@@ -5,4 +5,3 @@
 //! native tests, and the WASM adapter share one locked workspace immediately.
 
 #![forbid(unsafe_code)]
-
