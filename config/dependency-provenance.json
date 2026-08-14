@@ -9,7 +9,7 @@
     { "name": "blake3", "version": "1.8.2", "repository": "https://github.com/BLAKE3-team/BLAKE3" },
     { "name": "thiserror", "version": "2.0.17", "repository": "https://github.com/dtolnay/thiserror" },
     { "name": "wasm-bindgen", "version": "0.2.108", "repository": "https://github.com/wasm-bindgen/wasm-bindgen" },
-    { "name": "wasm-bindgen-cli", "version": "0.2.108", "repository": "https://github.com/wasm-bindgen/wasm-bindgen" },
+    { "name": "wasm-bindgen-cli", "version": "0.2.108", "repository": "https://github.com/wasm-bindgen/wasm-bindgen", "kind": "tool" },
     { "name": "serde-wasm-bindgen", "version": "0.6.5", "repository": "https://github.com/RReverser/serde-wasm-bindgen" },
     { "name": "proptest", "version": "1.8.0", "repository": "https://github.com/proptest-rs/proptest" }
   ],

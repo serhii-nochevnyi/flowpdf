@@ -168,7 +168,7 @@ async function verifyCrate(entry, options) {
   expect(typeof version.created_at === 'string', entry.name, 'publish metadata', 'publish timestamp missing');
   const repository = await verifyRepository(entry, version.repository ?? data.crate?.repository, options);
   return {
-    ecosystem: 'crates.io', name: entry.name, version: entry.version, repository,
+    ecosystem: 'crates.io', name: entry.name, version: entry.version, kind: entry.kind ?? 'dependency', repository,
     publishedAt: version.created_at, checksum: version.checksum,
     source: `https://crates.io/api/v1/crates/${encodeURIComponent(entry.name)}/${entry.version}`,
   };
@@ -201,7 +201,7 @@ async function verifyNpm(entry, options) {
   const publishedAt = packageMetadata.time?.[entry.version];
   expect(typeof publishedAt === 'string', entry.name, 'publish metadata', 'publish timestamp missing');
   return {
-    ecosystem: 'npm', name: entry.name, version: entry.version, repository,
+    ecosystem: 'npm', name: entry.name, version: entry.version, kind: entry.kind ?? 'dependency', repository,
     publishedAt, integrity, source: `https://registry.npmjs.org/${encoded}/${entry.version}`, tarball,
   };
 }
