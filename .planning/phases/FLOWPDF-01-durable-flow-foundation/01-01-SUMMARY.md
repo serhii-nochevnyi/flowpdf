@@ -9,9 +9,9 @@ provides:
   - "Machine-readable provenance blocker for unavailable or inconsistent registry metadata"
 affects: [FLOWPDF-01-durable-flow-foundation, workspace-bootstrap]
 actuals:
-  tokens: 3800
+  tokens: 4450
   tasks: 1
-  commits: 2
+  commits: 3
 tech-stack:
   added: [Node.js built-in test runner, HTTPS registry verification]
   patterns: [exact allowlist, no-install-before-provenance, fail-closed blocker]
@@ -64,12 +64,13 @@ status: blocked
 
 1. **Task 01-01-01: Tracer provenance gate (RED)** — `59cb258` (`test`)
 2. **Task 01-01-01: Tracer provenance gate (GREEN)** — `e149db8` (`feat`)
+3. **Task 01-01-01: Failure-invariant coverage** — `65e5033` (`test`)
 
 Tasks 01-01-02 and 01-01-03 were not started: their explicit preconditions require the absent success report and blocker-free state.
 
 ## Verification
 
-- Passed: `node --test scripts/verify-dependency-provenance.mjs` (3 tests).
+- Passed: `node --test scripts/verify-dependency-provenance.mjs` (3 tests covering positive evidence plus yanked/deprecated, checksum/integrity, origin, malformed-response, HTTP, and timeout failures).
 - Intentionally failed closed: live verifier exited 1 and created `artifacts/provenance/phase1-blocker.json` with `package: serde`, `check: crates.io release`, and `reason: network failure`.
 - Confirmed absent: `artifacts/provenance/phase1-dependencies.json`.
 
