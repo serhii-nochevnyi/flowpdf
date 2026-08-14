@@ -7,6 +7,7 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::anchor::Utf16Offset;
 use crate::schema::{SchemaError, validate_document};
 
 pub const SCHEMA_VERSION: u32 = 1;
@@ -46,6 +47,7 @@ stable_id!(NodeId);
 stable_id!(AssetId);
 stable_id!(FieldId);
 stable_id!(FieldOptionId);
+stable_id!(CommandId);
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -218,7 +220,7 @@ pub struct FieldOption {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct LogicalPosition {
     pub node_id: NodeId,
-    pub utf16_offset: u32,
+    pub utf16_offset: Utf16Offset,
     pub affinity: Affinity,
 }
 
@@ -338,7 +340,7 @@ impl FlowDocument {
                     label: Some("Ім’я / Name".to_owned()),
                     anchor: LogicalPosition {
                         node_id: first_node_id.clone(),
-                        utf16_offset: 0,
+                        utf16_offset: Utf16Offset::new(0),
                         affinity: Affinity::Forward,
                     },
                     kind: FieldKind::Text {
@@ -356,7 +358,7 @@ impl FlowDocument {
                     label: Some("Підтверджено".to_owned()),
                     anchor: LogicalPosition {
                         node_id: first_node_id.clone(),
-                        utf16_offset: 0,
+                        utf16_offset: Utf16Offset::new(0),
                         affinity: Affinity::Forward,
                     },
                     kind: FieldKind::Checkbox,
@@ -371,7 +373,7 @@ impl FlowDocument {
                     label: Some("Один варіант".to_owned()),
                     anchor: LogicalPosition {
                         node_id: first_node_id.clone(),
-                        utf16_offset: 0,
+                        utf16_offset: Utf16Offset::new(0),
                         affinity: Affinity::Forward,
                     },
                     kind: FieldKind::RadioGroup,
@@ -397,7 +399,7 @@ impl FlowDocument {
                     label: Some("Кілька варіантів".to_owned()),
                     anchor: LogicalPosition {
                         node_id: first_node_id.clone(),
-                        utf16_offset: 0,
+                        utf16_offset: Utf16Offset::new(0),
                         affinity: Affinity::Forward,
                     },
                     kind: FieldKind::Select { multiple: true },
@@ -426,7 +428,7 @@ impl FlowDocument {
                     label: Some("Підпис".to_owned()),
                     anchor: LogicalPosition {
                         node_id: first_node_id.clone(),
-                        utf16_offset: 0,
+                        utf16_offset: Utf16Offset::new(0),
                         affinity: Affinity::Forward,
                     },
                     kind: FieldKind::Signature,
@@ -441,7 +443,7 @@ impl FlowDocument {
                     label: Some("Дія".to_owned()),
                     anchor: LogicalPosition {
                         node_id: first_node_id,
-                        utf16_offset: 0,
+                        utf16_offset: Utf16Offset::new(0),
                         affinity: Affinity::Forward,
                     },
                     kind: FieldKind::Button,

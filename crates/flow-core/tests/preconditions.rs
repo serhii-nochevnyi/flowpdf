@@ -2,7 +2,9 @@ use flow_core::{
     anchor::Utf16Offset,
     canonical::canonical_bytes,
     model::{Affinity, CommandId, FlowDocument, LogicalPosition, NodeId},
-    transaction::{Command, CommandKind, EditorState, SourceModality, TextRange, TransactionService},
+    transaction::{
+        Command, CommandKind, EditorState, SourceModality, TextRange, TransactionService,
+    },
 };
 
 fn id(value: u32) -> CommandId {
@@ -45,16 +47,19 @@ fn stale_duplicate_invalid_and_broken_commands_are_exactly_non_mutating() {
     let document = FlowDocument::deterministic_sample("uk-UA").expect("sample");
     let initial = EditorState::new(document.clone()).expect("state");
 
-    let stale = TransactionService::apply(&initial, insert(&document, id(711), 0))
-        .expect_err("stale");
+    let stale =
+        TransactionService::apply(&initial, insert(&document, id(711), 0)).expect_err("stale");
     assert_eq!(stale.code(), "FLOW_STALE_REVISION");
     assert_unchanged(&initial, &initial.clone());
 
-    let first = TransactionService::apply(&initial, insert(&document, id(712), 1))
-        .expect("first");
+    let first = TransactionService::apply(&initial, insert(&document, id(712), 1)).expect("first");
     let duplicate = TransactionService::apply(
         &first.state,
-        insert(first.state.document(), id(712), first.state.document().revision),
+        insert(
+            first.state.document(),
+            id(712),
+            first.state.document().revision,
+        ),
     )
     .expect_err("duplicate");
     assert_eq!(duplicate.code(), "FLOW_DUPLICATE_COMMAND");

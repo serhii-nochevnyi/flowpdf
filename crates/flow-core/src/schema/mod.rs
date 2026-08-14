@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
 
+use crate::anchor::{Utf16Offset, resolve_utf16_offset};
 use crate::model::{
     AssetDescriptor, ContentNode, ContentNodeKind, DocumentId, FieldDescriptor, FieldKind,
     FieldValue, FlowDocument, MigrationHop, PageSettings, Provenance, SCHEMA_VERSION,
@@ -370,7 +371,7 @@ pub fn validate_document(document: &FlowDocument) -> Result<(), SchemaError> {
             .iter()
             .find(|node| node.id == field.anchor.node_id)
             .ok_or_else(SchemaError::dangling_reference)?;
-        if utf16_to_byte_offset(&node.text, field.anchor.utf16_offset).is_none() {
+        if resolve_utf16_offset(&node.text, field.anchor.utf16_offset).is_err() {
             return Err(SchemaError::invalid_utf16_position());
         }
         validate_field(field, &mut all_ids)?;
@@ -467,21 +468,9 @@ fn is_asset_hash(value: &str) -> bool {
 
 #[must_use]
 pub fn utf16_to_byte_offset(value: &str, utf16_offset: u32) -> Option<usize> {
-    let requested = usize::try_from(utf16_offset).ok()?;
-    if requested == 0 {
-        return Some(0);
-    }
-    let mut consumed = 0;
-    for (byte_index, character) in value.char_indices() {
-        if consumed == requested {
-            return Some(byte_index);
-        }
-        consumed += character.len_utf16();
-        if consumed > requested {
-            return None;
-        }
-    }
-    (consumed == requested).then_some(value.len())
+    resolve_utf16_offset(value, Utf16Offset::new(utf16_offset))
+        .ok()
+        .map(|offset| offset.get())
 }
 
 pub type MigrationFunction = fn(&[u8]) -> Result<Vec<u8>, SchemaError>;

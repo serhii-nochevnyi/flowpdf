@@ -29,6 +29,13 @@ export interface SnapshotRecordDto {
   readonly schemaVersion: number
   readonly canonicalJson: string
   readonly canonicalHash: string
+  readonly history: HistoryStateDto
+}
+
+export interface HistoryStateDto {
+  readonly entries: readonly unknown[]
+  readonly cursor: number
+  readonly seenCommandIds: readonly string[]
 }
 
 export interface TransactionRecordDto {

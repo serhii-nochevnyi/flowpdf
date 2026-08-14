@@ -1,4 +1,5 @@
 use flow_core::{
+    anchor::Utf16Offset,
     canonical::{canonical_bytes, canonical_hash, decode_canonical},
     model::{
         Affinity, FieldKind, FieldValue, FlowDocument, LogicalPosition, NodeId, TextInputHint,
@@ -262,12 +263,12 @@ fn utf16_positions_accept_boundaries_and_reject_surrogate_interiors() {
 
     document.fields[0].anchor = LogicalPosition {
         node_id: node.id.clone(),
-        utf16_offset: before_emoji,
+        utf16_offset: Utf16Offset::new(before_emoji),
         affinity: Affinity::Forward,
     };
     validate_document(&document).expect("boundary before emoji");
 
-    document.fields[0].anchor.utf16_offset = before_emoji + 1;
+    document.fields[0].anchor.utf16_offset = Utf16Offset::new(before_emoji + 1);
     assert_eq!(
         code(validate_document(&document).expect_err("surrogate interior")),
         "FLOW_INVALID_UTF16_POSITION"

@@ -3,8 +3,7 @@ use flow_core::{
     canonical::canonical_hash,
     model::{Affinity, CommandId, FlowDocument, LogicalPosition},
     transaction::{
-        Command, CommandKind, EditorState, Operation, SourceModality, TextRange,
-        TransactionService,
+        Command, CommandKind, EditorState, Operation, SourceModality, TextRange, TransactionService,
     },
 };
 
@@ -62,9 +61,19 @@ fn typed_replace_becomes_one_immutable_transaction_with_executable_inverse() {
         applied.transaction.before_hash,
         canonical_hash(&original_bytes)
     );
-    assert_eq!(applied.transaction.after_hash, applied.state.canonical_hash());
-    assert_ne!(applied.transaction.before_hash, applied.transaction.after_hash);
-    assert!(applied.state.document().content[1].text.starts_with("Англійський"));
+    assert_eq!(
+        applied.transaction.after_hash,
+        applied.state.canonical_hash()
+    );
+    assert_ne!(
+        applied.transaction.before_hash,
+        applied.transaction.after_hash
+    );
+    assert!(
+        applied.state.document().content[1]
+            .text
+            .starts_with("Англійський")
+    );
 
     match (
         &applied.transaction.forward_operations[0],
@@ -152,5 +161,8 @@ fn adjacent_mutations_keep_declared_forward_order_and_reverse_rollback_order() {
         },
     )
     .expect("undo batch");
-    assert_eq!(undone.state.document().content[1].text, document.content[1].text);
+    assert_eq!(
+        undone.state.document().content[1].text,
+        document.content[1].text
+    );
 }

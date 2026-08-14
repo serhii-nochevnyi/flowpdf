@@ -2,23 +2,27 @@
 
 #![forbid(unsafe_code)]
 
+pub mod anchor;
 pub mod canonical;
 pub mod model;
 pub mod schema;
+pub mod transaction;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use uuid::Uuid;
 
+use anchor::Utf16Offset;
 use canonical::{canonical_bytes, canonical_hash, decode_canonical};
 use model::{
-    Affinity, ContentNodeKind, DocumentId, FlowDocument, LogicalPosition, Provenance,
+    Affinity, CommandId, ContentNodeKind, DocumentId, FlowDocument, LogicalPosition, Provenance,
     SCHEMA_VERSION,
 };
-use schema::{
-    DocumentLimits, MigrationRegistry, MigrationReport, SchemaError, utf16_to_byte_offset,
-    validate_document,
+use schema::{DocumentLimits, MigrationRegistry, MigrationReport, SchemaError};
+pub use transaction::{
+    Command as CommandDto, CommandKind, HistoryState, Operation, SourceModality,
+    Transaction as TransactionRecord,
 };
+use transaction::{CommandError, EditorState, HistoryEffect, TransactionService};
 
 const SAMPLE_CREATE_COMMAND_ID: &str = "00000000-0000-4000-8000-000000000201";
 
@@ -32,6 +36,7 @@ pub struct CreateSampleRequest {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ApplyCommandRequest {
     pub canonical_json: String,
+    pub history: HistoryState,
     pub command: CommandDto,
 }
 
@@ -52,76 +57,13 @@ pub struct MigrateDocumentResult {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct CommandDto {
-    pub command_id: String,
-    pub base_revision: u32,
-    pub modality: SourceModality,
-    pub issued_at: String,
-    pub kind: CommandKind,
-    pub target: LogicalPosition,
-    pub text: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub enum SourceModality {
-    Ui,
-    Keyboard,
-    Voice,
-    Api,
-    System,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub enum CommandKind {
-    InsertText,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SnapshotRecord {
     pub document_id: DocumentId,
     pub revision: u32,
     pub schema_version: u32,
     pub canonical_json: String,
     pub canonical_hash: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct TransactionRecord {
-    pub transaction_id: String,
-    pub document_id: DocumentId,
-    pub command_id: String,
-    pub base_revision: u32,
-    pub new_revision: u32,
-    pub command_type: String,
-    pub modality: SourceModality,
-    pub before_hash: String,
-    pub after_hash: String,
-    pub forward_operations: Vec<Operation>,
-    pub inverse_operations: Vec<Operation>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(
-    tag = "kind",
-    rename_all = "camelCase",
-    rename_all_fields = "camelCase",
-    deny_unknown_fields
-)]
-pub enum Operation {
-    CreateDocument,
-    DeleteDocument,
-    InsertText {
-        target: LogicalPosition,
-        text: String,
-    },
-    DeleteText {
-        target: LogicalPosition,
-        utf16_length: u32,
-    },
+    pub history: HistoryState,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -170,6 +112,7 @@ pub struct SessionDto {
     pub document_id: DocumentId,
     pub revision: u32,
     pub next_command_target: LogicalPosition,
+    pub history: HistoryState,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -249,14 +192,8 @@ pub enum CoreError {
     Decode,
     #[error(transparent)]
     Schema(#[from] SchemaError),
-    #[error("The command uses a stale base revision")]
-    StaleRevision,
-    #[error("The command identifier is invalid")]
-    InvalidCommandId,
-    #[error("The command target does not exist")]
-    InvalidTarget,
-    #[error("The command range is invalid")]
-    InvalidRange,
+    #[error(transparent)]
+    Command(#[from] CommandError),
     #[error("The persisted record set is incomplete or discontinuous")]
     RecoveryGap,
     #[error("The persisted record hash does not match canonical content")]
@@ -271,10 +208,7 @@ impl CoreError {
         match self {
             Self::Decode => "FLOW_DECODE_ERROR",
             Self::Schema(error) => error.code(),
-            Self::StaleRevision => "FLOW_STALE_REVISION",
-            Self::InvalidCommandId => "FLOW_INVALID_COMMAND_ID",
-            Self::InvalidTarget => "FLOW_INVALID_TARGET",
-            Self::InvalidRange => "FLOW_INVALID_RANGE",
+            Self::Command(error) => error.code(),
             Self::RecoveryGap => "FLOW_RECOVERY_GAP",
             Self::HashMismatch => "FLOW_HASH_MISMATCH",
             Self::UnsafeAuditRecord => "FLOW_UNSAFE_AUDIT_RECORD",
@@ -308,18 +242,27 @@ fn create_sample_inner(request: CreateSampleRequest) -> Result<OperationResult, 
     let document = FlowDocument::deterministic_sample(&request.requested_locale)?;
     let canonical_json = canonical_string(&document)?;
     let canonical_hash = canonical_hash(canonical_json.as_bytes());
+    let command_id = CommandId::new(SAMPLE_CREATE_COMMAND_ID)?;
+    let history = HistoryState {
+        entries: Vec::new(),
+        cursor: 0,
+        seen_command_ids: vec![command_id.clone()],
+    };
     let transaction = TransactionRecord {
-        transaction_id: SAMPLE_CREATE_COMMAND_ID.to_owned(),
+        transaction_id: command_id.clone(),
         document_id: document.document_id.clone(),
-        command_id: SAMPLE_CREATE_COMMAND_ID.to_owned(),
+        command_id,
         base_revision: 0,
         new_revision: 1,
         command_type: "createSample".to_owned(),
         modality: SourceModality::System,
+        issued_at: "2026-08-14T00:00:00Z".to_owned(),
         before_hash: "none".to_owned(),
         after_hash: canonical_hash.clone(),
         forward_operations: vec![Operation::CreateDocument],
         inverse_operations: vec![Operation::DeleteDocument],
+        anchor_mapping: crate::anchor::AnchorMapping::identity(),
+        history_effect: HistoryEffect::Create,
     };
     let audit = safe_audit(
         SAMPLE_CREATE_COMMAND_ID,
@@ -329,7 +272,14 @@ fn create_sample_inner(request: CreateSampleRequest) -> Result<OperationResult, 
         SourceModality::System,
         "2026-08-14T00:00:00Z",
     );
-    operation_result(document, canonical_json, canonical_hash, transaction, audit)
+    operation_result(
+        document,
+        history,
+        canonical_json,
+        canonical_hash,
+        transaction,
+        audit,
+    )
 }
 
 #[must_use]
@@ -365,68 +315,33 @@ fn migrate_document_inner(
 }
 
 fn apply_command_inner(request: ApplyCommandRequest) -> Result<OperationResult, CoreError> {
-    let mut document = decode_canonical(request.canonical_json.as_bytes())?;
-    let before_hash = canonical_hash(request.canonical_json.as_bytes());
+    let document = decode_canonical(request.canonical_json.as_bytes())?;
+    let state = EditorState::with_history(document, request.history)?;
+    if state.canonical_hash() != canonical_hash(request.canonical_json.as_bytes()) {
+        return Err(CoreError::HashMismatch);
+    }
     let command = request.command;
-
-    if Uuid::parse_str(&command.command_id).is_err() {
-        return Err(CoreError::InvalidCommandId);
-    }
-    if command.base_revision != document.revision {
-        return Err(CoreError::StaleRevision);
-    }
-    if command.text.is_empty() || command.text.len() > 4_096 {
-        return Err(CoreError::InvalidRange);
-    }
-
-    let node = document
-        .content
-        .iter_mut()
-        .find(|node| node.id == command.target.node_id && node.kind == ContentNodeKind::Paragraph)
-        .ok_or(CoreError::InvalidTarget)?;
-    let byte_offset = utf16_to_byte_offset(&node.text, command.target.utf16_offset)
-        .ok_or(CoreError::InvalidRange)?;
-    node.text.insert_str(byte_offset, &command.text);
-
-    let base_revision = document.revision;
-    document.revision = document
-        .revision
-        .checked_add(1)
-        .ok_or_else(SchemaError::invalid_document)?;
-    validate_document(&document)?;
-
+    let applied = TransactionService::apply(&state, command.clone())?;
+    let document = applied.state.document().clone();
+    let history = applied.state.history().clone();
     let canonical_json = canonical_string(&document)?;
-    let canonical_hash = canonical_hash(canonical_json.as_bytes());
-    let inserted_utf16_length =
-        u32::try_from(command.text.encode_utf16().count()).map_err(|_| CoreError::InvalidRange)?;
-    let transaction = TransactionRecord {
-        transaction_id: command.command_id.clone(),
-        document_id: document.document_id.clone(),
-        command_id: command.command_id.clone(),
-        base_revision,
-        new_revision: document.revision,
-        command_type: command_type(&command.kind).to_owned(),
-        modality: command.modality.clone(),
-        before_hash,
-        after_hash: canonical_hash.clone(),
-        forward_operations: vec![Operation::InsertText {
-            target: command.target.clone(),
-            text: command.text,
-        }],
-        inverse_operations: vec![Operation::DeleteText {
-            target: command.target,
-            utf16_length: inserted_utf16_length,
-        }],
-    };
+    let resulting_hash = applied.state.canonical_hash().to_owned();
     let audit = safe_audit(
-        &command.command_id,
+        command.command_id.as_str(),
         &document,
-        base_revision,
-        command_type(&command.kind),
+        command.base_revision,
+        &applied.transaction.command_type,
         command.modality,
         &command.issued_at,
     );
-    operation_result(document, canonical_json, canonical_hash, transaction, audit)
+    operation_result(
+        document,
+        history,
+        canonical_json,
+        resulting_hash,
+        applied.transaction,
+        audit,
+    )
 }
 
 #[must_use]
@@ -464,6 +379,11 @@ fn recover_inner(mut request: RecoverRequest) -> Result<RecoverResult, CoreError
     if computed_hash != request.snapshot.canonical_hash {
         return Err(CoreError::HashMismatch);
     }
+    let history = request.snapshot.history.clone();
+    let recovered_state = EditorState::with_history(document.clone(), history.clone())?;
+    if recovered_state.canonical_hash() != computed_hash {
+        return Err(CoreError::HashMismatch);
+    }
 
     request
         .transactions
@@ -486,6 +406,18 @@ fn recover_inner(mut request: RecoverRequest) -> Result<RecoverResult, CoreError
     if expected_base != document.revision || previous_hash != computed_hash {
         return Err(CoreError::RecoveryGap);
     }
+    let mut transaction_command_ids = request
+        .transactions
+        .iter()
+        .filter(|record| record.document_id == document.document_id)
+        .map(|record| record.command_id.clone())
+        .collect::<Vec<_>>();
+    let mut history_command_ids = history.seen_command_ids.clone();
+    transaction_command_ids.sort();
+    history_command_ids.sort();
+    if transaction_command_ids != history_command_ids {
+        return Err(CoreError::RecoveryGap);
+    }
 
     request
         .audits
@@ -497,6 +429,7 @@ fn recover_inner(mut request: RecoverRequest) -> Result<RecoverResult, CoreError
 
     let session = session_dto(
         &document,
+        history,
         request.snapshot.canonical_json,
         computed_hash.clone(),
     )?;
@@ -506,6 +439,7 @@ fn recover_inner(mut request: RecoverRequest) -> Result<RecoverResult, CoreError
 
 fn operation_result(
     document: FlowDocument,
+    history: HistoryState,
     canonical_json: String,
     canonical_hash: String,
     transaction: TransactionRecord,
@@ -517,9 +451,10 @@ fn operation_result(
         schema_version: document.schema_version,
         canonical_json: canonical_json.clone(),
         canonical_hash: canonical_hash.clone(),
+        history: history.clone(),
     };
     let replace_existing = transaction.base_revision == 0;
-    let session = session_dto(&document, canonical_json, canonical_hash.clone())?;
+    let session = session_dto(&document, history, canonical_json, canonical_hash.clone())?;
     let view = inspector_view(&document, canonical_hash, vec![audit.clone()]);
     Ok(OperationResult {
         session,
@@ -535,6 +470,7 @@ fn operation_result(
 
 fn session_dto(
     document: &FlowDocument,
+    history: HistoryState,
     canonical_json: String,
     canonical_hash: String,
 ) -> Result<SessionDto, CoreError> {
@@ -542,9 +478,10 @@ fn session_dto(
         .content
         .iter()
         .find(|node| node.kind == ContentNodeKind::Paragraph)
-        .ok_or(CoreError::InvalidTarget)?;
-    let utf16_offset =
-        u32::try_from(node.text.encode_utf16().count()).map_err(|_| CoreError::InvalidRange)?;
+        .ok_or(CommandError::InvalidTarget)?;
+    let utf16_offset = u32::try_from(node.text.encode_utf16().count())
+        .map(Utf16Offset::new)
+        .map_err(|_| CommandError::InvalidRange)?;
     Ok(SessionDto {
         canonical_json,
         canonical_hash,
@@ -555,6 +492,7 @@ fn session_dto(
             utf16_offset,
             affinity: Affinity::Forward,
         },
+        history,
     })
 }
 
@@ -613,7 +551,21 @@ fn safe_audit(
 }
 
 fn validate_audit(audit: &AuditRecord) -> Result<(), CoreError> {
-    if audit.command_type != "createSample" && audit.command_type != "insertText" {
+    if ![
+        "createSample",
+        "insertText",
+        "replaceText",
+        "deleteText",
+        "setNodeStyle",
+        "insertNode",
+        "deleteNode",
+        "setField",
+        "batch",
+        "undo",
+        "redo",
+    ]
+    .contains(&audit.command_type.as_str())
+    {
         return Err(CoreError::UnsafeAuditRecord);
     }
     if audit.timestamp.len() > 64 || audit.safe_metadata.len() > 8 {
@@ -631,12 +583,6 @@ fn canonical_string(document: &FlowDocument) -> Result<String, CoreError> {
     String::from_utf8(canonical_bytes(document)?).map_err(|_| SchemaError::serialization().into())
 }
 
-fn command_type(kind: &CommandKind) -> &'static str {
-    match kind {
-        CommandKind::InsertText => "insertText",
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -651,17 +597,22 @@ mod tests {
         let created = success(create_sample(CreateSampleRequest {
             requested_locale: "uk-UA".to_owned(),
         }));
-        let command_id = "00000000-0000-4000-8000-000000000202".to_owned();
+        let command_id =
+            CommandId::new("00000000-0000-4000-8000-000000000202").expect("command id");
+        let history = created.session.history.clone();
+        let target = created.session.next_command_target.clone();
         let applied = success(apply_command(ApplyCommandRequest {
             canonical_json: created.session.canonical_json,
+            history,
             command: CommandDto {
                 command_id,
                 base_revision: created.session.revision,
                 modality: SourceModality::Ui,
                 issued_at: "2026-08-14T00:00:01Z".to_owned(),
-                kind: CommandKind::InsertText,
-                target: created.session.next_command_target,
-                text: " — typed mutation".to_owned(),
+                kind: CommandKind::InsertText {
+                    target,
+                    text: " — typed mutation".to_owned(),
+                },
             },
         }));
 
@@ -712,16 +663,21 @@ mod tests {
             requested_locale: "uk-UA".to_owned(),
         }));
         let before_hash = created.session.canonical_hash.clone();
+        let history = created.session.history.clone();
+        let target = created.session.next_command_target.clone();
         let response = apply_command(ApplyCommandRequest {
             canonical_json: created.session.canonical_json,
+            history,
             command: CommandDto {
-                command_id: "00000000-0000-4000-8000-000000000203".to_owned(),
+                command_id: CommandId::new("00000000-0000-4000-8000-000000000203")
+                    .expect("command id"),
                 base_revision: 0,
                 modality: SourceModality::Ui,
                 issued_at: "2026-08-14T00:00:01Z".to_owned(),
-                kind: CommandKind::InsertText,
-                target: created.session.next_command_target,
-                text: "must not appear".to_owned(),
+                kind: CommandKind::InsertText {
+                    target,
+                    text: "must not appear".to_owned(),
+                },
             },
         });
         assert!(!response.ok);
@@ -731,8 +687,8 @@ mod tests {
 
     #[test]
     fn utf16_offsets_do_not_split_surrogate_pairs() {
-        assert_eq!(utf16_to_byte_offset("A😀Б", 1), Some(1));
-        assert_eq!(utf16_to_byte_offset("A😀Б", 2), None);
-        assert_eq!(utf16_to_byte_offset("A😀Б", 3), Some(5));
+        assert_eq!(schema::utf16_to_byte_offset("A😀Б", 1), Some(1));
+        assert_eq!(schema::utf16_to_byte_offset("A😀Б", 2), None);
+        assert_eq!(schema::utf16_to_byte_offset("A😀Б", 3), Some(5));
     }
 }

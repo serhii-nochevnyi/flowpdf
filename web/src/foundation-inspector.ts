@@ -2,6 +2,7 @@ import {
   IndexedDbDocumentStore,
   StorageError,
   type AuditRecordDto,
+  type HistoryStateDto,
   type LogicalPositionDto,
   type PersistenceCommitDto,
   type RecoveryRecordsDto,
@@ -24,6 +25,7 @@ interface SessionDto {
   readonly documentId: string
   readonly revision: number
   readonly nextCommandTarget: LogicalPositionDto
+  readonly history: HistoryStateDto
 }
 
 interface InspectorViewDto {
@@ -199,14 +201,17 @@ class FoundationInspector implements FoundationInspectorController {
       const result = unwrap(
         this.wasm.apply_command({
           canonicalJson: this.session.canonicalJson,
+          history: this.session.history,
           command: {
             commandId: commandIdForRevision(this.session.revision + 1),
             baseRevision: this.session.revision,
             modality: 'ui',
             issuedAt: '2026-08-14T00:00:01Z',
-            kind: 'insertText',
-            target: this.session.nextCommandTarget,
-            text: ' — typed mutation',
+            kind: {
+              type: 'insertText',
+              target: this.session.nextCommandTarget,
+              text: ' — typed mutation',
+            },
           },
         }),
       )
