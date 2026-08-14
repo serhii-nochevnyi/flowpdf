@@ -155,13 +155,76 @@ A v1 requirement is complete only when implementation, automated tests, relevant
 
 ## Traceability
 
-Populated during roadmap creation. Every v1 requirement must map to exactly one phase.
+| Requirement | Phase | Status |
+|-------------|-------|--------|
+| FLOW-01 | Phase 1 | Pending |
+| FLOW-02 | Phase 1 | Pending |
+| FLOW-03 | Phase 1 | Pending |
+| FLOW-04 | Phase 1 | Pending |
+| FLOW-05 | Phase 1 | Pending |
+| EDIT-01 | Phase 2 | Pending |
+| EDIT-02 | Phase 2 | Pending |
+| EDIT-03 | Phase 2 | Pending |
+| EDIT-04 | Phase 2 | Pending |
+| EDIT-05 | Phase 2 | Pending |
+| EDIT-06 | Phase 1 | Pending |
+| EDIT-07 | Phase 1 | Pending |
+| LAYO-01 | Phase 3 | Pending |
+| LAYO-02 | Phase 3 | Pending |
+| LAYO-03 | Phase 3 | Pending |
+| LAYO-04 | Phase 3 | Pending |
+| LAYO-05 | Phase 3 | Pending |
+| LAYO-06 | Phase 3 | Pending |
+| LAYO-07 | Phase 3 | Pending |
+| LAYO-08 | Phase 3 | Pending |
+| PDFX-01 | Phase 4 | Pending |
+| PDFX-02 | Phase 4 | Pending |
+| PDFX-03 | Phase 4 | Pending |
+| PDFX-04 | Phase 4 | Pending |
+| PDFX-05 | Phase 4 | Pending |
+| PDFX-06 | Phase 4 | Pending |
+| PDFX-07 | Phase 4 | Pending |
+| PDFX-08 | Phase 4 | Pending |
+| FORM-01 | Phase 5 | Pending |
+| FORM-02 | Phase 5 | Pending |
+| FORM-03 | Phase 5 | Pending |
+| FORM-04 | Phase 5 | Pending |
+| FORM-05 | Phase 5 | Pending |
+| FORM-06 | Phase 5 | Pending |
+| FORM-07 | Phase 5 | Pending |
+| VOIC-01 | Phase 6 | Pending |
+| VOIC-02 | Phase 6 | Pending |
+| VOIC-03 | Phase 6 | Pending |
+| VOIC-04 | Phase 6 | Pending |
+| VOIC-05 | Phase 6 | Pending |
+| VOIC-06 | Phase 6 | Pending |
+| PDFI-01 | Phase 7 | Pending |
+| PDFI-02 | Phase 7 | Pending |
+| PDFI-03 | Phase 7 | Pending |
+| PDFI-04 | Phase 8 | Pending |
+| PDFI-05 | Phase 7 | Pending |
+| PDFI-06 | Phase 8 | Pending |
+| PDFI-07 | Phase 8 | Pending |
+| PDFI-08 | Phase 8 | Pending |
+| NPDF-01 | Phase 9 | Pending |
+| NPDF-02 | Phase 9 | Pending |
+| NPDF-03 | Phase 9 | Pending |
+| NPDF-04 | Phase 9 | Pending |
+| NPDF-05 | Phase 9 | Pending |
+| QUAL-01 | Phase 8 | Pending |
+| QUAL-02 | Phase 8 | Pending |
+| QUAL-03 | Phase 2 | Pending |
+| QUAL-04 | Phase 2 | Pending |
+| QUAL-05 | Phase 7 | Pending |
+| QUAL-06 | Phase 7 | Pending |
+| QUAL-07 | Phase 4 | Pending |
+| QUAL-08 | Phase 1 | Pending |
 
 **Coverage:**
 - v1 requirements: 62 total
-- Mapped to phases: 0
-- Unmapped: 62
+- Mapped to phases: 62
+- Unmapped: 0 ✓
 
 ---
 *Requirements defined: 2026-08-14*  
-*Last updated: 2026-08-14 after initial definition*
+*Last updated: 2026-08-14 after roadmap creation*
