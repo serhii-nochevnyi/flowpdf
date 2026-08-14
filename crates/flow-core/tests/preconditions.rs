@@ -6,9 +6,10 @@ use flow_core::{
     canonical::canonical_bytes,
     model::{Affinity, CommandId, FlowDocument, LogicalPosition, NodeId},
     transaction::{
-        Command, CommandKind, EditorState, Mutation, SourceModality, TextRange,
+        Command, CommandKind, EditorState, Mutation, Operation, SourceModality, TextRange,
         TransactionService,
     },
+    ApplyCommandRequest, CreateSampleRequest, RecoverRequest,
 };
 
 fn id(value: u32) -> CommandId {
@@ -403,5 +404,48 @@ fn oversized_batch_is_rejected_before_any_target_is_examined() {
             .expect_err("operation ceiling")
             .code(),
         "FLOW_LIMIT_TRANSACTION_OPERATIONS"
+    );
+}
+
+#[test]
+fn recovery_replays_transaction_meaning_and_rejects_tampered_inverse() {
+    let created = flow_core::create_sample(CreateSampleRequest {
+        requested_locale: "uk-UA".to_owned(),
+    })
+    .value
+    .expect("sample");
+    let applied = flow_core::apply_command(ApplyCommandRequest {
+        canonical_json: created.session.canonical_json.clone(),
+        history: created.session.history.clone(),
+        command: Command {
+            command_id: id(751),
+            base_revision: created.session.revision,
+            modality: SourceModality::Api,
+            issued_at: "2026-08-14T20:03:06Z".to_owned(),
+            kind: CommandKind::InsertText {
+                target: created.session.next_command_target.clone(),
+                text: "X".to_owned(),
+            },
+        },
+    })
+    .value
+    .expect("applied command");
+
+    let mut tampered = applied.commit.transaction.clone();
+    match &mut tampered.inverse_operations[0] {
+        Operation::ReplaceText { replacement, .. } => replacement.push_str("tampered"),
+        operation => panic!("unexpected inverse operation: {operation:?}"),
+    }
+    let response = flow_core::recover(RecoverRequest {
+        snapshot: applied.commit.snapshot,
+        transactions: vec![created.commit.transaction, tampered],
+        audits: vec![created.commit.audit, applied.commit.audit],
+    });
+
+    assert!(!response.ok);
+    assert!(response.value.is_none());
+    assert_eq!(
+        response.error.expect("stable recovery error").code,
+        "FLOW_RECOVERY_GAP"
     );
 }
