@@ -22,7 +22,10 @@ pub use transaction::{
     Command as CommandDto, CommandKind, HistoryState, Operation, SourceModality,
     Transaction as TransactionRecord,
 };
-use transaction::{CommandError, EditorState, HistoryEffect, TransactionService};
+use transaction::{
+    CommandError, EditorState, HistoryEffect, HistoryEntry, TransactionService, replay_forward,
+    replay_inverse, semantic_hash,
+};
 
 const SAMPLE_CREATE_COMMAND_ID: &str = "00000000-0000-4000-8000-000000000201";
 
@@ -380,22 +383,26 @@ fn recover_inner(mut request: RecoverRequest) -> Result<RecoverResult, CoreError
         return Err(CoreError::HashMismatch);
     }
     let history = request.snapshot.history.clone();
-    let recovered_state = EditorState::with_history(document.clone(), history.clone())?;
-    if recovered_state.canonical_hash() != computed_hash {
-        return Err(CoreError::HashMismatch);
-    }
+    history.validate().map_err(|error| match error {
+        CommandError::Schema(schema) => CoreError::Schema(schema),
+        _ => CoreError::RecoveryGap,
+    })?;
 
     request
         .transactions
         .sort_by_key(|record| record.new_revision);
-    let mut expected_base = 0;
+    let records = request
+        .transactions
+        .iter()
+        .filter(|record| record.document_id == document.document_id)
+        .collect::<Vec<_>>();
+    let create = records.first().ok_or(CoreError::RecoveryGap)?;
+    let mut expected_base = 0_u32;
     let mut previous_hash = "none".to_owned();
-    for record in &request.transactions {
-        if record.document_id != document.document_id {
-            continue;
-        }
+    for record in &records {
+        let expected_new = expected_base.checked_add(1).ok_or(CoreError::RecoveryGap)?;
         if record.base_revision != expected_base
-            || record.new_revision != expected_base + 1
+            || record.new_revision != expected_new
             || record.before_hash != previous_hash
         {
             return Err(CoreError::RecoveryGap);
@@ -406,17 +413,50 @@ fn recover_inner(mut request: RecoverRequest) -> Result<RecoverResult, CoreError
     if expected_base != document.revision || previous_hash != computed_hash {
         return Err(CoreError::RecoveryGap);
     }
-    let mut transaction_command_ids = request
-        .transactions
-        .iter()
-        .filter(|record| record.document_id == document.document_id)
-        .map(|record| record.command_id.clone())
-        .collect::<Vec<_>>();
-    let mut history_command_ids = history.seen_command_ids.clone();
-    transaction_command_ids.sort();
-    history_command_ids.sort();
-    if transaction_command_ids != history_command_ids {
+
+    if create.transaction_id != create.command_id
+        || create.base_revision != 0
+        || create.new_revision != 1
+        || create.before_hash != "none"
+        || create.command_type != "createSample"
+        || create.modality != SourceModality::System
+        || create.forward_operations != [Operation::CreateDocument]
+        || create.inverse_operations != [Operation::DeleteDocument]
+        || create.anchor_mapping != crate::anchor::AnchorMapping::identity()
+        || create.history_effect != HistoryEffect::Create
+    {
         return Err(CoreError::RecoveryGap);
+    }
+
+    let mut genesis = document.clone();
+    for record in records.iter().skip(1).rev() {
+        genesis = replay_inverse(&genesis, record).map_err(|_| CoreError::RecoveryGap)?;
+    }
+    if genesis.revision != 1 || canonical_hash(&canonical_bytes(&genesis)?) != create.after_hash {
+        return Err(CoreError::RecoveryGap);
+    }
+
+    let mut rebuilt_history = HistoryState {
+        entries: Vec::new(),
+        cursor: 0,
+        seen_command_ids: vec![create.command_id.clone()],
+    };
+    let mut replayed = genesis;
+    for record in records.iter().skip(1) {
+        let before = replayed.clone();
+        replayed = replay_forward(&before, record).map_err(|_| CoreError::RecoveryGap)?;
+        replay_history_effect(&mut rebuilt_history, record, &before, &replayed)?;
+    }
+    rebuilt_history
+        .validate()
+        .map_err(|_| CoreError::RecoveryGap)?;
+    if replayed != document || rebuilt_history != history {
+        return Err(CoreError::RecoveryGap);
+    }
+    let recovered_state = EditorState::with_history(document.clone(), rebuilt_history)
+        .map_err(|_| CoreError::RecoveryGap)?;
+    if recovered_state.canonical_hash() != computed_hash {
+        return Err(CoreError::HashMismatch);
     }
 
     request
@@ -435,6 +475,92 @@ fn recover_inner(mut request: RecoverRequest) -> Result<RecoverResult, CoreError
     )?;
     let view = inspector_view(&document, computed_hash, request.audits);
     Ok(RecoverResult { session, view })
+}
+
+fn replay_history_effect(
+    history: &mut HistoryState,
+    record: &TransactionRecord,
+    before: &FlowDocument,
+    after: &FlowDocument,
+) -> Result<(), CoreError> {
+    if history.seen_command_ids.contains(&record.command_id) {
+        return Err(CoreError::RecoveryGap);
+    }
+    let before_semantic_hash = semantic_hash(before).map_err(|_| CoreError::RecoveryGap)?;
+    let after_semantic_hash = semantic_hash(after).map_err(|_| CoreError::RecoveryGap)?;
+    let cursor = usize::try_from(history.cursor).map_err(|_| CoreError::RecoveryGap)?;
+
+    match &record.history_effect {
+        HistoryEffect::Commit { entry_command_id } => {
+            if entry_command_id != &record.command_id
+                || ![
+                    "insertText",
+                    "replaceText",
+                    "deleteText",
+                    "setNodeStyle",
+                    "insertNode",
+                    "deleteNode",
+                    "setField",
+                    "batch",
+                ]
+                .contains(&record.command_type.as_str())
+            {
+                return Err(CoreError::RecoveryGap);
+            }
+            history.entries.truncate(cursor);
+            history.entries.push(HistoryEntry {
+                command_id: record.command_id.clone(),
+                forward_operations: record.forward_operations.clone(),
+                inverse_operations: record.inverse_operations.clone(),
+                before_semantic_hash,
+                after_semantic_hash,
+            });
+            history.cursor =
+                u32::try_from(history.entries.len()).map_err(|_| CoreError::RecoveryGap)?;
+        }
+        HistoryEffect::Undo { entry_command_id } => {
+            if record.command_type != "undo" {
+                return Err(CoreError::RecoveryGap);
+            }
+            let entry = cursor
+                .checked_sub(1)
+                .and_then(|index| history.entries.get(index))
+                .ok_or(CoreError::RecoveryGap)?;
+            if &entry.command_id != entry_command_id
+                || record.forward_operations != entry.inverse_operations
+                || record.inverse_operations != entry.forward_operations
+                || before_semantic_hash != entry.after_semantic_hash
+                || after_semantic_hash != entry.before_semantic_hash
+            {
+                return Err(CoreError::RecoveryGap);
+            }
+            history.cursor = history
+                .cursor
+                .checked_sub(1)
+                .ok_or(CoreError::RecoveryGap)?;
+        }
+        HistoryEffect::Redo { entry_command_id } => {
+            if record.command_type != "redo" {
+                return Err(CoreError::RecoveryGap);
+            }
+            let entry = history.entries.get(cursor).ok_or(CoreError::RecoveryGap)?;
+            if &entry.command_id != entry_command_id
+                || record.forward_operations != entry.forward_operations
+                || record.inverse_operations != entry.inverse_operations
+                || before_semantic_hash != entry.before_semantic_hash
+                || after_semantic_hash != entry.after_semantic_hash
+            {
+                return Err(CoreError::RecoveryGap);
+            }
+            history.cursor = history
+                .cursor
+                .checked_add(1)
+                .ok_or(CoreError::RecoveryGap)?;
+        }
+        HistoryEffect::Create => return Err(CoreError::RecoveryGap),
+    }
+    history.seen_command_ids.push(record.command_id.clone());
+    Ok(())
 }
 
 fn operation_result(

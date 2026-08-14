@@ -231,20 +231,41 @@ impl HistoryState {
                 return Err(CommandError::HistoryConflict);
             }
         }
+        DocumentLimits::V1.check_recovery(self.seen_command_ids.len(), 0)?;
+        if self.entries.len() > self.seen_command_ids.len() {
+            return Err(CommandError::HistoryConflict);
+        }
+        let mut entry_ids = BTreeSet::new();
+        let mut total_bytes = self
+            .seen_command_ids
+            .len()
+            .checked_mul(36)
+            .ok_or(CommandError::HistoryConflict)?;
+        let mut previous_after: Option<&str> = None;
         for entry in &self.entries {
             if !seen.contains(entry.command_id.as_str())
+                || !entry_ids.insert(entry.command_id.as_str())
                 || entry.forward_operations.is_empty()
                 || entry.inverse_operations.is_empty()
+                || !is_versioned_hash(&entry.before_semantic_hash)
+                || !is_versioned_hash(&entry.after_semantic_hash)
+                || previous_after.is_some_and(|hash| hash != entry.before_semantic_hash)
             {
                 return Err(CommandError::HistoryConflict);
             }
+            previous_after = Some(&entry.after_semantic_hash);
+            let entry_bytes = serde_json::to_vec(entry)
+                .map_err(|_| SchemaError::serialization())?
+                .len();
             DocumentLimits::V1.check_transaction(
                 entry.forward_operations.len() + entry.inverse_operations.len(),
-                serde_json::to_vec(entry)
-                    .map_err(|_| SchemaError::serialization())?
-                    .len(),
+                entry_bytes,
             )?;
+            total_bytes = total_bytes
+                .checked_add(entry_bytes)
+                .ok_or(CommandError::HistoryConflict)?;
         }
+        DocumentLimits::V1.check_recovery(self.seen_command_ids.len(), total_bytes)?;
         Ok(())
     }
 
@@ -272,6 +293,7 @@ impl EditorState {
         validate_document(&document)?;
         history.validate()?;
         let bytes = canonical_bytes(&document)?;
+        validate_history_against_document(&document, &history)?;
         Ok(Self {
             canonical_hash: canonical_hash(&bytes),
             document,
@@ -390,6 +412,91 @@ fn validate_command_envelope(state: &EditorState, command: &Command) -> Result<(
     }
     if command.issued_at.is_empty() || command.issued_at.len() > 64 {
         return Err(CommandError::BrokenInvariant);
+    }
+    let operation_count = match &command.kind {
+        CommandKind::Batch { mutations } => mutations.len().saturating_mul(2),
+        CommandKind::Undo | CommandKind::Redo => 0,
+        _ => 2,
+    };
+    let command_bytes = serde_json::to_vec(command)
+        .map_err(|_| SchemaError::serialization())?
+        .len();
+    DocumentLimits::V1.check_transaction(operation_count, command_bytes)?;
+    Ok(())
+}
+
+fn is_versioned_hash(value: &str) -> bool {
+    let Some(hex) = value.strip_prefix("flowpdf:blake3:v1:") else {
+        return false;
+    };
+    hex.len() == 64 && hex.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn validate_history_against_document(
+    document: &FlowDocument,
+    history: &HistoryState,
+) -> Result<(), CommandError> {
+    if history.entries.is_empty() {
+        return Ok(());
+    }
+    let cursor = usize::try_from(history.cursor).map_err(|_| CommandError::HistoryConflict)?;
+    let expected_current = if cursor == 0 {
+        &history.entries[0].before_semantic_hash
+    } else {
+        &history.entries[cursor - 1].after_semantic_hash
+    };
+    if semantic_hash(document).map_err(|_| CommandError::HistoryConflict)? != *expected_current {
+        return Err(CommandError::HistoryConflict);
+    }
+
+    let current = document.clone();
+    let mut base = current.clone();
+    for entry in history.entries[..cursor].iter().rev() {
+        if semantic_hash(&base).map_err(|_| CommandError::HistoryConflict)?
+            != entry.after_semantic_hash
+        {
+            return Err(CommandError::HistoryConflict);
+        }
+        apply_operations(&mut base, &entry.inverse_operations)
+            .map_err(|_| CommandError::HistoryConflict)?;
+        validate_document(&base).map_err(|_| CommandError::HistoryConflict)?;
+        if semantic_hash(&base).map_err(|_| CommandError::HistoryConflict)?
+            != entry.before_semantic_hash
+        {
+            return Err(CommandError::HistoryConflict);
+        }
+    }
+
+    let original = base.clone();
+    if cursor == 0 && original != current {
+        return Err(CommandError::HistoryConflict);
+    }
+    let mut forward = original.clone();
+    for (index, entry) in history.entries.iter().enumerate() {
+        if semantic_hash(&forward).map_err(|_| CommandError::HistoryConflict)?
+            != entry.before_semantic_hash
+        {
+            return Err(CommandError::HistoryConflict);
+        }
+        apply_operations(&mut forward, &entry.forward_operations)
+            .map_err(|_| CommandError::HistoryConflict)?;
+        validate_document(&forward).map_err(|_| CommandError::HistoryConflict)?;
+        if semantic_hash(&forward).map_err(|_| CommandError::HistoryConflict)?
+            != entry.after_semantic_hash
+        {
+            return Err(CommandError::HistoryConflict);
+        }
+        if index + 1 == cursor && forward != current {
+            return Err(CommandError::HistoryConflict);
+        }
+    }
+
+    for entry in history.entries.iter().rev() {
+        apply_operations(&mut forward, &entry.inverse_operations)
+            .map_err(|_| CommandError::HistoryConflict)?;
+    }
+    if forward != original {
+        return Err(CommandError::HistoryConflict);
     }
     Ok(())
 }
@@ -756,6 +863,63 @@ fn apply_operations(
         mapping.extend(apply_operation(document, operation)?);
     }
     Ok(mapping)
+}
+
+pub(crate) fn replay_forward(
+    document: &FlowDocument,
+    transaction: &Transaction,
+) -> Result<FlowDocument, CommandError> {
+    if transaction.transaction_id != transaction.command_id
+        || transaction.document_id != document.document_id
+        || transaction.base_revision != document.revision
+        || transaction.new_revision
+            != transaction
+                .base_revision
+                .checked_add(1)
+                .ok_or(CommandError::HistoryConflict)?
+        || transaction.before_hash != canonical_hash(&canonical_bytes(document)?)
+    {
+        return Err(CommandError::HistoryConflict);
+    }
+
+    let mut candidate = document.clone();
+    let mapping = apply_operations(&mut candidate, &transaction.forward_operations)?;
+    candidate.revision = transaction.new_revision;
+    validate_document(&candidate).map_err(|_| CommandError::HistoryConflict)?;
+    if mapping != transaction.anchor_mapping
+        || canonical_hash(&canonical_bytes(&candidate)?) != transaction.after_hash
+    {
+        return Err(CommandError::HistoryConflict);
+    }
+    Ok(candidate)
+}
+
+pub(crate) fn replay_inverse(
+    document: &FlowDocument,
+    transaction: &Transaction,
+) -> Result<FlowDocument, CommandError> {
+    if transaction.transaction_id != transaction.command_id
+        || transaction.document_id != document.document_id
+        || transaction.new_revision != document.revision
+        || transaction.new_revision
+            != transaction
+                .base_revision
+                .checked_add(1)
+                .ok_or(CommandError::HistoryConflict)?
+        || transaction.base_revision == 0
+        || transaction.after_hash != canonical_hash(&canonical_bytes(document)?)
+    {
+        return Err(CommandError::HistoryConflict);
+    }
+
+    let mut candidate = document.clone();
+    apply_operations(&mut candidate, &transaction.inverse_operations)?;
+    candidate.revision = transaction.base_revision;
+    validate_document(&candidate).map_err(|_| CommandError::HistoryConflict)?;
+    if canonical_hash(&canonical_bytes(&candidate)?) != transaction.before_hash {
+        return Err(CommandError::HistoryConflict);
+    }
+    Ok(candidate)
 }
 
 fn apply_operation(
