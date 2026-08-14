@@ -1,0 +1,12 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "outDir": "./dist/web",
+    "rootDir": "./web",
+    "sourceMap": true,
+    "types": []
+  },
+  "include": ["web/src/**/*.ts", "web/persistence/**/*.ts"],
+  "exclude": ["web/tests/**/*.ts"]
+}
