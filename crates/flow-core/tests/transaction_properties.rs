@@ -2,11 +2,12 @@ use flow_core::{
     anchor::Utf16Offset,
     model::{Affinity, CommandId, ContentNode, FlowDocument, LogicalPosition, NodeId},
     transaction::{
-        Command, CommandKind, CommandError, EditorState, HistoryEffect, SourceModality, TextRange,
+        Command, CommandError, CommandKind, EditorState, HistoryEffect, SourceModality, TextRange,
         Transaction, TransactionService, semantic_hash,
     },
 };
 use proptest::prelude::*;
+use proptest::test_runner::FileFailurePersistence;
 
 fn command_id(serial: u32) -> CommandId {
     CommandId::new(format!("10000000-0000-4000-8000-{serial:012}")).expect("command id")
@@ -130,7 +131,10 @@ fn replacement_boundary_affinity_makes_field_anchor_undo_exactly_reversible() {
     .expect("replace");
     let (undone, _) = apply(&replaced, 812, CommandKind::Undo).expect("undo exact anchor mapping");
 
-    assert_eq!(semantic_hash(undone.document()).expect("undo hash"), initial_hash);
+    assert_eq!(
+        semantic_hash(undone.document()).expect("undo hash"),
+        initial_hash
+    );
     assert_eq!(undone.document().fields, document.fields);
 }
 
@@ -184,8 +188,17 @@ fn content_style_structure_and_field_transactions_all_undo_and_redo_in_order() {
     for serial in 831..835 {
         (state, _) = apply(&state, serial, CommandKind::Undo).expect("ordered undo");
     }
-    assert_eq!(semantic_hash(state.document()).expect("undone"), original_hash);
-    assert_eq!(state.document(), &FlowDocument { revision: state.document().revision, ..document.clone() });
+    assert_eq!(
+        semantic_hash(state.document()).expect("undone"),
+        original_hash
+    );
+    assert_eq!(
+        state.document(),
+        &FlowDocument {
+            revision: state.document().revision,
+            ..document.clone()
+        }
+    );
 
     for serial in 841..845 {
         (state, _) = apply(&state, serial, CommandKind::Redo).expect("ordered redo");
@@ -272,7 +285,12 @@ fn run_mixed_sequence(actions: &[u8]) -> (EditorState, Vec<Transaction>, String,
                 }
             }
             2 => {
-                if state.document().content.iter().any(|node| node.id == image.id) {
+                if state
+                    .document()
+                    .content
+                    .iter()
+                    .any(|node| node.id == image.id)
+                {
                     CommandKind::DeleteNode {
                         node_id: image.id.clone(),
                     }
@@ -297,11 +315,9 @@ fn run_mixed_sequence(actions: &[u8]) -> (EditorState, Vec<Transaction>, String,
                 }
             }
         };
-        let applied = TransactionService::apply(
-            &state,
-            command(&state, 1_000 + index as u32, kind),
-        )
-        .expect("generated valid mutation");
+        let applied =
+            TransactionService::apply(&state, command(&state, 1_000 + index as u32, kind))
+                .expect("generated valid mutation");
         state = applied.state;
         transactions.push(applied.transaction);
     }
@@ -316,7 +332,10 @@ fn run_mixed_sequence(actions: &[u8]) -> (EditorState, Vec<Transaction>, String,
         state = applied.state;
         transactions.push(applied.transaction);
     }
-    assert_eq!(semantic_hash(state.document()).expect("fully undone"), original_hash);
+    assert_eq!(
+        semantic_hash(state.document()).expect("fully undone"),
+        original_hash
+    );
 
     for index in 0..actions.len() {
         let applied = TransactionService::apply(
@@ -327,12 +346,24 @@ fn run_mixed_sequence(actions: &[u8]) -> (EditorState, Vec<Transaction>, String,
         state = applied.state;
         transactions.push(applied.transaction);
     }
-    assert_eq!(semantic_hash(state.document()).expect("fully redone"), final_hash);
+    assert_eq!(
+        semantic_hash(state.document()).expect("fully redone"),
+        final_hash
+    );
     (state, transactions, original_hash, final_hash)
 }
 
+fn property_config() -> ProptestConfig {
+    let mut config = ProptestConfig::with_cases(64);
+    config.failure_persistence = Some(Box::new(FileFailurePersistence::Direct(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/proptest-regressions/transaction_properties.txt"
+    ))));
+    config
+}
+
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(64))]
+    #![proptest_config(property_config())]
 
     #[test]
     fn generated_mixed_histories_are_reversible_replayable_and_deterministic(

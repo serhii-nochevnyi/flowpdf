@@ -229,32 +229,49 @@ fn map_text_edit(
         return AnchorMapResult::Invalid(AnchorInvalidation::DeletedText);
     };
 
-    let mapped = if removed == 0 {
+    let (mapped, affinity) = if removed == 0 {
         if point < start {
-            point
+            (point, position.affinity.clone())
         } else if point > start || position.affinity == Affinity::Forward {
             let Some(value) = point.checked_add(inserted) else {
                 return AnchorMapResult::Invalid(AnchorInvalidation::DeletedText);
             };
-            value
+            (value, position.affinity.clone())
         } else {
-            point
+            (point, position.affinity.clone())
         }
     } else if point < start {
-        point
+        (point, position.affinity.clone())
     } else if point > end {
         let Some(with_insert) = point.checked_add(inserted) else {
             return AnchorMapResult::Invalid(AnchorInvalidation::DeletedText);
         };
-        with_insert - removed
-    } else if point == start || point == end {
-        if position.affinity == Affinity::Forward {
-            let Some(value) = start.checked_add(inserted) else {
+        (with_insert - removed, position.affinity.clone())
+    } else if point == start {
+        match (&position.affinity, inserted) {
+            (Affinity::Backward, _) => (start, Affinity::Backward),
+            (Affinity::Forward, 0) => {
                 return AnchorMapResult::Invalid(AnchorInvalidation::DeletedText);
-            };
-            value
-        } else {
-            start
+            }
+            (Affinity::Forward, _) => {
+                let Some(value) = start.checked_add(inserted) else {
+                    return AnchorMapResult::Invalid(AnchorInvalidation::DeletedText);
+                };
+                (value, Affinity::Backward)
+            }
+        }
+    } else if point == end {
+        match (&position.affinity, inserted) {
+            (Affinity::Backward, 0) => {
+                return AnchorMapResult::Invalid(AnchorInvalidation::DeletedText);
+            }
+            (Affinity::Backward, _) => (start, Affinity::Forward),
+            (Affinity::Forward, _) => {
+                let Some(value) = start.checked_add(inserted) else {
+                    return AnchorMapResult::Invalid(AnchorInvalidation::DeletedText);
+                };
+                (value, Affinity::Forward)
+            }
         }
     } else {
         return AnchorMapResult::Invalid(AnchorInvalidation::DeletedText);
@@ -263,7 +280,7 @@ fn map_text_edit(
     AnchorMapResult::Mapped(LogicalPosition {
         node_id: position.node_id.clone(),
         utf16_offset: Utf16Offset::new(mapped),
-        affinity: position.affinity.clone(),
+        affinity,
     })
 }
 

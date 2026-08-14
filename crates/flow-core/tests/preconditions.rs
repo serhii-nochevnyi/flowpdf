@@ -323,8 +323,45 @@ fn replace_delete_and_node_invalidation_never_guess_an_interior_target() {
         })
     );
     assert_eq!(
+        mapped(2, Affinity::Forward),
+        AnchorMapResult::Mapped(LogicalPosition {
+            node_id: node_id.clone(),
+            utf16_offset: Utf16Offset::new(3),
+            affinity: Affinity::Backward,
+        })
+    );
+    assert_eq!(
+        mapped(6, Affinity::Backward),
+        AnchorMapResult::Mapped(LogicalPosition {
+            node_id: node_id.clone(),
+            utf16_offset: Utf16Offset::new(2),
+            affinity: Affinity::Forward,
+        })
+    );
+    assert_eq!(
         mapped(6, Affinity::Forward),
         AnchorMapResult::Mapped(position(node_id.clone(), 3))
+    );
+
+    let deletion = AnchorMapping {
+        transformations: vec![AnchorTransformation::TextEdit {
+            node_id: node_id.clone(),
+            start: Utf16Offset::new(2),
+            removed_utf16_length: 4,
+            inserted_utf16_length: 0,
+        }],
+    };
+    assert_eq!(
+        deletion.map(&position(node_id.clone(), 2)),
+        AnchorMapResult::Invalid(AnchorInvalidation::DeletedText)
+    );
+    assert_eq!(
+        deletion.map(&LogicalPosition {
+            node_id: node_id.clone(),
+            utf16_offset: Utf16Offset::new(6),
+            affinity: Affinity::Backward,
+        }),
+        AnchorMapResult::Invalid(AnchorInvalidation::DeletedText)
     );
 
     let deleted_node = AnchorMapping {
