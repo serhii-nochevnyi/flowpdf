@@ -1,7 +1,7 @@
 ---
 phase: 1
 slug: durable-flow-foundation
-status: draft
+status: ready
 nyquist_compliant: false
 wave_0_complete: false
 created: 2026-08-14
@@ -9,7 +9,7 @@ created: 2026-08-14
 
 # Phase 1 — Validation Strategy
 
-> Per-phase validation contract for feedback sampling during execution. The planner must replace the provisional task references below with final task IDs and waves without dropping any requirement row.
+> Per-phase validation contract synchronized to plans `01-01` through `01-06`. `nyquist_compliant` becomes true only after every mapped command is implemented and green.
 
 ---
 
@@ -36,18 +36,25 @@ created: 2026-08-14
 
 ## Per-Task Verification Map
 
-Task IDs and waves are provisional until PLAN.md files exist. Every final task must reference one or more rows and include its automated command.
-
-| Task ID | Plan | Wave | Requirement | Threat Ref | Secure Behavior | Test Type | Automated Command | File Exists | Status |
-|---------|------|------|-------------|------------|-----------------|-----------|-------------------|-------------|--------|
-| planner assigns | TBD | TBD | FLOW-01 | T-02 | Reject invalid/oversized schema input before publication; preserve exact Ukrainian/English bytes | unit + golden | `cargo test -p flow-core schema` | ❌ W0 | ⬜ pending |
-| planner assigns | TBD | TBD | FLOW-02 | T-01 | Canonical round-trip and asset lookup detect corruption and lose no semantic fields | integration + golden | `cargo test -p flow-core persistence_round_trip` | ❌ W0 | ⬜ pending |
-| planner assigns | TBD | TBD | FLOW-03 | T-01, T-02 | Pure sequential migration rejects unknown future versions and validates every hop | golden | `cargo test -p flow-core migration_golden` | ❌ W0 | ⬜ pending |
-| planner assigns | TBD | TBD | FLOW-04 | T-01, T-05 | Recovery accepts only a verified contiguous durable prefix and never guesses across gaps/conflicts | integration + browser | `cargo test -p flow-core recovery && npm run test:unit -- indexeddb-store && npm run test:browser -- recovery` | ❌ W0 | ⬜ pending |
-| planner assigns | TBD | TBD | FLOW-05 | T-01 | Revision and provenance DTOs identify create/migration lineage without fabricating export provenance | unit + UI contract | `cargo test -p flow-core provenance && npm run test:unit -- foundation-inspector` | ❌ W0 | ⬜ pending |
-| planner assigns | TBD | TBD | EDIT-06 | T-03 | Every reversible command sequence returns to the original canonical hash through transactional undo/redo | property | `cargo test -p flow-core transaction_properties` | ❌ W0 | ⬜ pending |
-| planner assigns | TBD | TBD | EDIT-07 | T-03 | Stale, duplicate, invalid-target, and invalid UTF-16 boundary commands leave bytes/revision/history unchanged | property + unit | `cargo test -p flow-core preconditions` | ❌ W0 | ⬜ pending |
-| planner assigns | TBD | TBD | QUAL-08 | T-04 | Audit serialization is allowlisted and contains no document text, command arguments, raw audio, or transcript | negative unit + browser | `cargo test -p flow-core audit_redaction && npm run test:unit -- indexeddb-store foundation-inspector` | ❌ W0 | ⬜ pending |
+| Task ID | Plan | Wave | Requirements | Threat Ref | Test Type | Automated Command | Status |
+|---------|------|------|--------------|------------|-----------|-------------------|--------|
+| 01-01-01 | 01-01 | 0 | all (tooling gate) | T-01-SC | Node unit + live official provenance | `node --test scripts/verify-dependency-provenance.mjs && node scripts/verify-dependency-provenance.mjs --config config/dependency-provenance.json --report artifacts/provenance/phase1-dependencies.json --blocker artifacts/provenance/phase1-blocker.json` | ⬜ pending |
+| 01-01-02 | 01-01 | 0 | all (Rust/WASM gate) | T-01-02 | Toolchain/metadata | `rustc --version --verbose && cargo --version && rustup component list --installed && rustup target list --installed && wasm-bindgen --version && cargo metadata --locked --format-version 1 >/dev/null` | ⬜ pending |
+| 01-01-03 | 01-01 | 0 | all (Node/browser gate) | T-01-SC | Lock unit + installed tools | `node --test scripts/verify-dependency-locks.mjs && node scripts/verify-dependency-locks.mjs && npm ci --ignore-scripts && npm exec -- playwright --version && npm exec -- vitest --version && npm exec -- tsc --version` | ⬜ pending |
+| 01-02-01 | 01-02 | 1 | FLOW-01, FLOW-02, FLOW-04, FLOW-05, QUAL-08 | T-02-01..03 | Real Chromium tracer | `npm run build:wasm && npm run test:browser -- walking-skeleton` | ⬜ pending |
+| 01-02-02 | 01-02 | 1 | FLOW-05, QUAL-08 | T-02-03 | TypeScript/build + browser | `npm run typecheck && npm run build:web && npm run test:browser -- walking-skeleton` | ⬜ pending |
+| 01-03-01 | 01-03 | 2 | FLOW-01 | T-03-01, T-03-02 | Rust unit + deterministic round-trip | `cargo test -p flow-core schema -- --nocapture` | ⬜ pending |
+| 01-03-02 | 01-03 | 2 | FLOW-01, FLOW-02 | T-03-01, T-03-02 | Rust integration + golden/limits | `cargo test -p flow-core persistence_round_trip -- --nocapture` | ⬜ pending |
+| 01-03-03 | 01-03 | 2 | FLOW-03 | T-03-03 | Rust migration golden + WASM check | `cargo test -p flow-core migration_golden -- --nocapture && cargo check -p flow-wasm --target wasm32-unknown-unknown` | ⬜ pending |
+| 01-04-01 | 01-04 | 3 | EDIT-06, EDIT-07 | T-04-01 | Rust transaction/precondition tracer | `cargo test -p flow-core transaction_tracer preconditions -- --nocapture && cargo check -p flow-wasm --target wasm32-unknown-unknown` | ⬜ pending |
+| 01-04-02 | 01-04 | 3 | EDIT-07 | T-04-01 | Rust anchor boundary unit/property | `cargo test -p flow-core preconditions -- --nocapture` | ⬜ pending |
+| 01-04-03 | 01-04 | 3 | EDIT-06 | T-04-02 | Rust stateful property | `cargo test -p flow-core transaction_properties -- --nocapture` | ⬜ pending |
+| 01-05-01 | 01-05 | 4 | FLOW-02, FLOW-04, FLOW-05, QUAL-08 | T-05-01, T-05-03 | Rust recovery tracer + WASM check | `cargo test -p flow-core recovery_tracer -- --nocapture && cargo check -p flow-wasm --target wasm32-unknown-unknown` | ⬜ pending |
+| 01-05-02 | 01-05 | 4 | FLOW-02, FLOW-03, FLOW-04 | T-05-01, T-05-02 | Rust persistence/recovery integration + executable p50/p95-or-blocker gate | `cargo test -p flow-core persistence_round_trip recovery -- --nocapture && node scripts/verify-recovery-benchmark.mjs` | ⬜ pending |
+| 01-05-03 | 01-05 | 4 | FLOW-05, QUAL-08 | T-05-03, T-05-04 | Rust negative privacy + provenance | `cargo test -p flow-core audit_redaction provenance -- --nocapture` | ⬜ pending |
+| 01-06-01 | 01-06 | 5 | FLOW-01..05, EDIT-06, EDIT-07, QUAL-08 | T-06-01, T-06-02 | Real Chromium lifecycle/recovery | `npm run build:wasm && npm run test:browser -- walking-skeleton recovery` | ⬜ pending |
+| 01-06-02 | 01-06 | 5 | FLOW-05, QUAL-08 | T-06-03, T-06-04 | Vitest DOM + TypeScript | `npm run test:unit -- foundation-inspector && npm run typecheck` | ⬜ pending |
+| 01-06-03 | 01-06 | 5 | all | T-06-01..05 | Chromium a11y + boundary + full deterministic gate | `npm run test:browser -- accessibility && node --test tests/contracts/phase1-boundary.test.mjs && npm run check` | ⬜ pending |
 
 ### Threat Reference Index
 
@@ -61,34 +68,31 @@ Task IDs and waves are provisional until PLAN.md files exist. Every final task m
 
 ---
 
-## Wave 0 Requirements
+## Wave 0 Requirements — Plan 01-01
 
-- [ ] Install and pin Rust stable, `rustfmt`, Clippy, and `wasm32-unknown-unknown`; record exact versions.
-- [ ] Independently verify package provenance from official crates.io/npm repositories, then generate reviewed `Cargo.lock` and `package-lock.json` without floating ranges.
-- [ ] Create Cargo workspace manifests, `flow-core`/`flow-wasm` test targets, and fixture directories.
-- [ ] Create `package.json`, `vitest.config.ts`, unit/browser projects, `fake-indexeddb` setup, and Chromium-compatible browser runtime.
-- [ ] Add empty red tests or tracer tests for all eight requirement rows before their implementation tasks begin.
-- [ ] Measure quick/full suite runtime and replace the target values above with recorded numbers.
+- [ ] Task 01-01-01 verifies every direct dependency through official registries/repos and emits success report or fail-closed blocker.
+- [ ] Task 01-01-02 installs/checksums and pins Rust, rustfmt, Clippy, WASM target, bindgen CLI, workspace manifests, and `Cargo.lock`.
+- [ ] Task 01-01-03 pins npm dependencies, `package-lock.json`, TypeScript, named Vitest projects, and real Chromium.
+- [ ] Plan 01-02 starts the red real-browser walking-skeleton test before production implementation.
+- [ ] Each behavior expansion in Plans 01-03 through 01-06 writes its named RED test before implementation.
+- [ ] Task 01-06-03 records measured focused/full-suite runtimes; no fabricated pass/test counts are gated.
+- [ ] Task 01-05-02 produces exactly one validated terminal recovery benchmark artifact; `npm run check` rejects a blocker or ambiguous/missing evidence.
 
 ---
 
-## Manual-Only Verifications
+## End-of-Phase Observational Review (non-blocking)
 
-| Behavior | Requirement | Why Manual | Test Instructions |
-|----------|-------------|------------|-------------------|
-| Foundation Inspector visual hierarchy, focus order, live-region behavior, and 320px/1280px overflow | FLOW-05, QUAL-08 | Visual and assistive-technology quality needs human observation even when DOM assertions pass | Run the local inspector in current Chrome/Edge; complete create → mutate → stale conflict → undo/redo → save/reload/recover; inspect focus, announcements, full hash access, long Ukrainian/English copy, and audit redaction. |
-
-The durable recovery result itself is automated; the manual row supplements rather than replaces browser tests.
+The Codex executor may visually inspect current Chrome/Edge at 320px and 1280px after Task 01-06-03, but no plan pauses for human approval. Recovery, focus/status semantics, localization, full-hash access, overflow, and audit redaction are all required automated browser assertions; observation is supplemental only.
 
 ---
 
 ## Validation Sign-Off
 
-- [ ] All final tasks have `<automated>` verification or an explicit Wave 0 dependency.
+- [x] All final tasks have synchronized `<automated>` verification commands.
 - [ ] Sampling continuity: no three consecutive tasks lack an automated check.
 - [ ] Wave 0 covers all currently missing test/config references.
 - [ ] No watch-mode flags appear in plan verification commands.
 - [ ] Measured focused feedback latency is below 30 seconds and the full suite below 120 seconds, or an evidence-backed exception is recorded.
 - [ ] `nyquist_compliant: true` is set only after every mapped row is wired and green.
 
-**Approval:** pending — planner must synchronize final task IDs/waves; verifier approves after execution evidence exists.
+**Approval:** planning synchronized — execution/verifier evidence remains pending.

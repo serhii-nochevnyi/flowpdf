@@ -399,26 +399,55 @@ PDF/font/image/audio hostile-input limits remain Phase 7+ work and must not be c
 |---|---|---|---|
 | A1 | A migrated snapshot should create a new replay boundary while old log records remain inspectable but are not applied under the new schema. | Migration contract | Recovery/history behavior could require a different migration-of-operations design. |
 | A2 | Phase 1 should reject UTF-16 positions that fall inside a surrogate pair, while grapheme boundary enforcement remains later work. | Canonical/transaction contract | Browser API compatibility or later editing semantics may need an adjusted conversion policy. |
-| A3 | `DocumentLimits` exact numeric budgets must be chosen from baseline measurements rather than guessed during planning. | Security limits | A later benchmark is required before limits become locked. |
+| A3 | `DocumentLimits::V1` uses the fixed hard caps recorded in Resolved Planning Decision R-02; benchmarks may tighten snapshot frequency but may not silently raise those caps. | Security limits | A later schema version and migration are required to expand a cap. |
 | A4 | A direct native IndexedDB adapter plus fake-IDB/browser tests is preferable to a runtime IndexedDB wrapper in this phase. | Standard stack | Implementation ergonomics may justify a wrapper after a separate, security-reviewed decision. |
 | A5 | Current Rust/crates/npm registry releases cannot be captured until Wave 0 because Rust/Cargo are absent and direct registry resolution is unavailable in this sandbox. | Standard stack / environment | Dependency manifests need a human checkpoint and lockfile review. |
 
-## Open Questions
+## Resolved Planning Decisions
 
-1. **What are the numerical durability/resource budgets?**
-   - What we know: correctness cannot depend on a particular snapshot cadence, and documents target 100–200 pages later. [VERIFIED: .planning/phases/FLOWPDF-01-durable-flow-foundation/01-CONTEXT.md:40-40] [VERIFIED: AGENTS.md:22-23]
-   - What's unclear: maximum JSON/log bytes, replay length, snapshot cadence, and browser quota response are not benchmarked.
-   - Recommendation: first implementation plan adds deterministic benchmark fixtures and picks values only after recording results.
+### R-01 — Exact schema v1 field vocabulary
 
-2. **How much field vocabulary belongs in schema v1?**
-   - What we know: FLOW-01 requires fields now, while interactive fillable-form behavior is Phase 5. [VERIFIED: .planning/REQUIREMENTS.md:18-18] [VERIFIED: .planning/ROADMAP.md:17-17]
-   - What's unclear: whether v1 should reserve all future field variants or use a strictly minimal typed field envelope followed by a migration.
-   - Recommendation: plan a minimal explicit field envelope that retains ID/name/anchor/type/ordered properties without implementing form UI or validation; record the exact v1 vocabulary as a schema decision before coding. [ASSUMED]
+Schema v1 stores semantic field descriptors now and defers widget rendering/authoring behavior to Phase 5. `FieldDescriptor` contains exactly: stable `id`, unique non-empty `name`, optional `label`, logical `anchor`, typed `kind`, `required`, `read_only`, typed `default_value`, and ordered `options`. It has no arbitrary property bag.
 
-3. **Can the WASM persistence port be direct Rust `web-sys` or a generated DTO protocol handled by TypeScript?**
-   - What we know: Rust owns canonical business rules and TypeScript is an adapter/UI language. [VERIFIED: .planning/phases/FLOWPDF-01-durable-flow-foundation/01-CONTEXT.md:81-88]
-   - What's unclear: build-size and async-ABI trade-offs are unmeasured.
-   - Recommendation: keep the public `DocumentStore` record protocol in Rust and decide the physical IndexedDB call site in a small Wave 0 spike; neither option may own document mutation. [ASSUMED]
+`FieldKind` is the closed v1 enum:
+
+- `Text { multiline, input_hint }`, where `input_hint` is `Plain | Date | Number | Email`;
+- `Checkbox`;
+- `RadioGroup`;
+- `Select { multiple }`;
+- `Signature`;
+- `Button`.
+
+`FieldOption` contains stable `id`, `label`, and unique `export_value`. `FieldValue` is `Empty | Text(String) | Checked(bool) | Selected(Vec<FieldOptionId>)`. Validation enforces kind/value compatibility, valid and unique option references, at most one radio selection, and no options on text/checkbox/signature/button fields. The schema deliberately excludes PDF/widget rectangles, appearance streams, JavaScript actions, tab coordinates, signature bytes, and arbitrary validation expressions. Adding those later requires an explicit schema migration. This resolves FLOW-01 without implementing Phase 5 UI or PDF behavior.
+
+### R-02 — Versioned resource and recovery budgets
+
+`DocumentLimits::V1` is a checked-in, versioned profile with hard ceilings applied before semantic publication:
+
+- canonical document bytes: 64 MiB;
+- tree depth: 128;
+- semantic nodes: 200,000;
+- total UTF-8 text bytes: 32 MiB;
+- one text node: 4 MiB;
+- styles: 4,096;
+- asset descriptors: 10,000;
+- field descriptors: 10,000;
+- operations in one transaction: 10,000;
+- one transaction record: 8 MiB;
+- recovery replay records: 10,000;
+- cumulative replay bytes after a snapshot: 64 MiB.
+
+Every boundary has N and N+1 tests; an over-limit decode/command/recovery returns a stable structured error and publishes no partial state. Deployments may lower limits, but raising a v1 cap requires an explicit reviewed policy/schema change and new fixtures.
+
+The default snapshot policy writes a snapshot on explicit local save, after every successful migration, or after 100 committed transactions / 4 MiB of uncheckpointed transaction bytes, whichever occurs first. Correctness tests run no-intermediate, every-transaction, and periodic policies. A checked-in 200-page-equivalent semantic fixture and 1,000-transaction log establish recovery measurements. The execution target is p95 recovery below 2 seconds in the pinned local Chromium/reference environment. If it misses, the executor may only lower the periodic thresholds, down to every 10 transactions / 1 MiB. If the target still fails, execution records a blocker artifact and the phase does not seal; it must not raise work limits, skip validation, or publish a guessed partial document.
+
+The benchmark contract is executable: `fixtures/recovery/benchmark-200-page.recipe.json` is the deterministic fixture recipe, `crates/flow-core/examples/recovery_benchmark.rs` performs warm-up plus 20 measured recoveries, and `scripts/verify-recovery-benchmark.mjs` runs and validates the gate. Exactly one terminal artifact is allowed: passing metrics at `artifacts/benchmarks/phase1-recovery.json`, or a failing `artifacts/benchmarks/phase1-recovery-blocker.json` containing every attempted cadence and p50/p95. The validator rejects both-present, both-absent, malformed, or threshold-inconsistent states.
+
+### R-03 — IndexedDB call-site ownership
+
+Use a generated/typed DTO protocol defined by Rust core/WASM and a thin TypeScript adapter for physical IndexedDB calls. Rust owns snapshot/log/audit record schemas, recovery selection/replay, validation, redaction, and all mutation semantics. TypeScript only performs bounded native IndexedDB reads/writes and translates platform errors. This avoids pulling `web-sys` storage lifecycle into the semantic core while preserving native/WASM parity.
+
+All three formerly open planning questions are resolved as of 2026-08-14. Later evidence may trigger an explicit migration or policy revision, never an implementation-time silent choice.
 
 ## Sources
 

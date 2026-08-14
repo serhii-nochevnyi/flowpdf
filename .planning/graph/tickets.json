@@ -1,0 +1,221 @@
+{
+  "generated_by": "validate-graph.cjs — do not edit by hand",
+  "epics": {
+    "FLOWPDF-01-durable-flow-foundation": {
+      "branch": "epic/FLOWPDF-01-durable-flow-foundation",
+      "base": null,
+      "repos": [
+        null
+      ]
+    }
+  },
+  "tickets": {
+    "T-01-01": {
+      "title": "01-01",
+      "plan": ".planning/phases/FLOWPDF-01-durable-flow-foundation/01-01-PLAN.md",
+      "phase": "FLOWPDF-01-durable-flow-foundation",
+      "repo": null,
+      "wave": 1,
+      "depends_on": [],
+      "cross_phase_deps": [],
+      "cross_repo_deps": [],
+      "unreachable_paths": false,
+      "files": [
+        "config/dependency-provenance.json",
+        "scripts/verify-dependency-provenance.mjs",
+        "artifacts/provenance/phase1-dependencies.json",
+        "artifacts/provenance/phase1-blocker.json",
+        "rust-toolchain.toml",
+        "Cargo.toml",
+        "Cargo.lock",
+        "crates/flow-core/Cargo.toml",
+        "crates/flow-wasm/Cargo.toml",
+        "package.json",
+        "package-lock.json",
+        "tsconfig.json",
+        "vitest.config.ts",
+        "scripts/verify-dependency-locks.mjs"
+      ],
+      "risk": "medium",
+      "type": "execute",
+      "human_checkpoint": false,
+      "branch": "ticket/T-01-01-01-01",
+      "epic": "epic/FLOWPDF-01-durable-flow-foundation",
+      "primary_parent": null,
+      "pr_base": "epic/FLOWPDF-01-durable-flow-foundation",
+      "jira": null
+    },
+    "T-01-02": {
+      "title": "01-02",
+      "plan": ".planning/phases/FLOWPDF-01-durable-flow-foundation/01-02-PLAN.md",
+      "phase": "FLOWPDF-01-durable-flow-foundation",
+      "repo": null,
+      "wave": 2,
+      "depends_on": [
+        "T-01-01"
+      ],
+      "cross_phase_deps": [],
+      "cross_repo_deps": [],
+      "unreachable_paths": false,
+      "files": [
+        "crates/flow-core/src/lib.rs",
+        "crates/flow-wasm/src/lib.rs",
+        "web/persistence/indexeddb-store.ts",
+        "web/src/foundation-inspector.ts",
+        "web/tests/walking-skeleton.browser.test.ts",
+        "web/index.html",
+        "web/src/main.ts",
+        "web/src/styles.css",
+        "scripts/serve-inspector.mjs",
+        "package.json"
+      ],
+      "risk": "medium",
+      "type": "execute",
+      "human_checkpoint": false,
+      "branch": "ticket/T-01-02-01-02",
+      "epic": "epic/FLOWPDF-01-durable-flow-foundation",
+      "primary_parent": "T-01-01",
+      "pr_base": "ticket/T-01-01-01-01",
+      "jira": null
+    },
+    "T-01-03": {
+      "title": "01-03",
+      "plan": ".planning/phases/FLOWPDF-01-durable-flow-foundation/01-03-PLAN.md",
+      "phase": "FLOWPDF-01-durable-flow-foundation",
+      "repo": null,
+      "wave": 3,
+      "depends_on": [
+        "T-01-02"
+      ],
+      "cross_phase_deps": [],
+      "cross_repo_deps": [],
+      "unreachable_paths": false,
+      "files": [
+        "crates/flow-core/src/lib.rs",
+        "crates/flow-core/src/model/mod.rs",
+        "crates/flow-core/src/canonical/mod.rs",
+        "crates/flow-core/src/schema/mod.rs",
+        "crates/flow-core/tests/schema.rs",
+        "crates/flow-core/tests/persistence_round_trip.rs",
+        "crates/flow-core/tests/migration_golden.rs",
+        "fixtures/flowdoc/current.json",
+        "fixtures/flowdoc/current.hash",
+        "fixtures/flowdoc/older.json",
+        "fixtures/flowdoc/migrated.json",
+        "fixtures/flowdoc/migrated.hash"
+      ],
+      "risk": "medium",
+      "type": "execute",
+      "human_checkpoint": false,
+      "branch": "ticket/T-01-03-01-03",
+      "epic": "epic/FLOWPDF-01-durable-flow-foundation",
+      "primary_parent": "T-01-02",
+      "pr_base": "ticket/T-01-02-01-02",
+      "jira": null
+    },
+    "T-01-04": {
+      "title": "01-04",
+      "plan": ".planning/phases/FLOWPDF-01-durable-flow-foundation/01-04-PLAN.md",
+      "phase": "FLOWPDF-01-durable-flow-foundation",
+      "repo": null,
+      "wave": 4,
+      "depends_on": [
+        "T-01-03"
+      ],
+      "cross_phase_deps": [],
+      "cross_repo_deps": [],
+      "unreachable_paths": false,
+      "files": [
+        "crates/flow-core/src/lib.rs",
+        "crates/flow-core/src/anchor/mod.rs",
+        "crates/flow-core/src/transaction/mod.rs",
+        "crates/flow-core/tests/transaction_tracer.rs",
+        "crates/flow-core/tests/preconditions.rs",
+        "crates/flow-core/tests/transaction_properties.rs",
+        "crates/flow-core/proptest-regressions/transaction_properties.txt"
+      ],
+      "risk": "medium",
+      "type": "execute",
+      "human_checkpoint": false,
+      "branch": "ticket/T-01-04-01-04",
+      "epic": "epic/FLOWPDF-01-durable-flow-foundation",
+      "primary_parent": "T-01-03",
+      "pr_base": "ticket/T-01-03-01-03",
+      "jira": null
+    },
+    "T-01-05": {
+      "title": "01-05",
+      "plan": ".planning/phases/FLOWPDF-01-durable-flow-foundation/01-05-PLAN.md",
+      "phase": "FLOWPDF-01-durable-flow-foundation",
+      "repo": null,
+      "wave": 5,
+      "depends_on": [
+        "T-01-04"
+      ],
+      "cross_phase_deps": [],
+      "cross_repo_deps": [],
+      "unreachable_paths": false,
+      "files": [
+        "crates/flow-core/src/lib.rs",
+        "crates/flow-core/src/store/mod.rs",
+        "crates/flow-core/src/audit/mod.rs",
+        "crates/flow-core/src/provenance/mod.rs",
+        "crates/flow-core/tests/recovery_tracer.rs",
+        "crates/flow-core/tests/persistence_round_trip.rs",
+        "crates/flow-core/tests/recovery.rs",
+        "crates/flow-core/tests/audit_redaction.rs",
+        "crates/flow-core/tests/provenance.rs",
+        "fixtures/recovery/cases.json",
+        "fixtures/recovery/benchmark-200-page.recipe.json",
+        "crates/flow-core/examples/recovery_benchmark.rs",
+        "scripts/verify-recovery-benchmark.mjs",
+        "artifacts/benchmarks/phase1-recovery.json",
+        "artifacts/benchmarks/phase1-recovery-blocker.json"
+      ],
+      "risk": "medium",
+      "type": "execute",
+      "human_checkpoint": false,
+      "branch": "ticket/T-01-05-01-05",
+      "epic": "epic/FLOWPDF-01-durable-flow-foundation",
+      "primary_parent": "T-01-04",
+      "pr_base": "ticket/T-01-04-01-04",
+      "jira": null
+    },
+    "T-01-06": {
+      "title": "01-06",
+      "plan": ".planning/phases/FLOWPDF-01-durable-flow-foundation/01-06-PLAN.md",
+      "phase": "FLOWPDF-01-durable-flow-foundation",
+      "repo": null,
+      "wave": 6,
+      "depends_on": [
+        "T-01-05"
+      ],
+      "cross_phase_deps": [],
+      "cross_repo_deps": [],
+      "unreachable_paths": false,
+      "files": [
+        "crates/flow-wasm/src/lib.rs",
+        "web/persistence/indexeddb-store.ts",
+        "web/src/foundation-inspector.ts",
+        "web/src/styles.css",
+        "web/src/i18n/uk.ts",
+        "web/src/i18n/en.ts",
+        "web/tests/foundation-inspector.test.ts",
+        "web/tests/walking-skeleton.browser.test.ts",
+        "web/tests/recovery.browser.test.ts",
+        "web/tests/accessibility.browser.test.ts",
+        "scripts/check-phase1.mjs",
+        "tests/contracts/phase1-boundary.test.mjs",
+        "package.json"
+      ],
+      "risk": "medium",
+      "type": "execute",
+      "human_checkpoint": false,
+      "branch": "ticket/T-01-06-01-06",
+      "epic": "epic/FLOWPDF-01-durable-flow-foundation",
+      "primary_parent": "T-01-05",
+      "pr_base": "ticket/T-01-05-01-05",
+      "jira": null
+    }
+  }
+}
