@@ -5,8 +5,8 @@ milestone_name: milestone
 current_phase: 1
 current_phase_name: Durable Flow Foundation
 status: executing
-stopped_at: Phase 1 context gathered
-last_updated: "2026-08-14T18:12:40.597Z"
+stopped_at: "Blocked FLOWPDF-01-01: provenance registry DNS unavailable"
+last_updated: "2026-08-14T18:18:39.437Z"
 last_activity: 2026-08-14
 last_activity_desc: Phase 1 execution started
 progress:
@@ -59,6 +59,7 @@ Decisions are logged in `.planning/PROJECT.md`.
 - FlowDocument is canonical for reflow; PDF remains a derived or native fixed-layout representation.
 - The implementation is writer-first and uses a Rust core compiled to native and WebAssembly.
 - Work is sequential because one autonomous executor owns the entire implementation.
+- [Phase ?]: Wave 0 requires successful official registry provenance before any Rust/npm/browser install; missing registry reachability is terminal.
 
 ### Pending Todos
 
@@ -68,6 +69,7 @@ None yet.
 
 - Rust is not installed in the current workspace environment; Phase 1 bootstrap must install and pin the toolchain.
 - The Rust text/font stack requires an early differential benchmark against HarfBuzz reference behavior.
+- FLOWPDF-01 Plan 01 is fail-closed: official crates.io metadata could not be resolved; see artifacts/provenance/phase1-blocker.json.
 
 ## Deferred Items
 
@@ -77,6 +79,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-08-14T14:13:34.914Z
-Stopped at: Phase 1 context gathered
-Resume file: .planning/phases/FLOWPDF-01-durable-flow-foundation/01-CONTEXT.md
+Last session: 2026-08-14T18:18:39.432Z
+Stopped at: Blocked FLOWPDF-01-01: provenance registry DNS unavailable
+Resume file: artifacts/provenance/phase1-blocker.json
