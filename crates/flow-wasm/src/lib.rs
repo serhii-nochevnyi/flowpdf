@@ -3,8 +3,9 @@
 #![forbid(unsafe_code)]
 
 use flow_core::{
-    ApiResponse, ApplyCommandRequest, CreateSampleRequest, MigrateDocumentRequest,
-    MigrateDocumentResult, OperationResult, RecoverRequest, RecoverResult,
+    ApiResponse, ApplyCommandRequest, AuditedRecoverRequest, AuditedRecoverResult,
+    CreateSampleRequest, MigrateDocumentRequest, MigrateDocumentResult, OperationResult,
+    PlanPersistenceCommitRequest, RecoverRequest, RecoverResult, store::PlannedPersistenceCommit,
 };
 use wasm_bindgen::prelude::*;
 
@@ -36,10 +37,28 @@ pub fn migrate_document(request: JsValue) -> JsValue {
 }
 
 #[wasm_bindgen]
+pub fn plan_persistence_commit(request: JsValue) -> JsValue {
+    let response = match serde_wasm_bindgen::from_value::<PlanPersistenceCommitRequest>(request) {
+        Ok(request) => flow_core::plan_persistence_commit(request),
+        Err(_) => flow_core::decode_failure::<PlannedPersistenceCommit>(),
+    };
+    serialize_response(&response)
+}
+
+#[wasm_bindgen]
 pub fn recover_document(request: JsValue) -> JsValue {
     let response = match serde_wasm_bindgen::from_value::<RecoverRequest>(request) {
         Ok(request) => flow_core::recover(request),
         Err(_) => flow_core::decode_failure::<RecoverResult>(),
+    };
+    serialize_response(&response)
+}
+
+#[wasm_bindgen]
+pub fn recover_document_audited(request: JsValue) -> JsValue {
+    let response = match serde_wasm_bindgen::from_value::<AuditedRecoverRequest>(request) {
+        Ok(request) => flow_core::recover_audited(request),
+        Err(_) => flow_core::decode_failure::<AuditedRecoverResult>(),
     };
     serialize_response(&response)
 }

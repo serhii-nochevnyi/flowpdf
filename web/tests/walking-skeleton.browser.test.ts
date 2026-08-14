@@ -14,10 +14,12 @@ test('walking-skeleton: creates, mutates, commits, reloads, and renders only saf
   await inspector.whenIdle()
 
   const beforeSave = inspector.snapshot()
-  expect(beforeSave.documentSummary).toContain('Український')
-  expect(beforeSave.documentSummary).toContain('English')
+  expect(beforeSave.contentNodeCount).toBeGreaterThan(0)
+  expect(beforeSave.fieldCount).toBe(6)
+  expect(beforeSave.assetCount).toBeGreaterThan(0)
+  expect(beforeSave.revisionProvenance.lineage.kind).toBe('created')
   expect(beforeSave.revision).toBe(1)
-  expect(beforeSave.audit.every((entry) => !JSON.stringify(entry).match(/Український|English|typed mutation/i))).toBe(true)
+  expect(JSON.stringify(beforeSave)).not.toMatch(/Український|English|typed mutation/i)
 
   root.querySelector<HTMLButtonElement>('[data-action="apply-mutation"]')?.click()
   expect(root.querySelector('[data-durability-status]')?.textContent).not.toContain('Збережено')
@@ -31,5 +33,5 @@ test('walking-skeleton: creates, mutates, commits, reloads, and renders only saf
   expect(recovered.revision).toBe(committed.revision)
   expect(recovered.hash).toBe(committed.hash)
   expect(root.querySelector('[data-provenance]')?.textContent).toMatch(/створено/i)
-  expect(root.querySelector('[data-audit]')?.textContent).not.toContain('Український')
+  expect(root.textContent).not.toMatch(/Український|English|typed mutation/i)
 })

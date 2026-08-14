@@ -5,12 +5,14 @@ import {
   type HistoryStateDto,
   type LogicalPositionDto,
   type PersistenceCommitDto,
+  type PlannedPersistenceCommitDto,
   type RecoveryRecordsDto,
 } from '../persistence/indexeddb-store'
 
 interface ErrorDto {
   readonly code: string
   readonly message: string
+  readonly audit: AuditRecordDto | null
 }
 
 interface ApiResponse<T> {
@@ -28,14 +30,38 @@ interface SessionDto {
   readonly history: HistoryStateDto
 }
 
+interface RevisionProvenanceDto {
+  readonly documentId: string
+  readonly revision: number
+  readonly schemaVersion: number
+  readonly canonicalHash: string
+  readonly engine: {
+    readonly engine: string
+    readonly version: string
+  }
+  readonly lineage:
+    | { readonly kind: 'created'; readonly createdAt: string }
+    | {
+        readonly kind: 'migrated'
+        readonly sourceSchemaVersion: number
+        readonly currentSchemaVersion: number
+        readonly sourceCreatedAt: string
+        readonly hops: readonly unknown[]
+      }
+  readonly sourceHashes: readonly string[]
+  readonly previewExportProvenance: 'unavailableInPhaseOne'
+}
+
 interface InspectorViewDto {
   readonly documentId: string
   readonly schemaVersion: number
   readonly revision: number
   readonly canonicalHash: string
   readonly locale: string
-  readonly documentSummary: string
-  readonly provenance: string
+  readonly contentNodeCount: number
+  readonly fieldCount: number
+  readonly assetCount: number
+  readonly revisionProvenance: RevisionProvenanceDto
   readonly audit: readonly AuditRecordDto[]
 }
 
@@ -54,6 +80,9 @@ interface WasmBoundary {
   readonly default: () => Promise<unknown>
   readonly create_sample: (request: unknown) => ApiResponse<OperationResultDto>
   readonly apply_command: (request: unknown) => ApiResponse<OperationResultDto>
+  readonly plan_persistence_commit: (
+    request: unknown,
+  ) => ApiResponse<PlannedPersistenceCommitDto>
   readonly recover_document: (request: RecoveryRecordsDto) => ApiResponse<RecoverResultDto>
 }
 
@@ -63,8 +92,10 @@ export interface FoundationInspectorSnapshot {
   readonly revision: number
   readonly hash: string
   readonly locale: string
-  readonly documentSummary: string
-  readonly provenance: string
+  readonly contentNodeCount: number
+  readonly fieldCount: number
+  readonly assetCount: number
+  readonly revisionProvenance: RevisionProvenanceDto
   readonly audit: readonly AuditRecordDto[]
 }
 
@@ -97,7 +128,11 @@ const messages = {
   'foundationInspector.save.success': 'Збережено локально — ревізія {revision}.',
   'foundationInspector.error.command':
     'Команду не виконано. Дані не змінено. Код: {code}.',
-  'foundationInspector.provenance.localSample': 'Створено локально з тестового зразка.',
+  'foundationInspector.summary': 'Структура: блоків — {nodes}, полів — {fields}, ресурсів — {assets}.',
+  'foundationInspector.provenance.created': 'Створено {createdAt}.',
+  'foundationInspector.provenance.migrated':
+    'Перенесено зі схеми {sourceSchema} до схеми {currentSchema}.',
+  'foundationInspector.provenance.engine': 'Оброблено {engine} {version}.',
   'foundationInspector.provenance.noExport':
     'Походження попереднього перегляду або експорту буде доступне в наступній фазі.',
 } as const
@@ -147,8 +182,10 @@ class FoundationInspector implements FoundationInspectorController {
       revision: this.view.revision,
       hash: this.view.canonicalHash,
       locale: this.view.locale,
-      documentSummary: this.view.documentSummary,
-      provenance: this.view.provenance,
+      contentNodeCount: this.view.contentNodeCount,
+      fieldCount: this.view.fieldCount,
+      assetCount: this.view.assetCount,
+      revisionProvenance: this.view.revisionProvenance,
       audit: this.view.audit,
     }
   }
@@ -156,7 +193,7 @@ class FoundationInspector implements FoundationInspectorController {
   async reloadFromStorage(): Promise<FoundationInspectorSnapshot> {
     this.setPending()
     try {
-      const records = await this.store.loadLatest()
+      const records = await this.store.loadRecords()
       const recovered = unwrap(this.wasm.recover_document(records))
       this.session = recovered.session
       this.view = recovered.view
@@ -185,7 +222,7 @@ class FoundationInspector implements FoundationInspectorController {
           requestedLocale: 'uk-UA',
         }),
       )
-      await this.store.commit(result.commit)
+      await this.persistPlanned(result.commit, 'creation')
       await this.publishRecoveredState(message('foundationInspector.create.success'))
     } finally {
       this.setBusy(false)
@@ -215,7 +252,7 @@ class FoundationInspector implements FoundationInspectorController {
           },
         }),
       )
-      await this.store.commit(result.commit)
+      await this.persistPlanned(result.commit, 'committedTransaction')
       await this.publishRecoveredState(
         message('foundationInspector.save.success', { revision: result.session.revision }),
       )
@@ -225,12 +262,27 @@ class FoundationInspector implements FoundationInspectorController {
   }
 
   private async publishRecoveredState(status: string): Promise<void> {
-    const records = await this.store.loadLatest()
+    const records = await this.store.loadRecords()
     const recovered = unwrap(this.wasm.recover_document(records))
     this.session = recovered.session
     this.view = recovered.view
     this.setStatus(status)
     this.render()
+  }
+
+  private async persistPlanned(
+    commit: PersistenceCommitDto,
+    reason: 'creation' | 'committedTransaction' | 'explicitLocalSave',
+  ): Promise<void> {
+    const records = await this.store.loadRecords({ allowEmpty: true })
+    const planned = unwrap(
+      this.wasm.plan_persistence_commit({
+        records,
+        commit,
+        reason,
+      }),
+    )
+    await this.store.commit(planned)
   }
 
   private setPending(): void {
@@ -272,16 +324,36 @@ class FoundationInspector implements FoundationInspectorController {
     this.elements.hash.textContent = this.view.canonicalHash
     this.elements.hash.setAttribute('aria-label', `Повний хеш ревізії ${this.view.canonicalHash}`)
     this.elements.locale.textContent = this.view.locale
-    this.elements.summary.textContent = this.view.documentSummary
-    this.elements.provenance.textContent = `${message('foundationInspector.provenance.localSample')} ${message('foundationInspector.provenance.noExport')}`
+    this.elements.summary.textContent = message('foundationInspector.summary', {
+      nodes: this.view.contentNodeCount,
+      fields: this.view.fieldCount,
+      assets: this.view.assetCount,
+    })
+    this.elements.provenance.textContent = provenanceText(this.view.revisionProvenance)
     this.elements.audit.replaceChildren(
       ...this.view.audit.map((entry) => {
         const item = document.createElement('li')
-        item.textContent = `${entry.newRevision}: ${entry.commandType} · ${entry.modality} · ${entry.outcome}`
+        const action =
+          entry.action.type === 'command' ? entry.action.commandKind : entry.action.type
+        item.textContent = `${entry.newRevision}: ${action} · ${entry.modality} · ${entry.outcome.kind}`
         return item
       }),
     )
   }
+}
+
+function provenanceText(provenance: RevisionProvenanceDto): string {
+  const lineage =
+    provenance.lineage.kind === 'created'
+      ? message('foundationInspector.provenance.created', {
+          createdAt: provenance.lineage.createdAt,
+        })
+      : message('foundationInspector.provenance.migrated', {
+          sourceSchema: provenance.lineage.sourceSchemaVersion,
+          currentSchema: provenance.lineage.currentSchemaVersion,
+        })
+  const engine = message('foundationInspector.provenance.engine', provenance.engine)
+  return `${lineage} ${engine} ${message('foundationInspector.provenance.noExport')}`
 }
 
 export async function mountFoundationInspector(

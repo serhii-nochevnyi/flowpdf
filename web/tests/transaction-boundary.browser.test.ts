@@ -4,6 +4,7 @@ import init, { apply_command, create_sample } from '../generated/flow_wasm.js'
 
 interface ErrorDto {
   readonly code: string
+  readonly audit: unknown | null
 }
 
 interface ApiResponse<T> {
