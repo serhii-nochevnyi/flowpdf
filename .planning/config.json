@@ -79,7 +79,7 @@
   "hooks": {
     "context_warnings": true
   },
-  "project_code": null,
+  "project_code": "FLOWPDF",
   "phase_naming": "sequential",
   "agent_skills": {},
   "claude_md_path": "./.claude/CLAUDE.md",
