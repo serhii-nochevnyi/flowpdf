@@ -1,5 +1,8 @@
 use flow_core::{
-    anchor::Utf16Offset,
+    anchor::{
+        AnchorError, AnchorInvalidation, AnchorMapResult, AnchorMapping, AnchorTransformation,
+        NativeByteOffset, Utf16Offset, byte_to_utf16_offset, resolve_utf16_offset,
+    },
     canonical::canonical_bytes,
     model::{Affinity, CommandId, FlowDocument, LogicalPosition, NodeId},
     transaction::{
@@ -190,4 +193,133 @@ fn serialized_public_anchor_has_no_dom_absolute_page_or_pdf_vocabulary() {
     for forbidden in ["dom", "absolute", "page", "pdf", "rect", "coordinate"] {
         assert!(!encoded.to_ascii_lowercase().contains(forbidden));
     }
+}
+
+#[test]
+fn utf16_and_native_offsets_round_trip_every_scalar_boundary_without_a_grapheme_claim() {
+    let text = "Aи\u{0306}😀𝄞Б";
+    for byte_index in text
+        .char_indices()
+        .map(|(index, _)| index)
+        .chain(std::iter::once(text.len()))
+    {
+        let native = NativeByteOffset::new(byte_index);
+        let utf16 = byte_to_utf16_offset(text, native).expect("native scalar boundary");
+        assert_eq!(
+            resolve_utf16_offset(text, utf16).expect("UTF-16 scalar boundary"),
+            native
+        );
+    }
+
+    let combining_mark_byte = text.find('\u{0306}').expect("combining mark");
+    let between_base_and_mark =
+        byte_to_utf16_offset(text, NativeByteOffset::new(combining_mark_byte)).expect("boundary");
+    assert!(
+        resolve_utf16_offset(text, between_base_and_mark).is_ok(),
+        "Phase 1 validates scalar/UTF-16 boundaries but intentionally does not claim grapheme safety"
+    );
+
+    let emoji_units = text[..text.find('😀').expect("emoji")].encode_utf16().count() as u32;
+    assert_eq!(
+        resolve_utf16_offset(text, Utf16Offset::new(emoji_units + 1)),
+        Err(AnchorError::InvalidUtf16Boundary)
+    );
+    assert_eq!(
+        resolve_utf16_offset(text, Utf16Offset::new(999)),
+        Err(AnchorError::OutOfRange)
+    );
+}
+
+#[test]
+fn insertion_mapping_uses_affinity_and_composes_in_declared_order() {
+    let document = FlowDocument::deterministic_sample("uk-UA").expect("sample");
+    let node_id = document.content[1].id.clone();
+    let mapping = AnchorMapping {
+        transformations: vec![
+            AnchorTransformation::TextEdit {
+                node_id: node_id.clone(),
+                start: Utf16Offset::new(2),
+                removed_utf16_length: 0,
+                inserted_utf16_length: 3,
+            },
+            AnchorTransformation::TextEdit {
+                node_id: node_id.clone(),
+                start: Utf16Offset::new(5),
+                removed_utf16_length: 0,
+                inserted_utf16_length: 1,
+            },
+        ],
+    };
+    let map = |offset, affinity| {
+        mapping.map(&LogicalPosition {
+            node_id: node_id.clone(),
+            utf16_offset: Utf16Offset::new(offset),
+            affinity,
+        })
+    };
+
+    assert_eq!(
+        map(1, Affinity::Forward),
+        AnchorMapResult::Mapped(position(node_id.clone(), 1))
+    );
+    assert_eq!(
+        map(2, Affinity::Backward),
+        AnchorMapResult::Mapped(LogicalPosition {
+            node_id: node_id.clone(),
+            utf16_offset: Utf16Offset::new(2),
+            affinity: Affinity::Backward,
+        })
+    );
+    assert_eq!(
+        map(2, Affinity::Forward),
+        AnchorMapResult::Mapped(position(node_id.clone(), 6))
+    );
+    assert_eq!(
+        map(3, Affinity::Forward),
+        AnchorMapResult::Mapped(position(node_id, 7))
+    );
+}
+
+#[test]
+fn replace_delete_and_node_invalidation_never_guess_an_interior_target() {
+    let document = FlowDocument::deterministic_sample("uk-UA").expect("sample");
+    let node_id = document.content[1].id.clone();
+    let replacement = AnchorMapping {
+        transformations: vec![AnchorTransformation::TextEdit {
+            node_id: node_id.clone(),
+            start: Utf16Offset::new(2),
+            removed_utf16_length: 4,
+            inserted_utf16_length: 1,
+        }],
+    };
+    let mapped = |offset, affinity| {
+        replacement.map(&LogicalPosition {
+            node_id: node_id.clone(),
+            utf16_offset: Utf16Offset::new(offset),
+            affinity,
+        })
+    };
+
+    assert_eq!(mapped(1, Affinity::Forward), AnchorMapResult::Mapped(position(node_id.clone(), 1)));
+    assert_eq!(mapped(3, Affinity::Forward), AnchorMapResult::Invalid(AnchorInvalidation::DeletedText));
+    assert_eq!(mapped(7, Affinity::Forward), AnchorMapResult::Mapped(position(node_id.clone(), 4)));
+    assert_eq!(
+        mapped(2, Affinity::Backward),
+        AnchorMapResult::Mapped(LogicalPosition {
+            node_id: node_id.clone(),
+            utf16_offset: Utf16Offset::new(2),
+            affinity: Affinity::Backward,
+        })
+    );
+    assert_eq!(mapped(6, Affinity::Forward), AnchorMapResult::Mapped(position(node_id.clone(), 3)));
+
+    let deleted_node = AnchorMapping {
+        transformations: vec![AnchorTransformation::NodeInvalidated {
+            node_id: node_id.clone(),
+        }],
+    };
+    assert_eq!(
+        deleted_node.map(&position(node_id, 0)),
+        AnchorMapResult::Invalid(AnchorInvalidation::DeletedNode)
+    );
 }
