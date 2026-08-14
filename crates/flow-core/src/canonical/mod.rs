@@ -8,6 +8,12 @@ use crate::{
     schema::{DocumentLimits, LimitKind, SchemaError, validate_document},
 };
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IdentityResolution {
+    Idempotent,
+    Independent,
+}
+
 pub fn canonical_bytes(document: &FlowDocument) -> Result<Vec<u8>, SchemaError> {
     validate_document(document)?;
     let bytes = serde_json::to_vec(document).map_err(|_| SchemaError::serialization())?;
@@ -16,9 +22,7 @@ pub fn canonical_bytes(document: &FlowDocument) -> Result<Vec<u8>, SchemaError> 
 }
 
 pub fn decode_canonical(bytes: &[u8]) -> Result<FlowDocument, SchemaError> {
-    let limits = DocumentLimits::V1;
-    limits.check(LimitKind::CanonicalBytes, bytes.len())?;
-    limits.check(LimitKind::TreeDepth, json_nesting_depth(bytes)?)?;
+    preflight_canonical_bytes(bytes)?;
     let document: FlowDocument =
         serde_json::from_slice(bytes).map_err(|_| SchemaError::decode())?;
     validate_document(&document)?;
@@ -27,6 +31,12 @@ pub fn decode_canonical(bytes: &[u8]) -> Result<FlowDocument, SchemaError> {
         return Err(SchemaError::non_canonical());
     }
     Ok(document)
+}
+
+pub fn preflight_canonical_bytes(bytes: &[u8]) -> Result<(), SchemaError> {
+    let limits = DocumentLimits::V1;
+    limits.check(LimitKind::CanonicalBytes, bytes.len())?;
+    limits.check(LimitKind::TreeDepth, json_nesting_depth(bytes)?)
 }
 
 #[must_use]
@@ -42,6 +52,21 @@ pub fn verify_asset_bytes(descriptor: &AssetDescriptor, bytes: &[u8]) -> Result<
         return Err(SchemaError::asset_hash_mismatch());
     }
     Ok(())
+}
+
+pub fn reconcile_canonical_identity(
+    existing: &[u8],
+    incoming: &[u8],
+) -> Result<IdentityResolution, SchemaError> {
+    let existing_document = decode_canonical(existing)?;
+    let incoming_document = decode_canonical(incoming)?;
+    if existing_document.document_id != incoming_document.document_id {
+        return Ok(IdentityResolution::Independent);
+    }
+    if existing == incoming {
+        return Ok(IdentityResolution::Idempotent);
+    }
+    Err(SchemaError::identity_conflict())
 }
 
 #[must_use]

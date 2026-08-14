@@ -1,7 +1,7 @@
 use flow_core::{
     canonical::{
         IdentityResolution, canonical_bytes, canonical_hash, decode_canonical,
-        reconcile_canonical_identity, verify_asset_bytes,
+        preflight_canonical_bytes, reconcile_canonical_identity, verify_asset_bytes,
     },
     model::{DocumentId, FlowDocument},
     schema::{DocumentLimits, LimitKind},
@@ -10,13 +10,20 @@ use flow_core::{
 const CURRENT_JSON: &[u8] = include_bytes!("../../../fixtures/flowdoc/current.json");
 const CURRENT_HASH: &str = include_str!("../../../fixtures/flowdoc/current.hash");
 
+fn current_payload() -> &'static [u8] {
+    CURRENT_JSON.strip_suffix(b"\n").unwrap_or(CURRENT_JSON)
+}
+
 #[test]
 fn checked_in_current_fixture_is_the_exact_round_trip_contract() {
     let document = FlowDocument::deterministic_sample("uk-UA").expect("sample");
     let bytes = canonical_bytes(&document).expect("canonical bytes");
-    assert_eq!(bytes, CURRENT_JSON);
+    assert_eq!(bytes, current_payload());
     assert_eq!(canonical_hash(&bytes), CURRENT_HASH.trim());
-    assert_eq!(decode_canonical(CURRENT_JSON).expect("golden decode"), document);
+    assert_eq!(
+        decode_canonical(current_payload()).expect("golden decode"),
+        document
+    );
     assert_eq!(canonical_bytes(&document).expect("repeat 1"), bytes);
     assert_eq!(canonical_bytes(&document).expect("repeat 2"), bytes);
 }
@@ -72,8 +79,7 @@ fn identical_creation_converges_and_divergent_same_identity_conflicts_atomically
     assert_eq!(divergent_bytes, divergent_before);
 
     let mut independent = divergent;
-    independent.document_id =
-        DocumentId::new("00000000-0000-4000-8000-000000009990").expect("id");
+    independent.document_id = DocumentId::new("00000000-0000-4000-8000-000000009990").expect("id");
     assert_eq!(
         reconcile_canonical_identity(
             &existing,
@@ -107,9 +113,7 @@ fn every_versioned_resource_ceiling_accepts_n_and_rejects_n_plus_one() {
 
     for (kind, maximum) in cases {
         limits.check(kind, maximum).expect("N must pass");
-        let error = limits
-            .check(kind, maximum + 1)
-            .expect_err("N+1 must fail");
+        let error = limits.check(kind, maximum + 1).expect_err("N+1 must fail");
         assert_eq!(error.code(), kind.code());
     }
 }
@@ -132,5 +136,19 @@ fn locked_v1_limits_match_the_reviewed_profile_exactly() {
             recovery_records: 10_000,
             recovery_bytes: 64 * 1024 * 1024,
         }
+    );
+}
+
+#[test]
+fn byte_and_depth_preflight_runs_before_typed_json_publication() {
+    let at_limit = format!("{}0{}", "[".repeat(128), "]".repeat(128));
+    preflight_canonical_bytes(at_limit.as_bytes()).expect("depth N passes preflight");
+
+    let beyond = format!("{}0{}", "[".repeat(129), "]".repeat(129));
+    assert_eq!(
+        preflight_canonical_bytes(beyond.as_bytes())
+            .expect_err("depth N+1")
+            .code(),
+        "FLOW_LIMIT_TREE_DEPTH"
     );
 }

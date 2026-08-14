@@ -211,6 +211,13 @@ impl SchemaError {
         )
     }
 
+    pub(crate) fn identity_conflict() -> Self {
+        Self::new(
+            "FLOW_IDENTITY_CONFLICT",
+            "The same document identity already has different canonical bytes",
+        )
+    }
+
     pub(crate) fn future_schema() -> Self {
         Self::new(
             "FLOW_MIGRATION_FUTURE_VERSION",
