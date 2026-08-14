@@ -9,12 +9,23 @@ export function normalizeRepository(value) {
   if (typeof value !== 'string' || value.length === 0) return null;
   const normalized = value
     .replace(/^git\+/, '')
-    .replace(/^git:\/\//, 'https://')
-    .replace(/\.git(?:#.*)?$/, '')
-    .replace(/\/$/, '');
-  return /^https:\/\/(?:www\.)?github\.com\/[\w.-]+\/[\w.-]+$/i.test(normalized)
-    ? normalized.replace(/^https:\/\/www\./, 'https://')
-    : null;
+    // npm still exposes legacy git:// repository identities for otherwise
+    // registry-hosted packages. This value is never fetched as Git; it is
+    // canonicalized and then verified through the HTTPS GitHub API.
+    .replace(/^git:\/\/github\.com\//i, 'https://github.com/');
+  if (/%|\/(?:\.{1,2})(?:\/|$)/.test(normalized)) return null;
+  let url;
+  try {
+    url = new URL(normalized);
+  } catch {
+    return null;
+  }
+  if (url.protocol !== 'https:' || url.hostname.toLowerCase() !== 'github.com' || url.port || url.username || url.password || url.search || url.hash) return null;
+  const parts = url.pathname.split('/').filter(Boolean);
+  if (parts.length < 2 || parts.some((part) => !/^[A-Za-z0-9_.-]+$/.test(part))) return null;
+  const [owner, repositoryWithSuffix] = parts;
+  const repository = repositoryWithSuffix.replace(/\.git$/, '');
+  return repository ? `https://github.com/${owner}/${repository}` : null;
 }
 
 class ProvenanceError extends Error {
@@ -63,14 +74,82 @@ async function fetchJson(url, { fetchImpl, timeoutMs, retries, packageName, chec
   throw lastError;
 }
 
+async function fetchText(url, { fetchImpl, timeoutMs, retries, packageName, check }) {
+  let lastError;
+  for (let attempt = 0; attempt <= retries; attempt += 1) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const response = await fetchImpl(url, {
+        headers: { accept: 'text/html', 'user-agent': 'flowpdf-provenance-verifier/1' },
+        signal: controller.signal,
+      });
+      expect(response?.ok, packageName, check, `HTTP ${response?.status ?? 'network failure'}`);
+      return await response.text();
+    } catch (error) {
+      lastError = error instanceof ProvenanceError
+        ? error
+        : new ProvenanceError(packageName, check, error?.name === 'AbortError' ? 'timeout' : 'network failure');
+      if (error instanceof ProvenanceError || attempt === retries) break;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  throw lastError;
+}
+
+async function verifyRepositoryPage(repositoryUrl, options, packageName) {
+  const html = await fetchText(repositoryUrl, {
+    ...options,
+    packageName,
+    check: 'upstream repository page',
+  });
+  const expectedNwo = new URL(repositoryUrl).pathname.slice(1);
+  const nwo = html.match(/<meta\s+name="octolytics-dimension-repository_nwo"\s+content="([^"]+)"\s*\/?>/i)?.[1];
+  const isPublic = html.match(/<meta\s+name="octolytics-dimension-repository_public"\s+content="([^"]+)"\s*\/?>/i)?.[1];
+  expect(nwo?.toLowerCase() === expectedNwo.toLowerCase(), packageName, 'upstream repository page', 'repository identity metadata missing');
+  expect(isPublic === 'true', packageName, 'upstream repository page', 'repository is not public');
+
+  const embedded = html.match(/<script\s+type="application\/json"\s+data-target="react-app\.embeddedData">([\s\S]*?)<\/script>/i)?.[1];
+  let repository;
+  try {
+    repository = JSON.parse(embedded).payload?.sidebarAbout?.repo;
+  } catch {
+    throw new ProvenanceError(packageName, 'upstream repository page', 'repository state metadata malformed');
+  }
+  expect(repository?.isPrivate === false, packageName, 'upstream repository page', 'repository is not public');
+  expect(repository?.isArchived === false, packageName, 'upstream repository page', 'repository is archived');
+  return { private: repository.isPrivate, archived: repository.isArchived };
+}
+
 async function verifyRepository(entry, registryRepository, options) {
   const actual = normalizeRepository(registryRepository);
   expect(actual === entry.repository, entry.name, 'repository', 'registry repository does not match allowlist');
-  const repository = await fetchJson(githubApiUrl(actual), {
-    ...options,
-    packageName: entry.name,
-    check: 'upstream repository',
-  });
+  let repositoryPromise = options.repositoryCache.get(actual);
+  if (!repositoryPromise) {
+    repositoryPromise = fetchJson(githubApiUrl(actual), {
+      ...options,
+      packageName: entry.name,
+      check: 'upstream repository',
+    });
+    options.repositoryCache.set(actual, repositoryPromise);
+  }
+  let repository;
+  try {
+    repository = await repositoryPromise;
+  } catch (error) {
+    // GitHub's unauthenticated REST limit is shared by the network egress.
+    // On a 403, verify the same public/non-archived invariants from GitHub's
+    // official repository page. Its identity and embedded state are required
+    // exactly; any markup drift remains a fail-closed error.
+    if (!(error instanceof ProvenanceError) || error.reason !== 'HTTP 403') throw error;
+    let pagePromise = options.repositoryPageCache.get(actual);
+    if (!pagePromise) {
+      pagePromise = verifyRepositoryPage(actual, options, entry.name);
+      options.repositoryPageCache.set(actual, pagePromise);
+    }
+    repository = await pagePromise;
+  }
   expect(repository.private === false, entry.name, 'upstream repository', 'repository is not public');
   expect(repository.archived === false, entry.name, 'upstream repository', 'repository is archived');
   return actual;
@@ -108,9 +187,19 @@ async function verifyNpm(entry, options) {
   expect(typeof integrity === 'string' && integrity.startsWith('sha512-'), entry.name, 'integrity', 'sha512 integrity missing');
   const tarball = data.dist?.tarball;
   expect(typeof tarball === 'string' && new URL(tarball).hostname === 'registry.npmjs.org', entry.name, 'tarball', 'tarball is not registry-hosted');
-  const publishedAt = data.time?.[entry.version];
-  expect(typeof publishedAt === 'string', entry.name, 'publish metadata', 'publish timestamp missing');
   const repository = await verifyRepository(entry, data.repository?.url ?? data.repository, options);
+  // The exact-version endpoint intentionally omits the package-level `time`
+  // map. Resolve the timestamp from the authoritative package document while
+  // keeping identity, repository and integrity checks bound to the exact
+  // version response above.
+  const packageMetadata = await fetchJson(`https://registry.npmjs.org/${encoded}`, {
+    ...options,
+    packageName: entry.name,
+    check: 'npm publish metadata',
+  });
+  expect(packageMetadata.versions?.[entry.version]?.version === entry.version, entry.name, 'publish metadata', 'exact version missing from npm package document');
+  const publishedAt = packageMetadata.time?.[entry.version];
+  expect(typeof publishedAt === 'string', entry.name, 'publish metadata', 'publish timestamp missing');
   return {
     ecosystem: 'npm', name: entry.name, version: entry.version, repository,
     publishedAt, integrity, source: `https://registry.npmjs.org/${encoded}/${entry.version}`, tarball,
@@ -119,7 +208,16 @@ async function verifyNpm(entry, options) {
 
 export async function verifyManifest({ config, fetchImpl = globalThis.fetch }) {
   expect(config?.schemaVersion === 1, 'manifest', 'schema', 'unsupported schema version');
-  const options = { fetchImpl, timeoutMs: config.timeoutMs, retries: config.retries };
+  const options = {
+    fetchImpl,
+    timeoutMs: config.timeoutMs,
+    retries: config.retries,
+    // wasm-bindgen and its CLI intentionally share one upstream. Cache the
+    // official repository response so a run consumes one bounded API request
+    // per canonical identity and cannot amplify rate limits through aliases.
+    repositoryCache: new Map(),
+    repositoryPageCache: new Map(),
+  };
   const crates = await Promise.all(config.crates.map((entry) => verifyCrate(entry, options)));
   const npm = await Promise.all(config.npm.map((entry) => verifyNpm(entry, options)));
   return { schemaVersion: 1, status: 'success', verifiedAt: new Date().toISOString(), crates, npm };
@@ -154,6 +252,7 @@ test('accepts an allowlisted stable crate and npm release with complete provenan
   const responses = new Map([
     ['https://crates.io/api/v1/crates/serde/1.0.228', { version: { num: '1.0.228', yanked: false, checksum: 'a'.repeat(64), created_at: '2026-01-01T00:00:00Z', repository: 'https://github.com/serde-rs/serde' } }],
     ['https://registry.npmjs.org/vitest/4.1.6', { name: 'vitest', version: '4.1.6', time: { '4.1.6': '2026-01-01T00:00:00Z' }, repository: { url: 'git+https://github.com/vitest-dev/vitest.git' }, dist: { integrity: 'sha512-test', tarball: 'https://registry.npmjs.org/vitest/-/vitest-4.1.6.tgz' } }],
+    ['https://registry.npmjs.org/vitest', { versions: { '4.1.6': { version: '4.1.6' } }, time: { '4.1.6': '2026-01-01T00:00:00Z' } }],
     ['https://api.github.com/repos/serde-rs/serde', { private: false, archived: false }],
     ['https://api.github.com/repos/vitest-dev/vitest', { private: false, archived: false }],
   ]);
@@ -177,6 +276,50 @@ test('normalizes git+https repository URLs', () => {
     normalizeRepository('git+https://github.com/example/repository.git'),
     'https://github.com/example/repository',
   );
+  assert.equal(
+    normalizeRepository('https://github.com/wasm-bindgen/wasm-bindgen/tree/master/crates/cli'),
+    'https://github.com/wasm-bindgen/wasm-bindgen',
+  );
+  assert.equal(
+    normalizeRepository('git://github.com/dumbmatter/fakeIndexedDB.git'),
+    'https://github.com/dumbmatter/fakeIndexedDB',
+  );
+});
+
+test('rejects unsafe or noncanonical repository URLs', () => {
+  for (const url of [
+    'http://github.com/serde-rs/serde',
+    'https://gitlab.com/serde-rs/serde',
+    'https://github.com/serde-rs',
+    'https://user:password@github.com/serde-rs/serde',
+    'https://github.com/serde-rs/../serde',
+    'https://github.com/serde-rs/%2e%2e/serde',
+  ]) {
+    assert.equal(normalizeRepository(url), null, url);
+  }
+});
+
+test('fails over from a rate-limited GitHub API to strict official page metadata', async () => {
+  const config = {
+    schemaVersion: 1, timeoutMs: 10, retries: 0, npm: [],
+    crates: [{ name: 'serde', version: '1.0.228', repository: 'https://github.com/serde-rs/serde' }],
+  };
+  const page = (archived) => `
+    <meta name="octolytics-dimension-repository_nwo" content="serde-rs/serde" />
+    <meta name="octolytics-dimension-repository_public" content="true" />
+    <script type="application/json" data-target="react-app.embeddedData">{"payload":{"sidebarAbout":{"repo":{"isPrivate":false,"isArchived":${archived}}}}}</script>`;
+  const fetchImpl = async (url) => {
+    if (url.startsWith('https://crates.io/')) return new Response(JSON.stringify({ version: { num: '1.0.228', yanked: false, checksum: 'a'.repeat(64), created_at: '2026-01-01T00:00:00Z', repository: 'https://github.com/serde-rs/serde' } }), { status: 200 });
+    if (url.startsWith('https://api.github.com/')) return new Response('', { status: 403 });
+    return new Response(page(false), { status: 200, headers: { 'content-type': 'text/html' } });
+  };
+  assert.equal((await verifyManifest({ config, fetchImpl })).status, 'success');
+  const archivedFetch = async (url) => {
+    if (url.startsWith('https://crates.io/')) return fetchImpl(url);
+    if (url.startsWith('https://api.github.com/')) return new Response('', { status: 403 });
+    return new Response(page(true), { status: 200, headers: { 'content-type': 'text/html' } });
+  };
+  await assert.rejects(() => verifyManifest({ config, fetchImpl: archivedFetch }), /archived/);
 });
 
 test('fails closed for every required negative provenance invariant', async () => {

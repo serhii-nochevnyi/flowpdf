@@ -1,0 +1,140 @@
+{
+  "schemaVersion": 1,
+  "status": "success",
+  "verifiedAt": "2026-08-14T18:40:16.808Z",
+  "crates": [
+    {
+      "ecosystem": "crates.io",
+      "name": "serde",
+      "version": "1.0.228",
+      "repository": "https://github.com/serde-rs/serde",
+      "publishedAt": "2025-09-27T16:51:35.265429Z",
+      "checksum": "9a8e94ea7f378bd32cbbd37198a4a91436180c5bb472411e48b5ec2e2124ae9e",
+      "source": "https://crates.io/api/v1/crates/serde/1.0.228"
+    },
+    {
+      "ecosystem": "crates.io",
+      "name": "serde_json",
+      "version": "1.0.149",
+      "repository": "https://github.com/serde-rs/json",
+      "publishedAt": "2026-01-06T16:23:34.585926Z",
+      "checksum": "83fc039473c5595ace860d8c4fafa220ff474b3fc6bfdb4293327f1a37e94d86",
+      "source": "https://crates.io/api/v1/crates/serde_json/1.0.149"
+    },
+    {
+      "ecosystem": "crates.io",
+      "name": "uuid",
+      "version": "1.18.1",
+      "repository": "https://github.com/uuid-rs/uuid",
+      "publishedAt": "2025-09-02T06:11:41.210851Z",
+      "checksum": "2f87b8aa10b915a06587d0dec516c282ff295b475d94abf425d62b57710070a2",
+      "source": "https://crates.io/api/v1/crates/uuid/1.18.1"
+    },
+    {
+      "ecosystem": "crates.io",
+      "name": "blake3",
+      "version": "1.8.2",
+      "repository": "https://github.com/BLAKE3-team/BLAKE3",
+      "publishedAt": "2025-04-21T00:22:38.151026Z",
+      "checksum": "3888aaa89e4b2a40fca9848e400f6a658a5a3978de7be858e209cafa8be9a4a0",
+      "source": "https://crates.io/api/v1/crates/blake3/1.8.2"
+    },
+    {
+      "ecosystem": "crates.io",
+      "name": "thiserror",
+      "version": "2.0.17",
+      "repository": "https://github.com/dtolnay/thiserror",
+      "publishedAt": "2025-09-28T23:26:56.561733Z",
+      "checksum": "f63587ca0f12b72a0600bcba1d40081f830876000bb46dd2337a3051618f4fc8",
+      "source": "https://crates.io/api/v1/crates/thiserror/2.0.17"
+    },
+    {
+      "ecosystem": "crates.io",
+      "name": "wasm-bindgen",
+      "version": "0.2.108",
+      "repository": "https://github.com/wasm-bindgen/wasm-bindgen",
+      "publishedAt": "2026-01-15T01:09:52.068263Z",
+      "checksum": "64024a30ec1e37399cf85a7ffefebdb72205ca1c972291c51512360d90bd8566",
+      "source": "https://crates.io/api/v1/crates/wasm-bindgen/0.2.108"
+    },
+    {
+      "ecosystem": "crates.io",
+      "name": "wasm-bindgen-cli",
+      "version": "0.2.108",
+      "repository": "https://github.com/wasm-bindgen/wasm-bindgen",
+      "publishedAt": "2026-01-15T01:10:06.749188Z",
+      "checksum": "44ec68e22cd8878c34e01b55fc514eaf75bd3b1c2d095deeb022fa6f8856d174",
+      "source": "https://crates.io/api/v1/crates/wasm-bindgen-cli/0.2.108"
+    },
+    {
+      "ecosystem": "crates.io",
+      "name": "serde-wasm-bindgen",
+      "version": "0.6.5",
+      "repository": "https://github.com/RReverser/serde-wasm-bindgen",
+      "publishedAt": "2024-02-27T21:32:21.678632Z",
+      "checksum": "8302e169f0eddcc139c70f139d19d6467353af16f9fce27e8c30158036a1e16b",
+      "source": "https://crates.io/api/v1/crates/serde-wasm-bindgen/0.6.5"
+    },
+    {
+      "ecosystem": "crates.io",
+      "name": "proptest",
+      "version": "1.8.0",
+      "repository": "https://github.com/proptest-rs/proptest",
+      "publishedAt": "2025-09-20T18:12:30.564021Z",
+      "checksum": "2bb0be07becd10686a0bb407298fb425360a5c44a663774406340c59a22de4ce",
+      "source": "https://crates.io/api/v1/crates/proptest/1.8.0"
+    }
+  ],
+  "npm": [
+    {
+      "ecosystem": "npm",
+      "name": "typescript",
+      "version": "5.9.3",
+      "repository": "https://github.com/microsoft/TypeScript",
+      "publishedAt": "2025-09-30T21:19:38.784Z",
+      "integrity": "sha512-jl1vZzPDinLr9eUt3J/t7V6FgNEw9QjvBPdysz9KfQDD41fQrC2Y4vKQdiaUpFT4bXlb1RHhLpp8wtm6M5TgSw==",
+      "source": "https://registry.npmjs.org/typescript/5.9.3",
+      "tarball": "https://registry.npmjs.org/typescript/-/typescript-5.9.3.tgz"
+    },
+    {
+      "ecosystem": "npm",
+      "name": "vitest",
+      "version": "4.1.6",
+      "repository": "https://github.com/vitest-dev/vitest",
+      "publishedAt": "2026-05-11T14:37:46.246Z",
+      "integrity": "sha512-6lvjbS3p9b4CrdCmguzbh2/4uoXhGE2q71R4OX5sqF9R1bo9Xd6fGrMAfvp5wnCzlBnFVdCOp6onuTQVbo8iUQ==",
+      "source": "https://registry.npmjs.org/vitest/4.1.6",
+      "tarball": "https://registry.npmjs.org/vitest/-/vitest-4.1.6.tgz"
+    },
+    {
+      "ecosystem": "npm",
+      "name": "fake-indexeddb",
+      "version": "6.2.4",
+      "repository": "https://github.com/dumbmatter/fakeIndexedDB",
+      "publishedAt": "2025-10-17T03:20:11.629Z",
+      "integrity": "sha512-INKeIKEtSViN4yVtEWEUqbsqmaIy7Ls+MfU0yxQVXg67pOJ/sH1ZxcVrP8XrKULUFohcPD9gnmym+qBfEybACw==",
+      "source": "https://registry.npmjs.org/fake-indexeddb/6.2.4",
+      "tarball": "https://registry.npmjs.org/fake-indexeddb/-/fake-indexeddb-6.2.4.tgz"
+    },
+    {
+      "ecosystem": "npm",
+      "name": "@vitest/browser-playwright",
+      "version": "4.1.6",
+      "repository": "https://github.com/vitest-dev/vitest",
+      "publishedAt": "2026-05-11T14:37:50.200Z",
+      "integrity": "sha512-4csoeyl/qwHyxU2zNL0++WaoDr8YJDXOQPwWPNJoTZ+QzcdO3INYKgF5Zfz730Io7zbkuv914aZmfQ+QE+1Hvw==",
+      "source": "https://registry.npmjs.org/%40vitest%2Fbrowser-playwright/4.1.6",
+      "tarball": "https://registry.npmjs.org/@vitest/browser-playwright/-/browser-playwright-4.1.6.tgz"
+    },
+    {
+      "ecosystem": "npm",
+      "name": "playwright",
+      "version": "1.57.0",
+      "repository": "https://github.com/microsoft/playwright",
+      "publishedAt": "2025-11-25T11:17:08.230Z",
+      "integrity": "sha512-ilYQj1s8sr2ppEJ2YVadYBN0Mb3mdo9J0wQ+UuDhzYqURwSoW4n1Xs5vs7ORwgDGmyEh33tRMeS8KhdkMoLXQw==",
+      "source": "https://registry.npmjs.org/playwright/1.57.0",
+      "tarball": "https://registry.npmjs.org/playwright/-/playwright-1.57.0.tgz"
+    }
+  ]
+}

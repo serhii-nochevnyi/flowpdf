@@ -1,8 +1,0 @@
-{
-  "schemaVersion": 1,
-  "status": "blocked",
-  "package": "serde",
-  "check": "crates.io release",
-  "reason": "network failure",
-  "timestamp": "2026-08-14T18:20:24.756Z"
-}
