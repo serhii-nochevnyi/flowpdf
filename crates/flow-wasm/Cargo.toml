@@ -1,0 +1,15 @@
+[package]
+name = "flow-wasm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+flow-core = { path = "../flow-core" }
+serde-wasm-bindgen.workspace = true
+wasm-bindgen.workspace = true
+
