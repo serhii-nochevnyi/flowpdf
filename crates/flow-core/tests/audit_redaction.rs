@@ -1,0 +1,95 @@
+use flow_core::{
+    audit::{
+        AuditAction, AuditCommandKind, AuditErrorCode, AuditEvent, AuditMetadata, AuditOutcome,
+        AuditTimestamp, sort_events,
+    },
+    model::{CommandId, FlowDocument},
+    transaction::SourceModality,
+};
+
+fn command_id(value: u32) -> CommandId {
+    CommandId::new(format!("00000000-0000-4000-8000-{value:012}")).expect("valid command ID")
+}
+
+fn event(sequence: u64, command: u32, timestamp: &str) -> AuditEvent {
+    let document = FlowDocument::deterministic_sample("uk-UA").expect("sample");
+    let command_id = command_id(command);
+    AuditEvent::success(
+        command_id.clone(),
+        document.document_id,
+        command_id.clone(),
+        command_id,
+        1,
+        2,
+        sequence,
+        AuditTimestamp::parse(timestamp).expect("safe timestamp"),
+        AuditAction::Command {
+            kind: AuditCommandKind::ReplaceText,
+        },
+        SourceModality::Keyboard,
+        vec![AuditMetadata::SchemaVersion { value: 1 }],
+    )
+    .expect("safe audit event")
+}
+
+#[test]
+fn audit_serialization_and_debug_are_closed_allowlists() {
+    let document = FlowDocument::deterministic_sample("uk-UA").expect("sample");
+    let command = command_id(501);
+    let event = AuditEvent::failure(
+        command.clone(),
+        document.document_id,
+        command.clone(),
+        command,
+        2,
+        2,
+        7,
+        AuditTimestamp::parse("2026-08-14T20:50:00Z").expect("timestamp"),
+        AuditAction::Command {
+            kind: AuditCommandKind::InsertText,
+        },
+        SourceModality::Voice,
+        AuditErrorCode::StaleRevision,
+        vec![AuditMetadata::RecoveryVerified],
+    )
+    .expect("failure event");
+
+    let serialized = serde_json::to_string(&event).expect("audit serializes");
+    let debug = format!("{event:?}");
+    for forbidden in [
+        "SENSITIVE_DOCUMENT_TEXT",
+        "RAW_AUDIO_BYTES",
+        "VOICE_TRANSCRIPT",
+        "commandArguments",
+        "forwardOperations",
+        "storagePayload",
+    ] {
+        assert!(!serialized.contains(forbidden), "serialized audit leaked {forbidden}");
+        assert!(!debug.contains(forbidden), "debug audit leaked {forbidden}");
+    }
+    assert!(serialized.contains("staleRevision"));
+    assert!(serialized.contains("schemaVersion") || serialized.contains("recoveryVerified"));
+
+    let mut unknown = serde_json::to_value(&event).expect("audit JSON value");
+    unknown
+        .as_object_mut()
+        .expect("object")
+        .insert("documentText".to_owned(), serde_json::json!("SENSITIVE_DOCUMENT_TEXT"));
+    assert!(serde_json::from_value::<AuditEvent>(unknown).is_err());
+}
+
+#[test]
+fn audit_order_uses_durable_sequence_then_revision_then_identity() {
+    let mut events = vec![
+        event(3, 503, "2026-08-14T20:50:00Z"),
+        event(2, 502, "2026-08-14T20:50:00Z"),
+        event(2, 501, "2026-08-14T20:50:00Z"),
+    ];
+    sort_events(&mut events);
+
+    assert_eq!(events[0].durable_sequence(), 2);
+    assert_eq!(events[0].audit_id().as_str(), command_id(501).as_str());
+    assert_eq!(events[1].durable_sequence(), 2);
+    assert_eq!(events[2].durable_sequence(), 3);
+    assert_eq!(events.len(), 3, "queries never coalesce adjacent events");
+}
