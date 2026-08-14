@@ -16,6 +16,10 @@ export default defineConfig({
         test: {
           name: 'browser',
           include: ['web/**/*.browser.test.ts'],
+          // The sandbox-compatible Chromium configuration is one process, so
+          // browser files must not race separate pages inside that process.
+          fileParallelism: false,
+          maxWorkers: 1,
           browser: {
             enabled: true,
             headless: true,
