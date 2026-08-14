@@ -220,7 +220,7 @@ export async function verifyManifest({ config, fetchImpl = globalThis.fetch }) {
   };
   const crates = await Promise.all(config.crates.map((entry) => verifyCrate(entry, options)));
   const npm = await Promise.all(config.npm.map((entry) => verifyNpm(entry, options)));
-  return { schemaVersion: 1, status: 'success', verifiedAt: new Date().toISOString(), crates, npm };
+  return { schemaVersion: 1, status: 'success', crates, npm };
 }
 
 export async function writeVerificationOutcome({ config, reportPath, blockerPath, fetchImpl }) {
