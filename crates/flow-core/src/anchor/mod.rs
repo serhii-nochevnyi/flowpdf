@@ -74,7 +74,11 @@ impl AnchorError {
     }
 }
 
-pub(crate) fn resolve_utf16_offset(
+/// Converts a browser/public UTF-16 offset to a native UTF-8 byte boundary.
+///
+/// This validates Unicode scalar boundaries only. Grapheme-safe editing is a
+/// later editor-layer responsibility.
+pub fn resolve_utf16_offset(
     value: &str,
     offset: Utf16Offset,
 ) -> Result<NativeByteOffset, AnchorError> {

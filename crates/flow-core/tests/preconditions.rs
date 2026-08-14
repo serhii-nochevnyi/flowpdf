@@ -219,7 +219,9 @@ fn utf16_and_native_offsets_round_trip_every_scalar_boundary_without_a_grapheme_
         "Phase 1 validates scalar/UTF-16 boundaries but intentionally does not claim grapheme safety"
     );
 
-    let emoji_units = text[..text.find('😀').expect("emoji")].encode_utf16().count() as u32;
+    let emoji_units = text[..text.find('😀').expect("emoji")]
+        .encode_utf16()
+        .count() as u32;
     assert_eq!(
         resolve_utf16_offset(text, Utf16Offset::new(emoji_units + 1)),
         Err(AnchorError::InvalidUtf16Boundary)
@@ -300,9 +302,18 @@ fn replace_delete_and_node_invalidation_never_guess_an_interior_target() {
         })
     };
 
-    assert_eq!(mapped(1, Affinity::Forward), AnchorMapResult::Mapped(position(node_id.clone(), 1)));
-    assert_eq!(mapped(3, Affinity::Forward), AnchorMapResult::Invalid(AnchorInvalidation::DeletedText));
-    assert_eq!(mapped(7, Affinity::Forward), AnchorMapResult::Mapped(position(node_id.clone(), 4)));
+    assert_eq!(
+        mapped(1, Affinity::Forward),
+        AnchorMapResult::Mapped(position(node_id.clone(), 1))
+    );
+    assert_eq!(
+        mapped(3, Affinity::Forward),
+        AnchorMapResult::Invalid(AnchorInvalidation::DeletedText)
+    );
+    assert_eq!(
+        mapped(7, Affinity::Forward),
+        AnchorMapResult::Mapped(position(node_id.clone(), 4))
+    );
     assert_eq!(
         mapped(2, Affinity::Backward),
         AnchorMapResult::Mapped(LogicalPosition {
@@ -311,7 +322,10 @@ fn replace_delete_and_node_invalidation_never_guess_an_interior_target() {
             affinity: Affinity::Backward,
         })
     );
-    assert_eq!(mapped(6, Affinity::Forward), AnchorMapResult::Mapped(position(node_id.clone(), 3)));
+    assert_eq!(
+        mapped(6, Affinity::Forward),
+        AnchorMapResult::Mapped(position(node_id.clone(), 3))
+    );
 
     let deleted_node = AnchorMapping {
         transformations: vec![AnchorTransformation::NodeInvalidated {
