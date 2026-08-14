@@ -15,7 +15,10 @@ use model::{
     Affinity, ContentNodeKind, DocumentId, FlowDocument, LogicalPosition, Provenance,
     SCHEMA_VERSION,
 };
-use schema::{DocumentLimits, SchemaError, utf16_to_byte_offset, validate_document};
+use schema::{
+    DocumentLimits, MigrationRegistry, MigrationReport, SchemaError, utf16_to_byte_offset,
+    validate_document,
+};
 
 const SAMPLE_CREATE_COMMAND_ID: &str = "00000000-0000-4000-8000-000000000201";
 
@@ -30,6 +33,21 @@ pub struct CreateSampleRequest {
 pub struct ApplyCommandRequest {
     pub canonical_json: String,
     pub command: CommandDto,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct MigrateDocumentRequest {
+    pub canonical_json: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct MigrateDocumentResult {
+    pub canonical_json: String,
+    pub canonical_hash: String,
+    pub provenance: Provenance,
+    pub report: MigrationReport,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -320,6 +338,30 @@ pub fn apply_command(request: ApplyCommandRequest) -> ApiResponse<OperationResul
         Ok(result) => ApiResponse::success(result),
         Err(error) => ApiResponse::failure(error),
     }
+}
+
+/// Runs the same pure migration registry used by native callers through a
+/// serialized DTO boundary suitable for WebAssembly.
+#[must_use]
+pub fn migrate_document(request: MigrateDocumentRequest) -> ApiResponse<MigrateDocumentResult> {
+    match migrate_document_inner(request) {
+        Ok(result) => ApiResponse::success(result),
+        Err(error) => ApiResponse::failure(error),
+    }
+}
+
+fn migrate_document_inner(
+    request: MigrateDocumentRequest,
+) -> Result<MigrateDocumentResult, CoreError> {
+    let outcome = MigrationRegistry::current().migrate(request.canonical_json.as_bytes())?;
+    let canonical_json =
+        String::from_utf8(outcome.canonical_bytes).map_err(|_| SchemaError::serialization())?;
+    Ok(MigrateDocumentResult {
+        canonical_json,
+        canonical_hash: outcome.canonical_hash,
+        provenance: outcome.document.provenance,
+        report: outcome.report,
+    })
 }
 
 fn apply_command_inner(request: ApplyCommandRequest) -> Result<OperationResult, CoreError> {
@@ -640,6 +682,28 @@ mod tests {
                 .expect("audit serializes")
                 .contains("typed mutation")
         );
+    }
+
+    #[test]
+    fn migration_dto_returns_the_registry_bytes_hash_and_provenance() {
+        let older = include_str!("../../../fixtures/flowdoc/older.json")
+            .strip_suffix('\n')
+            .unwrap_or(include_str!("../../../fixtures/flowdoc/older.json"));
+        let migrated = include_str!("../../../fixtures/flowdoc/migrated.json")
+            .strip_suffix('\n')
+            .unwrap_or(include_str!("../../../fixtures/flowdoc/migrated.json"));
+        let result = success(migrate_document(MigrateDocumentRequest {
+            canonical_json: older.to_owned(),
+        }));
+
+        assert_eq!(result.canonical_json, migrated);
+        assert_eq!(
+            result.canonical_hash,
+            include_str!("../../../fixtures/flowdoc/migrated.hash").trim()
+        );
+        assert!(matches!(result.provenance, Provenance::Migrated { .. }));
+        assert_eq!(result.report.source_schema_version, 0);
+        assert!(result.report.requires_new_snapshot);
     }
 
     #[test]

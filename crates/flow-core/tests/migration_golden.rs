@@ -17,7 +17,9 @@ fn payload(file: &'static [u8]) -> &'static [u8] {
 fn older_fixture_migrates_one_pure_hop_to_the_checked_in_current_schema_boundary() {
     let registry = MigrationRegistry::current();
     let first = registry.migrate(payload(OLDER_FILE)).expect("migration");
-    let second = registry.migrate(payload(OLDER_FILE)).expect("repeat migration");
+    let second = registry
+        .migrate(payload(OLDER_FILE))
+        .expect("repeat migration");
 
     assert_eq!(first.canonical_bytes, payload(MIGRATED_FILE));
     assert_eq!(first.canonical_hash, MIGRATED_HASH.trim());

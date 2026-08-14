@@ -2,11 +2,14 @@
 
 use std::collections::BTreeSet;
 
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
 
 use crate::model::{
-    ContentNodeKind, FieldDescriptor, FieldKind, FieldValue, FlowDocument, SCHEMA_VERSION,
+    AssetDescriptor, ContentNode, ContentNodeKind, DocumentId, FieldDescriptor, FieldKind,
+    FieldValue, FlowDocument, MigrationHop, PageSettings, Provenance, SCHEMA_VERSION,
+    StyleDefinition,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -239,6 +242,20 @@ impl SchemaError {
         )
     }
 
+    pub fn migration_aborted() -> Self {
+        Self::new(
+            "FLOW_MIGRATION_ABORTED",
+            "The migration was interrupted before a current snapshot was published",
+        )
+    }
+
+    fn migration_input_invalid() -> Self {
+        Self::new(
+            "FLOW_MIGRATION_INPUT_INVALID",
+            "The source document is not a valid canonical supported schema",
+        )
+    }
+
     pub(crate) fn limit(kind: LimitKind, actual: usize, maximum: usize) -> Self {
         Self::new(
             kind.code(),
@@ -465,4 +482,192 @@ pub fn utf16_to_byte_offset(value: &str, utf16_offset: u32) -> Option<usize> {
         }
     }
     (consumed == requested).then_some(value.len())
+}
+
+pub type MigrationFunction = fn(&[u8]) -> Result<Vec<u8>, SchemaError>;
+
+#[derive(Clone, Copy)]
+pub struct MigrationStep {
+    pub from_version: u32,
+    pub to_version: u32,
+    migrate: MigrationFunction,
+}
+
+impl MigrationStep {
+    #[must_use]
+    pub const fn new(from_version: u32, to_version: u32, migrate: MigrationFunction) -> Self {
+        Self {
+            from_version,
+            to_version,
+            migrate,
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct MigrationRegistry {
+    steps: Vec<MigrationStep>,
+}
+
+impl MigrationRegistry {
+    #[must_use]
+    pub fn current() -> Self {
+        Self::new(vec![MigrationStep::new(0, 1, migrate_v0_to_v1)])
+    }
+
+    #[must_use]
+    pub fn new(steps: Vec<MigrationStep>) -> Self {
+        Self { steps }
+    }
+
+    pub fn migrate(&self, input: &[u8]) -> Result<MigrationOutcome, SchemaError> {
+        crate::canonical::preflight_canonical_bytes(input)?;
+        let source_schema_version = probe_schema_version(input)?;
+        if source_schema_version > SCHEMA_VERSION {
+            return Err(SchemaError::future_schema());
+        }
+        if source_schema_version == SCHEMA_VERSION {
+            let document = crate::canonical::decode_canonical(input)?;
+            return Ok(MigrationOutcome {
+                canonical_hash: crate::canonical::canonical_hash(input),
+                canonical_bytes: input.to_vec(),
+                document,
+                report: MigrationReport {
+                    source_schema_version,
+                    current_schema_version: SCHEMA_VERSION,
+                    hops: Vec::new(),
+                    requires_new_snapshot: false,
+                    preserve_source_records: true,
+                },
+            });
+        }
+
+        let mut version = source_schema_version;
+        let mut bytes = input.to_vec();
+        let mut hops = Vec::new();
+        while version < SCHEMA_VERSION {
+            let expected_to = version
+                .checked_add(1)
+                .ok_or_else(SchemaError::migration_hop_missing)?;
+            let step = self
+                .steps
+                .iter()
+                .find(|step| step.from_version == version && step.to_version == expected_to)
+                .ok_or_else(SchemaError::migration_hop_missing)?;
+            let candidate = (step.migrate)(&bytes)?;
+            let candidate_version = probe_schema_version(&candidate)
+                .map_err(|_| SchemaError::migration_intermediate_invalid())?;
+            if candidate_version != expected_to {
+                return Err(SchemaError::migration_intermediate_invalid());
+            }
+            if candidate_version == SCHEMA_VERSION
+                && crate::canonical::decode_canonical(&candidate).is_err()
+            {
+                return Err(SchemaError::migration_intermediate_invalid());
+            }
+            bytes = candidate;
+            hops.push(MigrationHop {
+                from_version: version,
+                to_version: expected_to,
+            });
+            version = expected_to;
+        }
+
+        let document = crate::canonical::decode_canonical(&bytes)
+            .map_err(|_| SchemaError::migration_intermediate_invalid())?;
+        Ok(MigrationOutcome {
+            canonical_hash: crate::canonical::canonical_hash(&bytes),
+            canonical_bytes: bytes,
+            document,
+            report: MigrationReport {
+                source_schema_version,
+                current_schema_version: SCHEMA_VERSION,
+                hops,
+                requires_new_snapshot: true,
+                preserve_source_records: true,
+            },
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MigrationOutcome {
+    pub document: FlowDocument,
+    pub canonical_bytes: Vec<u8>,
+    pub canonical_hash: String,
+    pub report: MigrationReport,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct MigrationReport {
+    pub source_schema_version: u32,
+    pub current_schema_version: u32,
+    pub hops: Vec<MigrationHop>,
+    pub requires_new_snapshot: bool,
+    pub preserve_source_records: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct VersionProbe {
+    schema_version: u32,
+}
+
+fn probe_schema_version(input: &[u8]) -> Result<u32, SchemaError> {
+    serde_json::from_slice::<VersionProbe>(input)
+        .map(|probe| probe.schema_version)
+        .map_err(|_| SchemaError::decode())
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct LegacyDocumentV0 {
+    schema_version: u32,
+    document_id: DocumentId,
+    revision: u32,
+    locale: String,
+    page_settings: PageSettings,
+    styles: Vec<StyleDefinition>,
+    content: Vec<ContentNode>,
+    assets: Vec<AssetDescriptor>,
+    fields: Vec<FieldDescriptor>,
+    provenance: LegacyProvenanceV0,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct LegacyProvenanceV0 {
+    created_at: String,
+}
+
+fn migrate_v0_to_v1(input: &[u8]) -> Result<Vec<u8>, SchemaError> {
+    let legacy: LegacyDocumentV0 =
+        serde_json::from_slice(input).map_err(|_| SchemaError::migration_input_invalid())?;
+    if legacy.schema_version != 0
+        || serde_json::to_vec(&legacy).map_err(|_| SchemaError::serialization())? != input
+    {
+        return Err(SchemaError::migration_input_invalid());
+    }
+    let document = FlowDocument {
+        schema_version: SCHEMA_VERSION,
+        document_id: legacy.document_id,
+        revision: legacy.revision,
+        locale: legacy.locale,
+        page_settings: legacy.page_settings,
+        styles: legacy.styles,
+        content: legacy.content,
+        assets: legacy.assets,
+        fields: legacy.fields,
+        provenance: Provenance::Migrated {
+            source_schema_version: 0,
+            current_schema_version: SCHEMA_VERSION,
+            source_created_at: legacy.provenance.created_at,
+            hops: vec![MigrationHop {
+                from_version: 0,
+                to_version: 1,
+            }],
+        },
+    };
+    crate::canonical::canonical_bytes(&document)
 }

@@ -243,6 +243,7 @@ pub enum Provenance {
     Migrated {
         source_schema_version: u32,
         current_schema_version: u32,
+        source_created_at: String,
         hops: Vec<MigrationHop>,
     },
 }

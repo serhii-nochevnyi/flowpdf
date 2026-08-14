@@ -3,8 +3,8 @@
 #![forbid(unsafe_code)]
 
 use flow_core::{
-    ApiResponse, ApplyCommandRequest, CreateSampleRequest, OperationResult, RecoverRequest,
-    RecoverResult,
+    ApiResponse, ApplyCommandRequest, CreateSampleRequest, MigrateDocumentRequest,
+    MigrateDocumentResult, OperationResult, RecoverRequest, RecoverResult,
 };
 use wasm_bindgen::prelude::*;
 
@@ -22,6 +22,15 @@ pub fn apply_command(request: JsValue) -> JsValue {
     let response = match serde_wasm_bindgen::from_value::<ApplyCommandRequest>(request) {
         Ok(request) => flow_core::apply_command(request),
         Err(_) => flow_core::decode_failure::<OperationResult>(),
+    };
+    serialize_response(&response)
+}
+
+#[wasm_bindgen]
+pub fn migrate_document(request: JsValue) -> JsValue {
+    let response = match serde_wasm_bindgen::from_value::<MigrateDocumentRequest>(request) {
+        Ok(request) => flow_core::migrate_document(request),
+        Err(_) => flow_core::decode_failure::<MigrateDocumentResult>(),
     };
     serialize_response(&response)
 }
