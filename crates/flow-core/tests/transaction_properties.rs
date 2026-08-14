@@ -241,6 +241,39 @@ fn a_new_commit_after_undo_discards_redo_without_reusing_old_command_ids() {
     );
 }
 
+#[test]
+fn history_cursor_and_semantic_chain_are_bound_to_the_supplied_document() {
+    let document = FlowDocument::deterministic_sample("uk-UA").expect("sample");
+    let initial = EditorState::new(document.clone()).expect("state");
+    let (inserted, _) = apply(
+        &initial,
+        861,
+        CommandKind::InsertText {
+            target: position(document.content[1].id.clone(), 0, Affinity::Forward),
+            text: "X".to_owned(),
+        },
+    )
+    .expect("insert");
+
+    let mut wrong_cursor = inserted.history().clone();
+    wrong_cursor.cursor = 0;
+    assert_eq!(
+        EditorState::with_history(inserted.document().clone(), wrong_cursor)
+            .expect_err("cursor/document mismatch")
+            .code(),
+        "FLOW_HISTORY_CONFLICT"
+    );
+
+    let mut wrong_chain = inserted.history().clone();
+    wrong_chain.entries[0].before_semantic_hash = "flowpdf:blake3:v1:tampered".to_owned();
+    assert_eq!(
+        EditorState::with_history(inserted.document().clone(), wrong_chain)
+            .expect_err("history chain mismatch")
+            .code(),
+        "FLOW_HISTORY_CONFLICT"
+    );
+}
+
 fn run_mixed_sequence(actions: &[u8]) -> (EditorState, Vec<Transaction>, String, String) {
     let original = FlowDocument::deterministic_sample("uk-UA").expect("sample");
     let original_hash = semantic_hash(&original).expect("original");

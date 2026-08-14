@@ -6,7 +6,8 @@ use flow_core::{
     canonical::canonical_bytes,
     model::{Affinity, CommandId, FlowDocument, LogicalPosition, NodeId},
     transaction::{
-        Command, CommandKind, EditorState, SourceModality, TextRange, TransactionService,
+        Command, CommandKind, EditorState, Mutation, SourceModality, TextRange,
+        TransactionService,
     },
 };
 
@@ -372,5 +373,35 @@ fn replace_delete_and_node_invalidation_never_guess_an_interior_target() {
     assert_eq!(
         deleted_node.map(&position(node_id, 0)),
         AnchorMapResult::Invalid(AnchorInvalidation::DeletedNode)
+    );
+}
+
+#[test]
+fn oversized_batch_is_rejected_before_any_target_is_examined() {
+    let document = FlowDocument::deterministic_sample("uk-UA").expect("sample");
+    let state = EditorState::new(document).expect("state");
+    let missing = position(
+        NodeId::new("00000000-0000-4000-8000-000000009998").expect("id"),
+        0,
+    );
+    let mutations = (0..5_001)
+        .map(|_| Mutation::InsertText {
+            target: missing.clone(),
+            text: "X".to_owned(),
+        })
+        .collect();
+    let command = Command {
+        command_id: id(741),
+        base_revision: 1,
+        modality: SourceModality::Api,
+        issued_at: "2026-08-14T20:03:05Z".to_owned(),
+        kind: CommandKind::Batch { mutations },
+    };
+
+    assert_eq!(
+        TransactionService::apply(&state, command)
+            .expect_err("operation ceiling")
+            .code(),
+        "FLOW_LIMIT_TRANSACTION_OPERATIONS"
     );
 }
