@@ -2,22 +2,33 @@
 
 #![forbid(unsafe_code)]
 
+use std::collections::BTreeMap;
+
 pub mod anchor;
+pub mod audit;
 pub mod canonical;
 pub mod model;
+pub mod provenance;
 pub mod schema;
+pub mod store;
 pub mod transaction;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use anchor::Utf16Offset;
+use audit::{
+    AuditAction, AuditCommandKind, AuditErrorCode, AuditMetadata, AuditTimestamp,
+    AuditValidationError,
+};
+pub use audit::{AuditEvent as AuditRecord, AuditOutcome};
 use canonical::{canonical_bytes, canonical_hash, decode_canonical};
 use model::{
-    Affinity, CommandId, ContentNodeKind, DocumentId, FlowDocument, LogicalPosition, Provenance,
-    SCHEMA_VERSION,
+    Affinity, CommandId, ContentNodeKind, DocumentId, FlowDocument, LogicalPosition, MigrationHop,
+    Provenance, SCHEMA_VERSION,
 };
-use schema::{DocumentLimits, MigrationRegistry, MigrationReport, SchemaError};
+use provenance::{ProvenanceError, RevisionHash, RevisionProvenance};
+use schema::{DocumentLimits, LimitKind, MigrationRegistry, MigrationReport, SchemaError};
 pub use transaction::{
     Command as CommandDto, CommandKind, HistoryState, Operation, SourceModality,
     Transaction as TransactionRecord,
@@ -28,6 +39,7 @@ use transaction::{
 };
 
 const SAMPLE_CREATE_COMMAND_ID: &str = "00000000-0000-4000-8000-000000000201";
+pub const RECORD_FORMAT_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -47,6 +59,9 @@ pub struct ApplyCommandRequest {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct MigrateDocumentRequest {
     pub canonical_json: String,
+    pub migration_id: CommandId,
+    pub issued_at: String,
+    pub assets: Vec<store::AssetRecord>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -55,47 +70,78 @@ pub struct MigrateDocumentResult {
     pub canonical_json: String,
     pub canonical_hash: String,
     pub provenance: Provenance,
+    pub revision_provenance: RevisionProvenance,
     pub report: MigrationReport,
+    pub commit: Option<MigrationPersistenceCommit>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SnapshotRecord {
+    pub record_format_version: u32,
     pub document_id: DocumentId,
     pub revision: u32,
     pub schema_version: u32,
     pub canonical_json: String,
     pub canonical_hash: String,
     pub history: HistoryState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub migration_boundary: Option<MigrationBoundaryRecord>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct AuditRecord {
-    pub audit_id: String,
+pub struct MigrationBoundaryRecord {
+    pub record_format_version: u32,
+    pub migration_id: CommandId,
     pub document_id: DocumentId,
-    pub command_id: String,
-    pub base_revision: u32,
-    pub new_revision: u32,
-    pub timestamp: String,
-    pub command_type: String,
-    pub modality: SourceModality,
-    pub outcome: AuditOutcome,
-    pub error_code: Option<String>,
-    pub safe_metadata: Vec<SafeMetadata>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub enum AuditOutcome {
-    Applied,
+    pub revision: u32,
+    pub source_schema_version: u32,
+    pub current_schema_version: u32,
+    pub source_canonical_hash: String,
+    pub migrated_canonical_hash: String,
+    pub hops: Vec<MigrationHop>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct SafeMetadata {
-    pub key: String,
-    pub value: String,
+pub struct MigrationPersistenceCommit {
+    pub snapshot: SnapshotRecord,
+    pub audit: AuditRecord,
+    pub assets: Vec<store::AssetRecord>,
+    pub source: store::MigrationSourceRecord,
+}
+
+impl MigrationBoundaryRecord {
+    fn validate_against(
+        &self,
+        document: &FlowDocument,
+        migrated_hash: &str,
+    ) -> Result<(), CoreError> {
+        let Provenance::Migrated {
+            source_schema_version,
+            current_schema_version,
+            hops,
+            ..
+        } = &document.provenance
+        else {
+            return Err(CoreError::RecoveryGap);
+        };
+        RevisionHash::parse(self.source_canonical_hash.clone())?;
+        if self.record_format_version != RECORD_FORMAT_VERSION
+            || self.document_id != document.document_id
+            || self.revision != document.revision
+            || self.source_schema_version != *source_schema_version
+            || self.current_schema_version != *current_schema_version
+            || self.current_schema_version != document.schema_version
+            || self.source_canonical_hash == migrated_hash
+            || self.migrated_canonical_hash != migrated_hash
+            || self.hops != *hops
+        {
+            return Err(CoreError::RecoveryGap);
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -105,6 +151,7 @@ pub struct PersistenceCommit {
     pub snapshot: SnapshotRecord,
     pub transaction: TransactionRecord,
     pub audit: AuditRecord,
+    pub assets: Vec<store::AssetRecord>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -126,8 +173,10 @@ pub struct InspectorView {
     pub revision: u32,
     pub canonical_hash: String,
     pub locale: String,
-    pub document_summary: String,
-    pub provenance: String,
+    pub content_node_count: u32,
+    pub field_count: u32,
+    pub asset_count: u32,
+    pub revision_provenance: RevisionProvenance,
     pub audit: Vec<AuditRecord>,
 }
 
@@ -142,9 +191,19 @@ pub struct OperationResult {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RecoverRequest {
-    pub snapshot: SnapshotRecord,
+    pub snapshots: Vec<SnapshotRecord>,
     pub transactions: Vec<TransactionRecord>,
     pub audits: Vec<AuditRecord>,
+    pub assets: Vec<store::AssetRecord>,
+    pub sources: Vec<store::MigrationSourceRecord>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PlanPersistenceCommitRequest {
+    pub records: RecoverRequest,
+    pub commit: PersistenceCommit,
+    pub reason: store::SnapshotReason,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -152,6 +211,29 @@ pub struct RecoverRequest {
 pub struct RecoverResult {
     pub session: SessionDto,
     pub view: InspectorView,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RecoveryAuditContext {
+    pub attempt_id: CommandId,
+    pub document_id: DocumentId,
+    pub expected_revision: u32,
+    pub issued_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AuditedRecoverRequest {
+    pub records: RecoverRequest,
+    pub audit_context: RecoveryAuditContext,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AuditedRecoverResult {
+    pub recovered: RecoverResult,
+    pub audit: AuditRecord,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -180,6 +262,19 @@ impl<T> ApiResponse<T> {
             error: Some(error.into()),
         }
     }
+
+    #[must_use]
+    pub fn failure_with_audit(error: CoreError, audit: Option<AuditRecord>) -> Self {
+        Self {
+            ok: false,
+            value: None,
+            error: Some(ErrorDto {
+                code: error.code().to_owned(),
+                message: error.to_string(),
+                audit,
+            }),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -187,6 +282,7 @@ impl<T> ApiResponse<T> {
 pub struct ErrorDto {
     pub code: String,
     pub message: String,
+    pub audit: Option<AuditRecord>,
 }
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
@@ -203,6 +299,12 @@ pub enum CoreError {
     HashMismatch,
     #[error("The persisted audit record violates the redaction allowlist")]
     UnsafeAuditRecord,
+    #[error(transparent)]
+    Audit(#[from] AuditValidationError),
+    #[error(transparent)]
+    Provenance(#[from] ProvenanceError),
+    #[error(transparent)]
+    Store(#[from] store::StoreError),
 }
 
 impl CoreError {
@@ -214,7 +316,9 @@ impl CoreError {
             Self::Command(error) => error.code(),
             Self::RecoveryGap => "FLOW_RECOVERY_GAP",
             Self::HashMismatch => "FLOW_HASH_MISMATCH",
-            Self::UnsafeAuditRecord => "FLOW_UNSAFE_AUDIT_RECORD",
+            Self::UnsafeAuditRecord | Self::Audit(_) => "FLOW_UNSAFE_AUDIT_RECORD",
+            Self::Provenance(_) => "FLOW_PROVENANCE_INVALID",
+            Self::Store(error) => error.code(),
         }
     }
 }
@@ -224,6 +328,7 @@ impl From<CoreError> for ErrorDto {
         Self {
             code: error.code().to_owned(),
             message: error.to_string(),
+            audit: None,
         }
     }
 }
@@ -252,8 +357,10 @@ fn create_sample_inner(request: CreateSampleRequest) -> Result<OperationResult, 
         seen_command_ids: vec![command_id.clone()],
     };
     let transaction = TransactionRecord {
+        record_format_version: RECORD_FORMAT_VERSION,
         transaction_id: command_id.clone(),
         document_id: document.document_id.clone(),
+        schema_version: document.schema_version,
         command_id,
         base_revision: 0,
         new_revision: 1,
@@ -274,7 +381,7 @@ fn create_sample_inner(request: CreateSampleRequest) -> Result<OperationResult, 
         "createSample",
         SourceModality::System,
         "2026-08-14T00:00:00Z",
-    );
+    )?;
     operation_result(
         document,
         history,
@@ -287,9 +394,12 @@ fn create_sample_inner(request: CreateSampleRequest) -> Result<OperationResult, 
 
 #[must_use]
 pub fn apply_command(request: ApplyCommandRequest) -> ApiResponse<OperationResult> {
-    match apply_command_inner(request) {
+    match apply_command_inner(request.clone()) {
         Ok(result) => ApiResponse::success(result),
-        Err(error) => ApiResponse::failure(error),
+        Err(error) => {
+            let audit = rejected_command_audit(&request, &error);
+            ApiResponse::failure_with_audit(error, audit)
+        }
     }
 }
 
@@ -303,17 +413,99 @@ pub fn migrate_document(request: MigrateDocumentRequest) -> ApiResponse<MigrateD
     }
 }
 
+/// Selects the physical checkpoint set using the locked Rust-owned default
+/// policy. Browser/native adapters persist this DTO verbatim and never decide
+/// whether a snapshot is due.
+#[must_use]
+pub fn plan_persistence_commit(
+    request: PlanPersistenceCommitRequest,
+) -> ApiResponse<store::PlannedPersistenceCommit> {
+    match store::CommitPlanner::new(store::SnapshotPolicy::default()).plan(
+        &request.records,
+        request.commit,
+        request.reason,
+    ) {
+        Ok(commit) => ApiResponse::success(commit),
+        Err(error) => ApiResponse::failure(error.into()),
+    }
+}
+
 fn migrate_document_inner(
     request: MigrateDocumentRequest,
 ) -> Result<MigrateDocumentResult, CoreError> {
+    let source_canonical_hash = canonical_hash(request.canonical_json.as_bytes());
     let outcome = MigrationRegistry::current().migrate(request.canonical_json.as_bytes())?;
-    let canonical_json =
-        String::from_utf8(outcome.canonical_bytes).map_err(|_| SchemaError::serialization())?;
+    store::validate_asset_records(&outcome.document, &request.assets)?;
+    let canonical_json = String::from_utf8(outcome.canonical_bytes.clone())
+        .map_err(|_| SchemaError::serialization())?;
+    let mut revision_provenance =
+        RevisionProvenance::from_document(&outcome.document, outcome.canonical_hash.clone())?;
+    let commit = if outcome.report.requires_new_snapshot {
+        revision_provenance = revision_provenance
+            .with_source_hashes(vec![RevisionHash::parse(source_canonical_hash.clone())?])?;
+        let source_hash_for_record = source_canonical_hash.clone();
+        let boundary = MigrationBoundaryRecord {
+            record_format_version: RECORD_FORMAT_VERSION,
+            migration_id: request.migration_id.clone(),
+            document_id: outcome.document.document_id.clone(),
+            revision: outcome.document.revision,
+            source_schema_version: outcome.report.source_schema_version,
+            current_schema_version: outcome.report.current_schema_version,
+            source_canonical_hash,
+            migrated_canonical_hash: outcome.canonical_hash.clone(),
+            hops: outcome.report.hops.clone(),
+        };
+        boundary.validate_against(&outcome.document, &outcome.canonical_hash)?;
+        let snapshot = SnapshotRecord {
+            record_format_version: RECORD_FORMAT_VERSION,
+            document_id: outcome.document.document_id.clone(),
+            revision: outcome.document.revision,
+            schema_version: outcome.document.schema_version,
+            canonical_json: canonical_json.clone(),
+            canonical_hash: outcome.canonical_hash.clone(),
+            history: HistoryState::default(),
+            migration_boundary: Some(boundary),
+        };
+        EditorState::with_history(outcome.document.clone(), snapshot.history.clone())?;
+        let audit = AuditRecord::success(
+            request.migration_id.clone(),
+            outcome.document.document_id.clone(),
+            request.migration_id.clone(),
+            request.migration_id,
+            outcome.document.revision,
+            outcome.document.revision,
+            u64::from(outcome.document.revision),
+            AuditTimestamp::parse(request.issued_at)?,
+            AuditAction::Migration,
+            SourceModality::System,
+            vec![AuditMetadata::Migration {
+                from_schema_version: outcome.report.source_schema_version,
+                to_schema_version: outcome.report.current_schema_version,
+            }],
+        )?;
+        let source = store::MigrationSourceRecord {
+            record_format_version: RECORD_FORMAT_VERSION,
+            document_id: outcome.document.document_id.clone(),
+            schema_version: outcome.report.source_schema_version,
+            canonical_json: request.canonical_json,
+            canonical_hash: source_hash_for_record,
+        };
+        Some(MigrationPersistenceCommit {
+            snapshot,
+            audit,
+            assets: request.assets,
+            source,
+        })
+    } else {
+        None
+    };
     Ok(MigrateDocumentResult {
         canonical_json,
         canonical_hash: outcome.canonical_hash,
         provenance: outcome.document.provenance,
+        revision_provenance,
         report: outcome.report,
+        commit,
     })
 }
 
@@ -336,7 +528,7 @@ fn apply_command_inner(request: ApplyCommandRequest) -> Result<OperationResult, 
         &applied.transaction.command_type,
         command.modality,
         &command.issued_at,
-    );
+    )?;
     operation_result(
         document,
         history,
@@ -347,6 +539,46 @@ fn apply_command_inner(request: ApplyCommandRequest) -> Result<OperationResult, 
     )
 }
 
+fn rejected_command_audit(request: &ApplyCommandRequest, error: &CoreError) -> Option<AuditRecord> {
+    let document = decode_canonical(request.canonical_json.as_bytes()).ok()?;
+    let code = AuditErrorCode::from_stable_code(error.code())?;
+    let command_id = request.command.command_id.clone();
+    AuditRecord::failure(
+        command_id.clone(),
+        document.document_id,
+        command_id.clone(),
+        command_id,
+        document.revision,
+        document.revision,
+        u64::from(document.revision) + 1,
+        AuditTimestamp::parse(request.command.issued_at.clone()).ok()?,
+        AuditAction::Command {
+            command_kind: audit_command_kind(&request.command.kind),
+        },
+        request.command.modality.clone(),
+        code,
+        vec![AuditMetadata::SchemaVersion {
+            value: document.schema_version,
+        }],
+    )
+    .ok()
+}
+
+const fn audit_command_kind(kind: &CommandKind) -> AuditCommandKind {
+    match kind {
+        CommandKind::InsertText { .. } => AuditCommandKind::InsertText,
+        CommandKind::ReplaceText { .. } => AuditCommandKind::ReplaceText,
+        CommandKind::DeleteText { .. } => AuditCommandKind::DeleteText,
+        CommandKind::SetNodeStyle { .. } => AuditCommandKind::SetNodeStyle,
+        CommandKind::InsertNode { .. } => AuditCommandKind::InsertNode,
+        CommandKind::DeleteNode { .. } => AuditCommandKind::DeleteNode,
+        CommandKind::SetField { .. } => AuditCommandKind::SetField,
+        CommandKind::Batch { .. } => AuditCommandKind::Batch,
+        CommandKind::Undo => AuditCommandKind::Undo,
+        CommandKind::Redo => AuditCommandKind::Redo,
+    }
+}
+
 #[must_use]
 pub fn recover(request: RecoverRequest) -> ApiResponse<RecoverResult> {
     match recover_inner(request) {
@@ -355,129 +587,576 @@ pub fn recover(request: RecoverRequest) -> ApiResponse<RecoverResult> {
     }
 }
 
-fn recover_inner(mut request: RecoverRequest) -> Result<RecoverResult, CoreError> {
-    let replay_bytes = request
-        .transactions
-        .iter()
-        .try_fold(0_usize, |total, record| {
-            let bytes = serde_json::to_vec(record).map_err(|_| SchemaError::serialization())?;
-            DocumentLimits::V1.check_transaction(
-                record.forward_operations.len() + record.inverse_operations.len(),
-                bytes.len(),
-            )?;
-            total
-                .checked_add(bytes.len())
-                .ok_or_else(SchemaError::invalid_document)
-        })?;
-    DocumentLimits::V1.check_recovery(request.transactions.len(), replay_bytes)?;
-
-    let document = decode_canonical(request.snapshot.canonical_json.as_bytes())?;
-    if request.snapshot.document_id != document.document_id
-        || request.snapshot.revision != document.revision
-        || request.snapshot.schema_version != document.schema_version
-    {
-        return Err(SchemaError::invalid_document().into());
+#[must_use]
+pub fn recover_audited(request: AuditedRecoverRequest) -> ApiResponse<AuditedRecoverResult> {
+    match recover_inner(request.records) {
+        Ok(recovered) => {
+            if recovered.session.document_id != request.audit_context.document_id
+                || recovered.session.revision != request.audit_context.expected_revision
+            {
+                return ApiResponse::failure(CoreError::RecoveryGap);
+            }
+            match recovery_audit(&request.audit_context, None) {
+                Some(audit) => ApiResponse::success(AuditedRecoverResult { recovered, audit }),
+                None => ApiResponse::failure(CoreError::UnsafeAuditRecord),
+            }
+        }
+        Err(error) => {
+            let audit = recovery_audit(&request.audit_context, Some(&error));
+            ApiResponse::failure_with_audit(error, audit)
+        }
     }
-    let computed_hash = canonical_hash(request.snapshot.canonical_json.as_bytes());
-    if computed_hash != request.snapshot.canonical_hash {
+}
+
+fn recovery_audit(
+    context: &RecoveryAuditContext,
+    error: Option<&CoreError>,
+) -> Option<AuditRecord> {
+    let sequence = u64::from(context.expected_revision) + 1;
+    let timestamp = AuditTimestamp::parse(context.issued_at.clone()).ok()?;
+    match error {
+        None => AuditRecord::success(
+            context.attempt_id.clone(),
+            context.document_id.clone(),
+            context.attempt_id.clone(),
+            context.attempt_id.clone(),
+            context.expected_revision,
+            context.expected_revision,
+            sequence,
+            timestamp,
+            AuditAction::Recovery,
+            SourceModality::System,
+            vec![AuditMetadata::RecoveryVerified],
+        )
+        .ok(),
+        Some(error) => {
+            let code = AuditErrorCode::from_stable_code(error.code()).unwrap_or({
+                if matches!(error, CoreError::HashMismatch) {
+                    AuditErrorCode::HashMismatch
+                } else {
+                    AuditErrorCode::SchemaInvalid
+                }
+            });
+            AuditRecord::failure(
+                context.attempt_id.clone(),
+                context.document_id.clone(),
+                context.attempt_id.clone(),
+                context.attempt_id.clone(),
+                context.expected_revision,
+                context.expected_revision,
+                sequence,
+                timestamp,
+                AuditAction::Recovery,
+                SourceModality::System,
+                code,
+                Vec::new(),
+            )
+            .ok()
+        }
+    }
+}
+
+fn recover_inner(request: RecoverRequest) -> Result<RecoverResult, CoreError> {
+    preflight_recovery_records(&request)?;
+    let snapshots = normalize_snapshots(request.snapshots)?;
+    let document_id = snapshots
+        .first()
+        .map(|snapshot| snapshot.document_id.clone())
+        .ok_or(CoreError::RecoveryGap)?;
+    let records = normalize_transactions(request.transactions, &document_id)?;
+    let sources = normalize_migration_sources(request.sources, &document_id)?;
+    let mut first_error = None;
+    for snapshot in &snapshots {
+        match recover_from_snapshot(
+            snapshot,
+            &records,
+            &request.audits,
+            &request.assets,
+            &sources,
+        ) {
+            Ok(result) => return Ok(result),
+            Err(error) => {
+                if first_error.is_none() {
+                    first_error = Some(error);
+                }
+            }
+        }
+    }
+    Err(first_error.unwrap_or(CoreError::RecoveryGap))
+}
+
+fn recover_from_snapshot(
+    snapshot: &SnapshotRecord,
+    records: &[TransactionRecord],
+    audits: &[AuditRecord],
+    assets: &[store::AssetRecord],
+    sources: &[store::MigrationSourceRecord],
+) -> Result<RecoverResult, CoreError> {
+    let (mut document, mut history, _) = validate_snapshot(snapshot)?;
+    validate_migration_source(&document, snapshot.migration_boundary.as_ref(), sources)?;
+    store::validate_asset_records(&document, assets)?;
+    validate_snapshot_head(&document, &history, records)?;
+
+    let checkpoint_revision = document.revision;
+    for record in records
+        .iter()
+        .filter(|record| record.new_revision > checkpoint_revision)
+    {
+        if record.schema_version != document.schema_version {
+            return Err(CoreError::RecoveryGap);
+        }
+        let before = document.clone();
+        document = replay_forward(&before, record).map_err(|_| CoreError::RecoveryGap)?;
+        replay_history_effect(&mut history, record, &before, &document)?;
+    }
+    store::validate_asset_records(&document, assets)?;
+    history.validate().map_err(|_| CoreError::RecoveryGap)?;
+    let recovered_state = EditorState::with_history(document.clone(), history.clone())
+        .map_err(|_| CoreError::RecoveryGap)?;
+    let computed_hash = recovered_state.canonical_hash().to_owned();
+    let canonical_json = canonical_string(&document)?;
+    if canonical_hash(canonical_json.as_bytes()) != computed_hash {
         return Err(CoreError::HashMismatch);
     }
-    let history = request.snapshot.history.clone();
-    history.validate().map_err(|error| match error {
-        CommandError::Schema(schema) => CoreError::Schema(schema),
-        _ => CoreError::RecoveryGap,
-    })?;
 
-    request
-        .transactions
-        .sort_by_key(|record| record.new_revision);
-    let records = request
-        .transactions
+    let audits = normalize_and_bind_audits(
+        audits,
+        records,
+        &document,
+        snapshot.migration_boundary.as_ref(),
+    )?;
+    let session = session_dto(&document, history, canonical_json, computed_hash.clone())?;
+    let view = inspector_view(
+        &document,
+        computed_hash,
+        snapshot
+            .migration_boundary
+            .as_ref()
+            .map(|boundary| boundary.source_canonical_hash.as_str()),
+        audits,
+    )?;
+    Ok(RecoverResult { session, view })
+}
+
+fn preflight_recovery_records(request: &RecoverRequest) -> Result<(), CoreError> {
+    let record_count = request
+        .snapshots
+        .len()
+        .checked_add(request.transactions.len())
+        .and_then(|count| count.checked_add(request.audits.len()))
+        .and_then(|count| count.checked_add(request.assets.len()))
+        .and_then(|count| count.checked_add(request.sources.len()))
+        .ok_or_else(SchemaError::invalid_document)?;
+    DocumentLimits::V1.check_recovery(record_count, 0)?;
+
+    let mut replay_bytes = 0_usize;
+    for snapshot in &request.snapshots {
+        DocumentLimits::V1.check(LimitKind::CanonicalBytes, snapshot.canonical_json.len())?;
+        replay_bytes = checked_record_bytes(replay_bytes, snapshot)?;
+    }
+    for transaction in &request.transactions {
+        let bytes = serde_json::to_vec(transaction).map_err(|_| SchemaError::serialization())?;
+        DocumentLimits::V1.check_transaction(
+            transaction.forward_operations.len() + transaction.inverse_operations.len(),
+            bytes.len(),
+        )?;
+        replay_bytes = replay_bytes
+            .checked_add(bytes.len())
+            .ok_or_else(SchemaError::invalid_document)?;
+        DocumentLimits::V1.check_recovery(0, replay_bytes)?;
+    }
+    for audit in &request.audits {
+        replay_bytes = checked_record_bytes(replay_bytes, audit)?;
+    }
+    for asset in &request.assets {
+        DocumentLimits::V1.check(LimitKind::RecoveryBytes, asset.bytes.len())?;
+        replay_bytes = checked_record_bytes(replay_bytes, asset)?;
+    }
+    for source in &request.sources {
+        DocumentLimits::V1.check(LimitKind::CanonicalBytes, source.canonical_json.len())?;
+        replay_bytes = checked_record_bytes(replay_bytes, source)?;
+    }
+    DocumentLimits::V1.check_recovery(record_count, replay_bytes)?;
+    Ok(())
+}
+
+fn checked_record_bytes<T: Serialize>(total: usize, record: &T) -> Result<usize, CoreError> {
+    let bytes = serde_json::to_vec(record).map_err(|_| SchemaError::serialization())?;
+    let total = total
+        .checked_add(bytes.len())
+        .ok_or_else(SchemaError::invalid_document)?;
+    DocumentLimits::V1.check_recovery(0, total)?;
+    Ok(total)
+}
+
+fn normalize_snapshots(
+    mut snapshots: Vec<SnapshotRecord>,
+) -> Result<Vec<SnapshotRecord>, CoreError> {
+    if snapshots.is_empty() {
+        return Err(CoreError::RecoveryGap);
+    }
+    if snapshots
         .iter()
-        .filter(|record| record.document_id == document.document_id)
-        .collect::<Vec<_>>();
-    let create = records.first().ok_or(CoreError::RecoveryGap)?;
-    let mut expected_base = 0_u32;
-    let mut previous_hash = "none".to_owned();
-    for record in &records {
-        let expected_new = expected_base.checked_add(1).ok_or(CoreError::RecoveryGap)?;
-        if record.base_revision != expected_base
-            || record.new_revision != expected_new
-            || record.before_hash != previous_hash
+        .any(|snapshot| snapshot.schema_version > SCHEMA_VERSION)
+    {
+        return Err(CoreError::RecoveryGap);
+    }
+    snapshots.sort_by(|left, right| {
+        right
+            .schema_version
+            .cmp(&left.schema_version)
+            .then_with(|| right.revision.cmp(&left.revision))
+            .then_with(|| left.canonical_hash.cmp(&right.canonical_hash))
+    });
+    let declared_document_id = snapshots[0].document_id.clone();
+    if snapshots
+        .iter()
+        .any(|snapshot| snapshot.document_id != declared_document_id)
+    {
+        return Err(CoreError::RecoveryGap);
+    }
+    let mut identities = BTreeMap::<(DocumentId, u32, u32), SnapshotRecord>::new();
+    for snapshot in snapshots {
+        let identity = (
+            snapshot.document_id.clone(),
+            snapshot.schema_version,
+            snapshot.revision,
+        );
+        match identities.get(&identity) {
+            Some(existing) if existing == &snapshot => {}
+            Some(_) => return Err(CoreError::RecoveryGap),
+            None => {
+                identities.insert(identity, snapshot);
+            }
+        }
+    }
+    let mut normalized = identities.into_values().collect::<Vec<_>>();
+    normalized.sort_by(|left, right| {
+        right
+            .schema_version
+            .cmp(&left.schema_version)
+            .then_with(|| right.revision.cmp(&left.revision))
+            .then_with(|| left.canonical_hash.cmp(&right.canonical_hash))
+    });
+    Ok(normalized)
+}
+
+fn normalize_migration_sources(
+    sources: Vec<store::MigrationSourceRecord>,
+    document_id: &DocumentId,
+) -> Result<Vec<store::MigrationSourceRecord>, CoreError> {
+    let mut identities = BTreeMap::<(u32, String), store::MigrationSourceRecord>::new();
+    for source in sources {
+        if source.record_format_version != RECORD_FORMAT_VERSION
+            || &source.document_id != document_id
+            || source.canonical_hash != canonical_hash(source.canonical_json.as_bytes())
         {
             return Err(CoreError::RecoveryGap);
         }
-        expected_base = record.new_revision;
-        previous_hash.clone_from(&record.after_hash);
+        let identity = (source.schema_version, source.canonical_hash.clone());
+        match identities.get(&identity) {
+            Some(existing) if existing == &source => {}
+            Some(_) => return Err(CoreError::RecoveryGap),
+            None => {
+                identities.insert(identity, source);
+            }
+        }
     }
-    if expected_base != document.revision || previous_hash != computed_hash {
+    Ok(identities.into_values().collect())
+}
+
+fn validate_migration_source(
+    document: &FlowDocument,
+    boundary: Option<&MigrationBoundaryRecord>,
+    sources: &[store::MigrationSourceRecord],
+) -> Result<(), CoreError> {
+    let Some(boundary) = boundary else {
+        return if sources.is_empty() {
+            Ok(())
+        } else {
+            Err(CoreError::RecoveryGap)
+        };
+    };
+    let matching = sources
+        .iter()
+        .filter(|source| {
+            source.document_id == document.document_id
+                && source.schema_version == boundary.source_schema_version
+                && source.canonical_hash == boundary.source_canonical_hash
+        })
+        .collect::<Vec<_>>();
+    if matching.len() != 1 {
         return Err(CoreError::RecoveryGap);
     }
+    let migrated = MigrationRegistry::current()
+        .migrate(matching[0].canonical_json.as_bytes())
+        .map_err(|_| CoreError::RecoveryGap)?;
+    if migrated.report.source_schema_version != boundary.source_schema_version
+        || migrated.report.current_schema_version != boundary.current_schema_version
+        || migrated.report.hops != boundary.hops
+        || migrated.canonical_hash != boundary.migrated_canonical_hash
+        || migrated.document != *document
+    {
+        return Err(CoreError::RecoveryGap);
+    }
+    Ok(())
+}
 
-    if create.transaction_id != create.command_id
+fn validate_snapshot(
+    snapshot: &SnapshotRecord,
+) -> Result<(FlowDocument, HistoryState, String), CoreError> {
+    if snapshot.record_format_version != RECORD_FORMAT_VERSION {
+        return Err(CoreError::RecoveryGap);
+    }
+    let document = decode_canonical(snapshot.canonical_json.as_bytes())?;
+    if snapshot.document_id != document.document_id
+        || snapshot.revision != document.revision
+        || snapshot.schema_version != document.schema_version
+    {
+        return Err(SchemaError::invalid_document().into());
+    }
+    let computed_hash = canonical_hash(snapshot.canonical_json.as_bytes());
+    if computed_hash != snapshot.canonical_hash {
+        return Err(CoreError::HashMismatch);
+    }
+    match (&document.provenance, &snapshot.migration_boundary) {
+        (Provenance::LocalSample { .. }, None) => {}
+        (Provenance::Migrated { .. }, Some(boundary)) => {
+            boundary.validate_against(&document, &computed_hash)?;
+        }
+        _ => return Err(CoreError::RecoveryGap),
+    }
+    snapshot.history.validate().map_err(|error| match error {
+        CommandError::Schema(schema) => CoreError::Schema(schema),
+        _ => CoreError::RecoveryGap,
+    })?;
+    let state = EditorState::with_history(document.clone(), snapshot.history.clone())
+        .map_err(|_| CoreError::RecoveryGap)?;
+    if state.canonical_hash() != computed_hash {
+        return Err(CoreError::HashMismatch);
+    }
+    Ok((document, snapshot.history.clone(), computed_hash))
+}
+
+fn normalize_transactions(
+    transactions: Vec<TransactionRecord>,
+    document_id: &DocumentId,
+) -> Result<Vec<TransactionRecord>, CoreError> {
+    let mut by_id = BTreeMap::<String, TransactionRecord>::new();
+    for record in transactions {
+        if &record.document_id != document_id {
+            return Err(CoreError::RecoveryGap);
+        }
+        match by_id.get(record.transaction_id.as_str()) {
+            Some(existing) if existing == &record => continue,
+            Some(_) => return Err(CoreError::RecoveryGap),
+            None => {
+                by_id.insert(record.transaction_id.as_str().to_owned(), record);
+            }
+        }
+    }
+    let mut records = by_id.into_values().collect::<Vec<_>>();
+    records.sort_by(|left, right| {
+        left.new_revision
+            .cmp(&right.new_revision)
+            .then_with(|| left.transaction_id.cmp(&right.transaction_id))
+    });
+    for pair in records.windows(2) {
+        if pair[0].schema_version == SCHEMA_VERSION
+            && pair[1].schema_version == SCHEMA_VERSION
+            && pair[0].new_revision == pair[1].new_revision
+        {
+            return Err(CoreError::RecoveryGap);
+        }
+    }
+    Ok(records)
+}
+
+fn validate_snapshot_head(
+    document: &FlowDocument,
+    history: &HistoryState,
+    records: &[TransactionRecord],
+) -> Result<(), CoreError> {
+    if matches!(document.provenance, Provenance::Migrated { .. }) {
+        // A migration is an explicit current-schema checkpoint boundary. Its
+        // source document and hop sequence are validated by MigrationRegistry;
+        // only current-schema transactions after this boundary are replayed.
+        return Ok(());
+    }
+
+    let checkpoint_records = records
+        .iter()
+        .filter(|record| {
+            record.schema_version == document.schema_version
+                && record.new_revision <= document.revision
+        })
+        .collect::<Vec<_>>();
+    let expected_count = usize::try_from(document.revision).map_err(|_| CoreError::RecoveryGap)?;
+    if checkpoint_records.len() != expected_count {
+        return Err(CoreError::RecoveryGap);
+    }
+    for (index, record) in checkpoint_records.iter().enumerate() {
+        let new_revision = u32::try_from(index + 1).map_err(|_| CoreError::RecoveryGap)?;
+        if record.base_revision != new_revision - 1 || record.new_revision != new_revision {
+            return Err(CoreError::RecoveryGap);
+        }
+        if index > 0 && checkpoint_records[index - 1].after_hash != record.before_hash {
+            return Err(CoreError::RecoveryGap);
+        }
+    }
+
+    let create = *checkpoint_records.first().ok_or(CoreError::RecoveryGap)?;
+    let mut base_document = document.clone();
+    for record in checkpoint_records.iter().skip(1).rev() {
+        base_document =
+            replay_inverse(&base_document, record).map_err(|_| CoreError::RecoveryGap)?;
+    }
+    let mut rebuilt_history = HistoryState {
+        entries: Vec::new(),
+        cursor: 0,
+        seen_command_ids: vec![create.command_id.clone()],
+    };
+    validate_create_record(&base_document, &rebuilt_history, create)?;
+
+    let mut replayed = base_document;
+    for record in checkpoint_records.iter().skip(1) {
+        let before = replayed.clone();
+        replayed = replay_forward(&before, record).map_err(|_| CoreError::RecoveryGap)?;
+        replay_history_effect(&mut rebuilt_history, record, &before, &replayed)?;
+    }
+    if replayed != *document || rebuilt_history != *history {
+        return Err(CoreError::RecoveryGap);
+    }
+    Ok(())
+}
+
+fn validate_create_record(
+    document: &FlowDocument,
+    history: &HistoryState,
+    create: &TransactionRecord,
+) -> Result<(), CoreError> {
+    if create.record_format_version != RECORD_FORMAT_VERSION
+        || create.transaction_id != create.command_id
+        || create.document_id != document.document_id
+        || create.schema_version != document.schema_version
         || create.base_revision != 0
         || create.new_revision != 1
         || create.before_hash != "none"
+        || create.after_hash != canonical_hash(&canonical_bytes(document)?)
         || create.command_type != "createSample"
         || create.modality != SourceModality::System
         || create.forward_operations != [Operation::CreateDocument]
         || create.inverse_operations != [Operation::DeleteDocument]
         || create.anchor_mapping != crate::anchor::AnchorMapping::identity()
         || create.history_effect != HistoryEffect::Create
+        || !history.entries.is_empty()
+        || history.cursor != 0
+        || history.seen_command_ids != [create.command_id.clone()]
     {
         return Err(CoreError::RecoveryGap);
     }
-
-    let mut genesis = document.clone();
-    for record in records.iter().skip(1).rev() {
-        genesis = replay_inverse(&genesis, record).map_err(|_| CoreError::RecoveryGap)?;
-    }
-    if genesis.revision != 1 || canonical_hash(&canonical_bytes(&genesis)?) != create.after_hash {
-        return Err(CoreError::RecoveryGap);
-    }
-
-    let mut rebuilt_history = HistoryState {
-        entries: Vec::new(),
-        cursor: 0,
-        seen_command_ids: vec![create.command_id.clone()],
-    };
-    let mut replayed = genesis;
-    for record in records.iter().skip(1) {
-        let before = replayed.clone();
-        replayed = replay_forward(&before, record).map_err(|_| CoreError::RecoveryGap)?;
-        replay_history_effect(&mut rebuilt_history, record, &before, &replayed)?;
-    }
-    rebuilt_history
-        .validate()
-        .map_err(|_| CoreError::RecoveryGap)?;
-    if replayed != document || rebuilt_history != history {
-        return Err(CoreError::RecoveryGap);
-    }
-    let recovered_state = EditorState::with_history(document.clone(), rebuilt_history)
-        .map_err(|_| CoreError::RecoveryGap)?;
-    if recovered_state.canonical_hash() != computed_hash {
-        return Err(CoreError::HashMismatch);
-    }
-
-    request
-        .audits
-        .retain(|audit| audit.document_id == document.document_id);
-    request.audits.sort_by_key(|audit| audit.new_revision);
-    for audit in &request.audits {
-        validate_audit(audit)?;
-    }
-
-    let session = session_dto(
-        &document,
-        history,
-        request.snapshot.canonical_json,
-        computed_hash.clone(),
-    )?;
-    let view = inspector_view(&document, computed_hash, request.audits);
-    Ok(RecoverResult { session, view })
+    Ok(())
 }
 
-fn replay_history_effect(
+fn normalize_and_bind_audits(
+    audits: &[AuditRecord],
+    transactions: &[TransactionRecord],
+    document: &FlowDocument,
+    migration_boundary: Option<&MigrationBoundaryRecord>,
+) -> Result<Vec<AuditRecord>, CoreError> {
+    let mut by_id = BTreeMap::<String, AuditRecord>::new();
+    for audit in audits {
+        validate_audit(audit)?;
+        if audit.document_id() != &document.document_id || audit.new_revision() > document.revision
+        {
+            return Err(CoreError::RecoveryGap);
+        }
+        let audit_id = audit.audit_id().as_str().to_owned();
+        match by_id.get(&audit_id) {
+            Some(existing) if existing == audit => continue,
+            Some(_) => return Err(CoreError::RecoveryGap),
+            None => {
+                by_id.insert(audit_id, audit.clone());
+            }
+        }
+    }
+    let mut audits = by_id.into_values().collect::<Vec<_>>();
+    audit::sort_events(&mut audits);
+    for audit in &audits {
+        match (audit.action(), audit.outcome()) {
+            (AuditAction::Create | AuditAction::Command { .. }, AuditOutcome::Success) => {
+                let transaction = transactions
+                    .iter()
+                    .find(|record| &record.transaction_id == audit.transaction_id())
+                    .ok_or(CoreError::RecoveryGap)?;
+                if audit.audit_id() != &transaction.command_id
+                    || audit.command_id() != &transaction.command_id
+                    || audit.base_revision() != transaction.base_revision
+                    || audit.new_revision() != transaction.new_revision
+                    || audit.durable_sequence() != u64::from(transaction.new_revision)
+                    || audit.transaction_type() != transaction.command_type
+                    || audit.modality() != &transaction.modality
+                    || audit.timestamp().as_str() != transaction.issued_at
+                    || audit.metadata()
+                        != [AuditMetadata::SchemaVersion {
+                            value: transaction.schema_version,
+                        }]
+                {
+                    return Err(CoreError::RecoveryGap);
+                }
+            }
+            (AuditAction::Command { .. }, AuditOutcome::Failure { .. })
+            | (AuditAction::Recovery, AuditOutcome::Success | AuditOutcome::Failure { .. }) => {}
+            (AuditAction::Migration, AuditOutcome::Success) => {
+                let boundary = migration_boundary.ok_or(CoreError::RecoveryGap)?;
+                if audit.audit_id() != &boundary.migration_id
+                    || audit.command_id() != &boundary.migration_id
+                    || audit.transaction_id() != &boundary.migration_id
+                    || audit.base_revision() != boundary.revision
+                    || audit.new_revision() != boundary.revision
+                    || audit.metadata()
+                        != [AuditMetadata::Migration {
+                            from_schema_version: boundary.source_schema_version,
+                            to_schema_version: boundary.current_schema_version,
+                        }]
+                {
+                    return Err(CoreError::RecoveryGap);
+                }
+            }
+            _ => return Err(CoreError::RecoveryGap),
+        }
+    }
+    for transaction in transactions.iter().filter(|record| {
+        record.schema_version == document.schema_version && record.new_revision <= document.revision
+    }) {
+        if !audits.iter().any(|audit| {
+            audit.transaction_id() == &transaction.transaction_id
+                && matches!(audit.outcome(), AuditOutcome::Success)
+                && matches!(
+                    audit.action(),
+                    AuditAction::Create | AuditAction::Command { .. }
+                )
+        }) {
+            return Err(CoreError::RecoveryGap);
+        }
+    }
+    if let Some(boundary) = migration_boundary {
+        let migration_count = audits
+            .iter()
+            .filter(|audit| {
+                audit.audit_id() == &boundary.migration_id
+                    && matches!(audit.action(), AuditAction::Migration)
+                    && matches!(audit.outcome(), AuditOutcome::Success)
+            })
+            .count();
+        if migration_count != 1 {
+            return Err(CoreError::RecoveryGap);
+        }
+    }
+    Ok(audits)
+}
+
+pub(crate) fn replay_history_effect(
     history: &mut HistoryState,
     record: &TransactionRecord,
     before: &FlowDocument,
@@ -572,16 +1251,28 @@ fn operation_result(
     audit: AuditRecord,
 ) -> Result<OperationResult, CoreError> {
     let snapshot = SnapshotRecord {
+        record_format_version: RECORD_FORMAT_VERSION,
         document_id: document.document_id.clone(),
         revision: document.revision,
         schema_version: document.schema_version,
         canonical_json: canonical_json.clone(),
         canonical_hash: canonical_hash.clone(),
         history: history.clone(),
+        migration_boundary: None,
     };
+    let assets = document
+        .assets
+        .iter()
+        .filter(|descriptor| descriptor.byte_length == 0)
+        .map(|descriptor| store::AssetRecord {
+            record_format_version: RECORD_FORMAT_VERSION,
+            content_hash: descriptor.content_hash.clone(),
+            bytes: Vec::new(),
+        })
+        .collect();
     let replace_existing = transaction.base_revision == 0;
     let session = session_dto(&document, history, canonical_json, canonical_hash.clone())?;
-    let view = inspector_view(&document, canonical_hash, vec![audit.clone()]);
+    let view = inspector_view(&document, canonical_hash, None, vec![audit.clone()])?;
     Ok(OperationResult {
         session,
         view,
@@ -590,6 +1281,7 @@ fn operation_result(
             snapshot,
             transaction,
             audit,
+            assets,
         },
     })
 }
@@ -625,29 +1317,32 @@ fn session_dto(
 fn inspector_view(
     document: &FlowDocument,
     canonical_hash: String,
+    source_canonical_hash: Option<&str>,
     audit: Vec<AuditRecord>,
-) -> InspectorView {
-    let document_summary = document
-        .content
-        .iter()
-        .filter(|node| node.kind == ContentNodeKind::Paragraph)
-        .map(|node| node.text.as_str())
-        .collect::<Vec<_>>()
-        .join("\n");
-    let provenance = match document.provenance {
-        Provenance::LocalSample { .. } => "localSample",
-        Provenance::Migrated { .. } => "migrated",
-    };
-    InspectorView {
+) -> Result<InspectorView, CoreError> {
+    let content_node_count =
+        u32::try_from(document.content.len()).map_err(|_| SchemaError::invalid_document())?;
+    let field_count =
+        u32::try_from(document.fields.len()).map_err(|_| SchemaError::invalid_document())?;
+    let asset_count =
+        u32::try_from(document.assets.len()).map_err(|_| SchemaError::invalid_document())?;
+    let mut revision_provenance = RevisionProvenance::from_document(document, &canonical_hash)?;
+    if let Some(source_canonical_hash) = source_canonical_hash {
+        revision_provenance = revision_provenance
+            .with_source_hashes(vec![RevisionHash::parse(source_canonical_hash.to_owned())?])?;
+    }
+    Ok(InspectorView {
         document_id: document.document_id.clone(),
         schema_version: document.schema_version,
         revision: document.revision,
         canonical_hash,
         locale: document.locale.clone(),
-        document_summary,
-        provenance: provenance.to_owned(),
+        content_node_count,
+        field_count,
+        asset_count,
+        revision_provenance,
         audit,
-    }
+    })
 }
 
 fn safe_audit(
@@ -657,50 +1352,40 @@ fn safe_audit(
     command_type: &str,
     modality: SourceModality,
     timestamp: &str,
-) -> AuditRecord {
-    AuditRecord {
-        audit_id: command_id.to_owned(),
-        document_id: document.document_id.clone(),
-        command_id: command_id.to_owned(),
+) -> Result<AuditRecord, CoreError> {
+    let command_id = CommandId::new(command_id)?;
+    let action = match command_type {
+        "createSample" => AuditAction::Create,
+        "recovery" => AuditAction::Recovery,
+        value => AuditAction::Command {
+            command_kind: AuditCommandKind::from_transaction_type(value)
+                .ok_or(CoreError::UnsafeAuditRecord)?,
+        },
+    };
+    Ok(AuditRecord::success(
+        command_id.clone(),
+        document.document_id.clone(),
+        command_id.clone(),
+        command_id,
         base_revision,
-        new_revision: document.revision,
-        timestamp: timestamp.chars().take(64).collect(),
-        command_type: command_type.to_owned(),
+        document.revision,
+        u64::from(document.revision),
+        AuditTimestamp::parse(timestamp.to_owned())?,
+        action,
         modality,
-        outcome: AuditOutcome::Applied,
-        error_code: None,
-        safe_metadata: vec![SafeMetadata {
-            key: "schemaVersion".to_owned(),
-            value: document.schema_version.to_string(),
+        vec![AuditMetadata::SchemaVersion {
+            value: document.schema_version,
         }],
-    }
+    )?)
 }
 
 fn validate_audit(audit: &AuditRecord) -> Result<(), CoreError> {
-    if ![
-        "createSample",
-        "insertText",
-        "replaceText",
-        "deleteText",
-        "setNodeStyle",
-        "insertNode",
-        "deleteNode",
-        "setField",
-        "batch",
-        "undo",
-        "redo",
-    ]
-    .contains(&audit.command_type.as_str())
+    audit.validate()?;
+    if audit.audit_id() != audit.command_id()
+        || audit.transaction_id() != audit.command_id()
+        || audit.timestamp().as_str().is_empty()
     {
         return Err(CoreError::UnsafeAuditRecord);
-    }
-    if audit.timestamp.len() > 64 || audit.safe_metadata.len() > 8 {
-        return Err(CoreError::UnsafeAuditRecord);
-    }
-    for metadata in &audit.safe_metadata {
-        if metadata.key != "schemaVersion" || metadata.value != SCHEMA_VERSION.to_string() {
-            return Err(CoreError::UnsafeAuditRecord);
-        }
     }
     Ok(())
 }
@@ -743,21 +1428,27 @@ mod tests {
         }));
 
         let recovered = success(recover(RecoverRequest {
-            snapshot: applied.commit.snapshot.clone(),
+            snapshots: vec![created.commit.snapshot, applied.commit.snapshot.clone()],
             transactions: vec![created.commit.transaction, applied.commit.transaction],
             audits: vec![created.commit.audit, applied.commit.audit],
+            assets: created.commit.assets,
+            sources: Vec::new(),
         }));
         assert_eq!(
             recovered.session.canonical_hash,
             applied.session.canonical_hash
         );
         assert_eq!(recovered.session.revision, 2);
-        assert!(recovered.view.document_summary.contains("Український"));
-        assert!(recovered.view.document_summary.contains("typed mutation"));
+        assert_eq!(recovered.view.content_node_count, 3);
         assert!(
-            !serde_json::to_string(&recovered.view.audit)
-                .expect("audit serializes")
+            !serde_json::to_string(&recovered.view)
+                .expect("inspector serializes")
                 .contains("typed mutation")
+        );
+        assert!(
+            !serde_json::to_string(&recovered.view)
+                .expect("inspector serializes")
+                .contains("Український")
         );
     }
 
@@ -771,6 +1462,16 @@ mod tests {
             .unwrap_or(include_str!("../../../fixtures/flowdoc/migrated.json"));
         let result = success(migrate_document(MigrateDocumentRequest {
             canonical_json: older.to_owned(),
+            migration_id: CommandId::new("00000000-0000-4000-8000-000000000204")
+                .expect("migration id"),
+            issued_at: "2026-08-14T00:00:03Z".to_owned(),
+            assets: vec![store::AssetRecord {
+                record_format_version: RECORD_FORMAT_VERSION,
+                content_hash:
+                    "blake3:af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262"
+                        .to_owned(),
+                bytes: Vec::new(),
+            }],
         }));
 
         assert_eq!(result.canonical_json, migrated);
@@ -781,6 +1482,33 @@ mod tests {
         assert!(matches!(result.provenance, Provenance::Migrated { .. }));
         assert_eq!(result.report.source_schema_version, 0);
         assert!(result.report.requires_new_snapshot);
+        let provenance_json =
+            serde_json::to_string(&result.revision_provenance).expect("provenance");
+        assert!(provenance_json.contains(&canonical_hash(older.as_bytes())));
+
+        use crate::store::DocumentStore;
+        let commit = result.commit.clone().expect("migration commit");
+        let mut missing_boundary = commit.clone();
+        missing_boundary.snapshot.migration_boundary = None;
+        let rejected = recover(RecoverRequest {
+            snapshots: vec![missing_boundary.snapshot],
+            transactions: Vec::new(),
+            audits: vec![missing_boundary.audit],
+            assets: missing_boundary.assets,
+            sources: vec![missing_boundary.source],
+        });
+        assert!(!rejected.ok);
+        assert_eq!(
+            rejected.error.expect("boundary error").code,
+            "FLOW_RECOVERY_GAP"
+        );
+
+        let mut store = store::InMemoryDocumentStore::default();
+        store
+            .commit_migration_atomic(commit)
+            .expect("atomic migration boundary");
+        let recovered = success(recover(store.load_records().expect("migration records")));
+        assert_eq!(recovered.session.canonical_hash, result.canonical_hash);
     }
 
     #[test]
@@ -807,7 +1535,12 @@ mod tests {
             },
         });
         assert!(!response.ok);
-        assert_eq!(response.error.expect("error").code, "FLOW_STALE_REVISION");
+        let error = response.error.expect("error");
+        assert_eq!(error.code, "FLOW_STALE_REVISION");
+        let audit_json = serde_json::to_string(&error.audit.expect("safe failure audit"))
+            .expect("audit serialization");
+        assert!(audit_json.contains("staleRevision"));
+        assert!(!audit_json.contains("must not appear"));
         assert_eq!(before_hash, created.session.canonical_hash);
     }
 

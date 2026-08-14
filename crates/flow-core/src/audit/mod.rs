@@ -26,6 +26,12 @@ pub enum AuditValidationError {
     InvalidRevisionLink,
     #[error("Audit metadata is duplicated or exceeds the allowlist")]
     InvalidMetadata,
+    #[error("Audit action and outcome are not a supported durable fact")]
+    InvalidActionOutcome,
+    #[error("Audit metadata is not valid for the action and outcome")]
+    InvalidMetadataContext,
+    #[error("Audit record format is unsupported")]
+    UnsupportedRecordFormat,
 }
 
 /// A fixed-format timestamp prevents a caller from placing arbitrary prose in
@@ -38,12 +44,37 @@ impl AuditTimestamp {
     pub fn parse(value: impl Into<String>) -> Result<Self, AuditValidationError> {
         let value = value.into();
         let bytes = value.as_bytes();
-        let punctuation = [(4, b'-'), (7, b'-'), (10, b'T'), (13, b':'), (16, b':'), (19, b'Z')];
+        let punctuation = [
+            (4, b'-'),
+            (7, b'-'),
+            (10, b'T'),
+            (13, b':'),
+            (16, b':'),
+            (19, b'Z'),
+        ];
         if bytes.len() != 20
-            || punctuation.iter().any(|(index, expected)| bytes[*index] != *expected)
+            || punctuation
+                .iter()
+                .any(|(index, expected)| bytes[*index] != *expected)
             || bytes.iter().enumerate().any(|(index, byte)| {
                 ![4, 7, 10, 13, 16, 19].contains(&index) && !byte.is_ascii_digit()
             })
+        {
+            return Err(AuditValidationError::InvalidTimestamp);
+        }
+        let year = decimal(&bytes[0..4]);
+        let month = decimal(&bytes[5..7]);
+        let day = decimal(&bytes[8..10]);
+        let hour = decimal(&bytes[11..13]);
+        let minute = decimal(&bytes[14..16]);
+        let second = decimal(&bytes[17..19]);
+        if year == 0
+            || !(1..=12).contains(&month)
+            || day == 0
+            || day > days_in_month(year, month)
+            || hour > 23
+            || minute > 59
+            || second > 59
         {
             return Err(AuditValidationError::InvalidTimestamp);
         }
@@ -87,12 +118,69 @@ pub enum AuditCommandKind {
     Recovery,
 }
 
+impl AuditCommandKind {
+    #[must_use]
+    pub fn from_transaction_type(value: &str) -> Option<Self> {
+        Some(match value {
+            "createSample" => Self::Create,
+            "insertText" => Self::InsertText,
+            "replaceText" => Self::ReplaceText,
+            "deleteText" => Self::DeleteText,
+            "setNodeStyle" => Self::SetNodeStyle,
+            "insertNode" => Self::InsertNode,
+            "deleteNode" => Self::DeleteNode,
+            "setField" => Self::SetField,
+            "batch" => Self::Batch,
+            "undo" => Self::Undo,
+            "redo" => Self::Redo,
+            "recovery" => Self::Recovery,
+            _ => return None,
+        })
+    }
+
+    #[must_use]
+    pub const fn transaction_type(&self) -> &'static str {
+        match self {
+            Self::Create => "createSample",
+            Self::InsertText => "insertText",
+            Self::ReplaceText => "replaceText",
+            Self::DeleteText => "deleteText",
+            Self::SetNodeStyle => "setNodeStyle",
+            Self::InsertNode => "insertNode",
+            Self::DeleteNode => "deleteNode",
+            Self::SetField => "setField",
+            Self::Batch => "batch",
+            Self::Undo => "undo",
+            Self::Redo => "redo",
+            Self::Recovery => "recovery",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase", deny_unknown_fields)]
+#[serde(
+    tag = "type",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
+)]
 pub enum AuditAction {
     Create,
-    Command { kind: AuditCommandKind },
+    Command { command_kind: AuditCommandKind },
+    Migration,
     Recovery,
+}
+
+impl AuditAction {
+    #[must_use]
+    pub const fn transaction_type(&self) -> &'static str {
+        match self {
+            Self::Create => "createSample",
+            Self::Command { command_kind } => command_kind.transaction_type(),
+            Self::Migration => "migration",
+            Self::Recovery => "recovery",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -148,23 +236,39 @@ impl AuditErrorCode {
             "FLOW_HISTORY_CONFLICT" => Self::HistoryConflict,
             "FLOW_RECOVERY_GAP" => Self::RecoveryGap,
             "FLOW_HASH_MISMATCH" => Self::HashMismatch,
+            "FLOW_SCHEMA_INVALID" => Self::SchemaInvalid,
             _ => return None,
         })
     }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase", deny_unknown_fields)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
+)]
 pub enum AuditOutcome {
     Success,
     Failure { code: AuditErrorCode },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase", deny_unknown_fields)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
+)]
 pub enum AuditMetadata {
-    SchemaVersion { value: u32 },
-    Migration { from_schema_version: u32, to_schema_version: u32 },
+    SchemaVersion {
+        value: u32,
+    },
+    Migration {
+        from_schema_version: u32,
+        to_schema_version: u32,
+    },
     RecoveryVerified,
 }
 
@@ -184,6 +288,7 @@ impl AuditMetadata {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AuditEvent {
+    record_format_version: u32,
     audit_id: CommandId,
     document_id: DocumentId,
     transaction_id: CommandId,
@@ -278,17 +383,10 @@ impl AuditEvent {
         if durable_sequence == 0 {
             return Err(AuditValidationError::InvalidDurableSequence);
         }
-        match &outcome {
-            AuditOutcome::Success if new_revision <= base_revision => {
-                return Err(AuditValidationError::InvalidRevisionLink);
-            }
-            AuditOutcome::Failure if new_revision != base_revision => {
-                return Err(AuditValidationError::InvalidRevisionLink);
-            }
-            _ => {}
-        }
+        validate_action_semantics(&action, &outcome, base_revision, new_revision, &metadata)?;
         validate_metadata(&metadata)?;
         Ok(Self {
+            record_format_version: crate::RECORD_FORMAT_VERSION,
             audit_id,
             document_id,
             transaction_id,
@@ -310,8 +408,85 @@ impl AuditEvent {
     }
 
     #[must_use]
+    pub const fn record_format_version(&self) -> u32 {
+        self.record_format_version
+    }
+
+    #[must_use]
     pub fn audit_id(&self) -> &CommandId {
         &self.audit_id
+    }
+
+    #[must_use]
+    pub fn document_id(&self) -> &DocumentId {
+        &self.document_id
+    }
+
+    #[must_use]
+    pub fn transaction_id(&self) -> &CommandId {
+        &self.transaction_id
+    }
+
+    #[must_use]
+    pub fn command_id(&self) -> &CommandId {
+        &self.command_id
+    }
+
+    #[must_use]
+    pub const fn base_revision(&self) -> u32 {
+        self.base_revision
+    }
+
+    #[must_use]
+    pub const fn new_revision(&self) -> u32 {
+        self.new_revision
+    }
+
+    #[must_use]
+    pub fn timestamp(&self) -> &AuditTimestamp {
+        &self.timestamp
+    }
+
+    #[must_use]
+    pub const fn action(&self) -> &AuditAction {
+        &self.action
+    }
+
+    #[must_use]
+    pub const fn modality(&self) -> &SourceModality {
+        &self.modality
+    }
+
+    #[must_use]
+    pub const fn outcome(&self) -> &AuditOutcome {
+        &self.outcome
+    }
+
+    #[must_use]
+    pub fn metadata(&self) -> &[AuditMetadata] {
+        &self.metadata
+    }
+
+    #[must_use]
+    pub const fn transaction_type(&self) -> &'static str {
+        self.action.transaction_type()
+    }
+
+    pub fn validate(&self) -> Result<(), AuditValidationError> {
+        if self.record_format_version != crate::RECORD_FORMAT_VERSION {
+            return Err(AuditValidationError::UnsupportedRecordFormat);
+        }
+        if self.durable_sequence == 0 {
+            return Err(AuditValidationError::InvalidDurableSequence);
+        }
+        validate_action_semantics(
+            &self.action,
+            &self.outcome,
+            self.base_revision,
+            self.new_revision,
+            &self.metadata,
+        )?;
+        validate_metadata(&self.metadata)
     }
 }
 
@@ -324,8 +499,7 @@ impl fmt::Display for AuditEvent {
 /// Sorts without coalescing: adjacent equal-type outcomes remain distinct.
 pub fn sort_events(events: &mut [AuditEvent]) {
     events.sort_by(|left, right| {
-        left
-            .durable_sequence
+        left.durable_sequence
             .cmp(&right.durable_sequence)
             .then_with(|| left.new_revision.cmp(&right.new_revision))
             .then_with(|| left.audit_id.cmp(&right.audit_id))
@@ -345,4 +519,106 @@ fn validate_metadata(metadata: &[AuditMetadata]) -> Result<(), AuditValidationEr
         seen[index] = true;
     }
     Ok(())
+}
+
+fn validate_action_semantics(
+    action: &AuditAction,
+    outcome: &AuditOutcome,
+    base_revision: u32,
+    new_revision: u32,
+    metadata: &[AuditMetadata],
+) -> Result<(), AuditValidationError> {
+    match (action, outcome) {
+        (
+            AuditAction::Command {
+                command_kind: AuditCommandKind::Create | AuditCommandKind::Recovery,
+            },
+            _,
+        ) => Err(AuditValidationError::InvalidActionOutcome),
+        (AuditAction::Create | AuditAction::Command { .. }, AuditOutcome::Success) => {
+            if base_revision.checked_add(1) != Some(new_revision) {
+                return Err(AuditValidationError::InvalidRevisionLink);
+            }
+            require_schema_metadata(metadata)
+        }
+        (AuditAction::Command { .. }, AuditOutcome::Failure { .. }) => {
+            if new_revision != base_revision {
+                return Err(AuditValidationError::InvalidRevisionLink);
+            }
+            require_schema_metadata(metadata)
+        }
+        (AuditAction::Migration, AuditOutcome::Success) => {
+            if new_revision != base_revision {
+                return Err(AuditValidationError::InvalidRevisionLink);
+            }
+            require_migration_metadata(metadata)
+        }
+        (AuditAction::Recovery, AuditOutcome::Success) => {
+            if new_revision != base_revision {
+                return Err(AuditValidationError::InvalidRevisionLink);
+            }
+            require_exact_metadata(metadata, |item| {
+                matches!(item, AuditMetadata::RecoveryVerified)
+            })
+        }
+        (AuditAction::Recovery, AuditOutcome::Failure { .. }) => {
+            if new_revision != base_revision {
+                return Err(AuditValidationError::InvalidRevisionLink);
+            }
+            if metadata.is_empty() {
+                Ok(())
+            } else {
+                Err(AuditValidationError::InvalidMetadataContext)
+            }
+        }
+        _ => Err(AuditValidationError::InvalidActionOutcome),
+    }
+}
+
+fn require_schema_metadata(metadata: &[AuditMetadata]) -> Result<(), AuditValidationError> {
+    require_exact_metadata(
+        metadata,
+        |item| matches!(item, AuditMetadata::SchemaVersion { value } if *value > 0),
+    )
+}
+
+fn require_migration_metadata(metadata: &[AuditMetadata]) -> Result<(), AuditValidationError> {
+    require_exact_metadata(metadata, |item| {
+        matches!(
+            item,
+            AuditMetadata::Migration {
+                from_schema_version,
+                to_schema_version,
+            } if from_schema_version < to_schema_version
+        )
+    })
+}
+
+fn require_exact_metadata(
+    metadata: &[AuditMetadata],
+    predicate: impl Fn(&AuditMetadata) -> bool,
+) -> Result<(), AuditValidationError> {
+    if metadata.len() == 1 && predicate(&metadata[0]) {
+        Ok(())
+    } else {
+        Err(AuditValidationError::InvalidMetadataContext)
+    }
+}
+
+fn decimal(bytes: &[u8]) -> u16 {
+    bytes
+        .iter()
+        .fold(0_u16, |value, byte| value * 10 + u16::from(*byte - b'0'))
+}
+
+fn days_in_month(year: u16, month: u16) -> u16 {
+    match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if year.is_multiple_of(4) && (!year.is_multiple_of(100) || year.is_multiple_of(400)) => {
+            29
+        }
+        2 => 28,
+        _ => 0,
+    }
 }

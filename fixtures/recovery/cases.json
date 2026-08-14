@@ -1,0 +1,15 @@
+{
+  "formatVersion": 1,
+  "cases": [
+    { "id": "valid-tail-replay", "expected": "success" },
+    { "id": "repeated-identical", "expected": "success" },
+    { "id": "newest-corrupt-falls-back", "expected": "success" },
+    { "id": "revision-gap", "expected": "FLOW_RECOVERY_GAP" },
+    { "id": "divergent-duplicate", "expected": "FLOW_RECOVERY_GAP" },
+    { "id": "corrupt-only-snapshot-hash", "expected": "FLOW_HASH_MISMATCH" },
+    { "id": "wrong-document-identity", "expected": "FLOW_RECOVERY_GAP" },
+    { "id": "unknown-schema-tail", "expected": "FLOW_RECOVERY_GAP" },
+    { "id": "interrupted-atomic-commit", "expected": "FLOW_RECOVERY_GAP" },
+    { "id": "bounded-work-n-plus-one", "expected": "FLOW_LIMIT_RECOVERY_RECORDS" }
+  ]
+}

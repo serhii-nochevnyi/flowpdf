@@ -1,7 +1,7 @@
 use flow_core::{
     audit::{
-        AuditAction, AuditCommandKind, AuditErrorCode, AuditEvent, AuditMetadata, AuditOutcome,
-        AuditTimestamp, sort_events,
+        AuditAction, AuditCommandKind, AuditErrorCode, AuditEvent, AuditMetadata, AuditTimestamp,
+        sort_events,
     },
     model::{CommandId, FlowDocument},
     transaction::SourceModality,
@@ -24,7 +24,7 @@ fn event(sequence: u64, command: u32, timestamp: &str) -> AuditEvent {
         sequence,
         AuditTimestamp::parse(timestamp).expect("safe timestamp"),
         AuditAction::Command {
-            kind: AuditCommandKind::ReplaceText,
+            command_kind: AuditCommandKind::ReplaceText,
         },
         SourceModality::Keyboard,
         vec![AuditMetadata::SchemaVersion { value: 1 }],
@@ -46,11 +46,11 @@ fn audit_serialization_and_debug_are_closed_allowlists() {
         7,
         AuditTimestamp::parse("2026-08-14T20:50:00Z").expect("timestamp"),
         AuditAction::Command {
-            kind: AuditCommandKind::InsertText,
+            command_kind: AuditCommandKind::InsertText,
         },
         SourceModality::Voice,
         AuditErrorCode::StaleRevision,
-        vec![AuditMetadata::RecoveryVerified],
+        vec![AuditMetadata::SchemaVersion { value: 1 }],
     )
     .expect("failure event");
 
@@ -64,18 +64,277 @@ fn audit_serialization_and_debug_are_closed_allowlists() {
         "forwardOperations",
         "storagePayload",
     ] {
-        assert!(!serialized.contains(forbidden), "serialized audit leaked {forbidden}");
+        assert!(
+            !serialized.contains(forbidden),
+            "serialized audit leaked {forbidden}"
+        );
         assert!(!debug.contains(forbidden), "debug audit leaked {forbidden}");
     }
     assert!(serialized.contains("staleRevision"));
     assert!(serialized.contains("schemaVersion") || serialized.contains("recoveryVerified"));
 
     let mut unknown = serde_json::to_value(&event).expect("audit JSON value");
-    unknown
-        .as_object_mut()
-        .expect("object")
-        .insert("documentText".to_owned(), serde_json::json!("SENSITIVE_DOCUMENT_TEXT"));
+    unknown.as_object_mut().expect("object").insert(
+        "documentText".to_owned(),
+        serde_json::json!("SENSITIVE_DOCUMENT_TEXT"),
+    );
     assert!(serde_json::from_value::<AuditEvent>(unknown).is_err());
+}
+
+#[test]
+fn audit_timestamps_require_real_utc_calendar_seconds() {
+    for timestamp in [
+        "2024-02-29T23:59:59Z",
+        "2000-02-29T00:00:00Z",
+        "2026-08-15T00:00:00Z",
+    ] {
+        assert!(AuditTimestamp::parse(timestamp).is_ok(), "{timestamp}");
+    }
+
+    for timestamp in [
+        "2025-02-29T12:00:00Z",
+        "2026-04-31T12:00:00Z",
+        "2026-13-01T12:00:00Z",
+        "2026-01-01T24:00:00Z",
+        "2026-01-01T12:60:00Z",
+        "2026-01-01T12:00:60Z",
+        "0000-01-01T00:00:00Z",
+    ] {
+        assert!(AuditTimestamp::parse(timestamp).is_err(), "{timestamp}");
+    }
+}
+
+#[test]
+fn audit_actions_enforce_revision_and_metadata_semantics() {
+    let document = FlowDocument::deterministic_sample("uk-UA").expect("sample");
+    let timestamp = AuditTimestamp::parse("2026-08-15T00:00:00Z").expect("timestamp");
+    let id = command_id(601);
+
+    let transaction_success = || {
+        AuditEvent::success(
+            id.clone(),
+            document.document_id.clone(),
+            id.clone(),
+            id.clone(),
+            4,
+            5,
+            8,
+            timestamp.clone(),
+            AuditAction::Command {
+                command_kind: AuditCommandKind::ReplaceText,
+            },
+            SourceModality::Keyboard,
+            vec![AuditMetadata::SchemaVersion { value: 1 }],
+        )
+    };
+    assert!(transaction_success().is_ok());
+
+    assert!(
+        AuditEvent::success(
+            id.clone(),
+            document.document_id.clone(),
+            id.clone(),
+            id.clone(),
+            4,
+            5,
+            9,
+            timestamp.clone(),
+            AuditAction::Create,
+            SourceModality::System,
+            vec![AuditMetadata::SchemaVersion { value: 1 }],
+        )
+        .is_ok()
+    );
+
+    assert!(
+        AuditEvent::failure(
+            id.clone(),
+            document.document_id.clone(),
+            id.clone(),
+            id.clone(),
+            4,
+            4,
+            10,
+            timestamp.clone(),
+            AuditAction::Command {
+                command_kind: AuditCommandKind::DeleteText,
+            },
+            SourceModality::Keyboard,
+            AuditErrorCode::InvalidTarget,
+            vec![AuditMetadata::SchemaVersion { value: 1 }],
+        )
+        .is_ok()
+    );
+
+    assert!(
+        AuditEvent::success(
+            id.clone(),
+            document.document_id.clone(),
+            id.clone(),
+            id.clone(),
+            4,
+            5,
+            11,
+            timestamp.clone(),
+            AuditAction::Command {
+                command_kind: AuditCommandKind::Recovery,
+            },
+            SourceModality::System,
+            vec![AuditMetadata::SchemaVersion { value: 1 }],
+        )
+        .is_err()
+    );
+
+    assert!(
+        AuditEvent::success(
+            id.clone(),
+            document.document_id.clone(),
+            id.clone(),
+            id.clone(),
+            4,
+            6,
+            12,
+            timestamp.clone(),
+            AuditAction::Create,
+            SourceModality::System,
+            vec![AuditMetadata::SchemaVersion { value: 1 }],
+        )
+        .is_err()
+    );
+
+    assert!(
+        AuditEvent::failure(
+            id.clone(),
+            document.document_id.clone(),
+            id.clone(),
+            id.clone(),
+            4,
+            5,
+            13,
+            timestamp.clone(),
+            AuditAction::Command {
+                command_kind: AuditCommandKind::DeleteText,
+            },
+            SourceModality::Keyboard,
+            AuditErrorCode::InvalidTarget,
+            vec![AuditMetadata::SchemaVersion { value: 1 }],
+        )
+        .is_err()
+    );
+
+    let recovery_verified = AuditMetadata::RecoveryVerified;
+    assert!(
+        AuditEvent::failure(
+            id.clone(),
+            document.document_id.clone(),
+            id.clone(),
+            id.clone(),
+            4,
+            4,
+            14,
+            timestamp.clone(),
+            AuditAction::Command {
+                command_kind: AuditCommandKind::DeleteText,
+            },
+            SourceModality::Keyboard,
+            AuditErrorCode::InvalidTarget,
+            vec![recovery_verified],
+        )
+        .is_err()
+    );
+
+    assert!(
+        AuditEvent::success(
+            id.clone(),
+            document.document_id.clone(),
+            id.clone(),
+            id.clone(),
+            4,
+            4,
+            15,
+            timestamp.clone(),
+            AuditAction::Migration,
+            SourceModality::System,
+            vec![AuditMetadata::Migration {
+                from_schema_version: 0,
+                to_schema_version: 1,
+            }],
+        )
+        .is_ok()
+    );
+
+    assert!(
+        AuditEvent::success(
+            id.clone(),
+            document.document_id.clone(),
+            id.clone(),
+            id.clone(),
+            4,
+            4,
+            16,
+            timestamp.clone(),
+            AuditAction::Migration,
+            SourceModality::System,
+            vec![AuditMetadata::Migration {
+                from_schema_version: 1,
+                to_schema_version: 1,
+            }],
+        )
+        .is_err()
+    );
+
+    assert!(
+        AuditEvent::success(
+            id.clone(),
+            document.document_id.clone(),
+            id.clone(),
+            id.clone(),
+            4,
+            4,
+            17,
+            timestamp.clone(),
+            AuditAction::Recovery,
+            SourceModality::System,
+            vec![AuditMetadata::RecoveryVerified],
+        )
+        .is_ok()
+    );
+
+    assert!(
+        AuditEvent::failure(
+            id.clone(),
+            document.document_id.clone(),
+            id.clone(),
+            id,
+            4,
+            4,
+            18,
+            timestamp.clone(),
+            AuditAction::Recovery,
+            SourceModality::System,
+            AuditErrorCode::HashMismatch,
+            vec![],
+        )
+        .is_ok()
+    );
+
+    assert!(
+        AuditEvent::failure(
+            command_id(602),
+            document.document_id,
+            command_id(602),
+            command_id(602),
+            4,
+            4,
+            19,
+            timestamp,
+            AuditAction::Recovery,
+            SourceModality::System,
+            AuditErrorCode::HashMismatch,
+            vec![AuditMetadata::RecoveryVerified],
+        )
+        .is_err()
+    );
 }
 
 #[test]

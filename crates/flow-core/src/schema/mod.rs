@@ -377,7 +377,68 @@ pub fn validate_document(document: &FlowDocument) -> Result<(), SchemaError> {
         validate_field(field, &mut all_ids)?;
     }
 
+    validate_provenance(document)?;
+
     Ok(())
+}
+
+fn validate_provenance(document: &FlowDocument) -> Result<(), SchemaError> {
+    match &document.provenance {
+        Provenance::LocalSample { created_at } => {
+            if !is_compact_utc_timestamp(created_at) {
+                return Err(SchemaError::invalid_document());
+            }
+        }
+        Provenance::Migrated {
+            source_schema_version,
+            current_schema_version,
+            source_created_at,
+            hops,
+        } => {
+            if *source_schema_version >= *current_schema_version
+                || *current_schema_version != document.schema_version
+                || !is_compact_utc_timestamp(source_created_at)
+                || hops.is_empty()
+                || hops.len() > 32
+            {
+                return Err(SchemaError::invalid_document());
+            }
+            let mut expected_from = *source_schema_version;
+            for hop in hops {
+                let expected_to = expected_from
+                    .checked_add(1)
+                    .ok_or_else(SchemaError::invalid_document)?;
+                if hop.from_version != expected_from || hop.to_version != expected_to {
+                    return Err(SchemaError::invalid_document());
+                }
+                expected_from = hop.to_version;
+            }
+            if expected_from != *current_schema_version {
+                return Err(SchemaError::invalid_document());
+            }
+        }
+    }
+    Ok(())
+}
+
+fn is_compact_utc_timestamp(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    let punctuation = [
+        (4, b'-'),
+        (7, b'-'),
+        (10, b'T'),
+        (13, b':'),
+        (16, b':'),
+        (19, b'Z'),
+    ];
+    bytes.len() == 20
+        && punctuation
+            .iter()
+            .all(|(index, expected)| bytes[*index] == *expected)
+        && bytes
+            .iter()
+            .enumerate()
+            .all(|(index, byte)| [4, 7, 10, 13, 16, 19].contains(&index) || byte.is_ascii_digit())
 }
 
 fn validate_field(

@@ -437,9 +437,11 @@ fn recovery_replays_transaction_meaning_and_rejects_tampered_inverse() {
         operation => panic!("unexpected inverse operation: {operation:?}"),
     }
     let response = flow_core::recover(RecoverRequest {
-        snapshot: applied.commit.snapshot,
+        snapshots: vec![created.commit.snapshot, applied.commit.snapshot],
         transactions: vec![created.commit.transaction, tampered],
         audits: vec![created.commit.audit, applied.commit.audit],
+        assets: created.commit.assets,
+        sources: Vec::new(),
     });
 
     assert!(!response.ok);

@@ -171,8 +171,10 @@ pub enum Operation {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Transaction {
+    pub record_format_version: u32,
     pub transaction_id: CommandId,
     pub document_id: crate::model::DocumentId,
+    pub schema_version: u32,
     pub command_id: CommandId,
     pub base_revision: u32,
     pub new_revision: u32,
@@ -869,8 +871,10 @@ pub(crate) fn replay_forward(
     document: &FlowDocument,
     transaction: &Transaction,
 ) -> Result<FlowDocument, CommandError> {
-    if transaction.transaction_id != transaction.command_id
+    if transaction.record_format_version != crate::RECORD_FORMAT_VERSION
+        || transaction.transaction_id != transaction.command_id
         || transaction.document_id != document.document_id
+        || transaction.schema_version != document.schema_version
         || transaction.base_revision != document.revision
         || transaction.new_revision
             != transaction
@@ -898,8 +902,10 @@ pub(crate) fn replay_inverse(
     document: &FlowDocument,
     transaction: &Transaction,
 ) -> Result<FlowDocument, CommandError> {
-    if transaction.transaction_id != transaction.command_id
+    if transaction.record_format_version != crate::RECORD_FORMAT_VERSION
+        || transaction.transaction_id != transaction.command_id
         || transaction.document_id != document.document_id
+        || transaction.schema_version != document.schema_version
         || transaction.new_revision != document.revision
         || transaction.new_revision
             != transaction
@@ -1060,8 +1066,10 @@ fn build_transaction(
     history_effect: HistoryEffect,
 ) -> Result<Transaction, CommandError> {
     let transaction = Transaction {
+        record_format_version: crate::RECORD_FORMAT_VERSION,
         transaction_id: command.command_id.clone(),
         document_id: candidate.document_id.clone(),
+        schema_version: candidate.schema_version,
         command_id: command.command_id.clone(),
         base_revision: command.base_revision,
         new_revision: candidate.revision,

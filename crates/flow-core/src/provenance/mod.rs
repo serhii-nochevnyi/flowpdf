@@ -5,7 +5,10 @@ use std::collections::BTreeSet;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::model::{DocumentId, FlowDocument, MigrationHop, Provenance};
+use crate::{
+    canonical::{canonical_bytes, canonical_hash},
+    model::{DocumentId, FlowDocument, MigrationHop, Provenance},
+};
 
 const MAX_SOURCE_HASHES: usize = 16;
 
@@ -63,17 +66,57 @@ impl ProvenanceTimestamp {
     fn parse(value: impl Into<String>) -> Result<Self, ProvenanceError> {
         let value = value.into();
         let bytes = value.as_bytes();
-        let punctuation = [(4, b'-'), (7, b'-'), (10, b'T'), (13, b':'), (16, b':'), (19, b'Z')];
+        let punctuation = [
+            (4, b'-'),
+            (7, b'-'),
+            (10, b'T'),
+            (13, b':'),
+            (16, b':'),
+            (19, b'Z'),
+        ];
         if bytes.len() != 20
-            || punctuation.iter().any(|(index, expected)| bytes[*index] != *expected)
+            || punctuation
+                .iter()
+                .any(|(index, expected)| bytes[*index] != *expected)
             || bytes.iter().enumerate().any(|(index, byte)| {
                 ![4, 7, 10, 13, 16, 19].contains(&index) && !byte.is_ascii_digit()
             })
         {
             return Err(ProvenanceError::InvalidTimestamp);
         }
+        if !is_valid_calendar_timestamp(bytes) {
+            return Err(ProvenanceError::InvalidTimestamp);
+        }
         Ok(Self(value))
     }
+}
+
+fn is_valid_calendar_timestamp(bytes: &[u8]) -> bool {
+    let year = decimal(&bytes[0..4]);
+    let month = decimal(&bytes[5..7]);
+    let day = decimal(&bytes[8..10]);
+    let hour = decimal(&bytes[11..13]);
+    let minute = decimal(&bytes[14..16]);
+    let second = decimal(&bytes[17..19]);
+    let days_in_month = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if is_leap_year(year) => 29,
+        2 => 28,
+        _ => return false,
+    };
+
+    year != 0 && (1..=days_in_month).contains(&day) && hour <= 23 && minute <= 59 && second <= 59
+}
+
+fn decimal(bytes: &[u8]) -> u32 {
+    bytes
+        .iter()
+        .fold(0, |value, byte| value * 10 + u32::from(byte - b'0'))
+}
+
+const fn is_leap_year(year: u32) -> bool {
+    year.is_multiple_of(4) && (!year.is_multiple_of(100) || year.is_multiple_of(400))
 }
 
 impl TryFrom<String> for ProvenanceTimestamp {
@@ -108,9 +151,16 @@ impl EngineIdentity {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase", deny_unknown_fields)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
+)]
 pub enum RevisionLineage {
-    Created { created_at: ProvenanceTimestamp },
+    Created {
+        created_at: ProvenanceTimestamp,
+    },
     Migrated {
         source_schema_version: u32,
         current_schema_version: u32,
@@ -143,7 +193,7 @@ pub struct RevisionProvenance {
 impl RevisionProvenance {
     pub fn from_document(
         document: &FlowDocument,
-        canonical_hash: impl Into<String>,
+        supplied_canonical_hash: impl Into<String>,
     ) -> Result<Self, ProvenanceError> {
         let lineage = match &document.provenance {
             Provenance::LocalSample { created_at } => RevisionLineage::Created {
@@ -161,11 +211,17 @@ impl RevisionProvenance {
                 hops: hops.clone(),
             },
         };
+        let supplied_canonical_hash = RevisionHash::parse(supplied_canonical_hash)?;
+        let computed_canonical_hash =
+            canonical_hash(&canonical_bytes(document).map_err(|_| ProvenanceError::InvalidHash)?);
+        if supplied_canonical_hash.as_str() != computed_canonical_hash {
+            return Err(ProvenanceError::InvalidHash);
+        }
         Ok(Self {
             document_id: document.document_id.clone(),
             revision: document.revision,
             schema_version: document.schema_version,
-            canonical_hash: RevisionHash::parse(canonical_hash)?,
+            canonical_hash: supplied_canonical_hash,
             engine: EngineIdentity::current(),
             lineage,
             source_hashes: Vec::new(),
