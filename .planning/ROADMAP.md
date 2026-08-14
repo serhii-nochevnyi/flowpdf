@@ -36,10 +36,10 @@ FlowPDF progresses through nine dependency-ordered vertical capabilities. The ro
   3. User can recover the last durable revision after a reload or worker failure.
   4. User can inspect the revision, provenance and privacy-preserving audit entries behind the current document.
 
-**Plans**: 1/6 plans executed
+**Plans**: 2/6 plans executed
 
 - [x] 01-01-PLAN.md
-- [ ] 01-02-PLAN.md
+- [x] 01-02-PLAN.md
 - [ ] 01-03-PLAN.md
 - [ ] 01-04-PLAN.md
 - [ ] 01-05-PLAN.md
@@ -186,7 +186,7 @@ FlowPDF progresses through nine dependency-ordered vertical capabilities. The ro
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Durable Flow Foundation | 1/6 | In Progress|  |
+| 1. Durable Flow Foundation | 2/6 | In Progress|  |
 | 2. Accessible Rich-Text Editing | 0/TBD | Not started | - |
 | 3. Deterministic Reflow and Pagination | 0/TBD | Not started | - |
 | 4. Owned PDF Preview and Export | 0/TBD | Not started | - |
