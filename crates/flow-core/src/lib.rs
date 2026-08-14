@@ -1,158 +1,39 @@
-//! Canonical, deterministic FlowPDF document semantics.
-//!
-//! JavaScript transports the DTOs in this module, but it never receives a
-//! mutable document handle. Creation, commands, hashing, recovery validation,
-//! provenance, and audit redaction all stay on this side of the WASM boundary.
+//! Canonical, deterministic FlowPDF semantics and persistence DTOs.
 
 #![forbid(unsafe_code)]
+
+pub mod canonical;
+pub mod model;
+pub mod schema;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
 
-pub const SCHEMA_VERSION: u32 = 1;
-const MAX_CANONICAL_BYTES: usize = 4 * 1024 * 1024;
-const SAMPLE_DOCUMENT_ID: &str = "00000000-0000-4000-8000-000000000001";
-const SAMPLE_PARAGRAPH_ID: &str = "00000000-0000-4000-8000-000000000101";
+use canonical::{canonical_bytes, canonical_hash, decode_canonical};
+use model::{
+    Affinity, ContentNodeKind, DocumentId, FlowDocument, LogicalPosition, Provenance,
+    SCHEMA_VERSION,
+};
+use schema::{DocumentLimits, SchemaError, utf16_to_byte_offset, validate_document};
+
 const SAMPLE_CREATE_COMMAND_ID: &str = "00000000-0000-4000-8000-000000000201";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct FlowDocument {
-    pub schema_version: u32,
-    pub document_id: String,
-    pub revision: u32,
-    pub locale: String,
-    pub page_settings: PageSettings,
-    pub styles: Vec<StyleDefinition>,
-    pub content: Vec<ContentNode>,
-    pub assets: Vec<AssetDescriptor>,
-    pub fields: Vec<FieldDescriptor>,
-    pub provenance: CreateProvenance,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct PageSettings {
-    pub page_size: PageSize,
-    pub orientation: PageOrientation,
-    pub margins_millimetres: PageMargins,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub enum PageSize {
-    A4,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub enum PageOrientation {
-    Portrait,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct PageMargins {
-    pub top: u16,
-    pub right: u16,
-    pub bottom: u16,
-    pub left: u16,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct StyleDefinition {
-    pub id: String,
-    pub name: String,
-    pub font_family: String,
-    pub font_size_points: u16,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct ContentNode {
-    pub id: String,
-    pub kind: ContentNodeKind,
-    pub style_id: String,
-    pub text: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub enum ContentNodeKind {
-    Paragraph,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct AssetDescriptor {
-    pub id: String,
-    pub content_hash: String,
-    pub media_type: String,
-    pub byte_length: u32,
-    pub alt_text: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct FieldDescriptor {
-    pub id: String,
-    pub name: String,
-    pub field_type: FieldType,
-    pub anchor: LogicalPosition,
-    pub required: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub enum FieldType {
-    SingleLineText,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct CreateProvenance {
-    pub kind: ProvenanceKind,
-    pub created_at: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub enum ProvenanceKind {
-    LocalSample,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct LogicalPosition {
-    pub node_id: String,
-    pub utf16_offset: u32,
-    pub affinity: Affinity,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub enum Affinity {
-    Forward,
-    Backward,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CreateSampleRequest {
     pub requested_locale: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ApplyCommandRequest {
     pub canonical_json: String,
     pub command: CommandDto,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CommandDto {
     pub command_id: String,
     pub base_revision: u32,
@@ -180,9 +61,9 @@ pub enum CommandKind {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SnapshotRecord {
-    pub document_id: String,
+    pub document_id: DocumentId,
     pub revision: u32,
     pub schema_version: u32,
     pub canonical_json: String,
@@ -190,10 +71,10 @@ pub struct SnapshotRecord {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct TransactionRecord {
     pub transaction_id: String,
-    pub document_id: String,
+    pub document_id: DocumentId,
     pub command_id: String,
     pub base_revision: u32,
     pub new_revision: u32,
@@ -206,7 +87,7 @@ pub struct TransactionRecord {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "kind", rename_all = "camelCase")]
+#[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
 pub enum Operation {
     CreateDocument,
     DeleteDocument,
@@ -221,10 +102,10 @@ pub enum Operation {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AuditRecord {
     pub audit_id: String,
-    pub document_id: String,
+    pub document_id: DocumentId,
     pub command_id: String,
     pub base_revision: u32,
     pub new_revision: u32,
@@ -243,14 +124,14 @@ pub enum AuditOutcome {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SafeMetadata {
     pub key: String,
     pub value: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PersistenceCommit {
     pub replace_existing: bool,
     pub snapshot: SnapshotRecord,
@@ -259,19 +140,19 @@ pub struct PersistenceCommit {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SessionDto {
     pub canonical_json: String,
     pub canonical_hash: String,
-    pub document_id: String,
+    pub document_id: DocumentId,
     pub revision: u32,
     pub next_command_target: LogicalPosition,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct InspectorView {
-    pub document_id: String,
+    pub document_id: DocumentId,
     pub schema_version: u32,
     pub revision: u32,
     pub canonical_hash: String,
@@ -282,7 +163,7 @@ pub struct InspectorView {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct OperationResult {
     pub session: SessionDto,
     pub view: InspectorView,
@@ -290,7 +171,7 @@ pub struct OperationResult {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RecoverRequest {
     pub snapshot: SnapshotRecord,
     pub transactions: Vec<TransactionRecord>,
@@ -298,14 +179,14 @@ pub struct RecoverRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RecoverResult {
     pub session: SessionDto,
     pub view: InspectorView,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ApiResponse<T> {
     pub ok: bool,
     pub value: Option<T>,
@@ -333,7 +214,7 @@ impl<T> ApiResponse<T> {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ErrorDto {
     pub code: String,
     pub message: String,
@@ -343,16 +224,8 @@ pub struct ErrorDto {
 pub enum CoreError {
     #[error("The boundary request could not be decoded")]
     Decode,
-    #[error("The canonical payload is not valid JSON")]
-    InvalidCanonicalJson,
-    #[error("The canonical payload is not in the deterministic representation")]
-    NonCanonicalPayload,
-    #[error("The canonical payload exceeds the bounded size")]
-    PayloadTooLarge,
-    #[error("The document schema version is unsupported")]
-    UnsupportedSchema,
-    #[error("The document invariant is invalid")]
-    InvalidDocument,
+    #[error(transparent)]
+    Schema(#[from] SchemaError),
     #[error("The command uses a stale base revision")]
     StaleRevision,
     #[error("The command identifier is invalid")]
@@ -369,25 +242,27 @@ pub enum CoreError {
     UnsafeAuditRecord,
 }
 
+impl CoreError {
+    #[must_use]
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::Decode => "FLOW_DECODE_ERROR",
+            Self::Schema(error) => error.code(),
+            Self::StaleRevision => "FLOW_STALE_REVISION",
+            Self::InvalidCommandId => "FLOW_INVALID_COMMAND_ID",
+            Self::InvalidTarget => "FLOW_INVALID_TARGET",
+            Self::InvalidRange => "FLOW_INVALID_RANGE",
+            Self::RecoveryGap => "FLOW_RECOVERY_GAP",
+            Self::HashMismatch => "FLOW_HASH_MISMATCH",
+            Self::UnsafeAuditRecord => "FLOW_UNSAFE_AUDIT_RECORD",
+        }
+    }
+}
+
 impl From<CoreError> for ErrorDto {
     fn from(error: CoreError) -> Self {
-        let code = match error {
-            CoreError::Decode => "FLOW_DECODE_ERROR",
-            CoreError::InvalidCanonicalJson => "FLOW_INVALID_CANONICAL_JSON",
-            CoreError::NonCanonicalPayload => "FLOW_NON_CANONICAL_PAYLOAD",
-            CoreError::PayloadTooLarge => "FLOW_PAYLOAD_TOO_LARGE",
-            CoreError::UnsupportedSchema => "FLOW_UNSUPPORTED_SCHEMA",
-            CoreError::InvalidDocument => "FLOW_INVALID_DOCUMENT",
-            CoreError::StaleRevision => "FLOW_STALE_REVISION",
-            CoreError::InvalidCommandId => "FLOW_INVALID_COMMAND_ID",
-            CoreError::InvalidTarget => "FLOW_INVALID_TARGET",
-            CoreError::InvalidRange => "FLOW_INVALID_RANGE",
-            CoreError::RecoveryGap => "FLOW_RECOVERY_GAP",
-            CoreError::HashMismatch => "FLOW_HASH_MISMATCH",
-            CoreError::UnsafeAuditRecord => "FLOW_UNSAFE_AUDIT_RECORD",
-        };
         Self {
-            code: code.to_owned(),
+            code: error.code().to_owned(),
             message: error.to_string(),
         }
     }
@@ -407,63 +282,8 @@ pub fn create_sample(request: CreateSampleRequest) -> ApiResponse<OperationResul
 }
 
 fn create_sample_inner(request: CreateSampleRequest) -> Result<OperationResult, CoreError> {
-    if request.requested_locale != "uk-UA" && request.requested_locale != "en-US" {
-        return Err(CoreError::InvalidDocument);
-    }
-
-    let document = FlowDocument {
-        schema_version: SCHEMA_VERSION,
-        document_id: SAMPLE_DOCUMENT_ID.to_owned(),
-        revision: 1,
-        locale: request.requested_locale,
-        page_settings: PageSettings {
-            page_size: PageSize::A4,
-            orientation: PageOrientation::Portrait,
-            margins_millimetres: PageMargins {
-                top: 20,
-                right: 20,
-                bottom: 20,
-                left: 20,
-            },
-        },
-        styles: vec![StyleDefinition {
-            id: "00000000-0000-4000-8000-000000000301".to_owned(),
-            name: "Body".to_owned(),
-            font_family: "Noto Sans".to_owned(),
-            font_size_points: 12,
-        }],
-        content: vec![ContentNode {
-            id: SAMPLE_PARAGRAPH_ID.to_owned(),
-            kind: ContentNodeKind::Paragraph,
-            style_id: "00000000-0000-4000-8000-000000000301".to_owned(),
-            text: "Український тестовий документ. English sample document.".to_owned(),
-        }],
-        assets: vec![AssetDescriptor {
-            id: "00000000-0000-4000-8000-000000000401".to_owned(),
-            content_hash: format!("blake3:{}", "0".repeat(64)),
-            media_type: "image/png".to_owned(),
-            byte_length: 0,
-            alt_text: "Sample asset descriptor".to_owned(),
-        }],
-        fields: vec![FieldDescriptor {
-            id: "00000000-0000-4000-8000-000000000501".to_owned(),
-            name: "sample-name".to_owned(),
-            field_type: FieldType::SingleLineText,
-            anchor: LogicalPosition {
-                node_id: SAMPLE_PARAGRAPH_ID.to_owned(),
-                utf16_offset: 0,
-                affinity: Affinity::Forward,
-            },
-            required: false,
-        }],
-        provenance: CreateProvenance {
-            kind: ProvenanceKind::LocalSample,
-            created_at: "2026-08-14T00:00:00Z".to_owned(),
-        },
-    };
-    validate_document(&document)?;
-
-    let canonical_json = canonical_json(&document)?;
+    let document = FlowDocument::deterministic_sample(&request.requested_locale)?;
+    let canonical_json = canonical_string(&document)?;
     let canonical_hash = canonical_hash(canonical_json.as_bytes());
     let transaction = TransactionRecord {
         transaction_id: SAMPLE_CREATE_COMMAND_ID.to_owned(),
@@ -498,7 +318,7 @@ pub fn apply_command(request: ApplyCommandRequest) -> ApiResponse<OperationResul
 }
 
 fn apply_command_inner(request: ApplyCommandRequest) -> Result<OperationResult, CoreError> {
-    let mut document = decode_canonical(&request.canonical_json)?;
+    let mut document = decode_canonical(request.canonical_json.as_bytes())?;
     let before_hash = canonical_hash(request.canonical_json.as_bytes());
     let command = request.command;
 
@@ -508,14 +328,14 @@ fn apply_command_inner(request: ApplyCommandRequest) -> Result<OperationResult, 
     if command.base_revision != document.revision {
         return Err(CoreError::StaleRevision);
     }
-    if command.text.is_empty() || command.text.len() > 4096 {
+    if command.text.is_empty() || command.text.len() > 4_096 {
         return Err(CoreError::InvalidRange);
     }
 
     let node = document
         .content
         .iter_mut()
-        .find(|node| node.id == command.target.node_id)
+        .find(|node| node.id == command.target.node_id && node.kind == ContentNodeKind::Paragraph)
         .ok_or(CoreError::InvalidTarget)?;
     let byte_offset = utf16_to_byte_offset(&node.text, command.target.utf16_offset)
         .ok_or(CoreError::InvalidRange)?;
@@ -525,10 +345,10 @@ fn apply_command_inner(request: ApplyCommandRequest) -> Result<OperationResult, 
     document.revision = document
         .revision
         .checked_add(1)
-        .ok_or(CoreError::InvalidDocument)?;
+        .ok_or_else(SchemaError::invalid_document)?;
     validate_document(&document)?;
 
-    let canonical_json = canonical_json(&document)?;
+    let canonical_json = canonical_string(&document)?;
     let canonical_hash = canonical_hash(canonical_json.as_bytes());
     let inserted_utf16_length =
         u32::try_from(command.text.encode_utf16().count()).map_err(|_| CoreError::InvalidRange)?;
@@ -571,12 +391,27 @@ pub fn recover(request: RecoverRequest) -> ApiResponse<RecoverResult> {
 }
 
 fn recover_inner(mut request: RecoverRequest) -> Result<RecoverResult, CoreError> {
-    let document = decode_canonical(&request.snapshot.canonical_json)?;
+    let replay_bytes = request
+        .transactions
+        .iter()
+        .try_fold(0_usize, |total, record| {
+            let bytes = serde_json::to_vec(record).map_err(|_| SchemaError::serialization())?;
+            DocumentLimits::V1.check_transaction(
+                record.forward_operations.len() + record.inverse_operations.len(),
+                bytes.len(),
+            )?;
+            total
+                .checked_add(bytes.len())
+                .ok_or_else(SchemaError::invalid_document)
+        })?;
+    DocumentLimits::V1.check_recovery(request.transactions.len(), replay_bytes)?;
+
+    let document = decode_canonical(request.snapshot.canonical_json.as_bytes())?;
     if request.snapshot.document_id != document.document_id
         || request.snapshot.revision != document.revision
         || request.snapshot.schema_version != document.schema_version
     {
-        return Err(CoreError::InvalidDocument);
+        return Err(SchemaError::invalid_document().into());
     }
     let computed_hash = canonical_hash(request.snapshot.canonical_json.as_bytes());
     if computed_hash != request.snapshot.canonical_hash {
@@ -636,13 +471,14 @@ fn operation_result(
         canonical_json: canonical_json.clone(),
         canonical_hash: canonical_hash.clone(),
     };
+    let replace_existing = transaction.base_revision == 0;
     let session = session_dto(&document, canonical_json, canonical_hash.clone())?;
     let view = inspector_view(&document, canonical_hash, vec![audit.clone()]);
     Ok(OperationResult {
         session,
         view,
         commit: PersistenceCommit {
-            replace_existing: transaction.base_revision == 0,
+            replace_existing,
             snapshot,
             transaction,
             audit,
@@ -655,9 +491,13 @@ fn session_dto(
     canonical_json: String,
     canonical_hash: String,
 ) -> Result<SessionDto, CoreError> {
-    let node = document.content.first().ok_or(CoreError::InvalidDocument)?;
+    let node = document
+        .content
+        .iter()
+        .find(|node| node.kind == ContentNodeKind::Paragraph)
+        .ok_or(CoreError::InvalidTarget)?;
     let utf16_offset =
-        u32::try_from(node.text.encode_utf16().count()).map_err(|_| CoreError::InvalidDocument)?;
+        u32::try_from(node.text.encode_utf16().count()).map_err(|_| CoreError::InvalidRange)?;
     Ok(SessionDto {
         canonical_json,
         canonical_hash,
@@ -679,9 +519,14 @@ fn inspector_view(
     let document_summary = document
         .content
         .iter()
+        .filter(|node| node.kind == ContentNodeKind::Paragraph)
         .map(|node| node.text.as_str())
         .collect::<Vec<_>>()
         .join("\n");
+    let provenance = match document.provenance {
+        Provenance::LocalSample { .. } => "localSample",
+        Provenance::Migrated { .. } => "migrated",
+    };
     InspectorView {
         document_id: document.document_id.clone(),
         schema_version: document.schema_version,
@@ -689,7 +534,7 @@ fn inspector_view(
         canonical_hash,
         locale: document.locale.clone(),
         document_summary,
-        provenance: "localSample".to_owned(),
+        provenance: provenance.to_owned(),
         audit,
     }
 }
@@ -735,68 +580,14 @@ fn validate_audit(audit: &AuditRecord) -> Result<(), CoreError> {
     Ok(())
 }
 
-fn validate_document(document: &FlowDocument) -> Result<(), CoreError> {
-    if document.schema_version != SCHEMA_VERSION {
-        return Err(CoreError::UnsupportedSchema);
-    }
-    if Uuid::parse_str(&document.document_id).is_err()
-        || document.content.is_empty()
-        || document.locale.len() > 32
-    {
-        return Err(CoreError::InvalidDocument);
-    }
-    for node in &document.content {
-        if Uuid::parse_str(&node.id).is_err() || node.text.len() > MAX_CANONICAL_BYTES {
-            return Err(CoreError::InvalidDocument);
-        }
-    }
-    Ok(())
-}
-
-fn decode_canonical(input: &str) -> Result<FlowDocument, CoreError> {
-    if input.len() > MAX_CANONICAL_BYTES {
-        return Err(CoreError::PayloadTooLarge);
-    }
-    let document: FlowDocument =
-        serde_json::from_str(input).map_err(|_| CoreError::InvalidCanonicalJson)?;
-    validate_document(&document)?;
-    let encoded = canonical_json(&document)?;
-    if encoded != input {
-        return Err(CoreError::NonCanonicalPayload);
-    }
-    Ok(document)
-}
-
-fn canonical_json(document: &FlowDocument) -> Result<String, CoreError> {
-    serde_json::to_string(document).map_err(|_| CoreError::InvalidDocument)
-}
-
-fn canonical_hash(bytes: &[u8]) -> String {
-    format!("flowpdf:blake3:v1:{}", blake3::hash(bytes).to_hex())
+fn canonical_string(document: &FlowDocument) -> Result<String, CoreError> {
+    String::from_utf8(canonical_bytes(document)?).map_err(|_| SchemaError::serialization().into())
 }
 
 fn command_type(kind: &CommandKind) -> &'static str {
     match kind {
         CommandKind::InsertText => "insertText",
     }
-}
-
-fn utf16_to_byte_offset(value: &str, utf16_offset: u32) -> Option<usize> {
-    let requested = usize::try_from(utf16_offset).ok()?;
-    if requested == 0 {
-        return Some(0);
-    }
-    let mut consumed = 0;
-    for (byte_index, character) in value.char_indices() {
-        if consumed == requested {
-            return Some(byte_index);
-        }
-        consumed += character.len_utf16();
-        if consumed > requested {
-            return None;
-        }
-    }
-    (consumed == requested).then_some(value.len())
 }
 
 #[cfg(test)]

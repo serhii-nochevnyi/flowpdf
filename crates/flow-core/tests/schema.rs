@@ -24,7 +24,11 @@ fn representative_document_validates_and_round_trips_through_one_canonical_utf8_
 
     let exact_text = "Український текст: и\u{0306}, апостроф ’, emoji 😀, non-BMP 𝄞.";
     assert!(document.content.iter().any(|node| node.text == exact_text));
-    assert!(bytes.windows(exact_text.len()).any(|window| window == exact_text.as_bytes()));
+    assert!(
+        bytes
+            .windows(exact_text.len())
+            .any(|window| window == exact_text.as_bytes())
+    );
 }
 
 #[test]
@@ -91,11 +95,7 @@ fn schema_rejects_unknown_coordinates_floats_invalid_ids_duplicates_and_dangling
 
     let invalid_id = String::from_utf8(canonical_bytes(&document).expect("bytes"))
         .expect("utf8")
-        .replacen(
-            "00000000-0000-4000-8000-000000000001",
-            "not-a-uuid",
-            1,
-        );
+        .replacen("00000000-0000-4000-8000-000000000001", "not-a-uuid", 1);
     assert_eq!(
         code(decode_canonical(invalid_id.as_bytes()).expect_err("invalid id")),
         "FLOW_INVALID_ID"
@@ -109,10 +109,8 @@ fn schema_rejects_unknown_coordinates_floats_invalid_ids_duplicates_and_dangling
     );
 
     let mut dangling_style = document.clone();
-    dangling_style.content[0].style_id = Some(
-        flow_core::model::StyleId::new("00000000-0000-4000-8000-000000009902")
-            .expect("id"),
-    );
+    dangling_style.content[0].style_id =
+        Some(flow_core::model::StyleId::new("00000000-0000-4000-8000-000000009902").expect("id"));
     assert_eq!(
         code(validate_document(&dangling_style).expect_err("dangling style")),
         "FLOW_DANGLING_REFERENCE"
@@ -124,10 +122,8 @@ fn schema_rejects_unknown_coordinates_floats_invalid_ids_duplicates_and_dangling
         .iter_mut()
         .find(|node| node.asset_id.is_some())
         .expect("image node");
-    image.asset_id = Some(
-        flow_core::model::AssetId::new("00000000-0000-4000-8000-000000009903")
-            .expect("id"),
-    );
+    image.asset_id =
+        Some(flow_core::model::AssetId::new("00000000-0000-4000-8000-000000009903").expect("id"));
     assert_eq!(
         code(validate_document(&dangling_asset).expect_err("dangling asset")),
         "FLOW_DANGLING_REFERENCE"
@@ -150,16 +146,56 @@ fn field_vocabulary_is_closed_and_kind_value_option_constraints_are_exhaustive()
         }
     )));
     assert!(kinds.iter().any(|kind| matches!(kind, FieldKind::Checkbox)));
-    assert!(kinds.iter().any(|kind| matches!(kind, FieldKind::RadioGroup)));
-    assert!(kinds.iter().any(|kind| matches!(
-        kind,
-        FieldKind::Select { multiple: true }
-    )));
-    assert!(kinds.iter().any(|kind| matches!(kind, FieldKind::Signature)));
+    assert!(
+        kinds
+            .iter()
+            .any(|kind| matches!(kind, FieldKind::RadioGroup))
+    );
+    assert!(
+        kinds
+            .iter()
+            .any(|kind| matches!(kind, FieldKind::Select { multiple: true }))
+    );
+    assert!(
+        kinds
+            .iter()
+            .any(|kind| matches!(kind, FieldKind::Signature))
+    );
     assert!(kinds.iter().any(|kind| matches!(kind, FieldKind::Button)));
 
+    for input_hint in [
+        TextInputHint::Plain,
+        TextInputHint::Date,
+        TextInputHint::Number,
+        TextInputHint::Email,
+    ] {
+        for multiline in [false, true] {
+            for value in [FieldValue::Empty, FieldValue::text("exact text")] {
+                let mut valid = document.clone();
+                valid.fields[0].kind = FieldKind::Text {
+                    multiline,
+                    input_hint: input_hint.clone(),
+                };
+                valid.fields[0].default_value = value;
+                validate_document(&valid).expect("every text hint/value form is valid");
+            }
+        }
+    }
+
+    for value in [FieldValue::Empty, FieldValue::checked(true)] {
+        let mut valid = document.clone();
+        valid.fields[1].default_value = value;
+        validate_document(&valid).expect("checkbox empty/checked values are valid");
+    }
+
+    let mut valid_single_select = document.clone();
+    valid_single_select.fields[3].kind = FieldKind::Select { multiple: false };
+    valid_single_select.fields[3].default_value =
+        FieldValue::selected(vec![valid_single_select.fields[3].options[0].id.clone()]);
+    validate_document(&valid_single_select).expect("single select may select one option");
+
     let mut invalid_text = document.clone();
-    invalid_text.fields[0].default_value = FieldValue::Checked(true);
+    invalid_text.fields[0].default_value = FieldValue::checked(true);
     assert_eq!(
         code(validate_document(&invalid_text).expect_err("text/checked mismatch")),
         "FLOW_FIELD_VALUE_INVALID"
@@ -174,7 +210,7 @@ fn field_vocabulary_is_closed_and_kind_value_option_constraints_are_exhaustive()
 
     let mut invalid_radio = document.clone();
     let radio_options = invalid_radio.fields[2].options.clone();
-    invalid_radio.fields[2].default_value = FieldValue::Selected(vec![
+    invalid_radio.fields[2].default_value = FieldValue::selected(vec![
         radio_options[0].id.clone(),
         radio_options[1].id.clone(),
     ]);
@@ -190,9 +226,26 @@ fn field_vocabulary_is_closed_and_kind_value_option_constraints_are_exhaustive()
         "FLOW_FIELD_VALUE_INVALID"
     );
 
+    let mut invalid_option_reference = document.clone();
+    invalid_option_reference.fields[2].default_value = FieldValue::selected(vec![
+        flow_core::model::FieldOptionId::new("00000000-0000-4000-8000-000000009904").expect("id"),
+    ]);
+    assert_eq!(
+        code(validate_document(&invalid_option_reference).expect_err("unknown option")),
+        "FLOW_FIELD_VALUE_INVALID"
+    );
+
+    let mut duplicate_export = document.clone();
+    duplicate_export.fields[2].options[1].export_value =
+        duplicate_export.fields[2].options[0].export_value.clone();
+    assert_eq!(
+        code(validate_document(&duplicate_export).expect_err("duplicate export value")),
+        "FLOW_FIELD_OPTIONS_INVALID"
+    );
+
     for index in [4_usize, 5] {
         let mut invalid = document.clone();
-        invalid.fields[index].default_value = FieldValue::Text("forbidden".to_owned());
+        invalid.fields[index].default_value = FieldValue::text("forbidden");
         assert_eq!(
             code(validate_document(&invalid).expect_err("signature/button text")),
             "FLOW_FIELD_VALUE_INVALID"
