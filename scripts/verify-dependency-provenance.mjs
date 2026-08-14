@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
-import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
-import { dirname } from 'node:path';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { dirname, join } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
@@ -124,6 +125,26 @@ export async function verifyManifest({ config, fetchImpl = globalThis.fetch }) {
   return { schemaVersion: 1, status: 'success', verifiedAt: new Date().toISOString(), crates, npm };
 }
 
+export async function writeVerificationOutcome({ config, reportPath, blockerPath, fetchImpl }) {
+  try {
+    const report = await verifyManifest({ config, fetchImpl });
+    await mkdir(dirname(reportPath), { recursive: true });
+    await writeFile(reportPath, `${JSON.stringify(report, null, 2)}\n`);
+    await rm(blockerPath, { force: true });
+    return { ok: true, report };
+  } catch (error) {
+    const blocker = {
+      schemaVersion: 1, status: 'blocked', package: error.packageName ?? 'manifest',
+      check: error.check ?? 'unexpected error', reason: error.reason ?? 'verifier failed',
+      timestamp: new Date().toISOString(),
+    };
+    await mkdir(dirname(blockerPath), { recursive: true });
+    await rm(reportPath, { force: true });
+    await writeFile(blockerPath, `${JSON.stringify(blocker, null, 2)}\n`);
+    return { ok: false, blocker };
+  }
+}
+
 test('accepts an allowlisted stable crate and npm release with complete provenance', async () => {
   const config = {
     schemaVersion: 1, timeoutMs: 10, retries: 0,
@@ -141,6 +162,14 @@ test('accepts an allowlisted stable crate and npm release with complete provenan
   assert.equal(report.status, 'success');
   assert.equal(report.crates[0].checksum.length, 64);
   assert.match(report.npm[0].integrity, /^sha512-/);
+  const directory = await mkdtemp(join(tmpdir(), 'flowpdf-provenance-'));
+  const reportPath = join(directory, 'report.json');
+  const blockerPath = join(directory, 'blocker.json');
+  await writeFile(blockerPath, 'stale blocker');
+  const result = await writeVerificationOutcome({ config, fetchImpl, reportPath, blockerPath });
+  assert.equal(result.ok, true);
+  await assert.doesNotReject(() => readFile(reportPath));
+  await assert.rejects(() => readFile(blockerPath));
 });
 
 test('normalizes git+https repository URLs', () => {
@@ -150,16 +179,30 @@ test('normalizes git+https repository URLs', () => {
   );
 });
 
-test('fails closed for yanked crates, missing npm integrity, and repository mismatch', async () => {
+test('fails closed for every required negative provenance invariant', async () => {
   const base = {
     schemaVersion: 1, timeoutMs: 10, retries: 0, npm: [],
     crates: [{ name: 'serde', version: '1.0.228', repository: 'https://github.com/serde-rs/serde' }],
   };
   const yanked = async () => new Response(JSON.stringify({ version: { num: '1.0.228', yanked: true, checksum: 'a'.repeat(64), created_at: '2026-01-01T00:00:00Z', repository: 'https://github.com/serde-rs/serde' } }), { status: 200 });
   await assert.rejects(() => verifyManifest({ config: base, fetchImpl: yanked }), /release state/);
+  const missingChecksum = async () => new Response(JSON.stringify({ version: { num: '1.0.228', yanked: false, created_at: '2026-01-01T00:00:00Z', repository: 'https://github.com/serde-rs/serde' } }), { status: 200 });
+  await assert.rejects(() => verifyManifest({ config: base, fetchImpl: missingChecksum }), /checksum/);
   const npmConfig = { ...base, crates: [], npm: [{ name: 'vitest', version: '4.1.6', repository: 'https://github.com/vitest-dev/vitest' }] };
   const missingIntegrity = async () => new Response(JSON.stringify({ name: 'vitest', version: '4.1.6', time: { '4.1.6': '2026-01-01T00:00:00Z' }, repository: { url: 'https://github.com/vitest-dev/vitest' }, dist: { tarball: 'https://registry.npmjs.org/vitest/-/x.tgz' } }), { status: 200 });
   await assert.rejects(() => verifyManifest({ config: npmConfig, fetchImpl: missingIntegrity }), /integrity/);
+  const nonRegistryTarball = async () => new Response(JSON.stringify({ name: 'vitest', version: '4.1.6', time: { '4.1.6': '2026-01-01T00:00:00Z' }, repository: { url: 'https://github.com/vitest-dev/vitest' }, dist: { integrity: 'sha512-test', tarball: 'https://example.invalid/vitest.tgz' } }), { status: 200 });
+  await assert.rejects(() => verifyManifest({ config: npmConfig, fetchImpl: nonRegistryTarball }), /tarball/);
+  const repositoryMismatch = async () => new Response(JSON.stringify({ name: 'vitest', version: '4.1.6', time: { '4.1.6': '2026-01-01T00:00:00Z' }, repository: { url: 'https://github.com/example/untrusted' }, dist: { integrity: 'sha512-test', tarball: 'https://registry.npmjs.org/vitest/-/x.tgz' } }), { status: 200 });
+  await assert.rejects(() => verifyManifest({ config: npmConfig, fetchImpl: repositoryMismatch }), /repository/);
+  const deprecated = async () => new Response(JSON.stringify({ name: 'vitest', version: '4.1.6', deprecated: 'no longer supported', time: { '4.1.6': '2026-01-01T00:00:00Z' }, repository: { url: 'https://github.com/vitest-dev/vitest' }, dist: { integrity: 'sha512-test', tarball: 'https://registry.npmjs.org/vitest/-/x.tgz' } }), { status: 200 });
+  await assert.rejects(() => verifyManifest({ config: npmConfig, fetchImpl: deprecated }), /release state/);
+  const malformed = async () => new Response('{', { status: 200 });
+  await assert.rejects(() => verifyManifest({ config: base, fetchImpl: malformed }), /malformed JSON/);
+  const httpFailure = async () => new Response('', { status: 503 });
+  await assert.rejects(() => verifyManifest({ config: base, fetchImpl: httpFailure }), /HTTP 503/);
+  const timeout = async (_url, options) => new Promise((_, reject) => options.signal.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError'))));
+  await assert.rejects(() => verifyManifest({ config: { ...base, timeoutMs: 1 }, fetchImpl: timeout }), /timeout/);
 });
 
 if (process.argv.includes('--config')) {
@@ -172,23 +215,6 @@ if (process.argv.includes('--config')) {
     throw new Error('Usage: --config <path> --report <path> --blocker <path>');
   }
   const config = JSON.parse(await readFile(configPath, 'utf8'));
-  try {
-    const report = await verifyManifest({ config });
-    await mkdir(dirname(reportPath), { recursive: true });
-    await writeFile(reportPath, `${JSON.stringify(report, null, 2)}\n`);
-    await rm(blockerPath, { force: true });
-  } catch (error) {
-    const blocker = {
-      schemaVersion: 1,
-      status: 'blocked',
-      package: error.packageName ?? 'manifest',
-      check: error.check ?? 'unexpected error',
-      reason: error.reason ?? 'verifier failed',
-      timestamp: new Date().toISOString(),
-    };
-    await mkdir(dirname(blockerPath), { recursive: true });
-    await rm(reportPath, { force: true });
-    await writeFile(blockerPath, `${JSON.stringify(blocker, null, 2)}\n`);
-    process.exitCode = 1;
-  }
+  const result = await writeVerificationOutcome({ config, reportPath, blockerPath });
+  if (!result.ok) process.exitCode = 1;
 }
