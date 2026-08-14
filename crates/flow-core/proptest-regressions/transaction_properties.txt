@@ -1,0 +1,2 @@
+# Seeds produced by shrinking transaction state-machine failures are retained here.
+# This file is intentionally checked in even when the current regression set is empty.
