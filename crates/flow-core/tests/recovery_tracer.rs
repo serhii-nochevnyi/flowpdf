@@ -53,6 +53,12 @@ fn atomic_store_commit_recovers_the_exact_immutable_revision_and_redacted_audit(
     assert_eq!(records.snapshots.len(), 2);
     assert_eq!(records.transactions.len(), 2);
     assert_eq!(records.audits.len(), 2);
+    assert_eq!(records.assets.len(), 1);
+    assert!(records.assets[0].bytes.is_empty());
+    assert_eq!(
+        records.assets[0].content_hash,
+        "blake3:af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262"
+    );
 
     let recovered: RecoverResult = success(recover(records));
     assert_eq!(recovered.session.revision, applied.session.revision);
@@ -66,11 +72,15 @@ fn atomic_store_commit_recovers_the_exact_immutable_revision_and_redacted_audit(
     );
     assert_eq!(recovered.session.history, applied.session.history);
     assert_eq!(
-        recovered.view.revision_provenance.revision,
+        recovered.view.revision_provenance.revision(),
         applied.session.revision
     );
     assert_eq!(
-        recovered.view.revision_provenance.canonical_hash,
+        recovered
+            .view
+            .revision_provenance
+            .canonical_hash()
+            .as_str(),
         applied.session.canonical_hash
     );
 
