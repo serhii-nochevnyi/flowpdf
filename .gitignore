@@ -4,4 +4,7 @@ work/
 .playwright/
 test-results/
 coverage/
-
+dist/
+web/generated/
+web/tests/__screenshots__/
+.vitest-attachments/

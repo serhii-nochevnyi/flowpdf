@@ -5,7 +5,7 @@
   "type": "module",
   "packageManager": "npm@11.9.0",
   "scripts": {
-    "build:wasm": "cargo build -p flow-wasm --target wasm32-unknown-unknown --release --locked",
+    "build:wasm": "RUSTUP_HOME=./work/toolchains/rustup CARGO_HOME=./work/toolchains/cargo PATH=./work/toolchains/cargo/bin:$PATH cargo build -p flow-wasm --target wasm32-unknown-unknown --release --locked && RUSTUP_HOME=./work/toolchains/rustup CARGO_HOME=./work/toolchains/cargo PATH=./work/toolchains/cargo/bin:$PATH wasm-bindgen target/wasm32-unknown-unknown/release/flow_wasm.wasm --target web --out-dir web/generated --out-name flow_wasm",
     "check": "node scripts/check-phase1.mjs",
     "test": "vitest run --passWithNoTests",
     "test:browser": "PLAYWRIGHT_BROWSERS_PATH=./work/playwright vitest run --project browser --passWithNoTests",
@@ -20,4 +20,3 @@
     "vitest": "4.1.6"
   }
 }
-
