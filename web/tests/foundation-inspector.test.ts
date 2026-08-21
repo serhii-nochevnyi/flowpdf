@@ -15,6 +15,7 @@ type Locale = 'uk' | 'en'
 interface MountOptionsContract {
   readonly databaseName: string
   readonly locale?: Locale
+  readonly clock?: () => Date
 }
 
 interface LocalizationContract {
@@ -206,6 +207,7 @@ describe('Foundation Inspector approved contract', () => {
     const inspector = await mountWithOptions(root, {
       databaseName: 'flowpdf-inspector-audit-unit',
       locale: 'uk',
+      clock: () => new Date('2026-08-14T00:00:01.987Z'),
     })
     await clickAndWait(inspector, root, 'create-sample')
     await clickAndWait(inspector, root, 'apply-mutation')
@@ -221,6 +223,35 @@ describe('Foundation Inspector approved contract', () => {
       '2026-08-14T00:00:01Z',
       '2026-08-14T00:00:01Z',
       '2026-08-14T00:00:01Z',
+    ])
+  })
+
+  it('stamps each browser command from the injected clock', async () => {
+    const instants = [
+      '2026-08-14T12:00:01.123Z',
+      '2026-08-14T12:00:02.456Z',
+      '2026-08-14T12:00:03.789Z',
+    ]
+    let clockIndex = 0
+    const root = rootFixture()
+    const inspector = await mountWithOptions(root, {
+      databaseName: 'flowpdf-inspector-clock-unit',
+      locale: 'uk',
+      clock: () => new Date(instants[clockIndex++] ?? instants.at(-1)),
+    })
+
+    await clickAndWait(inspector, root, 'create-sample')
+    await clickAndWait(inspector, root, 'apply-mutation')
+    await clickAndWait(inspector, root, 'undo')
+    await clickAndWait(inspector, root, 'redo')
+
+    const timestamps = [...root.querySelectorAll<HTMLTimeElement>('[data-audit-row] time')]
+      .slice(1)
+      .map(({ dateTime }) => dateTime)
+    expect(timestamps).toEqual([
+      '2026-08-14T12:00:01Z',
+      '2026-08-14T12:00:02Z',
+      '2026-08-14T12:00:03Z',
     ])
   })
 })

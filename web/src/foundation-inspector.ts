@@ -128,6 +128,7 @@ export interface FoundationInspectorController {
 export interface FoundationInspectorOptions {
   readonly databaseName?: string
   readonly locale?: FoundationInspectorLocale
+  readonly clock?: () => Date
 }
 
 const GENERATED_WASM_MODULE = '../generated/flow_wasm.js'
@@ -183,6 +184,7 @@ class FoundationInspector implements FoundationInspectorController {
     private readonly wasm: WasmBoundary,
     private readonly store: IndexedDbDocumentStore,
     private readonly locale: FoundationInspectorLocale,
+    private readonly clock: () => Date,
   ) {
     this.elements = createInspectorDom(root, locale)
     this.elements.create.addEventListener('click', () => {
@@ -297,6 +299,7 @@ class FoundationInspector implements FoundationInspectorController {
 
   private async applyMutation(): Promise<void> {
     const session = this.requireSession()
+    const issuedAt = this.currentTimestamp()
     this.setPending()
     try {
       const result = unwrap(
@@ -307,7 +310,7 @@ class FoundationInspector implements FoundationInspectorController {
             commandId: newCommandId(),
             baseRevision: session.revision,
             modality: 'ui',
-            issuedAt: '2026-08-14T00:00:01Z',
+            issuedAt,
             kind: {
               type: 'insertText',
               target: session.nextCommandTarget,
@@ -331,6 +334,7 @@ class FoundationInspector implements FoundationInspectorController {
 
   private async applyStaleCommand(): Promise<void> {
     const session = this.requireSession()
+    const issuedAt = this.currentTimestamp()
     this.setPending()
     try {
       unwrap(
@@ -341,7 +345,7 @@ class FoundationInspector implements FoundationInspectorController {
             commandId: newCommandId(),
             baseRevision: Math.max(0, session.revision - 1),
             modality: 'ui',
-            issuedAt: '2026-08-14T00:00:01Z',
+            issuedAt,
             kind: {
               type: 'insertText',
               target: session.nextCommandTarget,
@@ -358,6 +362,7 @@ class FoundationInspector implements FoundationInspectorController {
 
   private async applyHistory(kind: 'undo' | 'redo'): Promise<void> {
     const session = this.requireSession()
+    const issuedAt = this.currentTimestamp()
     this.setPending()
     try {
       const request = {
@@ -367,7 +372,7 @@ class FoundationInspector implements FoundationInspectorController {
           commandId: newCommandId(),
           baseRevision: session.revision,
           modality: 'ui',
-          issuedAt: '2026-08-14T00:00:01Z',
+          issuedAt,
           kind: { type: kind },
         },
       }
@@ -392,13 +397,14 @@ class FoundationInspector implements FoundationInspectorController {
   }
 
   private async openOlderSchema(): Promise<void> {
+    const issuedAt = this.currentTimestamp()
     this.setPending()
     try {
       const result = unwrap(
         this.wasm.open_document({
           fixture: 'supportedOlder',
           migrationId: newCommandId(),
-          issuedAt: '2026-08-14T00:00:02Z',
+          issuedAt,
           assets: [
             {
               recordFormatVersion: 1,
@@ -426,6 +432,10 @@ class FoundationInspector implements FoundationInspectorController {
     } finally {
       this.setBusy(false)
     }
+  }
+
+  private currentTimestamp(): string {
+    return this.clock().toISOString().replace(/\.\d{3}Z$/, 'Z')
   }
 
   private async openLast(): Promise<void> {
@@ -807,6 +817,7 @@ export async function mountFoundationInspector(
     wasm,
     new IndexedDbDocumentStore(options.databaseName),
     options.locale ?? 'uk',
+    options.clock ?? (() => new Date()),
   )
   await inspector.initialize()
   return inspector
