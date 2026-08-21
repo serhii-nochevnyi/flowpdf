@@ -11,7 +11,7 @@
     "inspector": "npm run build:web && node scripts/serve-inspector.mjs",
     "test": "vitest run --passWithNoTests",
     "test:browser": "PLAYWRIGHT_BROWSERS_PATH=./work/playwright vitest run --project browser --passWithNoTests",
-    "test:unit": "vitest run --project unit --passWithNoTests",
+    "test:unit": "PLAYWRIGHT_BROWSERS_PATH=./work/playwright vitest run --project unit --project inspector-unit --passWithNoTests",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {

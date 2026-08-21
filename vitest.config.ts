@@ -9,7 +9,26 @@ export default defineConfig({
           name: 'unit',
           environment: 'node',
           include: ['web/**/*.test.ts'],
-          exclude: ['web/**/*.browser.test.ts'],
+          exclude: [
+            'web/**/*.browser.test.ts',
+            'web/tests/foundation-inspector.test.ts',
+          ],
+        },
+      },
+      {
+        test: {
+          name: 'inspector-unit',
+          include: ['web/tests/foundation-inspector.test.ts'],
+          fileParallelism: false,
+          maxWorkers: 1,
+          browser: {
+            enabled: true,
+            headless: true,
+            provider: playwright({
+              launchOptions: { args: ['--single-process'] },
+            }),
+            instances: [{ browser: 'chromium' }],
+          },
         },
       },
       {
