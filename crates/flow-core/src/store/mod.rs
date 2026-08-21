@@ -169,23 +169,13 @@ impl CommitPlanner {
     pub fn plan(
         self,
         records: &RecoverRequest,
-        commit: PersistenceCommit,
+        mut commit: PersistenceCommit,
         reason: SnapshotReason,
     ) -> Result<PlannedPersistenceCommit, StoreError> {
-        validate_commit_set(&commit)?;
+        attach_migration_boundary(records, &mut commit)?;
+        let document = validate_commit_set(&commit)?;
+        let checkpoint_revision = validate_commit_against_records(records, &commit, &document)?;
         validate_snapshot_reason(&commit.transaction, reason)?;
-
-        let checkpoint_revision = records
-            .snapshots
-            .iter()
-            .filter(|snapshot| {
-                snapshot.document_id == commit.transaction.document_id
-                    && snapshot.schema_version == commit.transaction.schema_version
-                    && snapshot.revision <= commit.transaction.base_revision
-            })
-            .map(|snapshot| snapshot.revision)
-            .max()
-            .unwrap_or(0);
 
         let mut seen = std::collections::BTreeMap::<&str, &TransactionRecord>::new();
         let mut uncheckpointed_transactions = 0_u32;
@@ -264,6 +254,162 @@ fn validate_snapshot_reason(
 fn transaction_record_bytes(transaction: &TransactionRecord) -> Result<u64, StoreError> {
     let bytes = serde_json::to_vec(transaction).map_err(|_| StoreError::InvalidCommit)?;
     u64::try_from(bytes.len()).map_err(|_| StoreError::InvalidCommit)
+}
+
+/// Operation DTOs are intentionally independent of the physical store, so a
+/// post-migration operation cannot invent or rewrite its source lineage. The
+/// Rust planner copies the single verified immutable boundary from durable
+/// records into the candidate checkpoint before deciding whether it is due.
+fn attach_migration_boundary(
+    records: &RecoverRequest,
+    commit: &mut PersistenceCommit,
+) -> Result<(), StoreError> {
+    let document = decode_canonical(commit.snapshot.canonical_json.as_bytes())
+        .map_err(|_| StoreError::InvalidCommit)?;
+    if !matches!(
+        document.provenance,
+        crate::model::Provenance::Migrated { .. }
+    ) {
+        return Ok(());
+    }
+
+    let mut durable_boundary = None;
+    for boundary in records
+        .snapshots
+        .iter()
+        .filter(|snapshot| {
+            snapshot.document_id == document.document_id
+                && snapshot.schema_version == document.schema_version
+        })
+        .filter_map(|snapshot| snapshot.migration_boundary.as_ref())
+    {
+        boundary
+            .validate_against_current(&document)
+            .map_err(|_| StoreError::PartialRecordSet)?;
+        match &durable_boundary {
+            Some(existing) if existing != boundary => {
+                return Err(StoreError::PartialRecordSet);
+            }
+            Some(_) => {}
+            None => durable_boundary = Some(boundary.clone()),
+        }
+    }
+    let boundary = durable_boundary.ok_or(StoreError::PartialRecordSet)?;
+    if commit
+        .snapshot
+        .migration_boundary
+        .as_ref()
+        .is_some_and(|supplied| supplied != &boundary)
+    {
+        return Err(StoreError::InvalidCommit);
+    }
+    crate::validate_migration_source(&document, Some(&boundary), &records.sources)
+        .map_err(|_| StoreError::PartialRecordSet)?;
+
+    let mut matching_audit = None;
+    for audit in records
+        .audits
+        .iter()
+        .filter(|audit| audit.audit_id() == &boundary.migration_id)
+    {
+        if audit.validate().is_err()
+            || !matches!(audit.action(), crate::audit::AuditAction::Migration)
+            || audit.command_id() != &boundary.migration_id
+            || audit.transaction_id() != &boundary.migration_id
+            || audit.document_id() != &boundary.document_id
+            || audit.base_revision() != boundary.revision
+            || audit.new_revision() != boundary.revision
+            || audit.durable_sequence() != u64::from(boundary.revision)
+            || audit.transaction_type() != "migration"
+            || audit.modality() != &SourceModality::System
+            || audit.timestamp().as_str() != boundary.issued_at
+            || audit.metadata()
+                != [crate::audit::AuditMetadata::Migration {
+                    from_schema_version: boundary.source_schema_version,
+                    to_schema_version: boundary.current_schema_version,
+                }]
+            || !matches!(audit.outcome(), crate::audit::AuditOutcome::Success)
+        {
+            return Err(StoreError::PartialRecordSet);
+        }
+        match matching_audit {
+            Some(existing) if existing != audit => return Err(StoreError::PartialRecordSet),
+            Some(_) => {}
+            None => matching_audit = Some(audit),
+        }
+    }
+    if matching_audit.is_none() {
+        return Err(StoreError::PartialRecordSet);
+    }
+
+    commit.snapshot.migration_boundary = Some(boundary);
+    Ok(())
+}
+
+/// Proves that a logical commit extends the recovered durable head (or is an
+/// exact retry of that head) before a browser/native adapter receives bytes to
+/// persist. Self-consistent candidate JSON is not sufficient: it must be the
+/// executable result of the durable prefix.
+fn validate_commit_against_records(
+    records: &RecoverRequest,
+    commit: &PersistenceCommit,
+    document: &FlowDocument,
+) -> Result<u32, StoreError> {
+    if commit.transaction.base_revision == 0 {
+        return Ok(0);
+    }
+
+    let mut already_durable = false;
+    for transaction in records
+        .transactions
+        .iter()
+        .filter(|transaction| transaction.transaction_id == commit.transaction.transaction_id)
+    {
+        if transaction != &commit.transaction {
+            return Err(StoreError::PartialRecordSet);
+        }
+        already_durable = true;
+    }
+
+    let (recovered, checkpoint_revision) = crate::recover_inner_with_checkpoint(records.clone())
+        .map_err(|_| StoreError::PartialRecordSet)?;
+    let before = decode_canonical(recovered.session.canonical_json.as_bytes())
+        .map_err(|_| StoreError::PartialRecordSet)?;
+    if before.document_id != recovered.session.document_id
+        || before.revision != recovered.session.revision
+        || canonical_hash(recovered.session.canonical_json.as_bytes())
+            != recovered.session.canonical_hash
+    {
+        return Err(StoreError::PartialRecordSet);
+    }
+
+    if already_durable {
+        if before != *document
+            || recovered.session.revision != commit.transaction.new_revision
+            || recovered.session.canonical_hash != commit.transaction.after_hash
+            || recovered.session.history != commit.snapshot.history
+        {
+            return Err(StoreError::InvalidCommit);
+        }
+        return Ok(checkpoint_revision);
+    }
+
+    if before.document_id != commit.transaction.document_id
+        || before.schema_version != commit.transaction.schema_version
+        || before.revision != commit.transaction.base_revision
+        || recovered.session.canonical_hash != commit.transaction.before_hash
+    {
+        return Err(StoreError::InvalidCommit);
+    }
+    let mut history = recovered.session.history;
+    let replayed =
+        replay_forward(&before, &commit.transaction).map_err(|_| StoreError::InvalidCommit)?;
+    crate::replay_history_effect(&mut history, &commit.transaction, &before, &replayed)
+        .map_err(|_| StoreError::InvalidCommit)?;
+    if replayed != *document || history != commit.snapshot.history {
+        return Err(StoreError::InvalidCommit);
+    }
+    Ok(checkpoint_revision)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -736,8 +882,8 @@ fn validate_transaction_audit(
 }
 
 fn validate_commit_set(commit: &PersistenceCommit) -> Result<FlowDocument, StoreError> {
-    let document = decode_canonical(commit.snapshot.canonical_json.as_bytes())
-        .map_err(|_| StoreError::InvalidCommit)?;
+    let (document, validated_history, validated_hash) =
+        crate::validate_snapshot(&commit.snapshot).map_err(|_| StoreError::InvalidCommit)?;
     let computed_hash = canonical_hash(commit.snapshot.canonical_json.as_bytes());
     validate_transaction_audit(&commit.transaction, &commit.audit)?;
     if commit.snapshot.record_format_version != crate::RECORD_FORMAT_VERSION
@@ -750,6 +896,8 @@ fn validate_commit_set(commit: &PersistenceCommit) -> Result<FlowDocument, Store
         || commit.transaction.new_revision != document.revision
         || commit.transaction.after_hash != computed_hash
         || commit.replace_existing != (commit.transaction.base_revision == 0)
+        || validated_history != commit.snapshot.history
+        || validated_hash != computed_hash
     {
         return Err(StoreError::InvalidCommit);
     }
@@ -799,6 +947,7 @@ fn validate_migration_commit(
         || commit.audit.durable_sequence() != u64::from(document.revision)
         || commit.audit.transaction_type() != "migration"
         || commit.audit.modality() != &SourceModality::System
+        || commit.audit.timestamp().as_str() != boundary.issued_at
         || commit.audit.metadata()
             != [crate::audit::AuditMetadata::Migration {
                 from_schema_version: boundary.source_schema_version,
@@ -809,12 +958,15 @@ fn validate_migration_commit(
     {
         return Err(StoreError::InvalidCommit);
     }
-    crate::validate_migration_source(
+    let migration_output = crate::validate_migration_source(
         &document,
         commit.snapshot.migration_boundary.as_ref(),
         std::slice::from_ref(&commit.source),
     )
     .map_err(|_| StoreError::InvalidCommit)?;
+    if migration_output.as_ref() != Some(&document) {
+        return Err(StoreError::InvalidCommit);
+    }
     validate_asset_records(&document, &commit.assets).map_err(|_| StoreError::InvalidCommit)?;
     Ok(document)
 }

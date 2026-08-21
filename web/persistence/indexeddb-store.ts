@@ -64,6 +64,7 @@ export interface SnapshotRecordDto {
   readonly migrationBoundary?: {
     readonly recordFormatVersion: number
     readonly migrationId: string
+    readonly issuedAt: string
     readonly documentId: string
     readonly revision: number
     readonly sourceSchemaVersion: number

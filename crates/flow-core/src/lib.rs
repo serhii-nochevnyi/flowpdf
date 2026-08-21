@@ -94,6 +94,7 @@ pub struct SnapshotRecord {
 pub struct MigrationBoundaryRecord {
     pub record_format_version: u32,
     pub migration_id: CommandId,
+    pub issued_at: String,
     pub document_id: DocumentId,
     pub revision: u32,
     pub source_schema_version: u32,
@@ -113,10 +114,13 @@ pub struct MigrationPersistenceCommit {
 }
 
 impl MigrationBoundaryRecord {
-    fn validate_against(
+    /// Validates the immutable migration-lineage pointer carried by every
+    /// current-schema checkpoint descended from a migration. The boundary
+    /// revision/hash describe the original migration output, not the later
+    /// checkpoint currently being validated.
+    pub(crate) fn validate_against_current(
         &self,
         document: &FlowDocument,
-        migrated_hash: &str,
     ) -> Result<(), CoreError> {
         let Provenance::Migrated {
             source_schema_version,
@@ -127,17 +131,30 @@ impl MigrationBoundaryRecord {
         else {
             return Err(CoreError::RecoveryGap);
         };
+        AuditTimestamp::parse(self.issued_at.clone())?;
         RevisionHash::parse(self.source_canonical_hash.clone())?;
+        RevisionHash::parse(self.migrated_canonical_hash.clone())?;
         if self.record_format_version != RECORD_FORMAT_VERSION
             || self.document_id != document.document_id
-            || self.revision != document.revision
+            || self.revision > document.revision
             || self.source_schema_version != *source_schema_version
             || self.current_schema_version != *current_schema_version
             || self.current_schema_version != document.schema_version
-            || self.source_canonical_hash == migrated_hash
-            || self.migrated_canonical_hash != migrated_hash
+            || self.source_canonical_hash == self.migrated_canonical_hash
             || self.hops != *hops
         {
+            return Err(CoreError::RecoveryGap);
+        }
+        Ok(())
+    }
+
+    fn validate_migration_output(
+        &self,
+        document: &FlowDocument,
+        migrated_hash: &str,
+    ) -> Result<(), CoreError> {
+        self.validate_against_current(document)?;
+        if self.revision != document.revision || self.migrated_canonical_hash != migrated_hash {
             return Err(CoreError::RecoveryGap);
         }
         Ok(())
@@ -447,6 +464,7 @@ fn migrate_document_inner(
         let boundary = MigrationBoundaryRecord {
             record_format_version: RECORD_FORMAT_VERSION,
             migration_id: request.migration_id.clone(),
+            issued_at: request.issued_at.clone(),
             document_id: outcome.document.document_id.clone(),
             revision: outcome.document.revision,
             source_schema_version: outcome.report.source_schema_version,
@@ -455,7 +473,7 @@ fn migrate_document_inner(
             migrated_canonical_hash: outcome.canonical_hash.clone(),
             hops: outcome.report.hops.clone(),
         };
-        boundary.validate_against(&outcome.document, &outcome.canonical_hash)?;
+        boundary.validate_migration_output(&outcome.document, &outcome.canonical_hash)?;
         let snapshot = SnapshotRecord {
             record_format_version: RECORD_FORMAT_VERSION,
             document_id: outcome.document.document_id.clone(),
@@ -657,6 +675,14 @@ fn recovery_audit(
 }
 
 fn recover_inner(request: RecoverRequest) -> Result<RecoverResult, CoreError> {
+    recover_inner_with_checkpoint(request).map(|(recovered, _)| recovered)
+}
+
+/// Returns the revision of the snapshot that actually passed validation, so
+/// durability policy never trusts metadata from a newer rejected candidate.
+pub(crate) fn recover_inner_with_checkpoint(
+    request: RecoverRequest,
+) -> Result<(RecoverResult, u32), CoreError> {
     preflight_recovery_records(&request)?;
     let snapshots = normalize_snapshots(request.snapshots)?;
     let document_id = snapshots
@@ -674,7 +700,7 @@ fn recover_inner(request: RecoverRequest) -> Result<RecoverResult, CoreError> {
             &request.assets,
             &sources,
         ) {
-            Ok(result) => return Ok(result),
+            Ok(result) => return Ok((result, snapshot.revision)),
             Err(error) => {
                 if first_error.is_none() {
                     first_error = Some(error);
@@ -693,9 +719,10 @@ fn recover_from_snapshot(
     sources: &[store::MigrationSourceRecord],
 ) -> Result<RecoverResult, CoreError> {
     let (mut document, mut history, _) = validate_snapshot(snapshot)?;
-    validate_migration_source(&document, snapshot.migration_boundary.as_ref(), sources)?;
+    let migration_output =
+        validate_migration_source(&document, snapshot.migration_boundary.as_ref(), sources)?;
     store::validate_asset_records(&document, assets)?;
-    validate_snapshot_head(&document, &history, records)?;
+    validate_snapshot_head(&document, &history, records, migration_output.as_ref())?;
 
     let checkpoint_revision = document.revision;
     for record in records
@@ -865,41 +892,51 @@ fn normalize_migration_sources(
     Ok(identities.into_values().collect())
 }
 
-fn validate_migration_source(
+pub(crate) fn validate_migration_source(
     document: &FlowDocument,
     boundary: Option<&MigrationBoundaryRecord>,
     sources: &[store::MigrationSourceRecord],
-) -> Result<(), CoreError> {
+) -> Result<Option<FlowDocument>, CoreError> {
     let Some(boundary) = boundary else {
         return if sources.is_empty() {
-            Ok(())
+            Ok(None)
         } else {
             Err(CoreError::RecoveryGap)
         };
     };
-    let matching = sources
-        .iter()
-        .filter(|source| {
-            source.document_id == document.document_id
-                && source.schema_version == boundary.source_schema_version
-                && source.canonical_hash == boundary.source_canonical_hash
-        })
-        .collect::<Vec<_>>();
-    if matching.len() != 1 {
+    boundary.validate_against_current(document)?;
+    if sources.iter().any(|source| {
+        source.record_format_version != RECORD_FORMAT_VERSION
+            || source.document_id != document.document_id
+            || source.canonical_hash != canonical_hash(source.canonical_json.as_bytes())
+    }) {
         return Err(CoreError::RecoveryGap);
     }
+    let mut matching = None;
+    for source in sources.iter().filter(|source| {
+        source.document_id == document.document_id
+            && source.schema_version == boundary.source_schema_version
+            && source.canonical_hash == boundary.source_canonical_hash
+    }) {
+        match matching {
+            Some(existing) if existing != source => return Err(CoreError::RecoveryGap),
+            Some(_) => {}
+            None => matching = Some(source),
+        }
+    }
+    let matching = matching.ok_or(CoreError::RecoveryGap)?;
     let migrated = MigrationRegistry::current()
-        .migrate(matching[0].canonical_json.as_bytes())
+        .migrate(matching.canonical_json.as_bytes())
         .map_err(|_| CoreError::RecoveryGap)?;
     if migrated.report.source_schema_version != boundary.source_schema_version
         || migrated.report.current_schema_version != boundary.current_schema_version
         || migrated.report.hops != boundary.hops
         || migrated.canonical_hash != boundary.migrated_canonical_hash
-        || migrated.document != *document
     {
         return Err(CoreError::RecoveryGap);
     }
-    Ok(())
+    boundary.validate_migration_output(&migrated.document, &migrated.canonical_hash)?;
+    Ok(Some(migrated.document))
 }
 
 fn validate_snapshot(
@@ -922,7 +959,7 @@ fn validate_snapshot(
     match (&document.provenance, &snapshot.migration_boundary) {
         (Provenance::LocalSample { .. }, None) => {}
         (Provenance::Migrated { .. }, Some(boundary)) => {
-            boundary.validate_against(&document, &computed_hash)?;
+            boundary.validate_against_current(&document)?;
         }
         _ => return Err(CoreError::RecoveryGap),
     }
@@ -976,12 +1013,82 @@ fn validate_snapshot_head(
     document: &FlowDocument,
     history: &HistoryState,
     records: &[TransactionRecord],
+    migration_output: Option<&FlowDocument>,
 ) -> Result<(), CoreError> {
-    if matches!(document.provenance, Provenance::Migrated { .. }) {
-        // A migration is an explicit current-schema checkpoint boundary. Its
-        // source document and hop sequence are validated by MigrationRegistry;
-        // only current-schema transactions after this boundary are replayed.
+    if let Provenance::Migrated { .. } = document.provenance {
+        let migration_output = migration_output.ok_or(CoreError::RecoveryGap)?;
+        if migration_output.document_id != document.document_id
+            || migration_output.schema_version != document.schema_version
+            || migration_output.provenance != document.provenance
+            || migration_output.revision > document.revision
+        {
+            return Err(CoreError::RecoveryGap);
+        }
+        if records.iter().any(|record| {
+            record.schema_version == document.schema_version
+                && record.new_revision <= migration_output.revision
+        }) {
+            // A migration snapshot is the first current-schema durable
+            // boundary. Current-schema transactions cannot exist behind it;
+            // accepting them would create unaudited ghost history.
+            return Err(CoreError::RecoveryGap);
+        }
+
+        let checkpoint_records = records
+            .iter()
+            .filter(|record| {
+                record.schema_version == document.schema_version
+                    && record.new_revision > migration_output.revision
+                    && record.new_revision <= document.revision
+            })
+            .collect::<Vec<_>>();
+        let expected_count = document
+            .revision
+            .checked_sub(migration_output.revision)
+            .and_then(|count| usize::try_from(count).ok())
+            .ok_or(CoreError::RecoveryGap)?;
+        if checkpoint_records.len() != expected_count {
+            return Err(CoreError::RecoveryGap);
+        }
+        for (index, record) in checkpoint_records.iter().enumerate() {
+            let offset = u32::try_from(index).map_err(|_| CoreError::RecoveryGap)?;
+            let base_revision = migration_output
+                .revision
+                .checked_add(offset)
+                .ok_or(CoreError::RecoveryGap)?;
+            let new_revision = base_revision.checked_add(1).ok_or(CoreError::RecoveryGap)?;
+            if record.base_revision != base_revision
+                || record.new_revision != new_revision
+                || (index == 0
+                    && record.before_hash != canonical_hash(&canonical_bytes(migration_output)?))
+                || (index > 0 && checkpoint_records[index - 1].after_hash != record.before_hash)
+            {
+                return Err(CoreError::RecoveryGap);
+            }
+        }
+
+        let mut reversed = document.clone();
+        for record in checkpoint_records.iter().rev() {
+            reversed = replay_inverse(&reversed, record).map_err(|_| CoreError::RecoveryGap)?;
+        }
+        if reversed != *migration_output {
+            return Err(CoreError::RecoveryGap);
+        }
+
+        let mut replayed = migration_output.clone();
+        let mut rebuilt_history = HistoryState::default();
+        for record in checkpoint_records {
+            let before = replayed.clone();
+            replayed = replay_forward(&before, record).map_err(|_| CoreError::RecoveryGap)?;
+            replay_history_effect(&mut rebuilt_history, record, &before, &replayed)?;
+        }
+        if replayed != *document || rebuilt_history != *history {
+            return Err(CoreError::RecoveryGap);
+        }
         return Ok(());
+    }
+    if migration_output.is_some() {
+        return Err(CoreError::RecoveryGap);
     }
 
     let checkpoint_records = records
@@ -1114,6 +1221,10 @@ fn normalize_and_bind_audits(
                     || audit.transaction_id() != &boundary.migration_id
                     || audit.base_revision() != boundary.revision
                     || audit.new_revision() != boundary.revision
+                    || audit.durable_sequence() != u64::from(boundary.revision)
+                    || audit.transaction_type() != "migration"
+                    || audit.modality() != &SourceModality::System
+                    || audit.timestamp().as_str() != boundary.issued_at
                     || audit.metadata()
                         != [AuditMetadata::Migration {
                             from_schema_version: boundary.source_schema_version,
