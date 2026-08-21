@@ -281,7 +281,7 @@ class FoundationInspector implements FoundationInspectorController {
     try {
       const result = unwrap(
         this.wasm.create_sample({
-          requestedLocale: 'uk-UA',
+          requestedLocale: this.locale === 'uk' ? 'uk-UA' : 'en-US',
         }),
       )
       await this.persistPlanned(result.commit, 'creation')

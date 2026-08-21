@@ -63,7 +63,7 @@ describe('Foundation Inspector approved contract', () => {
     expect(ukKeys).toContain('foundationInspector.provenance.noExport')
 
     const root = rootFixture()
-    await mountWithOptions(root, {
+    const inspector = await mountWithOptions(root, {
       databaseName: 'flowpdf-inspector-locale-unit',
       locale: 'en',
     })
@@ -74,6 +74,8 @@ describe('Foundation Inspector approved contract', () => {
     expect(root.textContent).toContain(
       'Preview or export provenance will be available in the next phase.',
     )
+    await clickAndWait(inspector, root, 'create-sample')
+    expect(inspector.snapshot().locale).toBe('en-US')
   })
 
   it('renders semantic empty, populated, audit, copy, and partial-provenance states', async () => {
@@ -91,6 +93,7 @@ describe('Foundation Inspector approved contract', () => {
     expect(root.querySelector('[data-audit-count]')?.textContent).toContain('0')
 
     await clickAndWait(inspector, root, 'create-sample')
+    expect(inspector.snapshot().locale).toBe('uk-UA')
 
     const auditTable = root.querySelector<HTMLTableElement>('table[data-audit]')
     expect(auditTable).not.toBeNull()
