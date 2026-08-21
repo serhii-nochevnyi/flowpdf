@@ -433,7 +433,11 @@ fn recovery_replays_transaction_meaning_and_rejects_tampered_inverse() {
             modality: SourceModality::Api,
             issued_at: "2026-08-14T20:03:06Z".to_owned(),
             kind: CommandKind::InsertText {
-                target: created.session.next_command_target.clone(),
+                target: created
+                    .session
+                    .next_command_target
+                    .clone()
+                    .expect("sample command target"),
                 text: "X".to_owned(),
             },
         },

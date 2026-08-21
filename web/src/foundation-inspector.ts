@@ -32,7 +32,7 @@ interface SessionDto {
   readonly canonicalHash: string
   readonly documentId: string
   readonly revision: number
-  readonly nextCommandTarget: LogicalPositionDto
+  readonly nextCommandTarget: LogicalPositionDto | null
   readonly history: HistoryStateDto
 }
 
@@ -299,6 +299,7 @@ class FoundationInspector implements FoundationInspectorController {
 
   private async applyMutation(): Promise<void> {
     const session = this.requireSession()
+    const target = this.requireCommandTarget(session)
     const issuedAt = this.currentTimestamp()
     this.setPending()
     try {
@@ -313,7 +314,7 @@ class FoundationInspector implements FoundationInspectorController {
             issuedAt,
             kind: {
               type: 'insertText',
-              target: session.nextCommandTarget,
+              target,
               text: ' — typed mutation',
             },
           },
@@ -334,6 +335,7 @@ class FoundationInspector implements FoundationInspectorController {
 
   private async applyStaleCommand(): Promise<void> {
     const session = this.requireSession()
+    const target = this.requireCommandTarget(session)
     const issuedAt = this.currentTimestamp()
     this.setPending()
     try {
@@ -348,7 +350,7 @@ class FoundationInspector implements FoundationInspectorController {
             issuedAt,
             kind: {
               type: 'insertText',
-              target: session.nextCommandTarget,
+              target,
               text: ' — stale diagnostic',
             },
           },
@@ -524,6 +526,13 @@ class FoundationInspector implements FoundationInspectorController {
     return this.session
   }
 
+  private requireCommandTarget(session: SessionDto): LogicalPositionDto {
+    if (session.nextCommandTarget === null) {
+      throw new FoundationError('FLOW_INVALID_TARGET')
+    }
+    return session.nextCommandTarget
+  }
+
   private handleKeyboard(event: KeyboardEvent): void {
     if (
       this.busy ||
@@ -602,8 +611,10 @@ class FoundationInspector implements FoundationInspectorController {
     this.elements.create.disabled = false
     this.elements.openLast.disabled = !this.hasDurableRecords
     this.elements.openOlder.disabled = false
-    this.elements.apply.disabled = !hasSession
-    this.elements.stale.disabled = !hasSession
+    const hasCommandTarget =
+      this.session?.nextCommandTarget !== undefined && this.session.nextCommandTarget !== null
+    this.elements.apply.disabled = !hasSession || !hasCommandTarget
+    this.elements.stale.disabled = !hasSession || !hasCommandTarget
     this.elements.undo.disabled = !hasSession || cursor === 0
     this.elements.redo.disabled = !hasSession || cursor >= entryCount
     this.elements.save.disabled = !hasSession || this.lastCommit === undefined

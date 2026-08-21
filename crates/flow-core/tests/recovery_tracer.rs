@@ -128,7 +128,11 @@ fn rejected_command_audit_is_redacted_atomic_and_idempotent_without_a_transactio
             modality: SourceModality::Voice,
             issued_at: "2026-08-14T20:40:02Z".to_owned(),
             kind: CommandKind::InsertText {
-                target: created.session.next_command_target.clone(),
+                target: created
+                    .session
+                    .next_command_target
+                    .clone()
+                    .expect("sample command target"),
                 text: "SENSITIVE_REJECTED_TEXT".to_owned(),
             },
         },
@@ -174,7 +178,11 @@ fn apply_one(created: &OperationResult) -> OperationResult {
             modality: SourceModality::Voice,
             issued_at: "2026-08-14T20:40:01Z".to_owned(),
             kind: CommandKind::InsertText {
-                target: created.session.next_command_target.clone(),
+                target: created
+                    .session
+                    .next_command_target
+                    .clone()
+                    .expect("sample command target"),
                 text: " — приватний вміст команди".to_owned(),
             },
         },
@@ -395,7 +403,10 @@ fn migrated_documents_checkpoint_after_the_boundary_and_reject_lineage_tampering
                 modality: SourceModality::Api,
                 issued_at: format!("2026-08-14T20:41:0{}Z", index + 1),
                 kind: CommandKind::InsertText {
-                    target: before.session.next_command_target,
+                    target: before
+                        .session
+                        .next_command_target
+                        .expect("sample command target"),
                     text: format!("-{index}"),
                 },
             },
@@ -587,7 +598,10 @@ fn migrated_documents_checkpoint_after_the_boundary_and_reject_lineage_tampering
             modality: SourceModality::Api,
             issued_at: "2026-08-14T20:41:04Z".to_owned(),
             kind: CommandKind::InsertText {
-                target: final_state.session.next_command_target,
+                target: final_state
+                    .session
+                    .next_command_target
+                    .expect("sample command target"),
                 text: "-candidate".to_owned(),
             },
         },

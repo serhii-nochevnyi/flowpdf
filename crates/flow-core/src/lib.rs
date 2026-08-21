@@ -178,7 +178,7 @@ pub struct SessionDto {
     pub canonical_hash: String,
     pub document_id: DocumentId,
     pub revision: u32,
-    pub next_command_target: LogicalPosition,
+    pub next_command_target: Option<LogicalPosition>,
     pub history: HistoryState,
 }
 
@@ -1403,24 +1403,27 @@ fn session_dto(
     canonical_json: String,
     canonical_hash: String,
 ) -> Result<SessionDto, CoreError> {
-    let node = document
+    let next_command_target = document
         .content
         .iter()
         .find(|node| node.kind == ContentNodeKind::Paragraph)
-        .ok_or(CommandError::InvalidTarget)?;
-    let utf16_offset = u32::try_from(node.text.encode_utf16().count())
-        .map(Utf16Offset::new)
-        .map_err(|_| CommandError::InvalidRange)?;
+        .map(|node| {
+            let utf16_offset = u32::try_from(node.text.encode_utf16().count())
+                .map(Utf16Offset::new)
+                .map_err(|_| CommandError::InvalidRange)?;
+            Ok::<_, CommandError>(LogicalPosition {
+                node_id: node.id.clone(),
+                utf16_offset,
+                affinity: Affinity::Forward,
+            })
+        })
+        .transpose()?;
     Ok(SessionDto {
         canonical_json,
         canonical_hash,
         document_id: document.document_id.clone(),
         revision: document.revision,
-        next_command_target: LogicalPosition {
-            node_id: node.id.clone(),
-            utf16_offset,
-            affinity: Affinity::Forward,
-        },
+        next_command_target,
         history,
     })
 }
@@ -1515,6 +1518,34 @@ mod tests {
     }
 
     #[test]
+    fn empty_and_image_only_documents_publish_a_null_command_target() {
+        for keep_image in [false, true] {
+            let mut document = FlowDocument::deterministic_sample("uk-UA").expect("sample");
+            document.fields.clear();
+            document
+                .content
+                .retain(|node| keep_image && node.kind == ContentNodeKind::Image);
+            if !keep_image {
+                document.assets.clear();
+            }
+            let canonical_json = canonical_string(&document).expect("canonical document");
+            let session = session_dto(
+                &document,
+                HistoryState::default(),
+                canonical_json.clone(),
+                canonical_hash(canonical_json.as_bytes()),
+            )
+            .expect("session DTO");
+
+            assert_eq!(session.next_command_target, None);
+            assert_eq!(
+                serde_json::to_value(&session).expect("session JSON")["nextCommandTarget"],
+                serde_json::Value::Null
+            );
+        }
+    }
+
+    #[test]
     fn sample_command_and_recovery_preserve_the_canonical_hash() {
         let created = success(create_sample(CreateSampleRequest {
             requested_locale: "uk-UA".to_owned(),
@@ -1522,7 +1553,11 @@ mod tests {
         let command_id =
             CommandId::new("00000000-0000-4000-8000-000000000202").expect("command id");
         let history = created.session.history.clone();
-        let target = created.session.next_command_target.clone();
+        let target = created
+            .session
+            .next_command_target
+            .clone()
+            .expect("sample command target");
         let applied = success(apply_command(ApplyCommandRequest {
             canonical_json: created.session.canonical_json,
             history,
@@ -1629,7 +1664,11 @@ mod tests {
         }));
         let before_hash = created.session.canonical_hash.clone();
         let history = created.session.history.clone();
-        let target = created.session.next_command_target.clone();
+        let target = created
+            .session
+            .next_command_target
+            .clone()
+            .expect("sample command target");
         let response = apply_command(ApplyCommandRequest {
             canonical_json: created.session.canonical_json,
             history,

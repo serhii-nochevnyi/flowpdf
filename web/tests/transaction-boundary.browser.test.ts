@@ -17,11 +17,13 @@ interface SessionDto {
   readonly canonicalJson: string
   readonly canonicalHash: string
   readonly revision: number
-  readonly nextCommandTarget: {
-    readonly nodeId: string
-    readonly utf16Offset: number
-    readonly affinity: string
-  }
+  readonly nextCommandTarget:
+    | {
+        readonly nodeId: string
+        readonly utf16Offset: number
+        readonly affinity: string
+      }
+    | null
   readonly history: unknown
 }
 
@@ -56,6 +58,8 @@ test('WASM command DTO preserves the native transaction, UTF-16, stale, and dupl
   const created = createdResponse.value
   expect(created).not.toBeNull()
   if (created === null) return
+  expect(created.session.nextCommandTarget).not.toBeNull()
+  if (created.session.nextCommandTarget === null) return
 
   const insertCommand = {
     commandId: commandId(801),

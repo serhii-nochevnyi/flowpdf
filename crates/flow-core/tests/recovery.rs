@@ -37,7 +37,11 @@ fn chain_with_commands(command_count: u32) -> Vec<OperationResult> {
                 modality: SourceModality::Api,
                 issued_at: format!("2026-08-14T20:41:{:02}Z", index + 1),
                 kind: CommandKind::InsertText {
-                    target: previous.session.next_command_target.clone(),
+                    target: previous
+                        .session
+                        .next_command_target
+                        .clone()
+                        .expect("sample command target"),
                     text: format!("-{index}"),
                 },
             },

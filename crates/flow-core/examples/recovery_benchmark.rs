@@ -231,7 +231,10 @@ fn build_workload(recipe: &Recipe, policy: &Policy) -> Result<BenchmarkWorkload,
     let mut canonical_json = created.session.canonical_json;
     let mut history = created.session.history;
     let mut revision = created.session.revision;
-    let mut target = created.session.next_command_target;
+    let mut target = created
+        .session
+        .next_command_target
+        .ok_or_else(|| "sample document has no command target".to_owned())?;
     let mut expected_hash = created.session.canonical_hash;
     for sequence in 1..=recipe.transactions {
         let kind = if sequence == recipe.transactions {
@@ -272,7 +275,10 @@ fn build_workload(recipe: &Recipe, policy: &Policy) -> Result<BenchmarkWorkload,
         canonical_json = result.session.canonical_json;
         history = result.session.history;
         revision = result.session.revision;
-        target = result.session.next_command_target;
+        target = result
+            .session
+            .next_command_target
+            .ok_or_else(|| "benchmark document lost its command target".to_owned())?;
         expected_hash = result.session.canonical_hash;
     }
 
