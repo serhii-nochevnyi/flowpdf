@@ -172,9 +172,11 @@ function requestResult<T>(request: IDBRequest<T>): Promise<T> {
 }
 
 function transactionTerminal(transaction: IDBTransaction): Promise<void> {
-  return new Promise<void>((resolve, reject) => {
+  return new Promise<void>((resolve) => {
     transaction.oncomplete = () => resolve()
     transaction.onabort = () => resolve()
-    transaction.onerror = () => reject(transaction.error)
+    transaction.onerror = () => {
+      // The abort event is the terminal signal for deliberately interrupted writes.
+    }
   })
 }

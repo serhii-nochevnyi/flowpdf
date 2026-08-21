@@ -106,6 +106,8 @@ test('walking-skeleton: opens the supported older fixture through Rust migration
   })
   await clickAndWait(inspector, root, 'open-older-schema')
 
+  expect(root.querySelector('[role="alert"]')?.textContent).toBe('')
+
   const migrated = inspector.snapshot()
   expect(migrated.schemaVersion).toBe(1)
   expect(migrated.revisionProvenance.lineage).toMatchObject({

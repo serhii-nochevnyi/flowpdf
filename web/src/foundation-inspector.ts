@@ -4,6 +4,7 @@ import {
   type AuditRecordDto,
   type HistoryStateDto,
   type LogicalPositionDto,
+  type MigrationPersistenceCommitDto,
   type PersistenceCommitDto,
   type PlannedPersistenceCommitDto,
   type RecoveryRecordsDto,
@@ -76,14 +77,26 @@ interface RecoverResultDto {
   readonly view: InspectorViewDto
 }
 
+interface MigrateDocumentResultDto {
+  readonly canonicalJson: string
+  readonly canonicalHash: string
+  readonly revisionProvenance: RevisionProvenanceDto
+  readonly report: {
+    readonly sourceSchemaVersion: number
+    readonly currentSchemaVersion: number
+  }
+  readonly commit: MigrationPersistenceCommitDto | null
+}
+
 interface WasmBoundary {
   readonly default: () => Promise<unknown>
   readonly create_sample: (request: unknown) => ApiResponse<OperationResultDto>
   readonly apply_command: (request: unknown) => ApiResponse<OperationResultDto>
-  readonly plan_persistence_commit: (
-    request: unknown,
-  ) => ApiResponse<PlannedPersistenceCommitDto>
-  readonly recover_document: (request: RecoveryRecordsDto) => ApiResponse<RecoverResultDto>
+  readonly undo: (request: unknown) => ApiResponse<OperationResultDto>
+  readonly redo: (request: unknown) => ApiResponse<OperationResultDto>
+  readonly open_document: (request: unknown) => ApiResponse<MigrateDocumentResultDto>
+  readonly commit_record: (request: unknown) => ApiResponse<PlannedPersistenceCommitDto>
+  readonly query_document: (request: RecoveryRecordsDto) => ApiResponse<RecoverResultDto>
 }
 
 export interface FoundationInspectorSnapshot {
@@ -105,7 +118,13 @@ export interface FoundationInspectorController {
   reloadFromStorage(): Promise<FoundationInspectorSnapshot>
 }
 
+export interface FoundationInspectorOptions {
+  readonly databaseName?: string
+}
+
 const GENERATED_WASM_MODULE = '../generated/flow_wasm.js'
+const EMPTY_ASSET_HASH =
+  'blake3:af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262'
 let wasmPromise: Promise<WasmBoundary> | undefined
 
 async function loadWasm(): Promise<WasmBoundary> {
@@ -119,15 +138,29 @@ async function loadWasm(): Promise<WasmBoundary> {
 
 const messages = {
   'foundationInspector.createSample': 'Створити тестовий документ',
+  'foundationInspector.openLastLocal': 'Відкрити останній локальний документ',
+  'foundationInspector.openOlderSchema': 'Відкрити документ старішої схеми',
   'foundationInspector.applyTestMutation': 'Застосувати тестову зміну',
+  'foundationInspector.testStaleCommand': 'Перевірити застарілу команду',
+  'foundationInspector.undo': 'Скасувати',
+  'foundationInspector.redo': 'Повторити',
+  'foundationInspector.save': 'Зберегти локально',
+  'foundationInspector.reload': 'Перезавантажити зі сховища',
+  'foundationInspector.recover': 'Відновити останню стійку ревізію',
   'foundationInspector.empty.heading': 'Документ ще не відкрито',
   'foundationInspector.empty.body':
-    'Створіть тестовий документ, щоб перевірити ревізії та відновлення.',
+    'Створіть тестовий документ або відкрийте останній локальний документ, щоб перевірити ревізії та відновлення.',
+  'foundationInspector.audit.empty': 'Записів аудиту ще немає.',
   'foundationInspector.pending': 'Виконується…',
   'foundationInspector.create.success': 'Тестовий документ створено і збережено локально.',
+  'foundationInspector.open.success': 'Відкрито локальну ревізію {revision}.',
+  'foundationInspector.migration.success':
+    'Документ перенесено зі схеми {sourceSchema} до схеми {currentSchema}.',
   'foundationInspector.save.success': 'Збережено локально — ревізія {revision}.',
   'foundationInspector.error.command':
     'Команду не виконано. Дані не змінено. Код: {code}.',
+  'foundationInspector.error.recovery':
+    'Не вдалося безпечно відновити документ. Локальні дані не змінено. Код: {code}.',
   'foundationInspector.summary': 'Структура: блоків — {nodes}, полів — {fields}, ресурсів — {assets}.',
   'foundationInspector.provenance.created': 'Створено {createdAt}.',
   'foundationInspector.provenance.migrated':
@@ -151,6 +184,8 @@ class FoundationInspector implements FoundationInspectorController {
   private readonly elements: InspectorElements
   private session: SessionDto | undefined
   private view: InspectorViewDto | undefined
+  private lastCommit: PersistenceCommitDto | undefined
+  private hasDurableRecords = false
   private pending: Promise<void> = Promise.resolve()
 
   constructor(
@@ -165,6 +200,36 @@ class FoundationInspector implements FoundationInspectorController {
     this.elements.apply.addEventListener('click', () => {
       this.start(() => this.applyMutation())
     })
+    this.elements.openLast.addEventListener('click', () => {
+      this.start(() => this.openLast())
+    })
+    this.elements.openOlder.addEventListener('click', () => {
+      this.start(() => this.openOlderSchema())
+    })
+    this.elements.stale.addEventListener('click', () => {
+      this.start(() => this.applyStaleCommand())
+    })
+    this.elements.undo.addEventListener('click', () => {
+      this.start(() => this.applyHistory('undo'))
+    })
+    this.elements.redo.addEventListener('click', () => {
+      this.start(() => this.applyHistory('redo'))
+    })
+    this.elements.save.addEventListener('click', () => {
+      this.start(() => this.save())
+    })
+    this.elements.reload.addEventListener('click', () => {
+      this.start(() => this.restoreFromStorage('reload'))
+    })
+    this.elements.recover.addEventListener('click', () => {
+      this.start(() => this.restoreFromStorage('recover'))
+    })
+    this.render()
+  }
+
+  async initialize(): Promise<void> {
+    const records = await this.store.loadRecords({ allowEmpty: true })
+    this.hasDurableRecords = records.snapshots.length > 0
     this.render()
   }
 
@@ -191,21 +256,8 @@ class FoundationInspector implements FoundationInspectorController {
   }
 
   async reloadFromStorage(): Promise<FoundationInspectorSnapshot> {
-    this.setPending()
-    try {
-      const records = await this.store.loadRecords()
-      const recovered = unwrap(this.wasm.recover_document(records))
-      this.session = recovered.session
-      this.view = recovered.view
-      this.setStatus(message('foundationInspector.save.success', { revision: recovered.view.revision }))
-      this.render()
-      return this.snapshot()
-    } catch (error: unknown) {
-      this.setError(errorCode(error))
-      throw error
-    } finally {
-      this.setBusy(false)
-    }
+    await this.restoreFromStorage('reload')
+    return this.snapshot()
   }
 
   private start(operation: () => Promise<void>): void {
@@ -223,47 +275,193 @@ class FoundationInspector implements FoundationInspectorController {
         }),
       )
       await this.persistPlanned(result.commit, 'creation')
-      await this.publishRecoveredState(message('foundationInspector.create.success'))
+      this.lastCommit = result.commit
+      await this.publishRecoveredState(
+        message('foundationInspector.create.success'),
+        result.session,
+      )
     } finally {
       this.setBusy(false)
     }
   }
 
   private async applyMutation(): Promise<void> {
-    if (this.session === undefined) {
-      throw new FoundationError('FLOW_NO_ACTIVE_DOCUMENT')
-    }
+    const session = this.requireSession()
     this.setPending()
     try {
       const result = unwrap(
         this.wasm.apply_command({
-          canonicalJson: this.session.canonicalJson,
-          history: this.session.history,
+          canonicalJson: session.canonicalJson,
+          history: session.history,
           command: {
-            commandId: commandIdForRevision(this.session.revision + 1),
-            baseRevision: this.session.revision,
+            commandId: newCommandId(),
+            baseRevision: session.revision,
             modality: 'ui',
             issuedAt: '2026-08-14T00:00:01Z',
             kind: {
               type: 'insertText',
-              target: this.session.nextCommandTarget,
+              target: session.nextCommandTarget,
               text: ' — typed mutation',
             },
           },
         }),
       )
       await this.persistPlanned(result.commit, 'committedTransaction')
+      this.lastCommit = result.commit
       await this.publishRecoveredState(
         message('foundationInspector.save.success', { revision: result.session.revision }),
+        result.session,
       )
     } finally {
       this.setBusy(false)
     }
   }
 
-  private async publishRecoveredState(status: string): Promise<void> {
+  private async applyStaleCommand(): Promise<void> {
+    const session = this.requireSession()
+    this.setPending()
+    try {
+      unwrap(
+        this.wasm.apply_command({
+          canonicalJson: session.canonicalJson,
+          history: session.history,
+          command: {
+            commandId: newCommandId(),
+            baseRevision: Math.max(0, session.revision - 1),
+            modality: 'ui',
+            issuedAt: '2026-08-14T00:00:01Z',
+            kind: {
+              type: 'insertText',
+              target: session.nextCommandTarget,
+              text: ' — stale diagnostic',
+            },
+          },
+        }),
+      )
+      throw new FoundationError('FLOW_STALE_DIAGNOSTIC_ACCEPTED')
+    } finally {
+      this.setBusy(false)
+    }
+  }
+
+  private async applyHistory(kind: 'undo' | 'redo'): Promise<void> {
+    const session = this.requireSession()
+    this.setPending()
+    try {
+      const request = {
+        canonicalJson: session.canonicalJson,
+        history: session.history,
+        command: {
+          commandId: newCommandId(),
+          baseRevision: session.revision,
+          modality: 'ui',
+          issuedAt: '2026-08-14T00:00:01Z',
+          kind: { type: kind },
+        },
+      }
+      const result = unwrap(
+        kind === 'undo' ? this.wasm.undo(request) : this.wasm.redo(request),
+      )
+      await this.persistPlanned(result.commit, 'committedTransaction')
+      this.lastCommit = result.commit
+      await this.publishRecoveredState(
+        message('foundationInspector.save.success', { revision: result.session.revision }),
+        result.session,
+      )
+    } finally {
+      this.setBusy(false)
+    }
+  }
+
+  private async openOlderSchema(): Promise<void> {
+    this.setPending()
+    try {
+      const result = unwrap(
+        this.wasm.open_document({
+          fixture: 'supportedOlder',
+          migrationId: newCommandId(),
+          issuedAt: '2026-08-14T00:00:02Z',
+          assets: [
+            {
+              recordFormatVersion: 1,
+              contentHash: EMPTY_ASSET_HASH,
+              bytes: [],
+            },
+          ],
+        }),
+      )
+      if (result.commit === null) {
+        throw new FoundationError('FLOW_MIGRATION_BOUNDARY_REQUIRED')
+      }
+      await this.store.commitMigration(result.commit)
+      this.lastCommit = undefined
+      await this.publishRecoveredState(
+        message('foundationInspector.migration.success', {
+          sourceSchema: result.report.sourceSchemaVersion,
+          currentSchema: result.report.currentSchemaVersion,
+        }),
+        {
+          revision: result.revisionProvenance.revision,
+          canonicalHash: result.canonicalHash,
+        },
+      )
+    } finally {
+      this.setBusy(false)
+    }
+  }
+
+  private async openLast(): Promise<void> {
+    await this.restoreFromStorage('open')
+  }
+
+  private async save(): Promise<void> {
+    const session = this.requireSession()
+    if (this.lastCommit === undefined) {
+      throw new FoundationError('FLOW_NO_PENDING_COMMIT')
+    }
+    this.setPending()
+    try {
+      await this.persistPlanned(this.lastCommit, 'explicitLocalSave')
+      await this.publishRecoveredState(
+        message('foundationInspector.save.success', { revision: session.revision }),
+        session,
+      )
+    } finally {
+      this.setBusy(false)
+    }
+  }
+
+  private async restoreFromStorage(mode: 'open' | 'reload' | 'recover'): Promise<void> {
+    this.setPending()
+    try {
+      const records = await this.store.loadRecords()
+      const recovered = unwrap(this.wasm.query_document(records))
+      this.session = recovered.session
+      this.view = recovered.view
+      this.lastCommit = undefined
+      this.setStatus(
+        mode === 'open'
+          ? message('foundationInspector.open.success', { revision: recovered.view.revision })
+          : message('foundationInspector.save.success', { revision: recovered.view.revision }),
+      )
+      this.render()
+    } finally {
+      this.setBusy(false)
+    }
+  }
+
+  private async publishRecoveredState(
+    status: string,
+    expected: Pick<SessionDto, 'revision' | 'canonicalHash'>,
+  ): Promise<void> {
     const records = await this.store.loadRecords()
-    const recovered = unwrap(this.wasm.recover_document(records))
+    const recovered = unwrap(this.wasm.query_document(records))
+    if (
+      recovered.session.revision !== expected.revision ||
+      recovered.session.canonicalHash !== expected.canonicalHash
+    ) {
+      throw new FoundationError('FLOW_RESULT_REVISION_MISMATCH')
+    }
     this.session = recovered.session
     this.view = recovered.view
     this.setStatus(status)
@@ -276,13 +474,21 @@ class FoundationInspector implements FoundationInspectorController {
   ): Promise<void> {
     const records = await this.store.loadRecords({ allowEmpty: true })
     const planned = unwrap(
-      this.wasm.plan_persistence_commit({
+      this.wasm.commit_record({
         records,
         commit,
         reason,
       }),
     )
     await this.store.commit(planned)
+    this.hasDurableRecords = true
+  }
+
+  private requireSession(): SessionDto {
+    if (this.session === undefined) {
+      throw new FoundationError('FLOW_NO_ACTIVE_DOCUMENT')
+    }
+    return this.session
   }
 
   private setPending(): void {
@@ -303,8 +509,19 @@ class FoundationInspector implements FoundationInspectorController {
   }
 
   private setBusy(busy: boolean): void {
-    this.elements.create.disabled = busy
-    this.elements.apply.disabled = busy || this.session === undefined
+    for (const control of this.elements.controls) control.disabled = busy
+    if (!busy) {
+      const hasSession = this.session !== undefined
+      const cursor = this.session?.history.cursor ?? 0
+      const entryCount = this.session?.history.entries.length ?? 0
+      this.elements.apply.disabled = !hasSession
+      this.elements.stale.disabled = !hasSession
+      this.elements.undo.disabled = !hasSession || cursor === 0
+      this.elements.redo.disabled = !hasSession || cursor >= entryCount
+      this.elements.save.disabled = !hasSession || this.lastCommit === undefined
+      this.elements.reload.disabled = !hasSession || !this.hasDurableRecords
+      this.elements.recover.disabled = !hasSession || !this.hasDurableRecords
+    }
     this.elements.root.setAttribute('aria-busy', String(busy))
   }
 
@@ -312,10 +529,16 @@ class FoundationInspector implements FoundationInspectorController {
     const populated = this.view !== undefined
     this.elements.empty.hidden = populated
     this.elements.session.hidden = !populated
-    this.elements.apply.hidden = !populated
-    this.elements.apply.disabled = !populated
+    this.elements.create.hidden = populated
+    this.elements.openOlder.hidden = populated
+    this.elements.openLast.hidden = populated || !this.hasDurableRecords
+    for (const control of this.elements.sessionControls) control.hidden = !populated
+    this.elements.auditEmpty.hidden = populated && this.view?.audit.length !== 0
+    this.elements.provenanceUnavailable.hidden = false
+    this.setBusy(false)
 
     if (this.view === undefined) {
+      this.elements.audit.replaceChildren()
       return
     }
     this.elements.documentId.textContent = this.view.documentId
@@ -330,6 +553,7 @@ class FoundationInspector implements FoundationInspectorController {
       assets: this.view.assetCount,
     })
     this.elements.provenance.textContent = provenanceText(this.view.revisionProvenance)
+    this.elements.auditEmpty.hidden = this.view.audit.length !== 0
     this.elements.audit.replaceChildren(
       ...this.view.audit.map((entry) => {
         const item = document.createElement('li')
@@ -353,14 +577,21 @@ function provenanceText(provenance: RevisionProvenanceDto): string {
           currentSchema: provenance.lineage.currentSchemaVersion,
         })
   const engine = message('foundationInspector.provenance.engine', provenance.engine)
-  return `${lineage} ${engine} ${message('foundationInspector.provenance.noExport')}`
+  return `${lineage} ${engine}`
 }
 
 export async function mountFoundationInspector(
   root: HTMLElement,
+  options: FoundationInspectorOptions = {},
 ): Promise<FoundationInspectorController> {
   const wasm = await loadWasm()
-  return new FoundationInspector(root, wasm, new IndexedDbDocumentStore())
+  const inspector = new FoundationInspector(
+    root,
+    wasm,
+    new IndexedDbDocumentStore(options.databaseName),
+  )
+  await inspector.initialize()
+  return inspector
 }
 
 function unwrap<T>(response: ApiResponse<T>): T {
@@ -370,8 +601,8 @@ function unwrap<T>(response: ApiResponse<T>): T {
   return response.value
 }
 
-function commandIdForRevision(revision: number): string {
-  return `00000000-0000-4000-8000-${String(200 + revision).padStart(12, '0')}`
+function newCommandId(): string {
+  return globalThis.crypto.randomUUID()
 }
 
 class FoundationError extends Error {
@@ -391,7 +622,17 @@ function errorCode(error: unknown): string {
 interface InspectorElements {
   readonly root: HTMLElement
   readonly create: HTMLButtonElement
+  readonly openLast: HTMLButtonElement
+  readonly openOlder: HTMLButtonElement
   readonly apply: HTMLButtonElement
+  readonly stale: HTMLButtonElement
+  readonly undo: HTMLButtonElement
+  readonly redo: HTMLButtonElement
+  readonly save: HTMLButtonElement
+  readonly reload: HTMLButtonElement
+  readonly recover: HTMLButtonElement
+  readonly controls: readonly HTMLButtonElement[]
+  readonly sessionControls: readonly HTMLButtonElement[]
   readonly empty: HTMLElement
   readonly session: HTMLElement
   readonly documentId: HTMLElement
@@ -401,7 +642,9 @@ interface InspectorElements {
   readonly locale: HTMLElement
   readonly summary: HTMLElement
   readonly provenance: HTMLElement
+  readonly provenanceUnavailable: HTMLElement
   readonly audit: HTMLOListElement
+  readonly auditEmpty: HTMLElement
   readonly status: HTMLElement
   readonly alert: HTMLElement
 }
@@ -422,6 +665,7 @@ function createInspectorDom(root: HTMLElement): InspectorElements {
   const commandsHeading = element('h2', 'section-heading', 'Команди перевірки')
   commandsHeading.id = 'commands-heading'
   const empty = element('div', 'empty-state')
+  empty.dataset.emptyDocument = ''
   empty.append(
     element('h3', 'section-heading', message('foundationInspector.empty.heading')),
     element('p', 'secondary-text', message('foundationInspector.empty.body')),
@@ -429,10 +673,29 @@ function createInspectorDom(root: HTMLElement): InspectorElements {
   const actions = element('div', 'action-group')
   const create = button(message('foundationInspector.createSample'), 'primary-action')
   create.dataset.action = 'create-sample'
+  const openLast = button(message('foundationInspector.openLastLocal'), 'secondary-action')
+  openLast.dataset.action = 'open-last'
+  openLast.hidden = true
+  const openOlder = button(message('foundationInspector.openOlderSchema'), 'secondary-action')
+  openOlder.dataset.action = 'open-older-schema'
   const apply = button(message('foundationInspector.applyTestMutation'), 'secondary-action')
   apply.dataset.action = 'apply-mutation'
-  apply.hidden = true
-  actions.append(create, apply)
+  const stale = button(message('foundationInspector.testStaleCommand'), 'secondary-action')
+  stale.dataset.action = 'stale-command'
+  const undo = button(message('foundationInspector.undo'), 'secondary-action')
+  undo.dataset.action = 'undo'
+  const redo = button(message('foundationInspector.redo'), 'secondary-action')
+  redo.dataset.action = 'redo'
+  const save = button(message('foundationInspector.save'), 'secondary-action')
+  save.dataset.action = 'save'
+  const reload = button(message('foundationInspector.reload'), 'secondary-action')
+  reload.dataset.action = 'reload'
+  const recover = button(message('foundationInspector.recover'), 'secondary-action')
+  recover.dataset.action = 'recover'
+  const sessionControls = [apply, stale, undo, redo, save, reload, recover]
+  for (const control of sessionControls) control.hidden = true
+  const controls = [create, openLast, openOlder, ...sessionControls]
+  actions.append(...controls)
   const status = element('p', 'status-region')
   status.dataset.durabilityStatus = ''
   status.setAttribute('aria-live', 'polite')
@@ -463,6 +726,12 @@ function createInspectorDom(root: HTMLElement): InspectorElements {
   const provenanceHeading = element('h2', 'section-heading', 'Походження')
   const provenance = element('p', 'secondary-text')
   provenance.dataset.provenance = ''
+  const provenanceUnavailable = element(
+    'p',
+    'secondary-text',
+    message('foundationInspector.provenance.noExport'),
+  )
+  provenanceUnavailable.dataset.provenanceUnavailable = ''
   const auditSection = element('section', 'audit-section')
   auditSection.setAttribute('aria-labelledby', 'audit-heading')
   const auditHeading = element('h2', 'section-heading', 'Аудит')
@@ -470,8 +739,21 @@ function createInspectorDom(root: HTMLElement): InspectorElements {
   const audit = document.createElement('ol')
   audit.className = 'audit-list'
   audit.dataset.audit = ''
-  auditSection.append(auditHeading, audit)
-  inspector.append(revisionHeading, revisionList, provenanceHeading, provenance, auditSection)
+  const auditEmpty = element(
+    'p',
+    'secondary-text',
+    message('foundationInspector.audit.empty'),
+  )
+  auditEmpty.dataset.auditEmpty = ''
+  auditSection.append(auditHeading, auditEmpty, audit)
+  inspector.append(
+    revisionHeading,
+    revisionList,
+    provenanceHeading,
+    provenance,
+    provenanceUnavailable,
+    auditSection,
+  )
 
   main.append(elementWithChildren('div', 'primary-column', commands, session), inspector)
   root.append(header, main)
@@ -479,7 +761,17 @@ function createInspectorDom(root: HTMLElement): InspectorElements {
   return {
     root,
     create,
+    openLast,
+    openOlder,
     apply,
+    stale,
+    undo,
+    redo,
+    save,
+    reload,
+    recover,
+    controls,
+    sessionControls,
     empty,
     session,
     documentId,
@@ -489,7 +781,9 @@ function createInspectorDom(root: HTMLElement): InspectorElements {
     locale,
     summary,
     provenance,
+    provenanceUnavailable,
     audit,
+    auditEmpty,
     status,
     alert,
   }

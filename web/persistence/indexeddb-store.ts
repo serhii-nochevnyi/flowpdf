@@ -148,7 +148,7 @@ export interface RecoveryRecordsDto {
   readonly sources: readonly MigrationSourceRecordDto[]
 }
 
-const DATABASE_NAME = 'flowpdf-foundation'
+const DEFAULT_DATABASE_NAME = 'flowpdf-foundation'
 const DATABASE_VERSION = 3
 const SNAPSHOTS = `snapshots-v${DATABASE_VERSION}`
 const TRANSACTIONS = `transactions-v${DATABASE_VERSION}`
@@ -175,6 +175,8 @@ interface GuardedStoreWrites {
 
 export class IndexedDbDocumentStore {
   private databasePromise: Promise<IDBDatabase> | undefined
+
+  constructor(private readonly databaseName = DEFAULT_DATABASE_NAME) {}
 
   async commit(commit: PlannedPersistenceCommitDto): Promise<void> {
     const snapshot =
@@ -300,7 +302,7 @@ export class IndexedDbDocumentStore {
 
   private open(): Promise<IDBDatabase> {
     this.databasePromise ??= new Promise<IDBDatabase>((resolve, reject) => {
-      const request = indexedDB.open(DATABASE_NAME, DATABASE_VERSION)
+      const request = indexedDB.open(this.databaseName, DATABASE_VERSION)
       request.onupgradeneeded = () => {
         const database = request.result
         for (const storeName of [SNAPSHOTS, TRANSACTIONS, AUDITS, ASSETS, SOURCES]) {
