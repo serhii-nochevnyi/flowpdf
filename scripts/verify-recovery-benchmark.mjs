@@ -107,6 +107,24 @@ function writeTerminalArtifact(targetPath, otherPath, report) {
 }
 
 function validateRecipe(value) {
+  const expectedVocabulary = [
+    'FlowPDF',
+    'document',
+    'contract',
+    'revision',
+    'semantic',
+    'paragraph',
+    'layout',
+    'anchor',
+    'field',
+    'recovery',
+    'audit',
+    'deterministic',
+    'документ',
+    'угода',
+    'сторона',
+    'підпис',
+  ]
   const expectedCandidates = [
     [100, 4 * 1024 * 1024],
     [50, 2 * 1024 * 1024],
@@ -114,9 +132,16 @@ function validateRecipe(value) {
     [10, 1024 * 1024],
   ]
   if (
-    value?.formatVersion !== 1 ||
+    value?.formatVersion !== 2 ||
+    value.name !== 'phase1-recovery-200-page-equivalent' ||
     value.pages !== 200 ||
     value.transactions !== 1000 ||
+    value.backgroundMutationUtf8Bytes !== 32 ||
+    value.pageEquivalent?.paragraphsPerPage !== 5 ||
+    value.pageEquivalent?.wordsPerParagraph !== 80 ||
+    value.pageEquivalent?.minimumUtf8BytesPerPage !== 3000 ||
+    JSON.stringify(value.pageEquivalent?.vocabulary) !== JSON.stringify(expectedVocabulary) ||
+    value.pages * value.pageEquivalent.paragraphsPerPage !== value.transactions ||
     value.warmups !== 3 ||
     value.measurements !== 20 ||
     value.p95TargetMilliseconds !== 2000 ||
@@ -133,9 +158,58 @@ function validateRecipe(value) {
   })
 }
 
+function generatedParagraph(sequence) {
+  const { paragraphsPerPage, wordsPerParagraph, vocabulary } = recipe.pageEquivalent
+  const page = Math.floor((sequence - 1) / paragraphsPerPage) + 1
+  const paragraphOnPage = ((sequence - 1) % paragraphsPerPage) + 1
+  const words = [`page-${String(page).padStart(3, '0')}`, `paragraph-${String(paragraphOnPage).padStart(2, '0')}`]
+  for (let wordIndex = 2; wordIndex < wordsPerParagraph; wordIndex += 1) {
+    const vocabularyIndex = (sequence + wordIndex) % vocabulary.length
+    const suffix = wordIndex + 1 === wordsPerParagraph ? '.' : ''
+    words.push(`${vocabulary[vocabularyIndex]}${suffix}`)
+  }
+  return words.join(' ')
+}
+
+function expectedWorkloadProof() {
+  const { paragraphsPerPage, wordsPerParagraph, minimumUtf8BytesPerPage } = recipe.pageEquivalent
+  const generatedParagraphCount = recipe.pages * paragraphsPerPage
+  let generatedUtf8Bytes = 0
+  let pageUtf8Bytes = 0
+  for (let sequence = 1; sequence <= generatedParagraphCount; sequence += 1) {
+    const paragraphBytes = Buffer.byteLength(generatedParagraph(sequence), 'utf8')
+    generatedUtf8Bytes += paragraphBytes
+    pageUtf8Bytes += paragraphBytes
+    if (sequence % paragraphsPerPage === 0) {
+      if (pageUtf8Bytes < minimumUtf8BytesPerPage) {
+        throw new Error('locked page-equivalent recipe does not meet its semantic byte floor')
+      }
+      pageUtf8Bytes = 0
+    }
+  }
+  return {
+    pageEquivalentCount: recipe.pages,
+    paragraphsPerPage,
+    wordsPerParagraph,
+    generatedParagraphCount,
+    generatedWordCount: generatedParagraphCount * wordsPerParagraph,
+    generatedUtf8Bytes,
+    minimumUtf8BytesPerPage,
+    initialContentNodeCount: 3,
+    finalContentNodeCount: 3 + generatedParagraphCount,
+    finalRevision: 1 + recipe.transactions,
+    historyEntryCount: recipe.transactions,
+    historyCursor: recipe.transactions,
+    plannedTransactionCount: recipe.transactions,
+  }
+}
+
 function validateMeasurement(measurement, policy) {
+  const expectedProof = expectedWorkloadProof()
+  const proof = measurement?.workloadProof
   if (
     measurement?.fixtureHash?.startsWith('blake3:') !== true ||
+    measurement.fixtureName !== recipe.name ||
     measurement.pages !== recipe.pages ||
     measurement.transactions !== recipe.transactions ||
     measurement.warmups !== recipe.warmups ||
@@ -143,6 +217,8 @@ function validateMeasurement(measurement, policy) {
     measurement.p95TargetMilliseconds !== recipe.p95TargetMilliseconds ||
     measurement.policy?.transactionInterval !== policy.transactionInterval ||
     measurement.policy?.byteInterval !== policy.byteInterval ||
+    proof?.semanticPayloadHash?.startsWith('blake3:') !== true ||
+    Object.entries(expectedProof).some(([key, value]) => proof[key] !== value) ||
     !Array.isArray(measurement.durationsMilliseconds) ||
     measurement.durationsMilliseconds.length !== recipe.measurements ||
     !Number.isFinite(measurement.p50Milliseconds) ||
@@ -173,6 +249,10 @@ function validateTerminalArtifact() {
   const benchmarkFixtureHash = report.attempts[0].fixtureHash
   if (report.attempts.some((attempt) => attempt.fixtureHash !== benchmarkFixtureHash)) {
     throw new Error('recovery benchmark attempts were measured against different fixture bytes')
+  }
+  const workloadProof = JSON.stringify(report.attempts[0].workloadProof)
+  if (report.attempts.some((attempt) => JSON.stringify(attempt.workloadProof) !== workloadProof)) {
+    throw new Error('recovery benchmark attempts did not use identical semantic workloads')
   }
   if (report.passed) {
     const last = report.attempts.at(-1)

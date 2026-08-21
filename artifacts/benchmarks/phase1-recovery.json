@@ -1,6 +1,6 @@
 {
   "formatVersion": 1,
-  "fixtureHash": "sha256:cd8ed768f0a51a0c7ce96f3563f9c23de5693dd93638298ea2100c2ff47388a3",
+  "fixtureHash": "sha256:4e7d163fe7de3ac4ffe40604e9df4fa3f013cbc88bff2afcb374e2cb562a038d",
   "fixturePath": "fixtures/recovery/benchmark-200-page.recipe.json",
   "toolchain": {
     "node": "v24.10.0",
@@ -17,7 +17,7 @@
   },
   "attempts": [
     {
-      "fixtureHash": "blake3:6fd087f3ed2945929915f25d5259ff85bac587d6755fdb158d6f7b7241bda03a",
+      "fixtureHash": "blake3:222f282a5e012a907fd0ac119a22094a0b2e0b0c98414b72f6cda4b40e577b12",
       "fixtureName": "phase1-recovery-200-page-equivalent",
       "pages": 200,
       "transactions": 1000,
@@ -28,38 +28,54 @@
         "transactionInterval": 100,
         "byteInterval": 4194304
       },
+      "workloadProof": {
+        "pageEquivalentCount": 200,
+        "paragraphsPerPage": 5,
+        "wordsPerParagraph": 80,
+        "generatedParagraphCount": 1000,
+        "generatedWordCount": 80000,
+        "generatedUtf8Bytes": 797152,
+        "minimumUtf8BytesPerPage": 3000,
+        "initialContentNodeCount": 3,
+        "finalContentNodeCount": 1003,
+        "semanticPayloadHash": "blake3:84ab0aecf4b17606bdf7b95de13615aac787233e625c7002158ed939bb55fa42",
+        "finalRevision": 1001,
+        "historyEntryCount": 1000,
+        "historyCursor": 1000,
+        "plannedTransactionCount": 1000
+      },
       "durationsMilliseconds": [
-        431.79920799999996,
-        430.080208,
-        431.168583,
-        438.46212499999996,
-        431.479208,
-        432.965083,
-        445.27975,
-        433.229625,
-        434.61899999999997,
-        434.450792,
-        428.64066699999995,
-        431.970458,
-        432.769917,
-        447.905209,
-        433.319417,
-        431.674167,
-        433.829833,
-        443.603,
-        449.09375,
-        434.185333
+        469.47075,
+        469.171792,
+        454.12991600000004,
+        453.782333,
+        454.31733299999996,
+        457.44229199999995,
+        465.217,
+        456.721416,
+        452.920667,
+        464.08270899999997,
+        470.157417,
+        466.060625,
+        459.781459,
+        457.12575,
+        477.0295,
+        471.294,
+        466.162917,
+        475.349375,
+        471.376375,
+        491.402958
       ],
-      "p50Milliseconds": 433.229625,
-      "p95Milliseconds": 447.905209
+      "p50Milliseconds": 465.217,
+      "p95Milliseconds": 477.0295
     }
   ],
   "selectedPolicy": {
     "transactionInterval": 100,
     "byteInterval": 4194304
   },
-  "p50Milliseconds": 433.229625,
-  "p95Milliseconds": 447.905209,
+  "p50Milliseconds": 465.217,
+  "p95Milliseconds": 477.0295,
   "p95TargetMilliseconds": 2000,
   "passed": true,
   "blocked": false
