@@ -52,12 +52,14 @@ fn stale_duplicate_invalid_and_broken_commands_are_exactly_non_mutating() {
     let document = FlowDocument::deterministic_sample("uk-UA").expect("sample");
     let initial = EditorState::new(document.clone()).expect("state");
 
+    let before_stale = initial.clone();
     let stale =
         TransactionService::apply(&initial, insert(&document, id(711), 0)).expect_err("stale");
     assert_eq!(stale.code(), "FLOW_STALE_REVISION");
-    assert_unchanged(&initial, &initial.clone());
+    assert_unchanged(&initial, &before_stale);
 
     let first = TransactionService::apply(&initial, insert(&document, id(712), 1)).expect("first");
+    let before_duplicate = first.state.clone();
     let duplicate = TransactionService::apply(
         &first.state,
         insert(
@@ -68,7 +70,7 @@ fn stale_duplicate_invalid_and_broken_commands_are_exactly_non_mutating() {
     )
     .expect_err("duplicate");
     assert_eq!(duplicate.code(), "FLOW_DUPLICATE_COMMAND");
-    assert_unchanged(&first.state, &first.state.clone());
+    assert_unchanged(&first.state, &before_duplicate);
 
     let mut missing = insert(&document, id(713), 1);
     missing.kind = CommandKind::InsertText {
@@ -78,12 +80,14 @@ fn stale_duplicate_invalid_and_broken_commands_are_exactly_non_mutating() {
         ),
         text: "X".to_owned(),
     };
+    let before_missing = initial.clone();
     assert_eq!(
         TransactionService::apply(&initial, missing)
             .expect_err("missing")
             .code(),
         "FLOW_INVALID_TARGET"
     );
+    assert_unchanged(&initial, &before_missing);
 
     let out_of_range = Command {
         command_id: id(714),
@@ -94,12 +98,14 @@ fn stale_duplicate_invalid_and_broken_commands_are_exactly_non_mutating() {
             range: TextRange::collapsed(position(document.content[1].id.clone(), 999)),
         },
     };
+    let before_out_of_range = initial.clone();
     assert_eq!(
         TransactionService::apply(&initial, out_of_range)
             .expect_err("range")
             .code(),
         "FLOW_INVALID_RANGE"
     );
+    assert_unchanged(&initial, &before_out_of_range);
 
     let emoji_node = document.content[0].clone();
     let emoji_byte = emoji_node.text.find('😀').expect("emoji");
@@ -114,12 +120,14 @@ fn stale_duplicate_invalid_and_broken_commands_are_exactly_non_mutating() {
             text: "X".to_owned(),
         },
     };
+    let before_surrogate_half = initial.clone();
     assert_eq!(
         TransactionService::apply(&initial, surrogate_half)
             .expect_err("surrogate interior")
             .code(),
         "FLOW_INVALID_UTF16_BOUNDARY"
     );
+    assert_unchanged(&initial, &before_surrogate_half);
 
     let no_op = Command {
         command_id: id(716),
@@ -134,13 +142,14 @@ fn stale_duplicate_invalid_and_broken_commands_are_exactly_non_mutating() {
             text: "English".to_owned(),
         },
     };
+    let before_no_op = initial.clone();
     assert_eq!(
         TransactionService::apply(&initial, no_op)
             .expect_err("no-op")
             .code(),
         "FLOW_BROKEN_INVARIANT"
     );
-    assert_unchanged(&initial, &initial.clone());
+    assert_unchanged(&initial, &before_no_op);
 }
 
 #[test]
@@ -170,13 +179,14 @@ fn deleting_a_node_with_live_anchors_is_explicitly_invalidated_not_guessed() {
         },
     };
 
+    let before = state.clone();
     assert_eq!(
         TransactionService::apply(&state, command)
             .expect_err("anchored node")
             .code(),
         "FLOW_ANCHOR_INVALIDATED"
     );
-    assert_unchanged(&state, &state.clone());
+    assert_unchanged(&state, &before);
 }
 
 #[test]
