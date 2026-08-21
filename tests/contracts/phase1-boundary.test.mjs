@@ -325,6 +325,7 @@ function validateWasmBoundary(source, diagnostics) {
 
 function assertGateContract(gate) {
   const required = [
+    'accessibility-focused',
     'boundary-contract',
     'browser-suites',
     'dependency-locks',
