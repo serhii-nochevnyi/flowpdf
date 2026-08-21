@@ -24,6 +24,7 @@ export default defineConfig({
           browser: {
             enabled: true,
             headless: true,
+            api: { host: '127.0.0.1', allowWrite: false, allowExec: false },
             provider: playwright({
               launchOptions: { args: ['--single-process'] },
             }),
@@ -42,6 +43,7 @@ export default defineConfig({
           browser: {
             enabled: true,
             headless: true,
+            api: { host: '127.0.0.1', allowWrite: false, allowExec: false },
             // The desktop workspace sandbox denies Chromium's macOS Mach-port
             // rendezvous for child renderers. Browser tests still execute in a
             // real local Chromium process; single-process mode keeps that

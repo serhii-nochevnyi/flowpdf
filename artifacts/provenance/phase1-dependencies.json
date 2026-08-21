@@ -108,13 +108,13 @@
     {
       "ecosystem": "npm",
       "name": "vitest",
-      "version": "4.1.6",
+      "version": "4.1.11",
       "kind": "dependency",
       "repository": "https://github.com/vitest-dev/vitest",
-      "publishedAt": "2026-05-11T14:37:46.246Z",
-      "integrity": "sha512-6lvjbS3p9b4CrdCmguzbh2/4uoXhGE2q71R4OX5sqF9R1bo9Xd6fGrMAfvp5wnCzlBnFVdCOp6onuTQVbo8iUQ==",
-      "source": "https://registry.npmjs.org/vitest/4.1.6",
-      "tarball": "https://registry.npmjs.org/vitest/-/vitest-4.1.6.tgz"
+      "publishedAt": "2026-08-18T14:27:07.240Z",
+      "integrity": "sha512-fhACrNXUidIbGSBr5FlbuBkO7VWC1ZyLl0DO4CU2DrQoAPxX84Ysxs+HeGQpii5lZWV1Q4gBZTTu49mF+A6Edw==",
+      "source": "https://registry.npmjs.org/vitest/4.1.11",
+      "tarball": "https://registry.npmjs.org/vitest/-/vitest-4.1.11.tgz"
     },
     {
       "ecosystem": "npm",
@@ -130,13 +130,13 @@
     {
       "ecosystem": "npm",
       "name": "@vitest/browser-playwright",
-      "version": "4.1.6",
+      "version": "4.1.11",
       "kind": "dependency",
       "repository": "https://github.com/vitest-dev/vitest",
-      "publishedAt": "2026-05-11T14:37:50.200Z",
-      "integrity": "sha512-4csoeyl/qwHyxU2zNL0++WaoDr8YJDXOQPwWPNJoTZ+QzcdO3INYKgF5Zfz730Io7zbkuv914aZmfQ+QE+1Hvw==",
-      "source": "https://registry.npmjs.org/%40vitest%2Fbrowser-playwright/4.1.6",
-      "tarball": "https://registry.npmjs.org/@vitest/browser-playwright/-/browser-playwright-4.1.6.tgz"
+      "publishedAt": "2026-08-18T14:22:33.004Z",
+      "integrity": "sha512-riLBxPqwnJ0lWs2DN2WeUfYeKLoAjbP2Xx8cLQdSddzMi20sksIa6K2mPz79DyMZKKVKH2ksOC2yJvtNcZg8cg==",
+      "source": "https://registry.npmjs.org/%40vitest%2Fbrowser-playwright/4.1.11",
+      "tarball": "https://registry.npmjs.org/@vitest/browser-playwright/-/browser-playwright-4.1.11.tgz"
     },
     {
       "ecosystem": "npm",

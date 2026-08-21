@@ -15,9 +15,9 @@
   ],
   "npm": [
     { "name": "typescript", "version": "5.9.3", "repository": "https://github.com/microsoft/TypeScript" },
-    { "name": "vitest", "version": "4.1.6", "repository": "https://github.com/vitest-dev/vitest" },
+    { "name": "vitest", "version": "4.1.11", "repository": "https://github.com/vitest-dev/vitest" },
     { "name": "fake-indexeddb", "version": "6.2.4", "repository": "https://github.com/dumbmatter/fakeIndexedDB" },
-    { "name": "@vitest/browser-playwright", "version": "4.1.6", "repository": "https://github.com/vitest-dev/vitest" },
+    { "name": "@vitest/browser-playwright", "version": "4.1.11", "repository": "https://github.com/vitest-dev/vitest" },
     { "name": "playwright", "version": "1.57.0", "repository": "https://github.com/microsoft/playwright" }
   ]
 }
