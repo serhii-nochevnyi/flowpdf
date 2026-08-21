@@ -2,10 +2,29 @@ use flow_core::{
     anchor::Utf16Offset,
     canonical::{canonical_bytes, canonical_hash, decode_canonical},
     model::{
-        Affinity, FieldKind, FieldValue, FlowDocument, LogicalPosition, NodeId, TextInputHint,
+        Affinity, DocumentId, FieldKind, FieldValue, FlowDocument, LogicalPosition, NodeId,
+        TextInputHint,
     },
     schema::{SchemaError, validate_document},
 };
+
+#[test]
+fn stable_ids_validate_on_deserialize_and_serialize_one_canonical_spelling() {
+    let canonical = "00000000-0000-4000-8000-00000000000a";
+    let alternate = "{00000000-0000-4000-8000-00000000000A}";
+    let id = DocumentId::new(alternate).expect("accepted UUID spelling");
+    assert_eq!(id.as_str(), canonical);
+    assert_eq!(
+        serde_json::to_string(&id).expect("serialize"),
+        format!("\"{canonical}\"")
+    );
+    assert_eq!(
+        serde_json::from_str::<DocumentId>(&format!("\"{alternate}\""))
+            .expect("checked deserialize"),
+        id
+    );
+    assert!(serde_json::from_str::<DocumentId>("\"not-a-uuid\"").is_err());
+}
 
 fn code(error: SchemaError) -> &'static str {
     error.code()
@@ -100,6 +119,18 @@ fn schema_rejects_unknown_coordinates_floats_invalid_ids_duplicates_and_dangling
     assert_eq!(
         code(decode_canonical(invalid_id.as_bytes()).expect_err("invalid id")),
         "FLOW_INVALID_ID"
+    );
+
+    let alternate_id = String::from_utf8(canonical_bytes(&document).expect("bytes"))
+        .expect("utf8")
+        .replacen(
+            "00000000-0000-4000-8000-000000000001",
+            "00000000000040008000000000000001",
+            1,
+        );
+    assert_eq!(
+        code(decode_canonical(alternate_id.as_bytes()).expect_err("alternate spelling")),
+        "FLOW_NON_CANONICAL_PAYLOAD"
     );
 
     let mut duplicate = document.clone();

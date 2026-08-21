@@ -14,22 +14,30 @@ pub const SCHEMA_VERSION: u32 = 1;
 
 macro_rules! stable_id {
     ($name:ident) => {
-        #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+        #[derive(Debug, Clone, Serialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
         #[serde(transparent)]
         pub struct $name(String);
 
         impl $name {
             pub fn new(value: impl Into<String>) -> Result<Self, SchemaError> {
                 let value = value.into();
-                if Uuid::parse_str(&value).is_err() {
-                    return Err(SchemaError::invalid_id());
-                }
-                Ok(Self(value))
+                let parsed = Uuid::parse_str(&value).map_err(|_| SchemaError::invalid_id())?;
+                Ok(Self(parsed.hyphenated().to_string()))
             }
 
             #[must_use]
             pub fn as_str(&self) -> &str {
                 &self.0
+            }
+        }
+
+        impl<'de> Deserialize<'de> for $name {
+            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+            where
+                D: serde::Deserializer<'de>,
+            {
+                let value = String::deserialize(deserializer)?;
+                Self::new(value).map_err(|_| serde::de::Error::custom("FLOW_INVALID_ID"))
             }
         }
 

@@ -82,6 +82,24 @@ fn audit_serialization_and_debug_are_closed_allowlists() {
 }
 
 #[test]
+fn audit_deserialization_rejects_invalid_ids_and_normalizes_uuid_spellings() {
+    let original = event(8, 508, "2026-08-14T20:50:01Z");
+    let mut invalid = serde_json::to_value(&original).expect("audit JSON value");
+    invalid["auditId"] = serde_json::json!("not-a-uuid");
+    assert!(serde_json::from_value::<AuditEvent>(invalid).is_err());
+
+    let mut alternate = serde_json::to_value(&original).expect("audit JSON value");
+    for field in ["auditId", "transactionId", "commandId"] {
+        let id = alternate[field].as_str().expect("serialized ID");
+        alternate[field] = serde_json::json!(id.replace('-', ""));
+    }
+    assert_eq!(
+        serde_json::from_value::<AuditEvent>(alternate).expect("normalized audit"),
+        original
+    );
+}
+
+#[test]
 fn audit_timestamps_require_real_utc_calendar_seconds() {
     for timestamp in [
         "2024-02-29T23:59:59Z",

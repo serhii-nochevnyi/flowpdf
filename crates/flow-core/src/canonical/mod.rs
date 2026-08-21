@@ -23,8 +23,13 @@ pub fn canonical_bytes(document: &FlowDocument) -> Result<Vec<u8>, SchemaError> 
 
 pub fn decode_canonical(bytes: &[u8]) -> Result<FlowDocument, SchemaError> {
     preflight_canonical_bytes(bytes)?;
-    let document: FlowDocument =
-        serde_json::from_slice(bytes).map_err(|_| SchemaError::decode())?;
+    let document: FlowDocument = serde_json::from_slice(bytes).map_err(|error| {
+        if error.to_string().contains("FLOW_INVALID_ID") {
+            SchemaError::invalid_id()
+        } else {
+            SchemaError::decode()
+        }
+    })?;
     validate_document(&document)?;
     let encoded = canonical_bytes(&document)?;
     if encoded != bytes {
