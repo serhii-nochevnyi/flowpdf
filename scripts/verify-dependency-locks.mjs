@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict'
 import { mkdtemp, readFile, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import test from 'node:test'
 
 const EXACT_VERSION = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/
@@ -80,6 +81,10 @@ export async function verifyDependencyLocks(root = process.cwd()) {
   return { cargoPackages: parseCargoPackages(cargoLock).length, npmPackages: Object.keys(packageLock.packages).length - 1 }
 }
 
+export function isMainModule(moduleUrl, argvPath) {
+  return argvPath !== undefined && resolve(fileURLToPath(moduleUrl)) === resolve(argvPath)
+}
+
 test('rejects Cargo origin and checksum drift', () => {
   const provenance = { crates: [{ name: 'serde', version: '1.0.228', checksum: 'a'.repeat(64) }] }
   const valid = `version = 4\n\n[[package]]\nname = "serde"\nversion = "1.0.228"\nsource = "${CRATES_IO_SOURCE}"\nchecksum = "${'a'.repeat(64)}"\n`
@@ -118,7 +123,12 @@ test('runs against an isolated on-disk lock fixture', async () => {
   assert.deepEqual(await verifyDependencyLocks(root), { cargoPackages: 1, npmPackages: 1 })
 })
 
-if (!process.env.NODE_TEST_CONTEXT && process.argv[1] && new URL(import.meta.url).pathname === process.argv[1]) {
+test('recognizes an encoded main-module path containing spaces', () => {
+  const path = join(tmpdir(), 'flowpdf lock verifier', 'verify-dependency-locks.mjs')
+  assert.equal(isMainModule(pathToFileURL(path), path), true)
+})
+
+if (!process.env.NODE_TEST_CONTEXT && isMainModule(import.meta.url, process.argv[1])) {
   const result = await verifyDependencyLocks()
   console.log(`verified Cargo packages: ${result.cargoPackages}`)
   console.log(`verified npm packages: ${result.npmPackages}`)
