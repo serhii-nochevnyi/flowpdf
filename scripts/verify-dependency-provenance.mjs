@@ -56,7 +56,13 @@ async function fetchJson(url, { fetchImpl, timeoutMs, retries, packageName, chec
         headers: { accept: 'application/json', 'user-agent': 'flowpdf-provenance-verifier/1' },
         signal: controller.signal,
       });
-      expect(response?.ok, packageName, check, `HTTP ${response?.status ?? 'network failure'}`);
+      if (!response?.ok) {
+        const status = response?.status;
+        lastError = new ProvenanceError(packageName, check, `HTTP ${status ?? 'network failure'}`);
+        if (attempt === retries || !isTransientHttpStatus(status)) break;
+        await waitForRetry(response, attempt, timeoutMs);
+        continue;
+      }
       try {
         return await response.json();
       } catch {
@@ -84,7 +90,13 @@ async function fetchText(url, { fetchImpl, timeoutMs, retries, packageName, chec
         headers: { accept: 'text/html', 'user-agent': 'flowpdf-provenance-verifier/1' },
         signal: controller.signal,
       });
-      expect(response?.ok, packageName, check, `HTTP ${response?.status ?? 'network failure'}`);
+      if (!response?.ok) {
+        const status = response?.status;
+        lastError = new ProvenanceError(packageName, check, `HTTP ${status ?? 'network failure'}`);
+        if (attempt === retries || !isTransientHttpStatus(status)) break;
+        await waitForRetry(response, attempt, timeoutMs);
+        continue;
+      }
       return await response.text();
     } catch (error) {
       lastError = error instanceof ProvenanceError
@@ -96,6 +108,25 @@ async function fetchText(url, { fetchImpl, timeoutMs, retries, packageName, chec
     }
   }
   throw lastError;
+}
+
+function isTransientHttpStatus(status) {
+  return status === 408 || status === 429 || (status >= 500 && status <= 599);
+}
+
+async function waitForRetry(response, attempt, timeoutMs) {
+  const retryAfter = response.headers?.get('retry-after');
+  let milliseconds = Math.min(250 * (2 ** attempt), timeoutMs);
+  if (retryAfter !== null && retryAfter !== undefined) {
+    const seconds = Number(retryAfter);
+    const requested = Number.isFinite(seconds)
+      ? seconds * 1_000
+      : Date.parse(retryAfter) - Date.now();
+    if (Number.isFinite(requested) && requested >= 0) {
+      milliseconds = Math.min(requested, timeoutMs);
+    }
+  }
+  await new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
 async function verifyRepositoryPage(repositoryUrl, options, packageName) {
@@ -346,6 +377,60 @@ test('fails closed for every required negative provenance invariant', async () =
   await assert.rejects(() => verifyManifest({ config: base, fetchImpl: httpFailure }), /HTTP 503/);
   const timeout = async (_url, options) => new Promise((_, reject) => options.signal.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError'))));
   await assert.rejects(() => verifyManifest({ config: { ...base, timeoutMs: 1 }, fetchImpl: timeout }), /timeout/);
+});
+
+test('retries only transient HTTP statuses and exhausts the configured budget', async () => {
+  let transientCalls = 0;
+  const transientThenSuccess = async () => {
+    transientCalls += 1;
+    if (transientCalls === 1) {
+      return new Response('', { status: 503, headers: { 'retry-after': '0' } });
+    }
+    return new Response(JSON.stringify({ ok: true }), { status: 200 });
+  };
+  assert.deepEqual(
+    await fetchJson('https://example.invalid', {
+      fetchImpl: transientThenSuccess,
+      timeoutMs: 10,
+      retries: 2,
+      packageName: 'fixture',
+      check: 'transient status',
+    }),
+    { ok: true },
+  );
+  assert.equal(transientCalls, 2);
+
+  let permanentCalls = 0;
+  await assert.rejects(
+    () => fetchJson('https://example.invalid', {
+      fetchImpl: async () => {
+        permanentCalls += 1;
+        return new Response('', { status: 404 });
+      },
+      timeoutMs: 10,
+      retries: 2,
+      packageName: 'fixture',
+      check: 'permanent status',
+    }),
+    /HTTP 404/,
+  );
+  assert.equal(permanentCalls, 1);
+
+  let exhaustedCalls = 0;
+  await assert.rejects(
+    () => fetchJson('https://example.invalid', {
+      fetchImpl: async () => {
+        exhaustedCalls += 1;
+        return new Response('', { status: 429, headers: { 'retry-after': '0' } });
+      },
+      timeoutMs: 10,
+      retries: 2,
+      packageName: 'fixture',
+      check: 'exhausted status',
+    }),
+    /HTTP 429/,
+  );
+  assert.equal(exhaustedCalls, 3);
 });
 
 if (process.argv.includes('--config')) {
