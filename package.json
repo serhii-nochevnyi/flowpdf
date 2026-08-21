@@ -9,7 +9,7 @@
     "npm": "11.9.0"
   },
   "scripts": {
-    "build:wasm": "RUSTUP_HOME=./work/toolchains/rustup CARGO_HOME=./work/toolchains/cargo PATH=./work/toolchains/cargo/bin:$PATH cargo build -p flow-wasm --target wasm32-unknown-unknown --release --locked && RUSTUP_HOME=./work/toolchains/rustup CARGO_HOME=./work/toolchains/cargo PATH=./work/toolchains/cargo/bin:$PATH wasm-bindgen target/wasm32-unknown-unknown/release/flow_wasm.wasm --target web --out-dir web/generated --out-name flow_wasm",
+    "build:wasm": "node scripts/verify-wasm-bindgen-tool.mjs && RUSTUP_HOME=./work/toolchains/rustup CARGO_HOME=./work/toolchains/cargo PATH=./work/toolchains/cargo/bin:$PATH cargo build -p flow-wasm --target wasm32-unknown-unknown --release --locked && RUSTUP_HOME=./work/toolchains/rustup CARGO_HOME=./work/toolchains/cargo PATH=./work/toolchains/cargo/bin:$PATH wasm-bindgen target/wasm32-unknown-unknown/release/flow_wasm.wasm --target web --out-dir web/generated --out-name flow_wasm",
     "build:web": "npm run build:wasm && node scripts/build-web.mjs --clean && tsc -p tsconfig.web.json && node scripts/build-web.mjs --copy-assets",
     "check": "node scripts/check-phase1.mjs",
     "inspector": "npm run build:web && node scripts/serve-inspector.mjs",
