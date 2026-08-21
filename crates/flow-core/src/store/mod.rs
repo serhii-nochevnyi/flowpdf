@@ -356,7 +356,13 @@ fn validate_commit_against_records(
     document: &FlowDocument,
 ) -> Result<u32, StoreError> {
     if commit.transaction.base_revision == 0 {
-        return Ok(0);
+        if recovery_records_are_empty(records) {
+            return Ok(0);
+        }
+        if exact_creation_records(records, commit) {
+            return Ok(0);
+        }
+        return Err(StoreError::PartialRecordSet);
     }
 
     let mut already_durable = false;
@@ -410,6 +416,40 @@ fn validate_commit_against_records(
         return Err(StoreError::InvalidCommit);
     }
     Ok(checkpoint_revision)
+}
+
+fn recovery_records_are_empty(records: &RecoverRequest) -> bool {
+    records.snapshots.is_empty()
+        && records.transactions.is_empty()
+        && records.audits.is_empty()
+        && records.assets.is_empty()
+        && records.sources.is_empty()
+}
+
+fn exact_creation_records(records: &RecoverRequest, commit: &PersistenceCommit) -> bool {
+    if records.snapshots.as_slice() != [commit.snapshot.clone()]
+        || records.transactions.as_slice() != [commit.transaction.clone()]
+        || records.audits.as_slice() != [commit.audit.clone()]
+        || !records.sources.is_empty()
+    {
+        return false;
+    }
+
+    let expected_assets = commit
+        .assets
+        .iter()
+        .map(|asset| (asset.content_hash.as_str(), asset))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let durable_assets = records
+        .assets
+        .iter()
+        .map(|asset| (asset.content_hash.as_str(), asset))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    records.assets.len() == durable_assets.len()
+        && expected_assets.len() == durable_assets.len()
+        && expected_assets
+            .iter()
+            .all(|(hash, asset)| durable_assets.get(hash) == Some(asset))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

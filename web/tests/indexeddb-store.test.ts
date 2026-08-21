@@ -492,6 +492,63 @@ describe('IndexedDbDocumentStore', () => {
     })
   })
 
+  it('keeps partial creation sets visible and refuses to reconstruct missing records', async () => {
+    for (const missingStore of [
+      'snapshots-v3',
+      'transactions-v3',
+      'audits-v3',
+      'assets-v3',
+    ]) {
+      globalThis.indexedDB = new IDBFactory() as unknown as IDBFactory
+      const store = new IndexedDbDocumentStore()
+      const creation = commitFor(1, 'asset-1')
+      await store.commit(creation)
+
+      const database = await openCurrentDatabase()
+      const transaction = database.transaction(missingStore, 'readwrite')
+      transaction.objectStore(missingStore).clear()
+      await transactionCompleteForTest(transaction)
+      database.close()
+
+      await expect(store.loadRecords()).resolves.toBeDefined()
+      await expect(store.commit(creation)).rejects.toMatchObject({
+        code: 'FLOW_STORE_PARTIAL_RECORD_SET',
+      })
+      const after = await store.loadRecords({ allowEmpty: true })
+      const missingCollection = {
+        'snapshots-v3': after.snapshots,
+        'transactions-v3': after.transactions,
+        'audits-v3': after.audits,
+        'assets-v3': after.assets,
+      }[missingStore]
+      expect(missingCollection).toEqual([])
+    }
+  })
+
+  it('refuses to reconstruct every missing member of a migration record set', async () => {
+    for (const missingStore of [
+      'snapshots-v3',
+      'audits-v3',
+      'assets-v3',
+      'migration-sources-v3',
+    ]) {
+      globalThis.indexedDB = new IDBFactory() as unknown as IDBFactory
+      const store = new IndexedDbDocumentStore()
+      const migration = migrationCommit()
+      await store.commitMigration(migration)
+
+      const database = await openCurrentDatabase()
+      const transaction = database.transaction(missingStore, 'readwrite')
+      transaction.objectStore(missingStore).clear()
+      await transactionCompleteForTest(transaction)
+      database.close()
+
+      await expect(store.commitMigration(migration)).rejects.toMatchObject({
+        code: 'FLOW_STORE_PARTIAL_RECORD_SET',
+      })
+    }
+  })
+
   it('retries after a transient open failure and closes cached connections on version change', async () => {
     const open = vi.spyOn(globalThis.indexedDB, 'open')
     open.mockImplementationOnce(() => {

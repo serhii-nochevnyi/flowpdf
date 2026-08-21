@@ -240,7 +240,13 @@ class FoundationInspector implements FoundationInspectorController {
 
   async initialize(): Promise<void> {
     const records = await this.store.loadRecords({ allowEmpty: true })
-    this.hasDurableRecords = records.snapshots.length > 0
+    this.hasDurableRecords = [
+      records.snapshots,
+      records.transactions,
+      records.audits,
+      records.assets,
+      records.sources,
+    ].some((store) => store.length > 0)
     this.render()
   }
 

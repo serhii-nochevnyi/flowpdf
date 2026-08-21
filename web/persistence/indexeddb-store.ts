@@ -217,7 +217,7 @@ export class IndexedDbDocumentStore {
 
     await commitGuardedRecords(
       database,
-      [SNAPSHOTS, TRANSACTIONS, AUDITS, ASSETS],
+      [SNAPSHOTS, TRANSACTIONS, AUDITS, ASSETS, SOURCES],
       [
         {
           storeName: SNAPSHOTS,
@@ -238,6 +238,7 @@ export class IndexedDbDocumentStore {
           storeName: ASSETS,
           records: assets.map((asset) => guardedRecord(asset, sameAssetIdentity)),
         },
+        { storeName: SOURCES, records: [] },
       ],
       {
         expected:
@@ -270,12 +271,13 @@ export class IndexedDbDocumentStore {
 
     await commitGuardedRecords(
       database,
-      [SNAPSHOTS, AUDITS, ASSETS, SOURCES],
+      [SNAPSHOTS, TRANSACTIONS, AUDITS, ASSETS, SOURCES],
       [
         {
           storeName: SNAPSHOTS,
           records: [guardedRecord(snapshot, sameSnapshotIdentity)],
         },
+        { storeName: TRANSACTIONS, records: [] },
         {
           storeName: AUDITS,
           records: [guardedRecord(audit, sameAuditIdentity)],
@@ -341,7 +343,13 @@ export class IndexedDbDocumentStore {
       throw storageError('FLOW_STORAGE_MIGRATION_REQUIRED')
     }
 
-    if (snapshots.length === 0 && options.allowEmpty !== true) {
+    const isEmpty =
+      snapshots.length === 0 &&
+      transactions.length === 0 &&
+      audits.length === 0 &&
+      assets.length === 0 &&
+      sources.length === 0
+    if (isEmpty && options.allowEmpty !== true) {
       throw storageError('FLOW_STORAGE_EMPTY')
     }
 
@@ -556,7 +564,7 @@ function commitGuardedRecords(
     )
     const existingByStore = new Map<string, readonly StoredEnvelope<unknown>[]>()
     const populatedGroups = groups.filter(({ records }) => records.length > 0)
-    let readsRemaining = populatedGroups.length + 2
+    let readsRemaining = groups.length + 2
     let failure: StorageError | undefined
     let currentHead: DocumentHeadDto | undefined
 
@@ -590,30 +598,22 @@ function commitGuardedRecords(
             assertIdentityCompatibility(existingByStore.get(group.storeName) ?? [], group.records)
           }
         }
-        if (exactRetry) validateIdentities()
-        const completeRetry =
-          exactRetry &&
-          populatedGroups.every((group) =>
-            group.records.every((candidate) =>
-              (existingByStore.get(group.storeName) ?? []).some(
-                (durable) =>
-                  durable.physicalKey === candidate.envelope.physicalKey &&
-                  deterministicJson(durable.record) ===
-                    deterministicJson(candidate.envelope.record),
-              ),
-            ),
-          )
-        if (exactRetry && !completeRetry) {
-          throw storageError('FLOW_STORE_HEAD_CONFLICT')
-        }
+        const newDocument = currentHead === undefined && headTransition.expected === null
         if (
-          !exactRetry &&
-          !expectedMatches &&
-          !(currentHead === undefined && headTransition.expected === null)
+          newDocument &&
+          groups.some((group) => (existingByStore.get(group.storeName) ?? []).length > 0)
         ) {
+          throw storageError('FLOW_STORE_PARTIAL_RECORD_SET')
+        }
+        if (exactRetry) {
+          validateIdentities()
+          if (!groups.every((group) => exactStoredGroup(existingByStore, group))) {
+            throw storageError('FLOW_STORE_PARTIAL_RECORD_SET')
+          }
+        } else if (!expectedMatches && !newDocument) {
           throw storageError('FLOW_STORE_HEAD_CONFLICT')
         }
-        if (!exactRetry) validateIdentities()
+        if (expectedMatches) validateIdentities()
         for (const group of populatedGroups) {
           const objectStore = transaction.objectStore(group.storeName)
           for (const { envelope } of group.records) objectStore.put(envelope)
@@ -657,7 +657,7 @@ function commitGuardedRecords(
     headRequest.onerror = () =>
       abort(storageError('FLOW_STORAGE_READ_FAILED', headRequest.error))
 
-    for (const group of populatedGroups) {
+    for (const group of groups) {
       const request = transaction.objectStore(group.storeName).getAll()
       request.onsuccess = () => {
         existingByStore.set(
@@ -688,6 +688,25 @@ function assertIdentityCompatibility(
     }
     observed.push(candidate.envelope)
   }
+}
+
+function exactStoredGroup(
+  existingByStore: ReadonlyMap<string, readonly StoredEnvelope<unknown>[]>,
+  group: GuardedStoreWrites,
+): boolean {
+  const expected = new Map<string, StoredEnvelope<unknown>>()
+  for (const { envelope } of group.records) expected.set(envelope.physicalKey, envelope)
+  const existing = existingByStore.get(group.storeName) ?? []
+  return (
+    existing.length === expected.size &&
+    existing.every((durable) => {
+      const candidate = expected.get(durable.physicalKey)
+      return (
+        candidate !== undefined &&
+        deterministicJson(durable.record) === deterministicJson(candidate.record)
+      )
+    })
+  )
 }
 
 function sameSnapshotIdentity(left: SnapshotRecordDto, right: SnapshotRecordDto): boolean {

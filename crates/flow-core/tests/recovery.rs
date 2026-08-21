@@ -55,6 +55,54 @@ fn chain() -> Vec<OperationResult> {
     chain_with_commands(2)
 }
 
+#[test]
+fn creation_planning_rejects_every_partial_durable_record_set() {
+    let chain = chain_with_commands(0);
+    let created = chain.first().expect("creation");
+    let planner = CommitPlanner::new(SnapshotPolicy::EveryTransaction);
+    let complete = request(&chain, &[0]);
+
+    planner
+        .plan(
+            &RecoverRequest {
+                snapshots: Vec::new(),
+                transactions: Vec::new(),
+                audits: Vec::new(),
+                assets: Vec::new(),
+                sources: Vec::new(),
+            },
+            created.commit.clone(),
+            SnapshotReason::Creation,
+        )
+        .expect("truly empty creation");
+    planner
+        .plan(&complete, created.commit.clone(), SnapshotReason::Creation)
+        .expect("complete exact retry");
+
+    let mut partial_sets = Vec::new();
+    let mut missing_snapshot = complete.clone();
+    missing_snapshot.snapshots.clear();
+    partial_sets.push(missing_snapshot);
+    let mut missing_transaction = complete.clone();
+    missing_transaction.transactions.clear();
+    partial_sets.push(missing_transaction);
+    let mut missing_audit = complete.clone();
+    missing_audit.audits.clear();
+    partial_sets.push(missing_audit);
+    let mut missing_asset = complete;
+    missing_asset.assets.clear();
+    partial_sets.push(missing_asset);
+
+    for partial in partial_sets {
+        assert_eq!(
+            planner
+                .plan(&partial, created.commit.clone(), SnapshotReason::Creation,)
+                .expect_err("partial creation must not be repaired"),
+            flow_core::store::StoreError::PartialRecordSet
+        );
+    }
+}
+
 fn commit(
     planner: &CommitPlanner,
     store: &mut InMemoryDocumentStore,
