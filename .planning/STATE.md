@@ -5,15 +5,15 @@ milestone_name: milestone
 current_phase: 1
 current_phase_name: Durable Flow Foundation
 status: executing
-stopped_at: Completed FLOWPDF-01-04-PLAN.md
-last_updated: "2026-08-14T20:37:18.207Z"
-last_activity: 2026-08-14
-last_activity_desc: Atomic transaction, UTF-16 anchor, undo/redo, and semantic recovery plan completed
+stopped_at: Completed FLOWPDF-01-05-PLAN.md
+last_updated: "2026-08-21T08:35:15.515Z"
+last_activity: 2026-08-21
+last_activity_desc: Durable recovery, provenance, audit privacy, migrated checkpoints, browser CAS, and source-bound benchmark completed
 progress:
   total_phases: 1
   completed_phases: 0
   total_plans: 6
-  completed_plans: 4
+  completed_plans: 5
 ---
 
 # Project State
@@ -28,27 +28,27 @@ See: .planning/PROJECT.md (updated 2026-08-14)
 ## Current Position
 
 Phase: 1 (Durable Flow Foundation) — EXECUTING
-Plan: 5 of 6
+Plan: 6 of 6
 Status: Ready to execute
-Last activity: 2026-08-14 — Atomic transaction, UTF-16 anchor, undo/redo, and semantic recovery plan completed
+Last activity: 2026-08-21 — Durable recovery, provenance, audit privacy, migrated checkpoints, browser CAS, and source-bound benchmark completed
 
-Progress: [███████░░░] 67%
+Progress: [████████░░] 83%
 
 ## Performance Metrics
 
 **Velocity:**
 
-- Total plans completed: 4
-- Average duration: 33 min
-- Total execution time: 2.2 hours
+- Total plans completed: 5
+- Average duration: not comparable (Plan 05 was a multi-session closeout)
+- Total execution time: multi-session
 
 **By Phase:**
 
 | Phase | Plans | Total | Avg/Plan |
 |-------|-------|-------|----------|
-| 1 | 4 | 132 min | 33 min |
+| 1 | 5 | multi-session | n/a |
 
-**Recent Trend:** Waves 0–3 complete; trusted toolchains, browser durability, canonical schema/migrations, and the native/WASM transaction engine are green.
+**Recent Trend:** Waves 0–4 complete; durable recovery, browser CAS, migration lineage, privacy-safe audit/provenance, and the source-bound benchmark are green.
 **Per-Plan Metrics:**
 
 | Plan | Duration | Tasks | Files |
@@ -57,6 +57,7 @@ Progress: [███████░░░] 67%
 | Phase 1 P02 | 27min | 2 tasks | 17 files |
 | Phase 1 P03 | 35min | 3 tasks | 13 files |
 | Phase 1 P04 | 30min | 3 tasks | 13 files |
+| Phase FLOWPDF-01 P05 | 7d-multi-session | 3 tasks | 18 files |
 
 ## Accumulated Context
 
@@ -75,6 +76,10 @@ Decisions are logged in `.planning/PROJECT.md`.
 - [Phase 1]: Schema migrations are pure contiguous hops; success creates a validated current-schema replay boundary while preserving source lineage.
 - [Phase 1]: Every input modality uses one typed Rust command service; undo and redo are fresh transactions that apply stored executable operations. — This keeps UI, keyboard, voice, API, native, and WASM behavior atomic and identical.
 - [Phase 1]: Recovery replays transactions backward and forward and rebuilds history before publication; unkeyed hashes prove consistency, not external authenticity. — Stored operations and mappings must be semantically bound to the snapshot without overstating the security of an untrusted rewritten store.
+- [Phase FLOWPDF-01]: Rust CommitPlanner owns snapshot cadence and recovery semantics; physical adapters persist opaque planned records only. — This keeps browser storage from becoming a second semantic implementation.
+- [Phase FLOWPDF-01]: IndexedDB normal writes enforce logical-identity CAS inside one strict transaction. — Exact retries converge while divergent concurrent saves cannot both be acknowledged.
+- [Phase FLOWPDF-01]: A migration boundary is immutable lineage to the original source and migration output and is carried by later checkpoints. — Post-migration recovery stays bounded without losing or inventing ancestry.
+- [Phase FLOWPDF-01]: Recovery benchmark evidence is bound to the recursively discovered core source graph and recomputes percentiles from raw samples. — Stale or forged performance evidence fails closed.
 
 ### Pending Todos
 
@@ -92,6 +97,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-08-14T20:37:04.263Z
-Stopped at: Completed FLOWPDF-01-04-PLAN.md
+Last session: 2026-08-21T08:35:15.509Z
+Stopped at: Completed FLOWPDF-01-05-PLAN.md
 Resume file: None
