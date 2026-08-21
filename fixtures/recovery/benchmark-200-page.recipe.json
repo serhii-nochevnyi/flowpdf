@@ -1,0 +1,16 @@
+{
+  "formatVersion": 1,
+  "name": "phase1-recovery-200-page-equivalent",
+  "pages": 200,
+  "transactions": 1000,
+  "bytesPerTransaction": 32,
+  "warmups": 3,
+  "measurements": 20,
+  "p95TargetMilliseconds": 2000,
+  "candidates": [
+    { "transactionInterval": 100, "byteInterval": 4194304 },
+    { "transactionInterval": 50, "byteInterval": 2097152 },
+    { "transactionInterval": 25, "byteInterval": 1048576 },
+    { "transactionInterval": 10, "byteInterval": 1048576 }
+  ]
+}

@@ -1,0 +1,66 @@
+{
+  "formatVersion": 1,
+  "fixtureHash": "sha256:cd8ed768f0a51a0c7ce96f3563f9c23de5693dd93638298ea2100c2ff47388a3",
+  "fixturePath": "fixtures/recovery/benchmark-200-page.recipe.json",
+  "toolchain": {
+    "node": "v24.10.0",
+    "platform": "darwin",
+    "architecture": "arm64",
+    "cargoBinary": "work/toolchains/cargo/bin/cargo",
+    "rustcBinary": "work/toolchains/cargo/bin/rustc",
+    "cargoHome": "work/toolchains/cargo",
+    "rustupHome": "work/toolchains/rustup",
+    "cargoVersion": "cargo 1.97.1 (c980f4866 2026-06-30)",
+    "rustcVersion": "rustc 1.97.1 (8bab26f4f 2026-07-14)",
+    "benchmark": "flow-core native release",
+    "browser": "not-applicable: Rust recovery benchmark; browser path is verified separately"
+  },
+  "attempts": [
+    {
+      "fixtureHash": "blake3:6fd087f3ed2945929915f25d5259ff85bac587d6755fdb158d6f7b7241bda03a",
+      "fixtureName": "phase1-recovery-200-page-equivalent",
+      "pages": 200,
+      "transactions": 1000,
+      "warmups": 3,
+      "measurements": 20,
+      "p95TargetMilliseconds": 2000,
+      "policy": {
+        "transactionInterval": 100,
+        "byteInterval": 4194304
+      },
+      "durationsMilliseconds": [
+        431.79920799999996,
+        430.080208,
+        431.168583,
+        438.46212499999996,
+        431.479208,
+        432.965083,
+        445.27975,
+        433.229625,
+        434.61899999999997,
+        434.450792,
+        428.64066699999995,
+        431.970458,
+        432.769917,
+        447.905209,
+        433.319417,
+        431.674167,
+        433.829833,
+        443.603,
+        449.09375,
+        434.185333
+      ],
+      "p50Milliseconds": 433.229625,
+      "p95Milliseconds": 447.905209
+    }
+  ],
+  "selectedPolicy": {
+    "transactionInterval": 100,
+    "byteInterval": 4194304
+  },
+  "p50Milliseconds": 433.229625,
+  "p95Milliseconds": 447.905209,
+  "p95TargetMilliseconds": 2000,
+  "passed": true,
+  "blocked": false
+}
