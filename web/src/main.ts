@@ -1,4 +1,4 @@
-import { mountFoundationInspector } from './foundation-inspector'
+import { mountFoundationInspector } from './foundation-inspector.js'
 
 const root = document.querySelector<HTMLElement>('#app')
 if (root === null) {

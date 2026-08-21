@@ -8,12 +8,12 @@ import {
   type PersistenceCommitDto,
   type PlannedPersistenceCommitDto,
   type RecoveryRecordsDto,
-} from '../persistence/indexeddb-store'
-import { foundationInspectorEn } from './i18n/en'
+} from '../persistence/indexeddb-store.js'
+import { foundationInspectorEn } from './i18n/en.js'
 import {
   foundationInspectorUk,
   type FoundationInspectorMessageKey,
-} from './i18n/uk'
+} from './i18n/uk.js'
 
 interface ErrorDto {
   readonly code: string
@@ -612,6 +612,10 @@ class FoundationInspector implements FoundationInspectorController {
     this.elements.create.hidden = populated
     this.elements.openOlder.hidden = populated
     this.elements.openLast.hidden = populated || !this.hasDurableRecords
+    this.elements.documentActions.hidden = populated
+    this.elements.commandActions.hidden = !populated
+    this.elements.historyActions.hidden = !populated
+    this.elements.durabilityActions.hidden = !populated
     for (const control of this.elements.sessionControls) control.hidden = !populated
     this.elements.auditEmpty.hidden = populated && this.view?.audit.length !== 0
     this.elements.provenanceUnavailable.hidden = false
@@ -849,6 +853,10 @@ interface InspectorElements {
   readonly copyHash: HTMLButtonElement
   readonly controls: readonly HTMLButtonElement[]
   readonly sessionControls: readonly HTMLButtonElement[]
+  readonly documentActions: HTMLElement
+  readonly commandActions: HTMLElement
+  readonly historyActions: HTMLElement
+  readonly durabilityActions: HTMLElement
   readonly empty: HTMLElement
   readonly session: HTMLElement
   readonly documentId: HTMLElement
@@ -985,6 +993,9 @@ function createInspectorDom(
     reload,
     recover,
   )
+  commandActions.hidden = true
+  historyActions.hidden = true
+  durabilityActions.hidden = true
   const status = element('p', 'status-region')
   status.dataset.durabilityStatus = ''
   status.dataset.state = 'idle'
@@ -1163,6 +1174,10 @@ function createInspectorDom(
     copyHash,
     controls,
     sessionControls,
+    documentActions,
+    commandActions,
+    historyActions,
+    durabilityActions,
     empty,
     session,
     documentId,

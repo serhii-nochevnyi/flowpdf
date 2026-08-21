@@ -1,4 +1,4 @@
-import type { FoundationInspectorMessageKey } from './uk'
+import type { FoundationInspectorMessageKey } from './uk.js'
 
 export const foundationInspectorEn = {
   'foundationInspector.app.product': 'FlowPDF',
