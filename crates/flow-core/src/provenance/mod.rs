@@ -131,7 +131,11 @@ pub enum PreviewExportProvenance {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(
+    rename_all = "camelCase",
+    deny_unknown_fields,
+    try_from = "RevisionProvenanceWire"
+)]
 pub struct RevisionProvenance {
     document_id: DocumentId,
     revision: u32,
@@ -141,6 +145,38 @@ pub struct RevisionProvenance {
     lineage: RevisionLineage,
     source_hashes: Vec<RevisionHash>,
     preview_export_provenance: PreviewExportProvenance,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RevisionProvenanceWire {
+    document_id: DocumentId,
+    revision: u32,
+    schema_version: u32,
+    canonical_hash: RevisionHash,
+    engine: EngineIdentity,
+    lineage: RevisionLineage,
+    source_hashes: Vec<RevisionHash>,
+    preview_export_provenance: PreviewExportProvenance,
+}
+
+impl TryFrom<RevisionProvenanceWire> for RevisionProvenance {
+    type Error = ProvenanceError;
+
+    fn try_from(wire: RevisionProvenanceWire) -> Result<Self, Self::Error> {
+        let source_hashes = wire.source_hashes;
+        Self {
+            document_id: wire.document_id,
+            revision: wire.revision,
+            schema_version: wire.schema_version,
+            canonical_hash: wire.canonical_hash,
+            engine: wire.engine,
+            lineage: wire.lineage,
+            source_hashes: Vec::new(),
+            preview_export_provenance: wire.preview_export_provenance,
+        }
+        .with_source_hashes(source_hashes)
+    }
 }
 
 impl RevisionProvenance {

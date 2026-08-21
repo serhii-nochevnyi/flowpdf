@@ -127,6 +127,11 @@ fn source_hashes_are_never_invented_and_explicit_values_remain_bounded() {
         RevisionProvenance::from_document(&document, hash).expect("verified revision provenance");
     let serialized = serde_json::to_value(&provenance).expect("provenance JSON");
     assert_eq!(serialized["sourceHashes"], serde_json::json!([]));
+    assert_eq!(
+        serde_json::from_value::<RevisionProvenance>(serialized.clone())
+            .expect("valid provenance round trip"),
+        provenance
+    );
 
     let duplicate =
         RevisionHash::parse(format!("flowpdf:blake3:v1:{:064x}", 1)).expect("explicit source hash");
@@ -149,6 +154,17 @@ fn source_hashes_are_never_invented_and_explicit_values_remain_bounded() {
             .with_source_hashes(over_limit)
             .expect_err("source hash limit"),
         ProvenanceError::InvalidSourceHashes
+    );
+
+    let mut hostile = serialized;
+    hostile["sourceHashes"] = serde_json::json!(
+        (0..17)
+            .map(|_| format!("flowpdf:blake3:v1:{:064x}", 1))
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        serde_json::from_value::<RevisionProvenance>(hostile).is_err(),
+        "deserialization must enforce the same source-hash bounds as constructors"
     );
 }
 
