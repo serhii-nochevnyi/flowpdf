@@ -75,7 +75,7 @@ test('recovery: an aborted incomplete physical transaction is invisible after pa
     },
   })
   transaction.abort()
-  await transactionTerminal(transaction)
+  await expectTransactionAbort(transaction)
   database.close()
 
   const reconstructedRoot = document.createElement('div')
@@ -172,11 +172,19 @@ function requestResult<T>(request: IDBRequest<T>): Promise<T> {
 }
 
 function transactionTerminal(transaction: IDBTransaction): Promise<void> {
-  return new Promise<void>((resolve) => {
+  return new Promise<void>((resolve, reject) => {
     transaction.oncomplete = () => resolve()
+    transaction.onabort = () => reject(transaction.error ?? new Error('IndexedDB transaction aborted'))
+    transaction.onerror = () => reject(transaction.error ?? new Error('IndexedDB transaction failed'))
+  })
+}
+
+function expectTransactionAbort(transaction: IDBTransaction): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    transaction.oncomplete = () => reject(new Error('IndexedDB transaction unexpectedly completed'))
     transaction.onabort = () => resolve()
     transaction.onerror = () => {
-      // The abort event is the terminal signal for deliberately interrupted writes.
+      // The following abort event is the expected terminal signal.
     }
   })
 }
