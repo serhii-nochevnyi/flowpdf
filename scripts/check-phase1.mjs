@@ -6,6 +6,9 @@ import { delimiter, dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { performance } from 'node:perf_hooks'
 
+import { assertSupportedNodeVersion } from './node-version.mjs'
+
+assertSupportedNodeVersion()
 const projectRoot = resolve(import.meta.dirname, '..')
 const cargoHome = resolve(projectRoot, 'work/toolchains/cargo')
 const rustupHome = resolve(projectRoot, 'work/toolchains/rustup')

@@ -5,6 +5,9 @@ import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 
+import { assertSupportedNodeVersion } from './node-version.mjs'
+
+assertSupportedNodeVersion()
 const root = resolve(import.meta.dirname, '..')
 const recipePath = resolve(root, 'fixtures/recovery/benchmark-200-page.recipe.json')
 const outputDir = resolve(root, 'artifacts/benchmarks')

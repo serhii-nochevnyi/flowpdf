@@ -5,6 +5,9 @@ import { extname, resolve, sep } from 'node:path'
 import { pipeline } from 'node:stream/promises'
 import { fileURLToPath } from 'node:url'
 
+import { assertSupportedNodeVersion } from './node-version.mjs'
+
+assertSupportedNodeVersion()
 const host = '127.0.0.1'
 const port = Number.parseInt(process.env.FLOWPDF_INSPECTOR_PORT ?? '4173', 10)
 const root = resolve(import.meta.dirname, '../dist/web')

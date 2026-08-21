@@ -2,6 +2,9 @@ import { cp, mkdir, rm } from 'node:fs/promises'
 import { resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+import { assertSupportedNodeVersion } from './node-version.mjs'
+
+assertSupportedNodeVersion()
 const projectRoot = resolve(import.meta.dirname, '..')
 
 export async function cleanWebOutput(root) {
