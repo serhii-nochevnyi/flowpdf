@@ -301,8 +301,16 @@ export class IndexedDbDocumentStore {
   }
 
   private open(): Promise<IDBDatabase> {
-    this.databasePromise ??= new Promise<IDBDatabase>((resolve, reject) => {
-      const request = indexedDB.open(this.databaseName, DATABASE_VERSION)
+    if (this.databasePromise !== undefined) return this.databasePromise
+
+    const pending = new Promise<IDBDatabase>((resolve, reject) => {
+      let request: IDBOpenDBRequest
+      try {
+        request = indexedDB.open(this.databaseName, DATABASE_VERSION)
+      } catch (error: unknown) {
+        reject(storageError('FLOW_STORAGE_OPEN_FAILED', error))
+        return
+      }
       request.onupgradeneeded = () => {
         const database = request.result
         for (const storeName of [SNAPSHOTS, TRANSACTIONS, AUDITS, ASSETS, SOURCES]) {
@@ -311,11 +319,23 @@ export class IndexedDbDocumentStore {
           }
         }
       }
-      request.onsuccess = () => resolve(request.result)
+      request.onsuccess = () => {
+        const database = request.result
+        database.onversionchange = () => {
+          database.close()
+          if (this.databasePromise === pending) this.databasePromise = undefined
+        }
+        resolve(database)
+      }
       request.onerror = () => reject(storageError('FLOW_STORAGE_OPEN_FAILED', request.error))
-      request.onblocked = () => reject(storageError('FLOW_STORAGE_BLOCKED'))
+      // A blocked upgrade is not terminal: IndexedDB can still complete this
+      // request once older connections close.
     })
-    return this.databasePromise
+    this.databasePromise = pending
+    void pending.catch(() => {
+      if (this.databasePromise === pending) this.databasePromise = undefined
+    })
+    return pending
   }
 }
 

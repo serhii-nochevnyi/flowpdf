@@ -412,6 +412,27 @@ describe('IndexedDbDocumentStore', () => {
     })
   })
 
+  it('retries after a transient open failure and closes cached connections on version change', async () => {
+    const open = vi.spyOn(globalThis.indexedDB, 'open')
+    open.mockImplementationOnce(() => {
+      throw new DOMException('transient open failure', 'UnknownError')
+    })
+    const store = new IndexedDbDocumentStore()
+
+    await expect(store.loadRecords({ allowEmpty: true })).rejects.toMatchObject({
+      code: 'FLOW_STORAGE_OPEN_FAILED',
+    })
+    await expect(store.loadRecords({ allowEmpty: true })).resolves.toMatchObject({
+      snapshots: [],
+    })
+
+    await deleteDatabaseForTest(databaseName)
+    await expect(store.loadRecords({ allowEmpty: true })).resolves.toMatchObject({
+      snapshots: [],
+    })
+    expect(open).toHaveBeenCalledTimes(3)
+  })
+
   it('adds versioned stores without deleting legacy stores or records', async () => {
     const legacyRecord = { legacy: true, value: 'must survive' }
     const legacyDatabase = await openLegacyDatabase(legacyRecord)
@@ -455,6 +476,14 @@ function openCurrentDatabase(): Promise<IDBDatabase> {
   return new Promise<IDBDatabase>((resolve, reject) => {
     const request = indexedDB.open(databaseName)
     request.onsuccess = () => resolve(request.result)
+    request.onerror = () => reject(request.error)
+  })
+}
+
+function deleteDatabaseForTest(name: string): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    const request = indexedDB.deleteDatabase(name)
+    request.onsuccess = () => resolve()
     request.onerror = () => reject(request.error)
   })
 }

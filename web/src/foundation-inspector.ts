@@ -137,11 +137,19 @@ const EMPTY_ASSET_HASH =
 let wasmPromise: Promise<WasmBoundary> | undefined
 
 async function loadWasm(): Promise<WasmBoundary> {
-  wasmPromise ??= import(/* @vite-ignore */ GENERATED_WASM_MODULE).then(async (module: unknown) => {
-    const boundary = module as WasmBoundary
-    await boundary.default()
-    return boundary
-  })
+  if (wasmPromise === undefined) {
+    const pending = import(/* @vite-ignore */ GENERATED_WASM_MODULE).then(
+      async (module: unknown) => {
+        const boundary = module as WasmBoundary
+        await boundary.default()
+        return boundary
+      },
+    )
+    wasmPromise = pending
+    void pending.catch(() => {
+      if (wasmPromise === pending) wasmPromise = undefined
+    })
+  }
   return wasmPromise
 }
 
