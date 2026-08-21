@@ -87,7 +87,7 @@ describe('Foundation Inspector approved contract', () => {
     expect(root.querySelectorAll('main')).toHaveLength(1)
     expect(root.querySelector('section[aria-labelledby="commands-heading"]')).not.toBeNull()
     expect(root.querySelector('aside[aria-label="Інспектор документа"]')).not.toBeNull()
-    expect(root.querySelector('[data-audit-empty]')?.hidden).toBe(false)
+    expect(root.querySelector<HTMLElement>('[data-audit-empty]')?.hidden).toBe(false)
     expect(root.querySelector('[data-audit-count]')?.textContent).toContain('0')
 
     await clickAndWait(inspector, root, 'create-sample')
@@ -122,13 +122,14 @@ describe('Foundation Inspector approved contract', () => {
     await clickAndWait(inspector, root, 'create-sample')
     expect(action(root, 'undo').disabled).toBe(true)
     await clickAndWait(inspector, root, 'apply-mutation')
+    await clickAndWait(inspector, root, 'apply-mutation')
     const applied = inspector.snapshot()
 
     await clickAndWait(inspector, root, 'stale-command')
     expect(inspector.snapshot()).toEqual(applied)
-    expect(root.querySelector('[role="alert"]')?.textContent).toMatch(
-      /FLOW_STALE_REVISION.*не змінено/i,
-    )
+    const conflictCopy = root.querySelector('[role="alert"]')?.textContent
+    expect(conflictCopy).toContain('FLOW_STALE_REVISION')
+    expect(conflictCopy).toMatch(/не змінено/i)
 
     const undo = action(root, 'undo')
     undo.focus()
@@ -141,7 +142,7 @@ describe('Foundation Inspector approved contract', () => {
     root.dispatchEvent(shortcut)
     await inspector.whenIdle()
     expect(shortcut.defaultPrevented).toBe(true)
-    expect(inspector.snapshot().revision).toBe(3)
+    expect(inspector.snapshot().revision).toBe(4)
     expect(document.activeElement).toBe(undo)
     expect(action(root, 'redo').disabled).toBe(false)
 
@@ -157,7 +158,7 @@ describe('Foundation Inspector approved contract', () => {
     input.dispatchEvent(inputShortcut)
     await inspector.whenIdle()
     expect(inputShortcut.defaultPrevented).toBe(false)
-    expect(inspector.snapshot().revision).toBe(3)
+    expect(inspector.snapshot().revision).toBe(4)
   })
 
   it('retains the prior view and disables only the initiating control while work is pending', async () => {
@@ -187,7 +188,7 @@ describe('Foundation Inspector approved contract', () => {
     try {
       expect(create.disabled).toBe(true)
       expect(openOlder.disabled).toBe(false)
-      expect(root.querySelector('[data-empty-document]')?.hidden).toBe(false)
+      expect(root.querySelector<HTMLElement>('[data-empty-document]')?.hidden).toBe(false)
       expect(root.querySelector('[data-durability-status]')?.textContent).toContain(
         'Виконується',
       )

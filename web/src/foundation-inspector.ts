@@ -9,6 +9,11 @@ import {
   type PlannedPersistenceCommitDto,
   type RecoveryRecordsDto,
 } from '../persistence/indexeddb-store'
+import { foundationInspectorEn } from './i18n/en'
+import {
+  foundationInspectorUk,
+  type FoundationInspectorMessageKey,
+} from './i18n/uk'
 
 interface ErrorDto {
   readonly code: string
@@ -99,6 +104,8 @@ interface WasmBoundary {
   readonly query_document: (request: RecoveryRecordsDto) => ApiResponse<RecoverResultDto>
 }
 
+type ErrorPresentation = 'command' | 'stale' | 'recovery' | 'copy'
+
 export interface FoundationInspectorSnapshot {
   readonly documentId: string
   readonly schemaVersion: number
@@ -120,6 +127,7 @@ export interface FoundationInspectorController {
 
 export interface FoundationInspectorOptions {
   readonly databaseName?: string
+  readonly locale?: FoundationInspectorLocale
 }
 
 const GENERATED_WASM_MODULE = '../generated/flow_wasm.js'
@@ -136,46 +144,26 @@ async function loadWasm(): Promise<WasmBoundary> {
   return wasmPromise
 }
 
-const messages = {
-  'foundationInspector.createSample': 'Створити тестовий документ',
-  'foundationInspector.openLastLocal': 'Відкрити останній локальний документ',
-  'foundationInspector.openOlderSchema': 'Відкрити документ старішої схеми',
-  'foundationInspector.applyTestMutation': 'Застосувати тестову зміну',
-  'foundationInspector.testStaleCommand': 'Перевірити застарілу команду',
-  'foundationInspector.undo': 'Скасувати',
-  'foundationInspector.redo': 'Повторити',
-  'foundationInspector.save': 'Зберегти локально',
-  'foundationInspector.reload': 'Перезавантажити зі сховища',
-  'foundationInspector.recover': 'Відновити останню стійку ревізію',
-  'foundationInspector.empty.heading': 'Документ ще не відкрито',
-  'foundationInspector.empty.body':
-    'Створіть тестовий документ або відкрийте останній локальний документ, щоб перевірити ревізії та відновлення.',
-  'foundationInspector.audit.empty': 'Записів аудиту ще немає.',
-  'foundationInspector.pending': 'Виконується…',
-  'foundationInspector.create.success': 'Тестовий документ створено і збережено локально.',
-  'foundationInspector.open.success': 'Відкрито локальну ревізію {revision}.',
-  'foundationInspector.migration.success':
-    'Документ перенесено зі схеми {sourceSchema} до схеми {currentSchema}.',
-  'foundationInspector.save.success': 'Збережено локально — ревізія {revision}.',
-  'foundationInspector.error.command':
-    'Команду не виконано. Дані не змінено. Код: {code}.',
-  'foundationInspector.error.recovery':
-    'Не вдалося безпечно відновити документ. Локальні дані не змінено. Код: {code}.',
-  'foundationInspector.summary': 'Структура: блоків — {nodes}, полів — {fields}, ресурсів — {assets}.',
-  'foundationInspector.provenance.created': 'Створено {createdAt}.',
-  'foundationInspector.provenance.migrated':
-    'Перенесено зі схеми {sourceSchema} до схеми {currentSchema}.',
-  'foundationInspector.provenance.engine': 'Оброблено {engine} {version}.',
-  'foundationInspector.provenance.noExport':
-    'Походження попереднього перегляду або експорту буде доступне в наступній фазі.',
-} as const
+export type FoundationInspectorLocale = 'uk' | 'en'
 
-type MessageKey = keyof typeof messages
+export const foundationInspectorMessages: Readonly<
+  Record<
+    FoundationInspectorLocale,
+    Readonly<Record<FoundationInspectorMessageKey, string>>
+  >
+> = {
+  uk: foundationInspectorUk,
+  en: foundationInspectorEn,
+}
 
-function message(key: MessageKey, parameters: Readonly<Record<string, string | number>> = {}): string {
-  let text: string = messages[key]
+function message(
+  locale: FoundationInspectorLocale,
+  key: FoundationInspectorMessageKey,
+  parameters: Readonly<Record<string, string | number>> = {},
+): string {
+  let text = foundationInspectorMessages[locale][key]
   for (const [name, value] of Object.entries(parameters)) {
-    text = text.replace(`{${name}}`, String(value))
+    text = text.replaceAll(`{${name}}`, String(value))
   }
   return text
 }
@@ -187,43 +175,56 @@ class FoundationInspector implements FoundationInspectorController {
   private lastCommit: PersistenceCommitDto | undefined
   private hasDurableRecords = false
   private pending: Promise<void> = Promise.resolve()
+  private busy = false
+  private activeControl: HTMLButtonElement | undefined
 
   constructor(
     root: HTMLElement,
     private readonly wasm: WasmBoundary,
     private readonly store: IndexedDbDocumentStore,
+    private readonly locale: FoundationInspectorLocale,
   ) {
-    this.elements = createInspectorDom(root)
+    this.elements = createInspectorDom(root, locale)
     this.elements.create.addEventListener('click', () => {
-      this.start(() => this.createSample())
+      this.start(() => this.createSample(), this.elements.create)
     })
     this.elements.apply.addEventListener('click', () => {
-      this.start(() => this.applyMutation())
+      this.start(() => this.applyMutation(), this.elements.apply)
     })
     this.elements.openLast.addEventListener('click', () => {
-      this.start(() => this.openLast())
+      this.start(() => this.openLast(), this.elements.openLast, 'recovery')
     })
     this.elements.openOlder.addEventListener('click', () => {
-      this.start(() => this.openOlderSchema())
+      this.start(() => this.openOlderSchema(), this.elements.openOlder)
     })
     this.elements.stale.addEventListener('click', () => {
-      this.start(() => this.applyStaleCommand())
+      this.start(() => this.applyStaleCommand(), this.elements.stale, 'stale')
     })
     this.elements.undo.addEventListener('click', () => {
-      this.start(() => this.applyHistory('undo'))
+      this.start(() => this.applyHistory('undo'), this.elements.undo)
     })
     this.elements.redo.addEventListener('click', () => {
-      this.start(() => this.applyHistory('redo'))
+      this.start(() => this.applyHistory('redo'), this.elements.redo)
     })
     this.elements.save.addEventListener('click', () => {
-      this.start(() => this.save())
+      this.start(() => this.save(), this.elements.save)
     })
     this.elements.reload.addEventListener('click', () => {
-      this.start(() => this.restoreFromStorage('reload'))
+      this.start(() => this.restoreFromStorage('reload'), this.elements.reload, 'recovery')
     })
     this.elements.recover.addEventListener('click', () => {
-      this.start(() => this.restoreFromStorage('recover'))
+      this.start(() => this.restoreFromStorage('recover'), this.elements.recover, 'recovery')
     })
+    this.elements.copyDocumentId.addEventListener('click', () => {
+      void this.copyValue(
+        this.view?.documentId,
+        'foundationInspector.copy.documentId.visible',
+      )
+    })
+    this.elements.copyHash.addEventListener('click', () => {
+      void this.copyValue(this.view?.canonicalHash, 'foundationInspector.copy.hash.visible')
+    })
+    root.addEventListener('keydown', (event) => this.handleKeyboard(event))
     this.render()
   }
 
@@ -260,10 +261,19 @@ class FoundationInspector implements FoundationInspectorController {
     return this.snapshot()
   }
 
-  private start(operation: () => Promise<void>): void {
-    this.pending = operation().catch((error: unknown) => {
-      this.setError(errorCode(error))
-    })
+  private start(
+    operation: () => Promise<void>,
+    control: HTMLButtonElement,
+    errorKind: ErrorPresentation = 'command',
+  ): void {
+    if (this.busy || control.disabled) return
+    this.activeControl = control
+    this.pending = operation()
+      .then(() => control.focus())
+      .catch((error: unknown) => {
+        this.setError(errorCode(error), errorKind)
+        control.focus()
+      })
   }
 
   private async createSample(): Promise<void> {
@@ -277,7 +287,7 @@ class FoundationInspector implements FoundationInspectorController {
       await this.persistPlanned(result.commit, 'creation')
       this.lastCommit = result.commit
       await this.publishRecoveredState(
-        message('foundationInspector.create.success'),
+        message(this.locale, 'foundationInspector.create.success'),
         result.session,
       )
     } finally {
@@ -309,7 +319,9 @@ class FoundationInspector implements FoundationInspectorController {
       await this.persistPlanned(result.commit, 'committedTransaction')
       this.lastCommit = result.commit
       await this.publishRecoveredState(
-        message('foundationInspector.save.success', { revision: result.session.revision }),
+        message(this.locale, 'foundationInspector.command.success', {
+          revision: result.session.revision,
+        }),
         result.session,
       )
     } finally {
@@ -365,7 +377,13 @@ class FoundationInspector implements FoundationInspectorController {
       await this.persistPlanned(result.commit, 'committedTransaction')
       this.lastCommit = result.commit
       await this.publishRecoveredState(
-        message('foundationInspector.save.success', { revision: result.session.revision }),
+        message(
+          this.locale,
+          kind === 'undo'
+            ? 'foundationInspector.undo.success'
+            : 'foundationInspector.redo.success',
+          { revision: result.session.revision },
+        ),
         result.session,
       )
     } finally {
@@ -396,7 +414,7 @@ class FoundationInspector implements FoundationInspectorController {
       await this.store.commitMigration(result.commit)
       this.lastCommit = undefined
       await this.publishRecoveredState(
-        message('foundationInspector.migration.success', {
+        message(this.locale, 'foundationInspector.migration.success', {
           sourceSchema: result.report.sourceSchemaVersion,
           currentSchema: result.report.currentSchemaVersion,
         }),
@@ -423,7 +441,9 @@ class FoundationInspector implements FoundationInspectorController {
     try {
       await this.persistPlanned(this.lastCommit, 'explicitLocalSave')
       await this.publishRecoveredState(
-        message('foundationInspector.save.success', { revision: session.revision }),
+        message(this.locale, 'foundationInspector.save.success', {
+          revision: session.revision,
+        }),
         session,
       )
     } finally {
@@ -439,11 +459,13 @@ class FoundationInspector implements FoundationInspectorController {
       this.session = recovered.session
       this.view = recovered.view
       this.lastCommit = undefined
-      this.setStatus(
+      const statusKey =
         mode === 'open'
-          ? message('foundationInspector.open.success', { revision: recovered.view.revision })
-          : message('foundationInspector.save.success', { revision: recovered.view.revision }),
-      )
+          ? 'foundationInspector.open.success'
+          : mode === 'reload'
+            ? 'foundationInspector.reload.success'
+            : 'foundationInspector.recover.success'
+      this.setStatus(message(this.locale, statusKey, { revision: recovered.view.revision }))
       this.render()
     } finally {
       this.setBusy(false)
@@ -491,38 +513,96 @@ class FoundationInspector implements FoundationInspectorController {
     return this.session
   }
 
+  private handleKeyboard(event: KeyboardEvent): void {
+    if (
+      this.busy ||
+      isTextEditingTarget(event.target) ||
+      !(event.ctrlKey || event.metaKey) ||
+      event.altKey ||
+      event.key.toLowerCase() !== 'z'
+    ) {
+      return
+    }
+    const kind = event.shiftKey ? 'redo' : 'undo'
+    const control = kind === 'undo' ? this.elements.undo : this.elements.redo
+    if (control.disabled) return
+    event.preventDefault()
+    control.focus()
+    this.start(() => this.applyHistory(kind), control)
+  }
+
+  private async copyValue(
+    value: string | undefined,
+    labelKey:
+      | 'foundationInspector.copy.documentId.visible'
+      | 'foundationInspector.copy.hash.visible',
+  ): Promise<void> {
+    if (value === undefined) return
+    try {
+      await navigator.clipboard.writeText(value)
+      this.setStatus(
+        message(this.locale, 'foundationInspector.copy.success', {
+          label: message(this.locale, labelKey),
+        }),
+      )
+    } catch {
+      this.setError('FLOW_CLIPBOARD_WRITE_FAILED', 'copy')
+    }
+  }
+
   private setPending(): void {
     this.setBusy(true)
     this.elements.alert.hidden = true
-    this.elements.status.textContent = message('foundationInspector.pending')
+    this.elements.status.dataset.state = 'pending'
+    this.elements.statusText.textContent = message(this.locale, 'foundationInspector.pending')
   }
 
   private setStatus(text: string): void {
     this.elements.alert.hidden = true
-    this.elements.status.textContent = text
+    this.elements.status.dataset.state = 'complete'
+    this.elements.statusText.textContent = text
   }
 
-  private setError(code: string): void {
+  private setError(code: string, kind: ErrorPresentation = 'command'): void {
     this.elements.alert.hidden = false
-    this.elements.alert.textContent = message('foundationInspector.error.command', { code })
-    this.elements.status.textContent = ''
+    const key =
+      kind === 'stale'
+        ? 'foundationInspector.error.stale'
+        : kind === 'recovery'
+          ? 'foundationInspector.error.recovery'
+          : kind === 'copy'
+            ? 'foundationInspector.error.copy'
+            : 'foundationInspector.error.command'
+    this.elements.alert.textContent = message(this.locale, key, { code })
+    this.elements.status.dataset.state = 'idle'
+    this.elements.statusText.textContent = ''
   }
 
   private setBusy(busy: boolean): void {
-    for (const control of this.elements.controls) control.disabled = busy
-    if (!busy) {
-      const hasSession = this.session !== undefined
-      const cursor = this.session?.history.cursor ?? 0
-      const entryCount = this.session?.history.entries.length ?? 0
-      this.elements.apply.disabled = !hasSession
-      this.elements.stale.disabled = !hasSession
-      this.elements.undo.disabled = !hasSession || cursor === 0
-      this.elements.redo.disabled = !hasSession || cursor >= entryCount
-      this.elements.save.disabled = !hasSession || this.lastCommit === undefined
-      this.elements.reload.disabled = !hasSession || !this.hasDurableRecords
-      this.elements.recover.disabled = !hasSession || !this.hasDurableRecords
-    }
+    this.busy = busy
+    this.updateControlAvailability()
     this.elements.root.setAttribute('aria-busy', String(busy))
+  }
+
+  private updateControlAvailability(): void {
+    const hasSession = this.session !== undefined
+    const cursor = this.session?.history.cursor ?? 0
+    const entryCount = this.session?.history.entries.length ?? 0
+    this.elements.create.disabled = false
+    this.elements.openLast.disabled = !this.hasDurableRecords
+    this.elements.openOlder.disabled = false
+    this.elements.apply.disabled = !hasSession
+    this.elements.stale.disabled = !hasSession
+    this.elements.undo.disabled = !hasSession || cursor === 0
+    this.elements.redo.disabled = !hasSession || cursor >= entryCount
+    this.elements.save.disabled = !hasSession || this.lastCommit === undefined
+    this.elements.reload.disabled = !hasSession || !this.hasDurableRecords
+    this.elements.recover.disabled = !hasSession || !this.hasDurableRecords
+    this.elements.copyDocumentId.disabled = !hasSession
+    this.elements.copyHash.disabled = !hasSession
+    if (this.busy && this.activeControl !== undefined) {
+      this.activeControl.disabled = true
+    }
   }
 
   private render(): void {
@@ -535,49 +615,182 @@ class FoundationInspector implements FoundationInspectorController {
     for (const control of this.elements.sessionControls) control.hidden = !populated
     this.elements.auditEmpty.hidden = populated && this.view?.audit.length !== 0
     this.elements.provenanceUnavailable.hidden = false
-    this.setBusy(false)
+    this.updateControlAvailability()
 
     if (this.view === undefined) {
-      this.elements.audit.replaceChildren()
+      const unavailable = message(this.locale, 'foundationInspector.value.unavailable')
+      this.elements.revision.textContent = unavailable
+      this.elements.hash.textContent = unavailable
+      this.elements.lastCommand.textContent = unavailable
+      this.elements.auditBody.replaceChildren()
+      this.elements.auditCount.textContent = auditCountText(this.locale, 0)
       return
     }
     this.elements.documentId.textContent = this.view.documentId
     this.elements.schemaVersion.textContent = String(this.view.schemaVersion)
     this.elements.revision.textContent = String(this.view.revision)
     this.elements.hash.textContent = this.view.canonicalHash
-    this.elements.hash.setAttribute('aria-label', `Повний хеш ревізії ${this.view.canonicalHash}`)
+    this.elements.hash.title = this.view.canonicalHash
+    this.elements.hash.setAttribute('aria-label', this.view.canonicalHash)
+    this.elements.copyHash.setAttribute(
+      'aria-label',
+      message(this.locale, 'foundationInspector.copy.hash.label', {
+        value: this.view.canonicalHash,
+      }),
+    )
+    this.elements.documentId.title = this.view.documentId
+    this.elements.documentId.setAttribute('aria-label', this.view.documentId)
+    this.elements.copyDocumentId.setAttribute(
+      'aria-label',
+      message(this.locale, 'foundationInspector.copy.documentId.label', {
+        value: this.view.documentId,
+      }),
+    )
     this.elements.locale.textContent = this.view.locale
-    this.elements.summary.textContent = message('foundationInspector.summary', {
+    this.elements.durable.textContent = message(
+      this.locale,
+      'foundationInspector.durable.verified',
+    )
+    this.elements.summary.textContent = message(this.locale, 'foundationInspector.summary', {
       nodes: this.view.contentNodeCount,
       fields: this.view.fieldCount,
       assets: this.view.assetCount,
     })
-    this.elements.provenance.textContent = provenanceText(this.view.revisionProvenance)
+    this.elements.provenance.textContent = provenanceText(
+      this.locale,
+      this.view.revisionProvenance,
+    )
+    this.elements.lastCommand.textContent =
+      this.view.audit.at(-1)?.commandId ??
+      message(this.locale, 'foundationInspector.value.unavailable')
     this.elements.auditEmpty.hidden = this.view.audit.length !== 0
-    this.elements.audit.replaceChildren(
-      ...this.view.audit.map((entry) => {
-        const item = document.createElement('li')
-        const action =
-          entry.action.type === 'command' ? entry.action.commandKind : entry.action.type
-        item.textContent = `${entry.newRevision}: ${action} · ${entry.modality} · ${entry.outcome.kind}`
-        return item
-      }),
+    this.elements.auditCount.textContent = auditCountText(
+      this.locale,
+      this.view.audit.length,
+    )
+    this.elements.auditBody.replaceChildren(
+      ...this.view.audit.map((entry, index) => auditRow(this.locale, entry, index)),
     )
   }
 }
 
-function provenanceText(provenance: RevisionProvenanceDto): string {
+function provenanceText(
+  locale: FoundationInspectorLocale,
+  provenance: RevisionProvenanceDto,
+): string {
   const lineage =
     provenance.lineage.kind === 'created'
-      ? message('foundationInspector.provenance.created', {
+      ? message(locale, 'foundationInspector.provenance.created', {
           createdAt: provenance.lineage.createdAt,
         })
-      : message('foundationInspector.provenance.migrated', {
+      : message(locale, 'foundationInspector.provenance.migrated', {
           sourceSchema: provenance.lineage.sourceSchemaVersion,
           currentSchema: provenance.lineage.currentSchemaVersion,
         })
-  const engine = message('foundationInspector.provenance.engine', provenance.engine)
+  const engine = message(locale, 'foundationInspector.provenance.engine', provenance.engine)
   return `${lineage} ${engine}`
+}
+
+function auditCountText(locale: FoundationInspectorLocale, count: number): string {
+  const key =
+    count === 0
+      ? 'foundationInspector.audit.count.zero'
+      : count === 1
+        ? 'foundationInspector.audit.count.one'
+        : 'foundationInspector.audit.count.many'
+  return message(locale, key, { count })
+}
+
+function auditRow(
+  locale: FoundationInspectorLocale,
+  entry: AuditRecordDto,
+  sourceIndex: number,
+): HTMLTableRowElement {
+  const row = document.createElement('tr')
+  row.dataset.auditRow = ''
+  row.dataset.auditId = entry.auditId
+  row.dataset.transactionId = entry.transactionId
+  row.dataset.revision = String(entry.newRevision)
+  row.dataset.sourceIndex = String(sourceIndex)
+  const identity = element(
+    'span',
+    'visually-hidden',
+    message(locale, 'foundationInspector.audit.identity', {
+      auditId: entry.auditId,
+      transactionId: entry.transactionId,
+    }),
+  )
+
+  const timestamp = element('time', 'audit-time', entry.timestamp)
+  timestamp.dateTime = entry.timestamp
+  row.append(
+    tableCell(timestamp, identity),
+    tableCell(document.createTextNode(`${entry.baseRevision} → ${entry.newRevision}`)),
+    tableCell(
+      document.createTextNode(auditAction(locale, entry)),
+      auditMetadata(locale, entry),
+    ),
+    tableCell(document.createTextNode(auditModality(locale, entry.modality))),
+    tableCell(document.createTextNode(auditOutcome(locale, entry))),
+    tableCell(document.createTextNode(entry.commandId)),
+  )
+  return row
+}
+
+function auditAction(locale: FoundationInspectorLocale, entry: AuditRecordDto): string {
+  if (entry.action.type === 'command') {
+    return message(locale, `foundationInspector.audit.action.${entry.action.commandKind}`)
+  }
+  return message(locale, `foundationInspector.audit.action.${entry.action.type}`)
+}
+
+function auditModality(
+  locale: FoundationInspectorLocale,
+  modality: AuditRecordDto['modality'],
+): string {
+  return message(locale, `foundationInspector.audit.modality.${modality}`)
+}
+
+function auditOutcome(locale: FoundationInspectorLocale, entry: AuditRecordDto): string {
+  return entry.outcome.kind === 'success'
+    ? message(locale, 'foundationInspector.audit.outcome.success')
+    : message(locale, 'foundationInspector.audit.outcome.failure', {
+        code: entry.outcome.code,
+      })
+}
+
+function auditMetadata(
+  locale: FoundationInspectorLocale,
+  entry: AuditRecordDto,
+): HTMLElement {
+  const text = entry.metadata
+    .map((metadata) => {
+      switch (metadata.kind) {
+        case 'schemaVersion':
+          return message(locale, 'foundationInspector.audit.metadata.schemaVersion', {
+            version: metadata.value,
+          })
+        case 'migration':
+          return message(locale, 'foundationInspector.audit.metadata.migration', {
+            from: metadata.fromSchemaVersion,
+            to: metadata.toSchemaVersion,
+          })
+        case 'recoveryVerified':
+          return message(locale, 'foundationInspector.audit.metadata.recoveryVerified')
+      }
+    })
+    .join('; ')
+  return element(
+    'span',
+    'audit-metadata',
+    text || message(locale, 'foundationInspector.value.unavailable'),
+  )
+}
+
+function tableCell(...children: readonly Node[]): HTMLTableCellElement {
+  const cell = document.createElement('td')
+  cell.append(...children)
+  return cell
 }
 
 export async function mountFoundationInspector(
@@ -589,6 +802,7 @@ export async function mountFoundationInspector(
     root,
     wasm,
     new IndexedDbDocumentStore(options.databaseName),
+    options.locale ?? 'uk',
   )
   await inspector.initialize()
   return inspector
@@ -631,6 +845,8 @@ interface InspectorElements {
   readonly save: HTMLButtonElement
   readonly reload: HTMLButtonElement
   readonly recover: HTMLButtonElement
+  readonly copyDocumentId: HTMLButtonElement
+  readonly copyHash: HTMLButtonElement
   readonly controls: readonly HTMLButtonElement[]
   readonly sessionControls: readonly HTMLButtonElement[]
   readonly empty: HTMLElement
@@ -640,112 +856,285 @@ interface InspectorElements {
   readonly revision: HTMLElement
   readonly hash: HTMLElement
   readonly locale: HTMLElement
+  readonly durable: HTMLElement
   readonly summary: HTMLElement
   readonly provenance: HTMLElement
   readonly provenanceUnavailable: HTMLElement
-  readonly audit: HTMLOListElement
+  readonly lastCommand: HTMLElement
+  readonly auditBody: HTMLTableSectionElement
+  readonly auditCount: HTMLElement
   readonly auditEmpty: HTMLElement
   readonly status: HTMLElement
+  readonly statusText: HTMLElement
   readonly alert: HTMLElement
 }
 
-function createInspectorDom(root: HTMLElement): InspectorElements {
+function createInspectorDom(
+  root: HTMLElement,
+  localeCode: FoundationInspectorLocale,
+): InspectorElements {
   root.replaceChildren()
   root.classList.add('foundation-shell')
+  root.lang = localeCode
 
   const header = element('header', 'app-header')
+  const eyebrow = element('p', 'eyebrow')
+  eyebrow.append(
+    document.createTextNode(message(localeCode, 'foundationInspector.app.product')),
+    element('span', 'eyebrow-separator', '·'),
+    document.createTextNode(message(localeCode, 'foundationInspector.app.localOnly')),
+  )
   header.append(
-    element('p', 'eyebrow', 'FlowPDF · Локальна перевірка'),
-    element('h1', 'page-title', 'Інспектор основи'),
+    eyebrow,
+    element('h1', 'page-title', message(localeCode, 'foundationInspector.app.title')),
   )
 
   const main = element('main', 'foundation-grid')
   const commands = element('section', 'card command-panel')
   commands.setAttribute('aria-labelledby', 'commands-heading')
-  const commandsHeading = element('h2', 'section-heading', 'Команди перевірки')
+  const commandsHeading = element(
+    'h2',
+    'section-heading',
+    message(localeCode, 'foundationInspector.section.commands'),
+  )
   commandsHeading.id = 'commands-heading'
   const empty = element('div', 'empty-state')
   empty.dataset.emptyDocument = ''
   empty.append(
-    element('h3', 'section-heading', message('foundationInspector.empty.heading')),
-    element('p', 'secondary-text', message('foundationInspector.empty.body')),
+    element(
+      'h3',
+      'subsection-heading',
+      message(localeCode, 'foundationInspector.empty.heading'),
+    ),
+    element(
+      'p',
+      'secondary-text',
+      message(localeCode, 'foundationInspector.empty.body'),
+    ),
   )
-  const actions = element('div', 'action-group')
-  const create = button(message('foundationInspector.createSample'), 'primary-action')
+  const create = button(
+    message(localeCode, 'foundationInspector.createSample'),
+    'primary-action',
+  )
   create.dataset.action = 'create-sample'
-  const openLast = button(message('foundationInspector.openLastLocal'), 'secondary-action')
+  const openLast = button(
+    message(localeCode, 'foundationInspector.openLastLocal'),
+    'secondary-action',
+  )
   openLast.dataset.action = 'open-last'
   openLast.hidden = true
-  const openOlder = button(message('foundationInspector.openOlderSchema'), 'secondary-action')
+  const openOlder = button(
+    message(localeCode, 'foundationInspector.openOlderSchema'),
+    'secondary-action',
+  )
   openOlder.dataset.action = 'open-older-schema'
-  const apply = button(message('foundationInspector.applyTestMutation'), 'secondary-action')
+  const apply = button(
+    message(localeCode, 'foundationInspector.applyTestMutation'),
+    'secondary-action',
+  )
   apply.dataset.action = 'apply-mutation'
-  const stale = button(message('foundationInspector.testStaleCommand'), 'secondary-action')
+  const stale = button(
+    message(localeCode, 'foundationInspector.testStaleCommand'),
+    'secondary-action',
+  )
   stale.dataset.action = 'stale-command'
-  const undo = button(message('foundationInspector.undo'), 'secondary-action')
+  const undo = button(message(localeCode, 'foundationInspector.undo'), 'secondary-action')
   undo.dataset.action = 'undo'
-  const redo = button(message('foundationInspector.redo'), 'secondary-action')
+  const redo = button(message(localeCode, 'foundationInspector.redo'), 'secondary-action')
   redo.dataset.action = 'redo'
-  const save = button(message('foundationInspector.save'), 'secondary-action')
+  const save = button(message(localeCode, 'foundationInspector.save'), 'secondary-action')
   save.dataset.action = 'save'
-  const reload = button(message('foundationInspector.reload'), 'secondary-action')
+  const reload = button(
+    message(localeCode, 'foundationInspector.reload'),
+    'secondary-action',
+  )
   reload.dataset.action = 'reload'
-  const recover = button(message('foundationInspector.recover'), 'secondary-action')
+  const recover = button(
+    message(localeCode, 'foundationInspector.recover'),
+    'secondary-action',
+  )
   recover.dataset.action = 'recover'
   const sessionControls = [apply, stale, undo, redo, save, reload, recover]
   for (const control of sessionControls) control.hidden = true
   const controls = [create, openLast, openOlder, ...sessionControls]
-  actions.append(...controls)
+  const documentActions = actionGroup(
+    message(localeCode, 'foundationInspector.group.document'),
+    create,
+    openLast,
+    openOlder,
+  )
+  const commandActions = actionGroup(
+    message(localeCode, 'foundationInspector.group.command'),
+    apply,
+    stale,
+  )
+  const historyActions = actionGroup(
+    message(localeCode, 'foundationInspector.group.history'),
+    labelledShortcut(
+      undo,
+      message(localeCode, 'foundationInspector.keyboard.undoHint'),
+    ),
+    labelledShortcut(
+      redo,
+      message(localeCode, 'foundationInspector.keyboard.redoHint'),
+    ),
+  )
+  const durabilityActions = actionGroup(
+    message(localeCode, 'foundationInspector.group.durability'),
+    save,
+    reload,
+    recover,
+  )
   const status = element('p', 'status-region')
   status.dataset.durabilityStatus = ''
+  status.dataset.state = 'idle'
   status.setAttribute('aria-live', 'polite')
+  status.setAttribute('aria-atomic', 'true')
+  const statusMarker = element('span', 'status-marker', '●')
+  statusMarker.setAttribute('aria-hidden', 'true')
+  const statusText = element('span', 'status-text')
+  status.append(statusMarker, statusText)
   const alert = element('p', 'alert-region')
   alert.setAttribute('role', 'alert')
+  alert.setAttribute('aria-atomic', 'true')
   alert.hidden = true
-  commands.append(commandsHeading, empty, actions, status, alert)
+  commands.append(
+    commandsHeading,
+    empty,
+    documentActions,
+    commandActions,
+    historyActions,
+    durabilityActions,
+    status,
+    alert,
+  )
 
   const session = element('section', 'card session-card')
   session.setAttribute('aria-labelledby', 'session-heading')
   session.hidden = true
-  const sessionHeading = element('h2', 'section-heading', 'Поточний документ')
+  const sessionHeading = element(
+    'h2',
+    'section-heading',
+    message(localeCode, 'foundationInspector.section.currentDocument'),
+  )
   sessionHeading.id = 'session-heading'
   const summary = element('p', 'document-summary')
   summary.dataset.documentSummary = ''
   const metadata = element('dl', 'metadata-grid')
-  const documentId = addDefinition(metadata, 'ID документа')
-  const schemaVersion = addDefinition(metadata, 'Версія схеми')
-  const locale = addDefinition(metadata, 'Локаль')
+  const documentDefinition = addCopyDefinition(
+    metadata,
+    message(localeCode, 'foundationInspector.metadata.documentId'),
+    message(localeCode, 'foundationInspector.copy.documentId.visible'),
+    'document-id',
+    'fullDocumentId',
+  )
+  const documentId = documentDefinition.value
+  const copyDocumentId = documentDefinition.copy
+  const schemaVersion = addDefinition(
+    metadata,
+    message(localeCode, 'foundationInspector.metadata.schemaVersion'),
+  )
+  const locale = addDefinition(
+    metadata,
+    message(localeCode, 'foundationInspector.metadata.locale'),
+  )
+  const durable = addDefinition(
+    metadata,
+    message(localeCode, 'foundationInspector.metadata.durable'),
+    'durable-badge',
+  )
+  durable.textContent = message(localeCode, 'foundationInspector.durable.verified')
   session.append(sessionHeading, summary, metadata)
 
   const inspector = element('aside', 'card inspector-card')
-  inspector.setAttribute('aria-label', 'Інспектор документа')
-  const revisionHeading = element('h2', 'section-heading current-inspector', 'Ревізія')
+  inspector.setAttribute(
+    'aria-label',
+    message(localeCode, 'foundationInspector.aside.label'),
+  )
+  const revisionHeading = element(
+    'h2',
+    'section-heading current-inspector',
+    message(localeCode, 'foundationInspector.section.revision'),
+  )
   const revisionList = element('dl', 'metadata-grid')
-  const revision = addDefinition(revisionList, 'Поточна ревізія')
-  const hash = addDefinition(revisionList, 'Канонічний хеш', 'hash-value')
-  const provenanceHeading = element('h2', 'section-heading', 'Походження')
+  const revision = addDefinition(
+    revisionList,
+    message(localeCode, 'foundationInspector.metadata.currentRevision'),
+  )
+  const hashDefinition = addCopyDefinition(
+    revisionList,
+    message(localeCode, 'foundationInspector.metadata.canonicalHash'),
+    message(localeCode, 'foundationInspector.copy.hash.visible'),
+    'revision-hash',
+    'fullRevisionHash',
+    'hash-value',
+  )
+  const hash = hashDefinition.value
+  const copyHash = hashDefinition.copy
+  const lastCommand = addDefinition(
+    revisionList,
+    message(localeCode, 'foundationInspector.metadata.lastCommand'),
+    'identifier-value',
+  )
+  const provenanceHeading = element(
+    'h2',
+    'section-heading',
+    message(localeCode, 'foundationInspector.section.provenance'),
+  )
   const provenance = element('p', 'secondary-text')
   provenance.dataset.provenance = ''
   const provenanceUnavailable = element(
     'p',
-    'secondary-text',
-    message('foundationInspector.provenance.noExport'),
+    'boundary-note',
+    message(localeCode, 'foundationInspector.provenance.noExport'),
   )
   provenanceUnavailable.dataset.provenanceUnavailable = ''
   const auditSection = element('section', 'audit-section')
   auditSection.setAttribute('aria-labelledby', 'audit-heading')
-  const auditHeading = element('h2', 'section-heading', 'Аудит')
+  const auditHeading = element(
+    'h2',
+    'section-heading',
+    message(localeCode, 'foundationInspector.section.audit'),
+  )
   auditHeading.id = 'audit-heading'
-  const audit = document.createElement('ol')
-  audit.className = 'audit-list'
-  audit.dataset.audit = ''
+  const auditCount = element('p', 'audit-count', auditCountText(localeCode, 0))
+  auditCount.dataset.auditCount = ''
+  auditCount.setAttribute('aria-live', 'polite')
+  auditCount.setAttribute('aria-atomic', 'true')
   const auditEmpty = element(
     'p',
     'secondary-text',
-    message('foundationInspector.audit.empty'),
+    message(localeCode, 'foundationInspector.audit.empty'),
   )
   auditEmpty.dataset.auditEmpty = ''
-  auditSection.append(auditHeading, auditEmpty, audit)
+  const auditWrapper = element('div', 'audit-table-wrapper')
+  const audit = document.createElement('table')
+  audit.className = 'audit-table'
+  audit.dataset.audit = ''
+  const caption = element(
+    'caption',
+    'visually-hidden',
+    message(localeCode, 'foundationInspector.section.audit'),
+  )
+  const auditHead = document.createElement('thead')
+  const auditHeadRow = document.createElement('tr')
+  for (const key of [
+    'foundationInspector.audit.header.timestamp',
+    'foundationInspector.audit.header.revision',
+    'foundationInspector.audit.header.action',
+    'foundationInspector.audit.header.source',
+    'foundationInspector.audit.header.outcome',
+    'foundationInspector.audit.header.commandId',
+  ] as const) {
+    const heading = element('th', '', message(localeCode, key))
+    heading.scope = 'col'
+    auditHeadRow.append(heading)
+  }
+  auditHead.append(auditHeadRow)
+  const auditBody = document.createElement('tbody')
+  audit.append(caption, auditHead, auditBody)
+  auditWrapper.append(audit)
+  auditSection.append(auditHeading, auditCount, auditEmpty, auditWrapper)
   inspector.append(
     revisionHeading,
     revisionList,
@@ -770,6 +1159,8 @@ function createInspectorDom(root: HTMLElement): InspectorElements {
     save,
     reload,
     recover,
+    copyDocumentId,
+    copyHash,
     controls,
     sessionControls,
     empty,
@@ -779,14 +1170,34 @@ function createInspectorDom(root: HTMLElement): InspectorElements {
     revision,
     hash,
     locale,
+    durable,
     summary,
     provenance,
     provenanceUnavailable,
-    audit,
+    lastCommand,
+    auditBody,
+    auditCount,
     auditEmpty,
     status,
+    statusText,
     alert,
   }
+}
+
+function actionGroup(label: string, ...children: readonly Node[]): HTMLElement {
+  const group = element('div', 'command-group')
+  const heading = element('h3', 'command-group-heading', label)
+  const actions = element('div', 'action-group')
+  actions.append(...children)
+  group.append(heading, actions)
+  return group
+}
+
+function labelledShortcut(control: HTMLButtonElement, shortcut: string): HTMLElement {
+  const wrapper = element('span', 'shortcut-control')
+  const hint = element('span', 'keyboard-hint', shortcut)
+  wrapper.append(control, hint)
+  return wrapper
 }
 
 function element<K extends keyof HTMLElementTagNameMap>(
@@ -823,4 +1234,32 @@ function addDefinition(list: HTMLElement, label: string, className = ''): HTMLEl
   const value = element('dd', className)
   list.append(value)
   return value
+}
+
+function addCopyDefinition(
+  list: HTMLElement,
+  label: string,
+  copyLabel: string,
+  copyKind: 'document-id' | 'revision-hash',
+  fullValueDataset: 'fullDocumentId' | 'fullRevisionHash',
+  className = '',
+): { readonly value: HTMLElement; readonly copy: HTMLButtonElement } {
+  list.append(element('dt', 'metadata-label', label))
+  const definition = element('dd', 'copy-definition')
+  const value = element('span', `identifier-value ${className}`.trim())
+  value.dataset[fullValueDataset] = ''
+  const copy = button(copyLabel, 'copy-action')
+  copy.dataset.copy = copyKind
+  definition.append(value, copy)
+  list.append(definition)
+  return { value, copy }
+}
+
+function isTextEditingTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return false
+  return (
+    target.matches('input, textarea, select') ||
+    target.isContentEditable ||
+    target.closest('[contenteditable="true"]') !== null
+  )
 }
