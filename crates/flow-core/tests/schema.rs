@@ -3,7 +3,7 @@ use flow_core::{
     canonical::{canonical_bytes, canonical_hash, decode_canonical},
     model::{
         Affinity, DocumentId, FieldKind, FieldValue, FlowDocument, LogicalPosition, NodeId,
-        TextInputHint,
+        Provenance, TextInputHint,
     },
     schema::{SchemaError, validate_document},
 };
@@ -24,6 +24,33 @@ fn stable_ids_validate_on_deserialize_and_serialize_one_canonical_spelling() {
         id
     );
     assert!(serde_json::from_str::<DocumentId>("\"not-a-uuid\"").is_err());
+}
+
+#[test]
+fn canonical_provenance_rejects_impossible_calendar_timestamps() {
+    for invalid in [
+        "2026-00-01T00:00:00Z",
+        "2026-13-01T00:00:00Z",
+        "2026-04-31T00:00:00Z",
+        "2025-02-29T00:00:00Z",
+        "2026-01-01T24:00:00Z",
+    ] {
+        let mut document = FlowDocument::deterministic_sample("uk-UA").expect("sample");
+        document.provenance = Provenance::LocalSample {
+            created_at: invalid.to_owned(),
+        };
+        assert_eq!(
+            code(canonical_bytes(&document).expect_err("impossible timestamp")),
+            "FLOW_INVALID_DOCUMENT",
+            "{invalid}"
+        );
+    }
+
+    let mut leap_day = FlowDocument::deterministic_sample("uk-UA").expect("sample");
+    leap_day.provenance = Provenance::LocalSample {
+        created_at: "2024-02-29T23:59:59Z".to_owned(),
+    };
+    canonical_bytes(&leap_day).expect("valid leap day");
 }
 
 fn code(error: SchemaError) -> &'static str {

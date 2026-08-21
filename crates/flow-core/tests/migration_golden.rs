@@ -110,3 +110,17 @@ fn invalid_or_interrupted_hops_never_publish_a_partial_current_document() {
     );
     assert_eq!(input, payload(OLDER_FILE));
 }
+
+#[test]
+fn migration_rejects_an_impossible_source_provenance_timestamp() {
+    let impossible = std::str::from_utf8(payload(OLDER_FILE))
+        .expect("UTF-8 fixture")
+        .replace("2026-08-14T00:00:00Z", "2026-02-30T00:00:00Z");
+    assert_eq!(
+        MigrationRegistry::current()
+            .migrate(impossible.as_bytes())
+            .expect_err("impossible timestamp")
+            .code(),
+        "FLOW_INVALID_DOCUMENT"
+    );
+}

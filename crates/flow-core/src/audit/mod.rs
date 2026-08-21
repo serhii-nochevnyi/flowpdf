@@ -43,39 +43,7 @@ pub struct AuditTimestamp(String);
 impl AuditTimestamp {
     pub fn parse(value: impl Into<String>) -> Result<Self, AuditValidationError> {
         let value = value.into();
-        let bytes = value.as_bytes();
-        let punctuation = [
-            (4, b'-'),
-            (7, b'-'),
-            (10, b'T'),
-            (13, b':'),
-            (16, b':'),
-            (19, b'Z'),
-        ];
-        if bytes.len() != 20
-            || punctuation
-                .iter()
-                .any(|(index, expected)| bytes[*index] != *expected)
-            || bytes.iter().enumerate().any(|(index, byte)| {
-                ![4, 7, 10, 13, 16, 19].contains(&index) && !byte.is_ascii_digit()
-            })
-        {
-            return Err(AuditValidationError::InvalidTimestamp);
-        }
-        let year = decimal(&bytes[0..4]);
-        let month = decimal(&bytes[5..7]);
-        let day = decimal(&bytes[8..10]);
-        let hour = decimal(&bytes[11..13]);
-        let minute = decimal(&bytes[14..16]);
-        let second = decimal(&bytes[17..19]);
-        if year == 0
-            || !(1..=12).contains(&month)
-            || day == 0
-            || day > days_in_month(year, month)
-            || hour > 23
-            || minute > 59
-            || second > 59
-        {
+        if !crate::schema::is_compact_utc_timestamp(&value) {
             return Err(AuditValidationError::InvalidTimestamp);
         }
         Ok(Self(value))
@@ -602,23 +570,5 @@ fn require_exact_metadata(
         Ok(())
     } else {
         Err(AuditValidationError::InvalidMetadataContext)
-    }
-}
-
-fn decimal(bytes: &[u8]) -> u16 {
-    bytes
-        .iter()
-        .fold(0_u16, |value, byte| value * 10 + u16::from(*byte - b'0'))
-}
-
-fn days_in_month(year: u16, month: u16) -> u16 {
-    match month {
-        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
-        4 | 6 | 9 | 11 => 30,
-        2 if year.is_multiple_of(4) && (!year.is_multiple_of(100) || year.is_multiple_of(400)) => {
-            29
-        }
-        2 => 28,
-        _ => 0,
     }
 }

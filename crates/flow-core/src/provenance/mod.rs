@@ -65,58 +65,11 @@ pub struct ProvenanceTimestamp(String);
 impl ProvenanceTimestamp {
     fn parse(value: impl Into<String>) -> Result<Self, ProvenanceError> {
         let value = value.into();
-        let bytes = value.as_bytes();
-        let punctuation = [
-            (4, b'-'),
-            (7, b'-'),
-            (10, b'T'),
-            (13, b':'),
-            (16, b':'),
-            (19, b'Z'),
-        ];
-        if bytes.len() != 20
-            || punctuation
-                .iter()
-                .any(|(index, expected)| bytes[*index] != *expected)
-            || bytes.iter().enumerate().any(|(index, byte)| {
-                ![4, 7, 10, 13, 16, 19].contains(&index) && !byte.is_ascii_digit()
-            })
-        {
-            return Err(ProvenanceError::InvalidTimestamp);
-        }
-        if !is_valid_calendar_timestamp(bytes) {
+        if !crate::schema::is_compact_utc_timestamp(&value) {
             return Err(ProvenanceError::InvalidTimestamp);
         }
         Ok(Self(value))
     }
-}
-
-fn is_valid_calendar_timestamp(bytes: &[u8]) -> bool {
-    let year = decimal(&bytes[0..4]);
-    let month = decimal(&bytes[5..7]);
-    let day = decimal(&bytes[8..10]);
-    let hour = decimal(&bytes[11..13]);
-    let minute = decimal(&bytes[14..16]);
-    let second = decimal(&bytes[17..19]);
-    let days_in_month = match month {
-        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
-        4 | 6 | 9 | 11 => 30,
-        2 if is_leap_year(year) => 29,
-        2 => 28,
-        _ => return false,
-    };
-
-    year != 0 && (1..=days_in_month).contains(&day) && hour <= 23 && minute <= 59 && second <= 59
-}
-
-fn decimal(bytes: &[u8]) -> u32 {
-    bytes
-        .iter()
-        .fold(0, |value, byte| value * 10 + u32::from(byte - b'0'))
-}
-
-const fn is_leap_year(year: u32) -> bool {
-    year.is_multiple_of(4) && (!year.is_multiple_of(100) || year.is_multiple_of(400))
 }
 
 impl TryFrom<String> for ProvenanceTimestamp {

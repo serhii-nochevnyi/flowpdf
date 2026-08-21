@@ -421,7 +421,7 @@ fn validate_provenance(document: &FlowDocument) -> Result<(), SchemaError> {
     Ok(())
 }
 
-fn is_compact_utc_timestamp(value: &str) -> bool {
+pub(crate) fn is_compact_utc_timestamp(value: &str) -> bool {
     let bytes = value.as_bytes();
     let punctuation = [
         (4, b'-'),
@@ -431,14 +431,39 @@ fn is_compact_utc_timestamp(value: &str) -> bool {
         (16, b':'),
         (19, b'Z'),
     ];
-    bytes.len() == 20
-        && punctuation
+    if bytes.len() != 20
+        || punctuation
             .iter()
-            .all(|(index, expected)| bytes[*index] == *expected)
-        && bytes
+            .any(|(index, expected)| bytes[*index] != *expected)
+        || bytes
             .iter()
             .enumerate()
-            .all(|(index, byte)| [4, 7, 10, 13, 16, 19].contains(&index) || byte.is_ascii_digit())
+            .any(|(index, byte)| ![4, 7, 10, 13, 16, 19].contains(&index) && !byte.is_ascii_digit())
+    {
+        return false;
+    }
+    let year = timestamp_decimal(&bytes[0..4]);
+    let month = timestamp_decimal(&bytes[5..7]);
+    let day = timestamp_decimal(&bytes[8..10]);
+    let hour = timestamp_decimal(&bytes[11..13]);
+    let minute = timestamp_decimal(&bytes[14..16]);
+    let second = timestamp_decimal(&bytes[17..19]);
+    let maximum_day = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if year.is_multiple_of(4) && (!year.is_multiple_of(100) || year.is_multiple_of(400)) => {
+            29
+        }
+        2 => 28,
+        _ => return false,
+    };
+    year != 0 && (1..=maximum_day).contains(&day) && hour <= 23 && minute <= 59 && second <= 59
+}
+
+fn timestamp_decimal(bytes: &[u8]) -> u32 {
+    bytes
+        .iter()
+        .fold(0, |value, byte| value * 10 + u32::from(byte - b'0'))
 }
 
 fn validate_field(
