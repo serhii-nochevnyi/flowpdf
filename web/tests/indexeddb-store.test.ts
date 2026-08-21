@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import {
   IndexedDbDocumentStore,
+  type AuditRecordDto,
   type MigrationPersistenceCommitDto,
   type PersistenceCommitDto,
   type PlannedPersistenceCommitDto,
@@ -67,6 +68,23 @@ function commitFor(revision: number, assetId: string): PersistenceCommitDto {
         bytes: [revision, revision + 1],
       },
     ],
+  }
+}
+
+function failedCommandAuditAt(
+  commit: PersistenceCommitDto,
+  auditId = `failed-command-${commit.snapshot.revision}`,
+): AuditRecordDto {
+  return {
+    ...commit.audit,
+    auditId,
+    transactionId: auditId,
+    commandId: auditId,
+    baseRevision: commit.snapshot.revision,
+    newRevision: commit.snapshot.revision,
+    durableSequence: commit.snapshot.revision + 1,
+    action: { type: 'command', commandKind: 'insertText' },
+    outcome: { kind: 'failure', code: 'FLOW_STALE_REVISION' },
   }
 }
 
@@ -170,6 +188,46 @@ describe('IndexedDbDocumentStore', () => {
     expect(records.transactions).toEqual([duplicate.transaction])
     expect(records.audits).toEqual([duplicate.audit])
     expect(records.assets).toEqual([duplicate.assets[0]])
+  })
+
+  it('commits an authorized standalone failure audit idempotently without advancing the head', async () => {
+    const store = new IndexedDbDocumentStore()
+    const baseline = commitFor(1, 'asset-1')
+    const failure = failedCommandAuditAt(baseline)
+
+    await store.commit(baseline)
+    await store.commitStandaloneAudit(failure)
+    await store.commitStandaloneAudit(failure)
+
+    await expect(store.loadRecords()).resolves.toMatchObject({
+      snapshots: [baseline.snapshot],
+      transactions: [baseline.transaction],
+      audits: expect.arrayContaining([baseline.audit, failure]),
+    })
+    await expect(
+      store.commitStandaloneAudit({
+        ...failure,
+        timestamp: '2026-08-15T00:00:59Z',
+      }),
+    ).rejects.toMatchObject({ code: 'FLOW_STORE_IDENTITY_CONFLICT' })
+    await expect(
+      store.commitStandaloneAudit({
+        ...failure,
+        auditId: 'unanchored-failure',
+        transactionId: 'unanchored-failure',
+        commandId: 'unanchored-failure',
+        baseRevision: 99,
+        newRevision: 99,
+      }),
+    ).rejects.toMatchObject({ code: 'FLOW_STORE_INVALID_COMMIT' })
+
+    const next = commitFor(2, 'asset-2')
+    await expect(store.commit({ ...next, snapshot: null })).resolves.toBeUndefined()
+    expect((await store.loadRecords()).snapshots).toHaveLength(1)
+    await expect(store.commit(next)).resolves.toBeUndefined()
+    const saved = await store.loadRecords()
+    expect(saved.transactions).toHaveLength(2)
+    expect(saved.snapshots).toHaveLength(2)
   })
 
   it('rejects every divergent logical record identity without partial writes', async () => {

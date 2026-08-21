@@ -507,6 +507,47 @@ pub trait DocumentStore {
     ) -> Result<CommitDisposition, StoreError>;
 }
 
+/// Validates the semantic and identity constraints for an audit-only write.
+/// The physical adapter must repeat the identity/anchor checks in its atomic
+/// transaction because the record image can change after this pure plan.
+pub fn validate_standalone_audit(
+    records: &RecoverRequest,
+    audit: &AuditRecord,
+) -> Result<(), StoreError> {
+    audit.validate().map_err(|_| StoreError::InvalidCommit)?;
+    if audit.record_format_version() != crate::RECORD_FORMAT_VERSION
+        || audit.audit_id() != audit.command_id()
+        || audit.transaction_id() != audit.command_id()
+        || !matches!(
+            (audit.action(), audit.outcome()),
+            (
+                crate::audit::AuditAction::Command { .. },
+                crate::audit::AuditOutcome::Failure { .. }
+            ) | (
+                crate::audit::AuditAction::Recovery,
+                crate::audit::AuditOutcome::Success | crate::audit::AuditOutcome::Failure { .. }
+            )
+        )
+        || !(records.snapshots.iter().any(|snapshot| {
+            snapshot.document_id == *audit.document_id()
+                && snapshot.revision == audit.new_revision()
+        }) || records.transactions.iter().any(|transaction| {
+            transaction.document_id == *audit.document_id()
+                && transaction.new_revision == audit.new_revision()
+        }))
+    {
+        return Err(StoreError::InvalidCommit);
+    }
+    if records
+        .audits
+        .iter()
+        .any(|record| record.audit_id() == audit.audit_id() && record != audit)
+    {
+        return Err(StoreError::IdentityConflict);
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct InMemoryDocumentStore {
@@ -786,29 +827,7 @@ impl DocumentStore for InMemoryDocumentStore {
         &mut self,
         audit: AuditRecord,
     ) -> Result<CommitDisposition, StoreError> {
-        audit.validate().map_err(|_| StoreError::InvalidCommit)?;
-        if audit.record_format_version() != crate::RECORD_FORMAT_VERSION
-            || !matches!(
-                (audit.action(), audit.outcome()),
-                (
-                    crate::audit::AuditAction::Command { .. },
-                    crate::audit::AuditOutcome::Failure { .. }
-                ) | (
-                    crate::audit::AuditAction::Recovery,
-                    crate::audit::AuditOutcome::Success
-                        | crate::audit::AuditOutcome::Failure { .. }
-                )
-            )
-            || !(self.snapshots.iter().any(|snapshot| {
-                snapshot.document_id == *audit.document_id()
-                    && snapshot.revision == audit.new_revision()
-            }) || self.transactions.iter().any(|transaction| {
-                transaction.document_id == *audit.document_id()
-                    && transaction.new_revision == audit.new_revision()
-            }))
-        {
-            return Err(StoreError::InvalidCommit);
-        }
+        validate_standalone_audit(&self.load_records()?, &audit)?;
         match record_state(
             &self.audits,
             |record| record.audit_id() == audit.audit_id(),

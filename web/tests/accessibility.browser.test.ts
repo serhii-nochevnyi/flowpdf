@@ -134,7 +134,16 @@ for (const locale of ['uk', 'en'] as const) {
 
       const beforeConflict = inspector.snapshot()
       await clickAndWait(inspector, root, 'stale-command')
-      expect(inspector.snapshot()).toEqual(beforeConflict)
+      const rejected = inspector.snapshot()
+      expect(rejected.revision).toBe(beforeConflict.revision)
+      expect(rejected.hash).toBe(beforeConflict.hash)
+      expect(rejected.audit).toHaveLength(beforeConflict.audit.length + 1)
+      expect(rejected.audit.at(-1)).toMatchObject({
+        baseRevision: beforeConflict.revision,
+        newRevision: beforeConflict.revision,
+        action: { type: 'command', commandKind: 'insertText' },
+        outcome: { kind: 'failure', code: 'staleRevision' },
+      })
       expect(root.querySelector('[role="alert"]')?.textContent).toContain(
         'FLOW_STALE_REVISION',
       )
@@ -150,14 +159,14 @@ for (const locale of ['uk', 'en'] as const) {
         [...root.querySelectorAll<HTMLElement>('[data-audit-row]')].map(
           ({ dataset }) => dataset.sourceIndex,
         ),
-      ).toEqual(['0', '1', '2', '3', '4'])
+      ).toEqual(['0', '1', '2', '3', '4', '5'])
       expect(
         new Set(
           [...root.querySelectorAll<HTMLElement>('[data-audit-row]')].map(
             ({ dataset }) => dataset.auditId,
           ),
         ).size,
-      ).toBe(5)
+      ).toBe(6)
 
       assertTargetSizes(root)
       assertMinimumTextSize(root)

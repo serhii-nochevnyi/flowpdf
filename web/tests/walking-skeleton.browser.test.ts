@@ -56,7 +56,18 @@ test('walking-skeleton: completes conflict, undo/redo, save, reload, and recover
 
   await clickAndWait(inspector, root, 'stale-command')
   expect(root.querySelector('[role="alert"]')?.textContent).toContain('FLOW_STALE_REVISION')
-  expect(inspector.snapshot()).toEqual(applied)
+  const rejected = inspector.snapshot()
+  expect(rejected.revision).toBe(applied.revision)
+  expect(rejected.hash).toBe(applied.hash)
+  expect(rejected.audit.at(-1)).toMatchObject({
+    baseRevision: applied.revision,
+    newRevision: applied.revision,
+    action: { type: 'command', commandKind: 'insertText' },
+    outcome: { kind: 'failure', code: 'staleRevision' },
+  })
+  expect(JSON.stringify(rejected.audit.at(-1))).not.toMatch(
+    /stale diagnostic|typed mutation|canonicalJson|commandArguments/i,
+  )
 
   await clickAndWait(inspector, root, 'undo')
   const undone = inspector.snapshot()
@@ -74,7 +85,7 @@ test('walking-skeleton: completes conflict, undo/redo, save, reload, and recover
     type: 'command',
     commandKind: 'redo',
   })
-  expect(redone.audit.map(({ newRevision }) => newRevision)).toEqual([1, 2, 3, 4])
+  expect(redone.audit.map(({ newRevision }) => newRevision)).toEqual([1, 2, 2, 3, 4])
 
   action(root, 'save').click()
   expect(root.querySelector('[data-durability-status]')?.textContent).not.toContain(
@@ -89,11 +100,14 @@ test('walking-skeleton: completes conflict, undo/redo, save, reload, and recover
   const reloaded = inspector.snapshot()
   expect(reloaded.revision).toBe(redone.revision)
   expect(reloaded.hash).toBe(redone.hash)
+  expect(reloaded.audit).toHaveLength(redone.audit.length + 1)
+  expect(reloaded.audit.some(({ action }) => action.type === 'recovery')).toBe(true)
 
   await clickAndWait(inspector, root, 'recover')
   const recovered = inspector.snapshot()
   expect(recovered.revision).toBe(redone.revision)
   expect(recovered.hash).toBe(redone.hash)
+  expect(recovered.audit).toHaveLength(reloaded.audit.length + 1)
   expect(root.textContent).not.toMatch(/Український|English|typed mutation/i)
 })
 
@@ -128,5 +142,10 @@ test('walking-skeleton: opens the supported older fixture through Rust migration
     databaseName: 'flowpdf-migration-browser-test',
   })
   expect(action(remountRoot, 'open-last').disabled).toBe(false)
-  expect(await remounted.reloadFromStorage()).toEqual(migrated)
+  const reopened = await remounted.reloadFromStorage()
+  expect(reopened.revision).toBe(migrated.revision)
+  expect(reopened.hash).toBe(migrated.hash)
+  expect(reopened.revisionProvenance).toEqual(migrated.revisionProvenance)
+  expect(reopened.audit).toHaveLength(migrated.audit.length + 1)
+  expect(reopened.audit.some(({ action }) => action.type === 'recovery')).toBe(true)
 })

@@ -130,7 +130,20 @@ describe('Foundation Inspector approved contract', () => {
     const applied = inspector.snapshot()
 
     await clickAndWait(inspector, root, 'stale-command')
-    expect(inspector.snapshot()).toEqual(applied)
+    const rejected = inspector.snapshot()
+    expect(rejected.revision).toBe(applied.revision)
+    expect(rejected.hash).toBe(applied.hash)
+    expect(rejected.audit).toHaveLength(applied.audit.length + 1)
+    expect(rejected.audit.at(-1)).toMatchObject({
+      documentId: applied.documentId,
+      baseRevision: applied.revision,
+      newRevision: applied.revision,
+      action: { type: 'command', commandKind: 'insertText' },
+      outcome: { kind: 'failure', code: 'staleRevision' },
+    })
+    expect(JSON.stringify(rejected.audit.at(-1))).not.toMatch(
+      /stale diagnostic|typed mutation|canonicalJson|commandArguments/i,
+    )
     const conflictCopy = root.querySelector('[role="alert"]')?.textContent
     expect(conflictCopy).toContain('FLOW_STALE_REVISION')
     expect(conflictCopy).toMatch(/не змінено/i)
@@ -237,7 +250,7 @@ describe('Foundation Inspector approved contract', () => {
     const inspector = await mountWithOptions(root, {
       databaseName: 'flowpdf-inspector-clock-unit',
       locale: 'uk',
-      clock: () => new Date(instants[clockIndex++] ?? instants.at(-1)),
+      clock: () => new Date(instants[clockIndex++] ?? '2026-08-14T12:00:03.789Z'),
     })
 
     await clickAndWait(inspector, root, 'create-sample')

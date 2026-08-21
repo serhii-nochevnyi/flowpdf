@@ -5,7 +5,6 @@ export interface LogicalPositionDto {
 }
 
 export type AuditCommandKindDto =
-  | 'create'
   | 'insertText'
   | 'replaceText'
   | 'deleteText'
@@ -16,7 +15,6 @@ export type AuditCommandKindDto =
   | 'batch'
   | 'undo'
   | 'redo'
-  | 'recovery'
 
 export type AuditActionDto =
   | { readonly type: 'create' }
@@ -150,6 +148,7 @@ export interface RecoveryRecordsDto {
 
 const DEFAULT_DATABASE_NAME = 'flowpdf-foundation'
 const DATABASE_VERSION = 5
+const RECORD_FORMAT_VERSION = 1
 const RECORD_STORE_VERSION = 3
 const SNAPSHOTS = `snapshots-v${RECORD_STORE_VERSION}`
 const TRANSACTIONS = `transactions-v${RECORD_STORE_VERSION}`
@@ -300,6 +299,107 @@ export class IndexedDbDocumentStore {
         },
       },
     )
+  }
+
+  async commitStandaloneAudit(auditRecord: AuditRecordDto): Promise<void> {
+    const audit = await recordEnvelope(auditRecord, 'FLOW_STORAGE_WRITE_FAILED')
+    const database = await this.open()
+
+    await new Promise<void>((resolve, reject) => {
+      const transaction = database.transaction(
+        [SNAPSHOTS, TRANSACTIONS, AUDITS, METADATA],
+        'readwrite',
+        { durability: 'strict' },
+      )
+      let snapshots: readonly StoredEnvelope<SnapshotRecordDto>[] = []
+      let transactions: readonly StoredEnvelope<TransactionRecordDto>[] = []
+      let audits: readonly StoredEnvelope<AuditRecordDto>[] = []
+      let metadata: readonly StorageMetadata[] = []
+      let readsRemaining = 4
+      let failure: StorageError | undefined
+
+      transaction.oncomplete = () => resolve()
+      transaction.onabort = () =>
+        reject(failure ?? storageError('FLOW_STORAGE_ABORTED', transaction.error))
+      transaction.onerror = () => {
+        failure ??= storageError('FLOW_STORAGE_WRITE_FAILED', transaction.error)
+      }
+
+      const abort = (error: StorageError): void => {
+        failure ??= error
+        try {
+          transaction.abort()
+        } catch {
+          // A failed request may already have started the transaction abort.
+        }
+      }
+      const ready = (): void => {
+        readsRemaining -= 1
+        if (readsRemaining !== 0) return
+        try {
+          if (metadata.some(({ key, value }) => key === LEGACY_MIGRATION_REQUIRED && value)) {
+            throw storageError('FLOW_STORAGE_MIGRATION_REQUIRED')
+          }
+          const isSupportedStandaloneAudit =
+            (auditRecord.action.type === 'command' &&
+              auditRecord.outcome.kind === 'failure') ||
+            (auditRecord.action.type === 'recovery' &&
+              (auditRecord.outcome.kind === 'success' ||
+                auditRecord.outcome.kind === 'failure'))
+          if (
+            auditRecord.recordFormatVersion !== RECORD_FORMAT_VERSION ||
+            auditRecord.auditId !== auditRecord.commandId ||
+            auditRecord.transactionId !== auditRecord.commandId ||
+            auditRecord.baseRevision !== auditRecord.newRevision ||
+            !isSupportedStandaloneAudit
+          ) {
+            throw storageError('FLOW_STORE_INVALID_COMMIT')
+          }
+          const hasRevisionAnchor =
+            snapshots.some(
+              ({ record }) =>
+                record.documentId === auditRecord.documentId &&
+                record.revision === auditRecord.newRevision,
+            ) ||
+            transactions.some(
+              ({ record }) =>
+                record.documentId === auditRecord.documentId &&
+                record.newRevision === auditRecord.newRevision,
+            )
+          if (!hasRevisionAnchor) throw storageError('FLOW_STORE_INVALID_COMMIT')
+          assertIdentityCompatibility(audits, [guardedRecord(audit, sameAuditIdentity)])
+          transaction.objectStore(AUDITS).put(audit)
+        } catch (error: unknown) {
+          abort(
+            error instanceof StorageError
+              ? error
+              : storageError('FLOW_STORAGE_WRITE_FAILED', error),
+          )
+        }
+      }
+      const read = <T>(storeName: string, assign: (records: readonly T[]) => void): void => {
+        const request = transaction.objectStore(storeName).getAll()
+        request.onsuccess = () => {
+          assign(request.result as readonly T[])
+          ready()
+        }
+        request.onerror = () =>
+          abort(storageError('FLOW_STORAGE_READ_FAILED', request.error))
+      }
+
+      read<StoredEnvelope<SnapshotRecordDto>>(SNAPSHOTS, (records) => {
+        snapshots = records
+      })
+      read<StoredEnvelope<TransactionRecordDto>>(TRANSACTIONS, (records) => {
+        transactions = records
+      })
+      read<StoredEnvelope<AuditRecordDto>>(AUDITS, (records) => {
+        audits = records
+      })
+      read<StorageMetadata>(METADATA, (records) => {
+        metadata = records
+      })
+    })
   }
 
   async loadRecords(options: { readonly allowEmpty?: boolean } = {}): Promise<RecoveryRecordsDto> {
@@ -607,7 +707,15 @@ function commitGuardedRecords(
         }
         if (exactRetry) {
           validateIdentities()
-          if (!groups.every((group) => exactStoredGroup(existingByStore, group))) {
+          // A core-planned explicit save may add the current revision's
+          // checkpoint after its transaction and audit are already durable.
+          // Creation and migration retries still require their snapshot to
+          // have been part of the original atomic boundary.
+          const requiredRetryGroups =
+            headTransition.expected === null
+              ? groups
+              : groups.filter(({ storeName }) => storeName !== SNAPSHOTS)
+          if (!requiredRetryGroups.every((group) => exactStoredGroup(existingByStore, group))) {
             throw storageError('FLOW_STORE_PARTIAL_RECORD_SET')
           }
         } else if (!expectedMatches && !newDocument) {
@@ -694,18 +802,13 @@ function exactStoredGroup(
   existingByStore: ReadonlyMap<string, readonly StoredEnvelope<unknown>[]>,
   group: GuardedStoreWrites,
 ): boolean {
-  const expected = new Map<string, StoredEnvelope<unknown>>()
-  for (const { envelope } of group.records) expected.set(envelope.physicalKey, envelope)
   const existing = existingByStore.get(group.storeName) ?? []
-  return (
-    existing.length === expected.size &&
-    existing.every((durable) => {
-      const candidate = expected.get(durable.physicalKey)
-      return (
-        candidate !== undefined &&
-        deterministicJson(durable.record) === deterministicJson(candidate.record)
-      )
-    })
+  return group.records.every(({ envelope: candidate }) =>
+    existing.some(
+      (durable) =>
+        durable.physicalKey === candidate.physicalKey &&
+        deterministicJson(durable.record) === deterministicJson(candidate.record),
+    ),
   )
 }
 

@@ -18,6 +18,7 @@ const mountWithOptions = mountFoundationInspector as unknown as (
 const databaseVersion = 3
 const snapshotStore = `snapshots-v${databaseVersion}`
 const transactionStore = `transactions-v${databaseVersion}`
+const auditStore = `audits-v${databaseVersion}`
 
 interface StoredEnvelope {
   readonly physicalKey: string
@@ -83,7 +84,16 @@ test('recovery: an aborted incomplete physical transaction is invisible after pa
   const reconstructed = await mountWithOptions(reconstructedRoot, { databaseName })
   await clickAndWait(reconstructed, reconstructedRoot, 'open-last')
 
-  expect(reconstructed.snapshot()).toEqual(baseline.snapshot)
+  const reopened = reconstructed.snapshot()
+  expect(reopened.revision).toBe(baseline.snapshot.revision)
+  expect(reopened.hash).toBe(baseline.snapshot.hash)
+  expect(reopened.audit).toHaveLength(baseline.snapshot.audit.length + 1)
+  expect(reopened.audit.find(({ action }) => action.type === 'recovery')).toMatchObject({
+    baseRevision: baseline.snapshot.revision,
+    newRevision: baseline.snapshot.revision,
+    action: { type: 'recovery' },
+    outcome: { kind: 'success' },
+  })
   expect(await countRecords(databaseName, transactionStore)).toBe(2)
 })
 
@@ -98,6 +108,22 @@ for (const corruption of ['hash', 'gap', 'conflict'] as const) {
     expect(inspector.snapshot()).toEqual(snapshot)
     expect(root.querySelector('[role="alert"]')?.textContent).toMatch(
       /FLOW_(HASH_MISMATCH|RECOVERY_GAP)/,
+    )
+    const auditRecords = await allEnvelopes(databaseName, auditStore)
+    const failure = auditRecords.find(
+      ({ record }) =>
+        (record.action as { readonly type?: string } | undefined)?.type === 'recovery' &&
+        (record.outcome as { readonly kind?: string } | undefined)?.kind === 'failure',
+    )
+    expect(failure?.record).toMatchObject({
+      documentId: snapshot.documentId,
+      baseRevision: snapshot.revision,
+      newRevision: snapshot.revision,
+      action: { type: 'recovery' },
+      outcome: { kind: 'failure' },
+    })
+    expect(JSON.stringify(failure?.record)).not.toMatch(
+      /canonicalJson|typed mutation|Український|English|commandArguments/i,
     )
     expect(root.textContent).not.toMatch(/canonicalJson|typed mutation|Український|English/i)
   })
@@ -135,6 +161,16 @@ async function injectCorruption(
 }
 
 async function firstEnvelope(databaseName: string, storeName: string): Promise<StoredEnvelope> {
+  const records = await allEnvelopes(databaseName, storeName)
+  const record = records[0]
+  if (record === undefined) throw new Error(`missing durable record in ${storeName}`)
+  return record
+}
+
+async function allEnvelopes(
+  databaseName: string,
+  storeName: string,
+): Promise<StoredEnvelope[]> {
   const database = await openDatabase(databaseName)
   const transaction = database.transaction(storeName, 'readonly')
   const records = await requestResult<StoredEnvelope[]>(
@@ -142,9 +178,7 @@ async function firstEnvelope(databaseName: string, storeName: string): Promise<S
   )
   await transactionTerminal(transaction)
   database.close()
-  const record = records[0]
-  if (record === undefined) throw new Error(`missing durable record in ${storeName}`)
-  return record
+  return records
 }
 
 async function countRecords(databaseName: string, storeName: string): Promise<number> {

@@ -5,7 +5,8 @@
 use flow_core::{
     ApiResponse, ApplyCommandRequest, AuditedRecoverRequest, AuditedRecoverResult, CommandKind,
     CreateSampleRequest, MigrateDocumentRequest, MigrateDocumentResult, OperationResult,
-    PlanPersistenceCommitRequest, RecoverRequest, RecoverResult, store::PlannedPersistenceCommit,
+    PlanPersistenceCommitRequest, PlanStandaloneAuditRequest, RecoverRequest, RecoverResult,
+    store::PlannedPersistenceCommit,
 };
 use serde::Deserialize;
 use wasm_bindgen::prelude::*;
@@ -105,6 +106,17 @@ pub fn plan_persistence_commit(request: JsValue) -> JsValue {
 #[wasm_bindgen]
 pub fn commit_record(request: JsValue) -> JsValue {
     plan_persistence_commit(request)
+}
+
+/// Authorizes a core-produced audit-only write without exposing document
+/// mutation or trusting the browser to reproduce audit validation rules.
+#[wasm_bindgen]
+pub fn plan_standalone_audit(request: JsValue) -> JsValue {
+    let response = match serde_wasm_bindgen::from_value::<PlanStandaloneAuditRequest>(request) {
+        Ok(request) => flow_core::plan_standalone_audit(request),
+        Err(_) => flow_core::decode_failure::<flow_core::AuditRecord>(),
+    };
+    serialize_response(&response)
 }
 
 #[wasm_bindgen]

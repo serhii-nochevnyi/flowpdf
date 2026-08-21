@@ -1,10 +1,10 @@
 use flow_core::model::CommandId;
 use flow_core::{
-    ApiResponse, ApplyCommandRequest, AuditRecord, AuditedRecoverRequest, CommandDto, CommandKind,
-    CreateSampleRequest, MigrateDocumentRequest, OperationResult, RecoverResult,
-    RecoveryAuditContext, SourceModality, apply_command,
-    audit::{AuditAction, AuditCommandKind, AuditMetadata, AuditTimestamp},
-    create_sample, migrate_document, recover, recover_audited,
+    ApiResponse, ApplyCommandRequest, AuditOutcome, AuditRecord, AuditedRecoverRequest, CommandDto,
+    CommandKind, CreateSampleRequest, MigrateDocumentRequest, OperationResult,
+    PlanStandaloneAuditRequest, RecoverResult, RecoveryAuditContext, SourceModality, apply_command,
+    audit::{AuditAction, AuditCommandKind, AuditErrorCode, AuditMetadata, AuditTimestamp},
+    create_sample, migrate_document, plan_standalone_audit, recover, recover_audited,
     store::{
         CommitDisposition, CommitPlanner, DocumentStore, InMemoryDocumentStore, SnapshotPolicy,
         SnapshotReason, StoreError,
@@ -275,21 +275,78 @@ fn verified_recovery_audit_is_nonmutating_and_idempotent_by_attempt_identity() {
         audit_context: context,
     }));
     assert_eq!(audited.recovered.session.revision, applied.session.revision);
+    let authorized = success(plan_standalone_audit(PlanStandaloneAuditRequest {
+        records: store.load_records().expect("authorization records"),
+        audit: audited.audit.clone(),
+    }));
     assert_eq!(
         store
-            .commit_standalone_audit_atomic(audited.audit.clone())
+            .commit_standalone_audit_atomic(authorized.clone())
             .expect("recovery audit"),
         CommitDisposition::Committed
     );
     assert_eq!(
         store
-            .commit_standalone_audit_atomic(audited.audit)
+            .commit_standalone_audit_atomic(authorized)
             .expect("same recovery attempt"),
         CommitDisposition::Idempotent
     );
     let reopened = success(recover(store.load_records().expect("reopen records")));
     assert_eq!(reopened.session.revision, applied.session.revision);
     assert_eq!(reopened.view.audit.len(), 3);
+}
+
+#[test]
+fn recovery_context_mismatch_returns_an_authorizable_nonmutating_failure_audit() {
+    let created = success(create_sample(CreateSampleRequest {
+        requested_locale: "uk-UA".to_owned(),
+    }));
+    let applied = apply_one(&created);
+    let mut store = InMemoryDocumentStore::default();
+    store.commit_atomic(created.commit).expect("create commit");
+    store
+        .commit_atomic(applied.commit)
+        .expect("mutation commit");
+
+    let records = store.load_records().expect("records");
+    let response = recover_audited(AuditedRecoverRequest {
+        records: records.clone(),
+        audit_context: RecoveryAuditContext {
+            attempt_id: CommandId::new("00000000-0000-4000-8000-000000000909")
+                .expect("recovery ID"),
+            document_id: applied.session.document_id,
+            expected_revision: 1,
+            issued_at: "2026-08-14T20:40:09Z".to_owned(),
+        },
+    });
+    assert!(!response.ok);
+    let error = response.error.expect("mismatch diagnostic");
+    assert_eq!(error.code, "FLOW_RECOVERY_GAP");
+    let audit = error.audit.expect("mismatch failure audit");
+    assert_eq!(audit.new_revision(), 1);
+    assert!(matches!(audit.action(), AuditAction::Recovery));
+    assert!(matches!(
+        audit.outcome(),
+        AuditOutcome::Failure {
+            code: AuditErrorCode::RecoveryGap
+        }
+    ));
+    let authorized = success(plan_standalone_audit(PlanStandaloneAuditRequest {
+        records,
+        audit: audit.clone(),
+    }));
+    assert_eq!(
+        store
+            .commit_standalone_audit_atomic(authorized)
+            .expect("failure audit commit"),
+        CommitDisposition::Committed
+    );
+    let reopened = success(recover(store.load_records().expect("reopen records")));
+    assert_eq!(reopened.session.revision, 2);
+    assert!(reopened.view.audit.contains(&audit));
+    let audit_json = serde_json::to_string(&audit).expect("failure audit JSON");
+    assert!(!audit_json.contains("typed mutation"));
+    assert!(!audit_json.contains("canonicalJson"));
 }
 
 #[test]

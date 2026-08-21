@@ -82,6 +82,11 @@ interface RecoverResultDto {
   readonly view: InspectorViewDto
 }
 
+interface AuditedRecoverResultDto {
+  readonly recovered: RecoverResultDto
+  readonly audit: AuditRecordDto
+}
+
 interface MigrateDocumentResultDto {
   readonly canonicalJson: string
   readonly canonicalHash: string
@@ -101,7 +106,9 @@ interface WasmBoundary {
   readonly redo: (request: unknown) => ApiResponse<OperationResultDto>
   readonly open_document: (request: unknown) => ApiResponse<MigrateDocumentResultDto>
   readonly commit_record: (request: unknown) => ApiResponse<PlannedPersistenceCommitDto>
+  readonly plan_standalone_audit: (request: unknown) => ApiResponse<AuditRecordDto>
   readonly query_document: (request: RecoveryRecordsDto) => ApiResponse<RecoverResultDto>
+  readonly recover_document_audited: (request: unknown) => ApiResponse<AuditedRecoverResultDto>
 }
 
 type ErrorPresentation = 'command' | 'stale' | 'recovery' | 'copy'
@@ -273,8 +280,13 @@ class FoundationInspector implements FoundationInspectorController {
   }
 
   async reloadFromStorage(): Promise<FoundationInspectorSnapshot> {
-    await this.restoreFromStorage('reload')
-    return this.snapshot()
+    try {
+      await this.restoreFromStorage('reload')
+      return this.snapshot()
+    } catch (error: unknown) {
+      await this.persistErrorAudit(error, true)
+      throw error
+    }
   }
 
   private start(
@@ -286,9 +298,18 @@ class FoundationInspector implements FoundationInspectorController {
     this.activeControl = control
     this.pending = operation()
       .then(() => control.focus())
-      .catch((error: unknown) => {
-        this.setError(errorCode(error), errorKind)
-        control.focus()
+      .catch(async (error: unknown) => {
+        this.setBusy(true)
+        let presentedError = error
+        try {
+          await this.persistErrorAudit(error, errorKind === 'recovery')
+        } catch (auditError: unknown) {
+          presentedError = auditError
+        } finally {
+          this.setBusy(false)
+          this.setError(errorCode(presentedError), errorKind)
+          control.focus()
+        }
       })
   }
 
@@ -482,14 +503,27 @@ class FoundationInspector implements FoundationInspectorController {
     this.setPending()
     try {
       const records = await this.store.loadRecords()
-      const recovered = unwrap(this.wasm.query_document(records))
+      const expectedSession =
+        this.session ?? unwrap(this.wasm.query_document(records)).session
+      const audited = unwrap(
+        this.wasm.recover_document_audited({
+          records,
+          auditContext: {
+            attemptId: newCommandId(),
+            documentId: expectedSession.documentId,
+            expectedRevision: expectedSession.revision,
+            issuedAt: this.currentTimestamp(),
+          },
+        }),
+      )
+      const recovered = audited.recovered
       await this.store.installRecoveredHead(records, {
         documentId: recovered.session.documentId,
         revision: recovered.session.revision,
         canonicalHash: recovered.session.canonicalHash,
       })
-      this.session = recovered.session
-      this.view = recovered.view
+      await this.persistStandaloneAudit(audited.audit)
+      const refreshed = await this.refreshVerifiedState()
       this.lastCommit = undefined
       const statusKey =
         mode === 'open'
@@ -497,7 +531,7 @@ class FoundationInspector implements FoundationInspectorController {
           : mode === 'reload'
             ? 'foundationInspector.reload.success'
             : 'foundationInspector.recover.success'
-      this.setStatus(message(this.locale, statusKey, { revision: recovered.view.revision }))
+      this.setStatus(message(this.locale, statusKey, { revision: refreshed.view.revision }))
       this.render()
     } finally {
       this.setBusy(false)
@@ -536,6 +570,40 @@ class FoundationInspector implements FoundationInspectorController {
     )
     await this.store.commit(planned)
     this.hasDurableRecords = true
+  }
+
+  private async persistStandaloneAudit(audit: AuditRecordDto): Promise<void> {
+    const records = await this.store.loadRecords()
+    const authorized = unwrap(
+      this.wasm.plan_standalone_audit({
+        records,
+        audit,
+      }),
+    )
+    await this.store.commitStandaloneAudit(authorized)
+    this.hasDurableRecords = true
+  }
+
+  private async persistErrorAudit(
+    error: unknown,
+    retainViewOnRefreshFailure: boolean,
+  ): Promise<void> {
+    if (!(error instanceof FoundationError) || error.audit === null) return
+    await this.persistStandaloneAudit(error.audit)
+    try {
+      await this.refreshVerifiedState()
+      this.render()
+    } catch (refreshError: unknown) {
+      if (!retainViewOnRefreshFailure) throw refreshError
+    }
+  }
+
+  private async refreshVerifiedState(): Promise<RecoverResultDto> {
+    const records = await this.store.loadRecords()
+    const recovered = unwrap(this.wasm.query_document(records))
+    this.session = recovered.session
+    this.view = recovered.view
+    return recovered
   }
 
   private requireSession(): SessionDto {
@@ -856,7 +924,10 @@ export async function mountFoundationInspector(
 
 function unwrap<T>(response: ApiResponse<T>): T {
   if (!response.ok || response.value === null) {
-    throw new FoundationError(response.error?.code ?? 'FLOW_UNKNOWN_CORE_ERROR')
+    throw new FoundationError(
+      response.error?.code ?? 'FLOW_UNKNOWN_CORE_ERROR',
+      response.error?.audit ?? null,
+    )
   }
   return response.value
 }
@@ -866,7 +937,10 @@ function newCommandId(): string {
 }
 
 class FoundationError extends Error {
-  constructor(readonly code: string) {
+  constructor(
+    readonly code: string,
+    readonly audit: AuditRecordDto | null = null,
+  ) {
     super(code)
     this.name = 'FoundationError'
   }

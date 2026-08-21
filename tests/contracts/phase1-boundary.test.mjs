@@ -12,6 +12,7 @@ const allowedWasmExports = new Set([
   'migrate_document',
   'open_document',
   'plan_persistence_commit',
+  'plan_standalone_audit',
   'query_document',
   'recover_document',
   'recover_document_audited',

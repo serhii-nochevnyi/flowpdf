@@ -225,6 +225,13 @@ pub struct PlanPersistenceCommitRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PlanStandaloneAuditRequest {
+    pub records: RecoverRequest,
+    pub audit: AuditRecord,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RecoverResult {
     pub session: SessionDto,
     pub view: InspectorView,
@@ -447,6 +454,18 @@ pub fn plan_persistence_commit(
     }
 }
 
+/// Authorizes a privacy-minimized, non-mutating audit record against the
+/// durable record image. Physical adapters persist only the returned record,
+/// preserving Rust ownership of audit semantics while keeping the write
+/// idempotent and independent from the document head.
+#[must_use]
+pub fn plan_standalone_audit(request: PlanStandaloneAuditRequest) -> ApiResponse<AuditRecord> {
+    match store::validate_standalone_audit(&request.records, &request.audit) {
+        Ok(()) => ApiResponse::success(request.audit),
+        Err(error) => ApiResponse::failure(error.into()),
+    }
+}
+
 fn migrate_document_inner(
     request: MigrateDocumentRequest,
 ) -> Result<MigrateDocumentResult, CoreError> {
@@ -612,7 +631,9 @@ pub fn recover_audited(request: AuditedRecoverRequest) -> ApiResponse<AuditedRec
             if recovered.session.document_id != request.audit_context.document_id
                 || recovered.session.revision != request.audit_context.expected_revision
             {
-                return ApiResponse::failure(CoreError::RecoveryGap);
+                let error = CoreError::RecoveryGap;
+                let audit = recovery_audit(&request.audit_context, Some(&error));
+                return ApiResponse::failure_with_audit(error, audit);
             }
             match recovery_audit(&request.audit_context, None) {
                 Some(audit) => ApiResponse::success(AuditedRecoverResult { recovered, audit }),
