@@ -418,6 +418,7 @@ class FoundationInspector implements FoundationInspectorController {
         throw new FoundationError('FLOW_MIGRATION_BOUNDARY_REQUIRED')
       }
       await this.store.commitMigration(result.commit)
+      this.hasDurableRecords = true
       this.lastCommit = undefined
       await this.publishRecoveredState(
         message(this.locale, 'foundationInspector.migration.success', {

@@ -120,7 +120,13 @@ test('walking-skeleton: opens the supported older fixture through Rust migration
   expect(root.querySelector('[data-provenance-unavailable]')?.textContent).toMatch(
     /наступній фазі/i,
   )
+  expect(action(root, 'reload').disabled).toBe(false)
 
-  await clickAndWait(inspector, root, 'reload')
-  expect(inspector.snapshot()).toEqual(migrated)
+  const remountRoot = document.createElement('div')
+  document.body.replaceChildren(remountRoot)
+  const remounted = await mountWithOptions(remountRoot, {
+    databaseName: 'flowpdf-migration-browser-test',
+  })
+  expect(action(remountRoot, 'open-last').disabled).toBe(false)
+  expect(await remounted.reloadFromStorage()).toEqual(migrated)
 })
