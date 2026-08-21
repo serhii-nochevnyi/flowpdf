@@ -2,7 +2,7 @@
 
 import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 
 const root = resolve(import.meta.dirname, '..')
@@ -10,11 +10,12 @@ const recipePath = resolve(root, 'fixtures/recovery/benchmark-200-page.recipe.js
 const outputDir = resolve(root, 'artifacts/benchmarks')
 const passedPath = resolve(outputDir, 'phase1-recovery.json')
 const blockedPath = resolve(outputDir, 'phase1-recovery-blocker.json')
-const sourceManifestPaths = [
+const fixedSourceManifestPaths = [
   'fixtures/recovery/benchmark-200-page.recipe.json',
+  'Cargo.toml',
   'Cargo.lock',
-  'crates/flow-core/src/lib.rs',
-  'crates/flow-core/src/store/mod.rs',
+  'rust-toolchain.toml',
+  'crates/flow-core/Cargo.toml',
   'crates/flow-core/examples/recovery_benchmark.rs',
   'scripts/verify-recovery-benchmark.mjs',
 ]
@@ -328,7 +329,7 @@ function nearestRankPercentile(sorted, percentile) {
 }
 
 function resolveSourceManifest() {
-  const files = sourceManifestPaths.map((path) => {
+  const files = resolveSourceManifestPaths().map((path) => {
     const bytes = readFileSync(resolve(root, path))
     return {
       path,
@@ -339,9 +340,41 @@ function resolveSourceManifest() {
   return {
     formatVersion: 1,
     algorithm: 'sha256',
+    fileCount: files.length,
     files,
     digest: `sha256:${createHash('sha256').update(manifestBytes, 'utf8').digest('hex')}`,
   }
+}
+
+function resolveSourceManifestPaths() {
+  const rustSources = discoverRustSources('crates/flow-core/src')
+  const paths = [...fixedSourceManifestPaths, ...rustSources].sort(compareNormalizedPaths)
+  if (
+    new Set(paths).size !== paths.length ||
+    paths.some((path) => path.startsWith('/') || path.includes('\\') || path.split('/').includes('..'))
+  ) {
+    throw new Error('source manifest paths must be unique normalized workspace-relative paths')
+  }
+  return paths
+}
+
+function discoverRustSources(directory) {
+  const entries = readdirSync(resolve(root, directory), { withFileTypes: true })
+    .sort((left, right) => compareNormalizedPaths(left.name, right.name))
+  const paths = []
+  for (const entry of entries) {
+    const relativePath = `${directory}/${entry.name}`
+    if (entry.isDirectory()) {
+      paths.push(...discoverRustSources(relativePath))
+    } else if (entry.isFile() && entry.name.endsWith('.rs')) {
+      paths.push(relativePath)
+    }
+  }
+  return paths
+}
+
+function compareNormalizedPaths(left, right) {
+  return left < right ? -1 : left > right ? 1 : 0
 }
 
 function assertSourceManifestStable() {
@@ -354,6 +387,10 @@ function runValidatorSelfTest() {
   const report = validateTerminalArtifact()
   const adversarialCases = [
     ['stale source manifest', (candidate) => { candidate.sourceManifest.files[0].sha256 = 'sha256:forged' }],
+    ['missing manifest entry', (candidate) => { candidate.sourceManifest.files.pop() }],
+    ['unexpected manifest entry', (candidate) => {
+      candidate.sourceManifest.files.push({ path: 'unexpected.rs', sha256: 'sha256:forged' })
+    }],
     ['forged p50', (candidate) => { candidate.attempts[0].p50Milliseconds += 1 }],
     ['forged terminal p95', (candidate) => { candidate.p95Milliseconds += 1 }],
     ['negative duration', (candidate) => { candidate.attempts[0].durationsMilliseconds[0] = -1 }],
