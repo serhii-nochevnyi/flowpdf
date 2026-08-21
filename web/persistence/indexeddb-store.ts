@@ -149,12 +149,21 @@ export interface RecoveryRecordsDto {
 }
 
 const DEFAULT_DATABASE_NAME = 'flowpdf-foundation'
-const DATABASE_VERSION = 3
-const SNAPSHOTS = `snapshots-v${DATABASE_VERSION}`
-const TRANSACTIONS = `transactions-v${DATABASE_VERSION}`
-const AUDITS = `audits-v${DATABASE_VERSION}`
-const ASSETS = `assets-v${DATABASE_VERSION}`
-const SOURCES = `migration-sources-v${DATABASE_VERSION}`
+const DATABASE_VERSION = 4
+const RECORD_STORE_VERSION = 3
+const SNAPSHOTS = `snapshots-v${RECORD_STORE_VERSION}`
+const TRANSACTIONS = `transactions-v${RECORD_STORE_VERSION}`
+const AUDITS = `audits-v${RECORD_STORE_VERSION}`
+const ASSETS = `assets-v${RECORD_STORE_VERSION}`
+const SOURCES = `migration-sources-v${RECORD_STORE_VERSION}`
+const METADATA = 'storage-metadata'
+const LEGACY_MIGRATION_REQUIRED = 'legacy-migration-required'
+const LEGACY_STORES = ['snapshots', 'transactions', 'audits', 'assets', 'migration-sources']
+
+interface StorageMetadata {
+  readonly key: string
+  readonly value: boolean
+}
 
 interface StoredEnvelope<T> {
   readonly physicalKey: string
@@ -258,7 +267,7 @@ export class IndexedDbDocumentStore {
   async loadRecords(options: { readonly allowEmpty?: boolean } = {}): Promise<RecoveryRecordsDto> {
     const database = await this.open()
     const transaction = database.transaction(
-      [SNAPSHOTS, TRANSACTIONS, AUDITS, ASSETS, SOURCES],
+      [SNAPSHOTS, TRANSACTIONS, AUDITS, ASSETS, SOURCES, METADATA],
       'readonly',
     )
     const snapshotsRequest = transaction.objectStore(SNAPSHOTS).getAll()
@@ -266,6 +275,9 @@ export class IndexedDbDocumentStore {
     const auditsRequest = transaction.objectStore(AUDITS).getAll()
     const assetsRequest = transaction.objectStore(ASSETS).getAll()
     const sourcesRequest = transaction.objectStore(SOURCES).getAll()
+    const migrationRequiredRequest = transaction
+      .objectStore(METADATA)
+      .get(LEGACY_MIGRATION_REQUIRED)
 
     const [
       snapshotEnvelopes,
@@ -273,12 +285,14 @@ export class IndexedDbDocumentStore {
       auditEnvelopes,
       assetEnvelopes,
       sourceEnvelopes,
+      migrationRequired,
     ] = await Promise.all([
       requestResult<StoredEnvelope<SnapshotRecordDto>[]>(snapshotsRequest),
       requestResult<StoredEnvelope<TransactionRecordDto>[]>(transactionsRequest),
       requestResult<StoredEnvelope<AuditRecordDto>[]>(auditsRequest),
       requestResult<StoredEnvelope<AssetRecordDto>[]>(assetsRequest),
       requestResult<StoredEnvelope<MigrationSourceRecordDto>[]>(sourcesRequest),
+      requestResult<StorageMetadata | undefined>(migrationRequiredRequest),
       transactionComplete(transaction),
     ])
     const snapshots = snapshotEnvelopes.map(({ record }) => record)
@@ -286,6 +300,10 @@ export class IndexedDbDocumentStore {
     const audits = auditEnvelopes.map(({ record }) => record)
     const assets = assetEnvelopes.map(({ record }) => record)
     const sources = sourceEnvelopes.map(({ record }) => record)
+
+    if (migrationRequired?.value === true) {
+      throw storageError('FLOW_STORAGE_MIGRATION_REQUIRED')
+    }
 
     if (snapshots.length === 0 && options.allowEmpty !== true) {
       throw storageError('FLOW_STORAGE_EMPTY')
@@ -316,6 +334,21 @@ export class IndexedDbDocumentStore {
         for (const storeName of [SNAPSHOTS, TRANSACTIONS, AUDITS, ASSETS, SOURCES]) {
           if (!database.objectStoreNames.contains(storeName)) {
             database.createObjectStore(storeName, { keyPath: 'physicalKey' })
+          }
+        }
+        if (!database.objectStoreNames.contains(METADATA)) {
+          database.createObjectStore(METADATA, { keyPath: 'key' })
+        }
+        const upgrade = request.transaction
+        if (upgrade === null) return
+        const metadata = upgrade.objectStore(METADATA)
+        for (const storeName of LEGACY_STORES) {
+          if (!database.objectStoreNames.contains(storeName)) continue
+          const count = upgrade.objectStore(storeName).count()
+          count.onsuccess = () => {
+            if (count.result > 0) {
+              metadata.put({ key: LEGACY_MIGRATION_REQUIRED, value: true })
+            }
           }
         }
       }
@@ -368,12 +401,12 @@ function commitGuardedRecords(
   groups: readonly GuardedStoreWrites[],
 ): Promise<void> {
   return new Promise<void>((resolve, reject) => {
-    const transaction = database.transaction(storeNames, 'readwrite', {
+    const transaction = database.transaction([...new Set([...storeNames, METADATA])], 'readwrite', {
       durability: 'strict',
     })
     const existingByStore = new Map<string, readonly StoredEnvelope<unknown>[]>()
     const populatedGroups = groups.filter(({ records }) => records.length > 0)
-    let readsRemaining = populatedGroups.length
+    let readsRemaining = populatedGroups.length + 1
     let failure: StorageError | undefined
 
     transaction.oncomplete = () => resolve()
@@ -411,10 +444,24 @@ function commitGuardedRecords(
       }
     }
 
-    if (readsRemaining === 0) {
-      validateAndWrite()
-      return
+    const ready = (): void => {
+      readsRemaining -= 1
+      if (readsRemaining === 0) validateAndWrite()
     }
+
+    const migrationRequired = transaction
+      .objectStore(METADATA)
+      .get(LEGACY_MIGRATION_REQUIRED)
+    migrationRequired.onsuccess = () => {
+      const metadata = migrationRequired.result as StorageMetadata | undefined
+      if (metadata?.value === true) {
+        abort(storageError('FLOW_STORAGE_MIGRATION_REQUIRED'))
+      } else {
+        ready()
+      }
+    }
+    migrationRequired.onerror = () =>
+      abort(storageError('FLOW_STORAGE_READ_FAILED', migrationRequired.error))
 
     for (const group of populatedGroups) {
       const request = transaction.objectStore(group.storeName).getAll()
@@ -423,8 +470,7 @@ function commitGuardedRecords(
           group.storeName,
           request.result as readonly StoredEnvelope<unknown>[],
         )
-        readsRemaining -= 1
-        if (readsRemaining === 0) validateAndWrite()
+        ready()
       }
       request.onerror = () =>
         abort(storageError('FLOW_STORAGE_READ_FAILED', request.error))

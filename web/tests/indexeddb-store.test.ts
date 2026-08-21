@@ -433,13 +433,22 @@ describe('IndexedDbDocumentStore', () => {
     expect(open).toHaveBeenCalledTimes(3)
   })
 
-  it('adds versioned stores without deleting legacy stores or records', async () => {
-    const legacyRecord = { legacy: true, value: 'must survive' }
-    const legacyDatabase = await openLegacyDatabase(legacyRecord)
+  it('preserves incompatible v2 records and blocks v3 reads and writes pending migration', async () => {
+    const legacyRecords = {
+      snapshots: [{ legacy: true, revision: 2, canonicalHash: 'legacy-hash' }],
+      transactions: [{ legacy: true, revision: 2 }],
+      audits: [{ legacy: true, revision: 2 }],
+    }
+    const legacyDatabase = await openLegacyDatabase(legacyRecords)
     legacyDatabase.close()
 
     const store = new IndexedDbDocumentStore()
-    await store.loadRecords({ allowEmpty: true })
+    await expect(store.loadRecords({ allowEmpty: true })).rejects.toMatchObject({
+      code: 'FLOW_STORAGE_MIGRATION_REQUIRED',
+    })
+    await expect(store.commit(commitFor(1, 'asset-1'))).rejects.toMatchObject({
+      code: 'FLOW_STORAGE_MIGRATION_REQUIRED',
+    })
 
     const upgraded = await openCurrentDatabase()
     expect(Array.from(upgraded.objectStoreNames)).toEqual(
@@ -450,22 +459,39 @@ describe('IndexedDbDocumentStore', () => {
         'audits-v3',
         'assets-v3',
         'migration-sources-v3',
+        'storage-metadata',
       ]),
     )
-    const transaction = upgraded.transaction('snapshots', 'readonly')
-    const records = await requestResultForTest<unknown[]>(
-      transaction.objectStore('snapshots').getAll(),
-    )
-    expect(records).toEqual([legacyRecord])
+    for (const [storeName, expected] of Object.entries(legacyRecords)) {
+      const transaction = upgraded.transaction(storeName, 'readonly')
+      const records = await requestResultForTest<unknown[]>(
+        transaction.objectStore(storeName).getAll(),
+      )
+      expect(records).toEqual(expected)
+    }
+    const currentStoreNames = ['snapshots-v3', 'transactions-v3', 'audits-v3', 'assets-v3']
+    const currentTransaction = upgraded.transaction(currentStoreNames, 'readonly')
+    await expect(
+      Promise.all(
+        currentStoreNames.map((storeName) =>
+          requestResultForTest<unknown[]>(currentTransaction.objectStore(storeName).getAll()),
+        ),
+      ),
+    ).resolves.toEqual([[], [], [], []])
     upgraded.close()
   })
 })
 
-function openLegacyDatabase(record: unknown): Promise<IDBDatabase> {
+function openLegacyDatabase(
+  records: Readonly<Record<'snapshots' | 'transactions' | 'audits', readonly unknown[]>>,
+): Promise<IDBDatabase> {
   return new Promise<IDBDatabase>((resolve, reject) => {
     const request = indexedDB.open(databaseName, 2)
     request.onupgradeneeded = () => {
-      request.result.createObjectStore('snapshots', { autoIncrement: true }).put(record)
+      for (const [storeName, stored] of Object.entries(records)) {
+        const store = request.result.createObjectStore(storeName, { autoIncrement: true })
+        for (const record of stored) store.put(record)
+      }
     }
     request.onsuccess = () => resolve(request.result)
     request.onerror = () => reject(request.error)
