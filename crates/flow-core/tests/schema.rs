@@ -5,7 +5,7 @@ use flow_core::{
         Affinity, DocumentId, FieldKind, FieldValue, FlowDocument, LogicalPosition, NodeId,
         Provenance, TextInputHint,
     },
-    schema::{SchemaError, validate_document},
+    schema::{DocumentLimits, SchemaError, validate_document},
 };
 
 #[test]
@@ -186,6 +186,55 @@ fn schema_rejects_unknown_coordinates_floats_invalid_ids_duplicates_and_dangling
     assert_eq!(
         code(validate_document(&dangling_asset).expect_err("dangling asset")),
         "FLOW_DANGLING_REFERENCE"
+    );
+}
+
+#[test]
+fn asset_descriptors_use_canonical_hashes_and_fit_the_encoded_recovery_budget() {
+    let document = FlowDocument::deterministic_sample("uk-UA").expect("sample");
+
+    let mut uppercase = document.clone();
+    let asset_hex = uppercase.assets[0]
+        .content_hash
+        .strip_prefix("blake3:")
+        .expect("asset hash");
+    uppercase.assets[0].content_hash = format!("blake3:{}", asset_hex.to_ascii_uppercase());
+    assert_eq!(
+        code(validate_document(&uppercase).expect_err("uppercase asset hash")),
+        "FLOW_INVALID_DOCUMENT"
+    );
+
+    let mut conflicting_length = document.clone();
+    let mut duplicate = conflicting_length.assets[0].clone();
+    duplicate.id =
+        flow_core::model::AssetId::new("00000000-0000-4000-8000-000000009904").expect("asset ID");
+    duplicate.byte_length = 1;
+    conflicting_length.assets.push(duplicate);
+    assert_eq!(
+        code(validate_document(&conflicting_length).expect_err("conflicting length")),
+        "FLOW_INVALID_DOCUMENT"
+    );
+
+    let mut oversized = document;
+    oversized.assets[0].byte_length =
+        u32::try_from(DocumentLimits::V1.recovery_bytes / 4).expect("v1 limit") + 1;
+    assert_eq!(
+        code(validate_document(&oversized).expect_err("encoded asset budget")),
+        "FLOW_LIMIT_RECOVERY_BYTES"
+    );
+
+    let mut aggregate = FlowDocument::deterministic_sample("uk-UA").expect("sample");
+    let per_asset =
+        u32::try_from(DocumentLimits::V1.recovery_bytes / 8).expect("v1 aggregate limit");
+    aggregate.assets[0].byte_length = per_asset;
+    let mut second = aggregate.assets[0].clone();
+    second.id =
+        flow_core::model::AssetId::new("00000000-0000-4000-8000-000000009905").expect("asset ID");
+    second.content_hash = format!("blake3:{}", "1".repeat(64));
+    aggregate.assets.push(second);
+    assert_eq!(
+        code(validate_document(&aggregate).expect_err("aggregate encoded asset budget")),
+        "FLOW_LIMIT_RECOVERY_BYTES"
     );
 }
 

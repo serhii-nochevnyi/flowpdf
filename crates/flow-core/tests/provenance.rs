@@ -172,4 +172,5 @@ fn source_hashes_are_never_invented_and_explicit_values_remain_bounded() {
 fn revision_hash_rejects_unversioned_or_malformed_values() {
     assert!(RevisionHash::parse("blake3:abc").is_err());
     assert!(RevisionHash::parse("flowpdf:blake3:v1:not-hex").is_err());
+    assert!(RevisionHash::parse(format!("flowpdf:blake3:v1:{:064X}", 0xAB)).is_err());
 }

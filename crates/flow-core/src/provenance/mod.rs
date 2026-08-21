@@ -32,7 +32,11 @@ impl RevisionHash {
         let Some(hex) = value.strip_prefix("flowpdf:blake3:v1:") else {
             return Err(ProvenanceError::InvalidHash);
         };
-        if hex.len() != 64 || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        if hex.len() != 64
+            || !hex
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
             return Err(ProvenanceError::InvalidHash);
         }
         Ok(Self(value))

@@ -1,6 +1,6 @@
 //! Schema validation, fixed resource budgets, and sequential migrations.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -306,6 +306,8 @@ pub fn validate_document(document: &FlowDocument) -> Result<(), SchemaError> {
     }
 
     let mut asset_ids = BTreeSet::new();
+    let mut asset_lengths = BTreeMap::<&str, u32>::new();
+    let mut encoded_asset_bytes = 0_usize;
     for asset in &document.assets {
         insert_id(&mut all_ids, asset.id.as_str())?;
         asset_ids.insert(asset.id.as_str());
@@ -315,6 +317,26 @@ pub fn validate_document(document: &FlowDocument) -> Result<(), SchemaError> {
             || asset.alt_text.len() > 16_384
         {
             return Err(SchemaError::invalid_document());
+        }
+        if let Some(existing_length) = asset_lengths.get(asset.content_hash.as_str()) {
+            if *existing_length != asset.byte_length {
+                return Err(SchemaError::invalid_document());
+            }
+        } else {
+            asset_lengths.insert(asset.content_hash.as_str(), asset.byte_length);
+            // JSON encodes each u8 as at most three digits plus a separator.
+            // The fixed allowance covers the version/hash field names and delimiters.
+            const ASSET_RECORD_JSON_OVERHEAD: usize = 128;
+            let byte_length =
+                usize::try_from(asset.byte_length).map_err(|_| SchemaError::invalid_document())?;
+            let encoded_length = byte_length
+                .checked_mul(4)
+                .and_then(|length| length.checked_add(ASSET_RECORD_JSON_OVERHEAD))
+                .ok_or_else(SchemaError::invalid_document)?;
+            encoded_asset_bytes = encoded_asset_bytes
+                .checked_add(encoded_length)
+                .ok_or_else(SchemaError::invalid_document)?;
+            limits.check(LimitKind::RecoveryBytes, encoded_asset_bytes)?;
         }
     }
 
@@ -549,7 +571,10 @@ fn is_asset_hash(value: &str) -> bool {
     let Some(hex) = value.strip_prefix("blake3:") else {
         return false;
     };
-    hex.len() == 64 && hex.bytes().all(|byte| byte.is_ascii_hexdigit())
+    hex.len() == 64
+        && hex
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 #[must_use]
