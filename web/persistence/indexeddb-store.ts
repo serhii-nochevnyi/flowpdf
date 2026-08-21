@@ -149,7 +149,7 @@ export interface RecoveryRecordsDto {
 }
 
 const DEFAULT_DATABASE_NAME = 'flowpdf-foundation'
-const DATABASE_VERSION = 4
+const DATABASE_VERSION = 5
 const RECORD_STORE_VERSION = 3
 const SNAPSHOTS = `snapshots-v${RECORD_STORE_VERSION}`
 const TRANSACTIONS = `transactions-v${RECORD_STORE_VERSION}`
@@ -157,12 +157,25 @@ const AUDITS = `audits-v${RECORD_STORE_VERSION}`
 const ASSETS = `assets-v${RECORD_STORE_VERSION}`
 const SOURCES = `migration-sources-v${RECORD_STORE_VERSION}`
 const METADATA = 'storage-metadata'
+const HEADS = 'document-heads'
 const LEGACY_MIGRATION_REQUIRED = 'legacy-migration-required'
+const HEAD_BOOTSTRAP_REQUIRED = 'head-bootstrap-required'
 const LEGACY_STORES = ['snapshots', 'transactions', 'audits', 'assets', 'migration-sources']
 
 interface StorageMetadata {
   readonly key: string
   readonly value: boolean
+}
+
+export interface DocumentHeadDto {
+  readonly documentId: string
+  readonly revision: number
+  readonly canonicalHash: string
+}
+
+interface HeadTransition {
+  readonly expected: DocumentHeadDto | null
+  readonly resulting: DocumentHeadDto
 }
 
 interface StoredEnvelope<T> {
@@ -226,6 +239,21 @@ export class IndexedDbDocumentStore {
           records: assets.map((asset) => guardedRecord(asset, sameAssetIdentity)),
         },
       ],
+      {
+        expected:
+          commit.transaction.baseRevision === 0
+            ? null
+            : {
+                documentId: commit.transaction.documentId,
+                revision: commit.transaction.baseRevision,
+                canonicalHash: commit.transaction.beforeHash,
+              },
+        resulting: {
+          documentId: commit.transaction.documentId,
+          revision: commit.transaction.newRevision,
+          canonicalHash: commit.transaction.afterHash,
+        },
+      },
     )
   }
 
@@ -261,6 +289,14 @@ export class IndexedDbDocumentStore {
           records: [guardedRecord(source, sameMigrationSourceIdentity)],
         },
       ],
+      {
+        expected: null,
+        resulting: {
+          documentId: commit.snapshot.documentId,
+          revision: commit.snapshot.revision,
+          canonicalHash: commit.snapshot.canonicalHash,
+        },
+      },
     )
   }
 
@@ -318,6 +354,104 @@ export class IndexedDbDocumentStore {
     }
   }
 
+  async installRecoveredHead(
+    recoveredRecords: RecoveryRecordsDto,
+    head: DocumentHeadDto,
+  ): Promise<void> {
+    const database = await this.open()
+    await new Promise<void>((resolve, reject) => {
+      const storeNames = [SNAPSHOTS, TRANSACTIONS, AUDITS, ASSETS, SOURCES] as const
+      const transaction = database.transaction(
+        [...storeNames, METADATA, HEADS],
+        'readwrite',
+        { durability: 'strict' },
+      )
+      const currentRecords = new Map<string, readonly unknown[]>()
+      let currentHead: DocumentHeadDto | undefined
+      let metadata: readonly StorageMetadata[] = []
+      let readsRemaining = storeNames.length + 2
+      let failure: StorageError | undefined
+
+      transaction.oncomplete = () => resolve()
+      transaction.onabort = () =>
+        reject(failure ?? storageError('FLOW_STORAGE_ABORTED', transaction.error))
+      transaction.onerror = () => {
+        failure ??= storageError('FLOW_STORAGE_WRITE_FAILED', transaction.error)
+      }
+
+      const abort = (error: StorageError): void => {
+        failure ??= error
+        try {
+          transaction.abort()
+        } catch {
+          // The transaction may already be aborting because a request failed.
+        }
+      }
+      const ready = (): void => {
+        readsRemaining -= 1
+        if (readsRemaining !== 0) return
+        try {
+          if (metadata.some(({ key, value }) => key === LEGACY_MIGRATION_REQUIRED && value)) {
+            throw storageError('FLOW_STORAGE_MIGRATION_REQUIRED')
+          }
+          if (currentHead !== undefined && !sameHead(currentHead, head)) {
+            throw storageError('FLOW_STORE_HEAD_CONFLICT')
+          }
+          const current = recoveryRecordsFromEnvelopes(currentRecords)
+          if (deterministicJson(current) !== deterministicJson(recoveredRecords)) {
+            throw storageError('FLOW_STORAGE_HEAD_REQUIRED')
+          }
+          const headIsBound =
+            current.snapshots.some(
+              (snapshot) =>
+                snapshot.documentId === head.documentId &&
+                snapshot.revision === head.revision &&
+                snapshot.canonicalHash === head.canonicalHash,
+            ) ||
+            current.transactions.some(
+              (record) =>
+                record.documentId === head.documentId &&
+                record.newRevision === head.revision &&
+                record.afterHash === head.canonicalHash,
+            )
+          if (!headIsBound) throw storageError('FLOW_STORAGE_HEAD_REQUIRED')
+          transaction.objectStore(HEADS).put(head)
+          transaction.objectStore(METADATA).delete(HEAD_BOOTSTRAP_REQUIRED)
+        } catch (error: unknown) {
+          abort(
+            error instanceof StorageError
+              ? error
+              : storageError('FLOW_STORAGE_WRITE_FAILED', error),
+          )
+        }
+      }
+
+      for (const storeName of storeNames) {
+        const request = transaction.objectStore(storeName).getAll()
+        request.onsuccess = () => {
+          currentRecords.set(storeName, request.result as readonly StoredEnvelope<unknown>[])
+          ready()
+        }
+        request.onerror = () =>
+          abort(storageError('FLOW_STORAGE_READ_FAILED', request.error))
+      }
+      const headRequest = transaction.objectStore(HEADS).get(head.documentId)
+      headRequest.onsuccess = () => {
+        currentHead = headRequest.result as DocumentHeadDto | undefined
+        ready()
+      }
+      headRequest.onerror = () =>
+        abort(storageError('FLOW_STORAGE_READ_FAILED', headRequest.error))
+      const metadataRequest = transaction.objectStore(METADATA).getAll()
+      metadataRequest.onsuccess = () => {
+        metadata = metadataRequest.result as StorageMetadata[]
+        ready()
+      }
+      metadataRequest.onerror = () =>
+        abort(storageError('FLOW_STORAGE_READ_FAILED', metadataRequest.error))
+    })
+  }
+
   private open(): Promise<IDBDatabase> {
     if (this.databasePromise !== undefined) return this.databasePromise
 
@@ -329,7 +463,7 @@ export class IndexedDbDocumentStore {
         reject(storageError('FLOW_STORAGE_OPEN_FAILED', error))
         return
       }
-      request.onupgradeneeded = () => {
+      request.onupgradeneeded = (event) => {
         const database = request.result
         for (const storeName of [SNAPSHOTS, TRANSACTIONS, AUDITS, ASSETS, SOURCES]) {
           if (!database.objectStoreNames.contains(storeName)) {
@@ -338,6 +472,9 @@ export class IndexedDbDocumentStore {
         }
         if (!database.objectStoreNames.contains(METADATA)) {
           database.createObjectStore(METADATA, { keyPath: 'key' })
+        }
+        if (!database.objectStoreNames.contains(HEADS)) {
+          database.createObjectStore(HEADS, { keyPath: 'documentId' })
         }
         const upgrade = request.transaction
         if (upgrade === null) return
@@ -348,6 +485,16 @@ export class IndexedDbDocumentStore {
           count.onsuccess = () => {
             if (count.result > 0) {
               metadata.put({ key: LEGACY_MIGRATION_REQUIRED, value: true })
+            }
+          }
+        }
+        if (event.oldVersion > 0) {
+          for (const storeName of [SNAPSHOTS, TRANSACTIONS, AUDITS, ASSETS, SOURCES]) {
+            const count = upgrade.objectStore(storeName).count()
+            count.onsuccess = () => {
+              if (count.result > 0) {
+                metadata.put({ key: HEAD_BOOTSTRAP_REQUIRED, value: true })
+              }
             }
           }
         }
@@ -399,15 +546,19 @@ function commitGuardedRecords(
   database: IDBDatabase,
   storeNames: readonly string[],
   groups: readonly GuardedStoreWrites[],
+  headTransition: HeadTransition,
 ): Promise<void> {
   return new Promise<void>((resolve, reject) => {
-    const transaction = database.transaction([...new Set([...storeNames, METADATA])], 'readwrite', {
-      durability: 'strict',
-    })
+    const transaction = database.transaction(
+      [...new Set([...storeNames, METADATA, HEADS])],
+      'readwrite',
+      { durability: 'strict' },
+    )
     const existingByStore = new Map<string, readonly StoredEnvelope<unknown>[]>()
     const populatedGroups = groups.filter(({ records }) => records.length > 0)
-    let readsRemaining = populatedGroups.length + 1
+    let readsRemaining = populatedGroups.length + 2
     let failure: StorageError | undefined
+    let currentHead: DocumentHeadDto | undefined
 
     transaction.oncomplete = () => resolve()
     transaction.onabort = () =>
@@ -428,13 +579,46 @@ function commitGuardedRecords(
 
     const validateAndWrite = (): void => {
       try {
-        for (const group of populatedGroups) {
-          assertIdentityCompatibility(existingByStore.get(group.storeName) ?? [], group.records)
+        const expectedMatches =
+          headTransition.expected !== null &&
+          currentHead !== undefined &&
+          sameHead(currentHead, headTransition.expected)
+        const exactRetry =
+          currentHead !== undefined && sameHead(currentHead, headTransition.resulting)
+        const validateIdentities = (): void => {
+          for (const group of populatedGroups) {
+            assertIdentityCompatibility(existingByStore.get(group.storeName) ?? [], group.records)
+          }
         }
+        if (exactRetry) validateIdentities()
+        const completeRetry =
+          exactRetry &&
+          populatedGroups.every((group) =>
+            group.records.every((candidate) =>
+              (existingByStore.get(group.storeName) ?? []).some(
+                (durable) =>
+                  durable.physicalKey === candidate.envelope.physicalKey &&
+                  deterministicJson(durable.record) ===
+                    deterministicJson(candidate.envelope.record),
+              ),
+            ),
+          )
+        if (exactRetry && !completeRetry) {
+          throw storageError('FLOW_STORE_HEAD_CONFLICT')
+        }
+        if (
+          !exactRetry &&
+          !expectedMatches &&
+          !(currentHead === undefined && headTransition.expected === null)
+        ) {
+          throw storageError('FLOW_STORE_HEAD_CONFLICT')
+        }
+        if (!exactRetry) validateIdentities()
         for (const group of populatedGroups) {
           const objectStore = transaction.objectStore(group.storeName)
           for (const { envelope } of group.records) objectStore.put(envelope)
         }
+        transaction.objectStore(HEADS).put(headTransition.resulting)
       } catch (error: unknown) {
         abort(
           error instanceof StorageError
@@ -449,19 +633,29 @@ function commitGuardedRecords(
       if (readsRemaining === 0) validateAndWrite()
     }
 
-    const migrationRequired = transaction
-      .objectStore(METADATA)
-      .get(LEGACY_MIGRATION_REQUIRED)
-    migrationRequired.onsuccess = () => {
-      const metadata = migrationRequired.result as StorageMetadata | undefined
-      if (metadata?.value === true) {
+    const metadataRequest = transaction.objectStore(METADATA).getAll()
+    metadataRequest.onsuccess = () => {
+      const metadata = metadataRequest.result as StorageMetadata[]
+      if (metadata.some(({ key, value }) => key === LEGACY_MIGRATION_REQUIRED && value)) {
         abort(storageError('FLOW_STORAGE_MIGRATION_REQUIRED'))
+      } else if (metadata.some(({ key, value }) => key === HEAD_BOOTSTRAP_REQUIRED && value)) {
+        abort(storageError('FLOW_STORAGE_HEAD_REQUIRED'))
       } else {
         ready()
       }
     }
-    migrationRequired.onerror = () =>
-      abort(storageError('FLOW_STORAGE_READ_FAILED', migrationRequired.error))
+    metadataRequest.onerror = () =>
+      abort(storageError('FLOW_STORAGE_READ_FAILED', metadataRequest.error))
+
+    const headRequest = transaction
+      .objectStore(HEADS)
+      .get(headTransition.resulting.documentId)
+    headRequest.onsuccess = () => {
+      currentHead = headRequest.result as DocumentHeadDto | undefined
+      ready()
+    }
+    headRequest.onerror = () =>
+      abort(storageError('FLOW_STORAGE_READ_FAILED', headRequest.error))
 
     for (const group of populatedGroups) {
       const request = transaction.objectStore(group.storeName).getAll()
@@ -528,6 +722,30 @@ function sameMigrationSourceIdentity(
     left.schemaVersion === right.schemaVersion &&
     left.canonicalHash === right.canonicalHash
   )
+}
+
+function sameHead(left: DocumentHeadDto, right: DocumentHeadDto): boolean {
+  return (
+    left.documentId === right.documentId &&
+    left.revision === right.revision &&
+    left.canonicalHash === right.canonicalHash
+  )
+}
+
+function recoveryRecordsFromEnvelopes(
+  stores: ReadonlyMap<string, readonly unknown[]>,
+): RecoveryRecordsDto {
+  const records = <T>(storeName: string): T[] =>
+    (stores.get(storeName) ?? []).map(
+      (value) => (value as StoredEnvelope<T>).record,
+    )
+  return {
+    snapshots: records<SnapshotRecordDto>(SNAPSHOTS),
+    transactions: records<TransactionRecordDto>(TRANSACTIONS),
+    audits: records<AuditRecordDto>(AUDITS),
+    assets: records<AssetRecordDto>(ASSETS),
+    sources: records<MigrationSourceRecordDto>(SOURCES),
+  }
 }
 
 function deterministicJson(value: unknown): string {

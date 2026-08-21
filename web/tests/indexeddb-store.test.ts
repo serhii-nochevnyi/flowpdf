@@ -271,6 +271,86 @@ describe('IndexedDbDocumentStore', () => {
     })
   })
 
+  it('uses an atomic document-head CAS for divergent commits from the same base', async () => {
+    const bootstrap = new IndexedDbDocumentStore()
+    await bootstrap.commit(commitFor(1, 'asset-1'))
+
+    const firstStore = new IndexedDbDocumentStore()
+    const secondStore = new IndexedDbDocumentStore()
+    const first = commitFor(2, 'asset-2')
+    const second: PersistenceCommitDto = {
+      ...first,
+      snapshot: {
+        ...first.snapshot,
+        canonicalJson: `{"documentId":"${documentId}","revision":2,"blocks":["divergent"]}`,
+        canonicalHash: 'snapshot-2-divergent',
+      },
+      transaction: {
+        ...first.transaction,
+        transactionId: 'transaction-2-divergent',
+        commandId: 'command-2-divergent',
+        afterHash: 'snapshot-2-divergent',
+      },
+      audit: {
+        ...first.audit,
+        auditId: 'audit-2-divergent',
+        transactionId: 'transaction-2-divergent',
+        commandId: 'command-2-divergent',
+      },
+      assets: [{ ...first.assets[0]!, contentHash: 'asset-2-divergent' }],
+    }
+
+    const outcomes = await Promise.allSettled([
+      firstStore.commit(first),
+      secondStore.commit(second),
+    ])
+    expect(outcomes.filter(({ status }) => status === 'fulfilled')).toHaveLength(1)
+    expect(outcomes.find(({ status }) => status === 'rejected')).toMatchObject({
+      status: 'rejected',
+      reason: { code: 'FLOW_STORE_HEAD_CONFLICT' },
+    })
+
+    const winner = outcomes[0]?.status === 'fulfilled' ? first : second
+    const records = await firstStore.loadRecords()
+    expect(records.snapshots).toHaveLength(2)
+    expect(records.snapshots).toEqual(
+      expect.arrayContaining([commitFor(1, 'asset-1').snapshot, winner.snapshot]),
+    )
+    expect(records.transactions).toHaveLength(2)
+    expect(records.transactions).toEqual(
+      expect.arrayContaining([commitFor(1, 'asset-1').transaction, winner.transaction]),
+    )
+    expect(records.audits).toHaveLength(2)
+    expect(records.audits).toEqual(
+      expect.arrayContaining([commitFor(1, 'asset-1').audit, winner.audit]),
+    )
+  })
+
+  it('bootstraps a head for existing v3 data only after the exact record image is recovered', async () => {
+    const baseline = commitFor(1, 'asset-1')
+    const previousDatabase = await openV4Database(baseline)
+    previousDatabase.close()
+    const store = new IndexedDbDocumentStore()
+    const records = await store.loadRecords()
+
+    await expect(store.commit(commitFor(2, 'asset-2'))).rejects.toMatchObject({
+      code: 'FLOW_STORAGE_HEAD_REQUIRED',
+    })
+    await expect(
+      store.installRecoveredHead(
+        { ...records, audits: [] },
+        { documentId, revision: 1, canonicalHash: 'snapshot-1' },
+      ),
+    ).rejects.toMatchObject({ code: 'FLOW_STORAGE_HEAD_REQUIRED' })
+
+    await store.installRecoveredHead(records, {
+      documentId,
+      revision: 1,
+      canonicalHash: 'snapshot-1',
+    })
+    await expect(store.commit(commitFor(2, 'asset-2'))).resolves.toBeUndefined()
+  })
+
   it('keeps deliberately injected divergent opaque records visible for Rust validation', async () => {
     const store = new IndexedDbDocumentStore()
     const original = commitFor(1, 'asset-1')
@@ -460,6 +540,7 @@ describe('IndexedDbDocumentStore', () => {
         'assets-v3',
         'migration-sources-v3',
         'storage-metadata',
+        'document-heads',
       ]),
     )
     for (const [storeName, expected] of Object.entries(legacyRecords)) {
@@ -501,6 +582,30 @@ function openLegacyDatabase(
 function openCurrentDatabase(): Promise<IDBDatabase> {
   return new Promise<IDBDatabase>((resolve, reject) => {
     const request = indexedDB.open(databaseName)
+    request.onsuccess = () => resolve(request.result)
+    request.onerror = () => reject(request.error)
+  })
+}
+
+function openV4Database(commit: PersistenceCommitDto): Promise<IDBDatabase> {
+  return new Promise<IDBDatabase>((resolve, reject) => {
+    const request = indexedDB.open(databaseName, 4)
+    request.onupgradeneeded = () => {
+      const stores = {
+        'snapshots-v3': [commit.snapshot],
+        'transactions-v3': [commit.transaction],
+        'audits-v3': [commit.audit],
+        'assets-v3': commit.assets,
+        'migration-sources-v3': [],
+      }
+      for (const [storeName, records] of Object.entries(stores)) {
+        const store = request.result.createObjectStore(storeName, { keyPath: 'physicalKey' })
+        records.forEach((record, index) => {
+          store.put({ physicalKey: `${storeName}-${index}`, record })
+        })
+      }
+      request.result.createObjectStore('storage-metadata', { keyPath: 'key' })
+    }
     request.onsuccess = () => resolve(request.result)
     request.onerror = () => reject(request.error)
   })

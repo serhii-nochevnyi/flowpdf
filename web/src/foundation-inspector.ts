@@ -477,6 +477,11 @@ class FoundationInspector implements FoundationInspectorController {
     try {
       const records = await this.store.loadRecords()
       const recovered = unwrap(this.wasm.query_document(records))
+      await this.store.installRecoveredHead(records, {
+        documentId: recovered.session.documentId,
+        revision: recovered.session.revision,
+        canonicalHash: recovered.session.canonicalHash,
+      })
       this.session = recovered.session
       this.view = recovered.view
       this.lastCommit = undefined
