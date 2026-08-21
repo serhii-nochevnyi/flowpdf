@@ -1,7 +1,38 @@
 {
-  "formatVersion": 1,
+  "formatVersion": 2,
   "fixtureHash": "sha256:4e7d163fe7de3ac4ffe40604e9df4fa3f013cbc88bff2afcb374e2cb562a038d",
   "fixturePath": "fixtures/recovery/benchmark-200-page.recipe.json",
+  "sourceManifest": {
+    "formatVersion": 1,
+    "algorithm": "sha256",
+    "files": [
+      {
+        "path": "fixtures/recovery/benchmark-200-page.recipe.json",
+        "sha256": "sha256:4e7d163fe7de3ac4ffe40604e9df4fa3f013cbc88bff2afcb374e2cb562a038d"
+      },
+      {
+        "path": "Cargo.lock",
+        "sha256": "sha256:a3fb3e6c2c0d181e7321c92d9b85a437e9e607d6301cc52e2097e664f28931ed"
+      },
+      {
+        "path": "crates/flow-core/src/lib.rs",
+        "sha256": "sha256:314436203f3be16fe54a3872f9ce5babb9b22cedc6bc88ca0512aa1f7c80e2a6"
+      },
+      {
+        "path": "crates/flow-core/src/store/mod.rs",
+        "sha256": "sha256:065a7f75c65b4e560f28bb01c2e569aea3d25faee3047debaa68a8bc92dd592a"
+      },
+      {
+        "path": "crates/flow-core/examples/recovery_benchmark.rs",
+        "sha256": "sha256:601536281e96d42024ff7e53715ee7b8a8fd529df2685e1676f4fc01642d60a6"
+      },
+      {
+        "path": "scripts/verify-recovery-benchmark.mjs",
+        "sha256": "sha256:d3e24c9138eaffb25112afb4c177dd6860d468997bf24c75eefc49e354e03085"
+      }
+    ],
+    "digest": "sha256:30945685e2bed42d24039dfd8ee697c9778e46a618de1b5e17bad7ff469f675e"
+  },
   "toolchain": {
     "node": "v24.10.0",
     "platform": "darwin",
@@ -45,37 +76,37 @@
         "plannedTransactionCount": 1000
       },
       "durationsMilliseconds": [
-        469.47075,
-        469.171792,
-        454.12991600000004,
-        453.782333,
-        454.31733299999996,
-        457.44229199999995,
-        465.217,
-        456.721416,
-        452.920667,
-        464.08270899999997,
-        470.157417,
-        466.060625,
-        459.781459,
-        457.12575,
-        477.0295,
-        471.294,
-        466.162917,
-        475.349375,
-        471.376375,
-        491.402958
+        459.452584,
+        460.920875,
+        464.565,
+        458.855166,
+        468.095417,
+        469.52883299999996,
+        475.398334,
+        479.381083,
+        476.706208,
+        461.569875,
+        467.189625,
+        483.64750000000004,
+        461.669791,
+        468.645875,
+        461.04079199999995,
+        480.93979199999995,
+        469.395625,
+        479.137417,
+        472.058417,
+        466.901833
       ],
-      "p50Milliseconds": 465.217,
-      "p95Milliseconds": 477.0295
+      "p50Milliseconds": 468.095417,
+      "p95Milliseconds": 480.93979199999995
     }
   ],
   "selectedPolicy": {
     "transactionInterval": 100,
     "byteInterval": 4194304
   },
-  "p50Milliseconds": 465.217,
-  "p95Milliseconds": 477.0295,
+  "p50Milliseconds": 468.095417,
+  "p95Milliseconds": 480.93979199999995,
   "p95TargetMilliseconds": 2000,
   "passed": true,
   "blocked": false

@@ -10,14 +10,25 @@ const recipePath = resolve(root, 'fixtures/recovery/benchmark-200-page.recipe.js
 const outputDir = resolve(root, 'artifacts/benchmarks')
 const passedPath = resolve(outputDir, 'phase1-recovery.json')
 const blockedPath = resolve(outputDir, 'phase1-recovery-blocker.json')
+const sourceManifestPaths = [
+  'fixtures/recovery/benchmark-200-page.recipe.json',
+  'Cargo.lock',
+  'crates/flow-core/src/lib.rs',
+  'crates/flow-core/src/store/mod.rs',
+  'crates/flow-core/examples/recovery_benchmark.rs',
+  'scripts/verify-recovery-benchmark.mjs',
+]
 const toolchain = resolveToolchain()
+const sourceManifest = resolveSourceManifest()
 
 const recipeBytes = readFileSync(recipePath)
 const recipe = JSON.parse(recipeBytes.toString('utf8'))
 validateRecipe(recipe)
 const fixtureHash = `sha256:${createHash('sha256').update(recipeBytes).digest('hex')}`
 
-if (process.argv.includes('--validate')) {
+if (process.argv.includes('--self-test')) {
+  runValidatorSelfTest()
+} else if (process.argv.includes('--validate')) {
   validateTerminalArtifact()
   process.stdout.write('Recovery benchmark terminal artifact is valid.\n')
 } else {
@@ -28,6 +39,7 @@ function runBenchmark() {
   const attempts = []
   for (const policy of recipe.candidates) {
     const measurement = runCandidate(policy)
+    assertSourceManifestStable()
     attempts.push(measurement)
     if (measurement.p95Milliseconds < recipe.p95TargetMilliseconds) {
       const report = terminalReport({ attempts, selectedPolicy: policy, passed: true, blocked: false })
@@ -84,9 +96,10 @@ function runCandidate(policy) {
 
 function terminalReport({ attempts, selectedPolicy, passed, blocked }) {
   return {
-    formatVersion: 1,
+    formatVersion: 2,
     fixtureHash,
     fixturePath: 'fixtures/recovery/benchmark-200-page.recipe.json',
+    sourceManifest,
     toolchain,
     attempts,
     selectedPolicy,
@@ -207,6 +220,7 @@ function expectedWorkloadProof() {
 function validateMeasurement(measurement, policy) {
   const expectedProof = expectedWorkloadProof()
   const proof = measurement?.workloadProof
+  const durations = measurement?.durationsMilliseconds
   if (
     measurement?.fixtureHash?.startsWith('blake3:') !== true ||
     measurement.fixtureName !== recipe.name ||
@@ -219,12 +233,17 @@ function validateMeasurement(measurement, policy) {
     measurement.policy?.byteInterval !== policy.byteInterval ||
     proof?.semanticPayloadHash?.startsWith('blake3:') !== true ||
     Object.entries(expectedProof).some(([key, value]) => proof[key] !== value) ||
-    !Array.isArray(measurement.durationsMilliseconds) ||
-    measurement.durationsMilliseconds.length !== recipe.measurements ||
-    !Number.isFinite(measurement.p50Milliseconds) ||
-    !Number.isFinite(measurement.p95Milliseconds)
+    !Array.isArray(durations) ||
+    durations.length !== recipe.measurements
   ) {
     throw new Error('recovery benchmark returned a malformed measurement')
+  }
+  const { p50Milliseconds, p95Milliseconds } = recomputePercentiles(durations)
+  if (
+    measurement.p50Milliseconds !== p50Milliseconds ||
+    measurement.p95Milliseconds !== p95Milliseconds
+  ) {
+    throw new Error('recovery benchmark percentile claims do not match the measured durations')
   }
 }
 
@@ -234,13 +253,27 @@ function validateTerminalArtifact() {
     throw new Error('exactly one recovery benchmark terminal artifact must exist')
   }
   const report = JSON.parse(readFileSync(present[0], 'utf8'))
+  validateReport(report)
+  const expectedPath = report.passed ? passedPath : blockedPath
+  if (present[0] !== expectedPath) {
+    throw new Error('recovery benchmark result is stored under the wrong terminal artifact name')
+  }
+  return report
+}
+
+function validateReport(report) {
   if (
-    report?.formatVersion !== 1 ||
+    report?.formatVersion !== 2 ||
     report.fixtureHash !== fixtureHash ||
+    report.fixturePath !== 'fixtures/recovery/benchmark-200-page.recipe.json' ||
+    JSON.stringify(report.sourceManifest) !== JSON.stringify(resolveSourceManifest()) ||
     !Array.isArray(report.attempts) ||
     report.attempts.length < 1 ||
+    report.attempts.length > recipe.candidates.length ||
     report.p95TargetMilliseconds !== recipe.p95TargetMilliseconds ||
     JSON.stringify(report.toolchain) !== JSON.stringify(toolchain) ||
+    typeof report.passed !== 'boolean' ||
+    typeof report.blocked !== 'boolean' ||
     report.passed === report.blocked
   ) {
     throw new Error('recovery benchmark terminal artifact is malformed')
@@ -258,13 +291,89 @@ function validateTerminalArtifact() {
     const last = report.attempts.at(-1)
     if (
       last.p95Milliseconds >= recipe.p95TargetMilliseconds ||
-      JSON.stringify(report.selectedPolicy) !== JSON.stringify(last.policy)
+      report.attempts.slice(0, -1).some((attempt) => attempt.p95Milliseconds < recipe.p95TargetMilliseconds) ||
+      JSON.stringify(report.selectedPolicy) !== JSON.stringify(last.policy) ||
+      report.p50Milliseconds !== last.p50Milliseconds ||
+      report.p95Milliseconds !== last.p95Milliseconds
     ) {
       throw new Error('passing report must select an approved policy below the p95 threshold')
     }
-  } else if (report.attempts.length !== recipe.candidates.length || report.selectedPolicy !== null) {
-    throw new Error('blocked report must include every approved candidate and no selected policy')
+  } else if (
+    report.attempts.length !== recipe.candidates.length ||
+    report.attempts.some((attempt) => attempt.p95Milliseconds < recipe.p95TargetMilliseconds) ||
+    report.selectedPolicy !== null ||
+    report.p50Milliseconds !== null ||
+    report.p95Milliseconds !== null
+  ) {
+    throw new Error('blocked report must include every failed approved candidate and no selected policy')
   }
+}
+
+// Match the Rust benchmark's documented nearest-rank algorithm exactly:
+// sort ascending, then select ceil(sample_count * percentile) - 1.
+function recomputePercentiles(durations) {
+  if (durations.some((duration) => !Number.isFinite(duration) || duration < 0)) {
+    throw new Error('recovery benchmark durations must be finite and nonnegative')
+  }
+  const ordered = [...durations].sort((left, right) => left - right)
+  return {
+    p50Milliseconds: nearestRankPercentile(ordered, 0.5),
+    p95Milliseconds: nearestRankPercentile(ordered, 0.95),
+  }
+}
+
+function nearestRankPercentile(sorted, percentile) {
+  const index = Math.max(0, Math.ceil(sorted.length * percentile) - 1)
+  return sorted[index]
+}
+
+function resolveSourceManifest() {
+  const files = sourceManifestPaths.map((path) => {
+    const bytes = readFileSync(resolve(root, path))
+    return {
+      path,
+      sha256: `sha256:${createHash('sha256').update(bytes).digest('hex')}`,
+    }
+  })
+  const manifestBytes = files.map(({ path, sha256 }) => `${path}\0${sha256}\n`).join('')
+  return {
+    formatVersion: 1,
+    algorithm: 'sha256',
+    files,
+    digest: `sha256:${createHash('sha256').update(manifestBytes, 'utf8').digest('hex')}`,
+  }
+}
+
+function assertSourceManifestStable() {
+  if (JSON.stringify(sourceManifest) !== JSON.stringify(resolveSourceManifest())) {
+    throw new Error('benchmark or recovery sources changed while the benchmark was running')
+  }
+}
+
+function runValidatorSelfTest() {
+  const report = validateTerminalArtifact()
+  const adversarialCases = [
+    ['stale source manifest', (candidate) => { candidate.sourceManifest.files[0].sha256 = 'sha256:forged' }],
+    ['forged p50', (candidate) => { candidate.attempts[0].p50Milliseconds += 1 }],
+    ['forged terminal p95', (candidate) => { candidate.p95Milliseconds += 1 }],
+    ['negative duration', (candidate) => { candidate.attempts[0].durationsMilliseconds[0] = -1 }],
+    ['non-finite duration', (candidate) => { candidate.attempts[0].durationsMilliseconds[0] = Number.POSITIVE_INFINITY }],
+    ['durations detached from metrics', (candidate) => { candidate.attempts[0].durationsMilliseconds.fill(0) }],
+  ]
+  for (const [name, mutate] of adversarialCases) {
+    const candidate = structuredClone(report)
+    mutate(candidate)
+    let rejected = false
+    try {
+      validateReport(candidate)
+    } catch {
+      rejected = true
+    }
+    if (!rejected) {
+      throw new Error(`validator self-test accepted adversarial case: ${name}`)
+    }
+  }
+  process.stdout.write(`Recovery benchmark validator rejected ${adversarialCases.length} adversarial cases.\n`)
 }
 
 function resolveToolchain() {
