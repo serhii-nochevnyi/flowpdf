@@ -72,7 +72,6 @@ impl From<AuditTimestamp> for String {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum AuditCommandKind {
-    Create,
     InsertText,
     ReplaceText,
     DeleteText,
@@ -83,14 +82,12 @@ pub enum AuditCommandKind {
     Batch,
     Undo,
     Redo,
-    Recovery,
 }
 
 impl AuditCommandKind {
     #[must_use]
     pub fn from_transaction_type(value: &str) -> Option<Self> {
         Some(match value {
-            "createSample" => Self::Create,
             "insertText" => Self::InsertText,
             "replaceText" => Self::ReplaceText,
             "deleteText" => Self::DeleteText,
@@ -101,7 +98,6 @@ impl AuditCommandKind {
             "batch" => Self::Batch,
             "undo" => Self::Undo,
             "redo" => Self::Redo,
-            "recovery" => Self::Recovery,
             _ => return None,
         })
     }
@@ -109,7 +105,6 @@ impl AuditCommandKind {
     #[must_use]
     pub const fn transaction_type(&self) -> &'static str {
         match self {
-            Self::Create => "createSample",
             Self::InsertText => "insertText",
             Self::ReplaceText => "replaceText",
             Self::DeleteText => "deleteText",
@@ -120,7 +115,6 @@ impl AuditCommandKind {
             Self::Batch => "batch",
             Self::Undo => "undo",
             Self::Redo => "redo",
-            Self::Recovery => "recovery",
         }
     }
 }
@@ -497,13 +491,13 @@ fn validate_action_semantics(
     metadata: &[AuditMetadata],
 ) -> Result<(), AuditValidationError> {
     match (action, outcome) {
-        (
-            AuditAction::Command {
-                command_kind: AuditCommandKind::Create | AuditCommandKind::Recovery,
-            },
-            _,
-        ) => Err(AuditValidationError::InvalidActionOutcome),
-        (AuditAction::Create | AuditAction::Command { .. }, AuditOutcome::Success) => {
+        (AuditAction::Create, AuditOutcome::Success) => {
+            if base_revision != 0 || new_revision != 1 {
+                return Err(AuditValidationError::InvalidRevisionLink);
+            }
+            require_schema_metadata(metadata)
+        }
+        (AuditAction::Command { .. }, AuditOutcome::Success) => {
             if base_revision.checked_add(1) != Some(new_revision) {
                 return Err(AuditValidationError::InvalidRevisionLink);
             }

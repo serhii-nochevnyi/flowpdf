@@ -153,8 +153,8 @@ fn audit_actions_enforce_revision_and_metadata_semantics() {
             document.document_id.clone(),
             id.clone(),
             id.clone(),
-            4,
-            5,
+            0,
+            1,
             9,
             timestamp.clone(),
             AuditAction::Create,
@@ -194,14 +194,18 @@ fn audit_actions_enforce_revision_and_metadata_semantics() {
             5,
             11,
             timestamp.clone(),
-            AuditAction::Command {
-                command_kind: AuditCommandKind::Recovery,
-            },
+            AuditAction::Create,
             SourceModality::System,
             vec![AuditMetadata::SchemaVersion { value: 1 }],
         )
         .is_err()
     );
+
+    assert_eq!(
+        AuditCommandKind::from_transaction_type("createSample"),
+        None
+    );
+    assert_eq!(AuditCommandKind::from_transaction_type("recovery"), None);
 
     assert!(
         AuditEvent::success(
