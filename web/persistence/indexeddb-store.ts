@@ -160,6 +160,18 @@ interface StoredEnvelope<T> {
   readonly record: T
 }
 
+type SameIdentity<T> = (left: T, right: T) => boolean
+
+interface GuardedRecord {
+  readonly envelope: StoredEnvelope<unknown>
+  readonly sameIdentity: SameIdentity<unknown>
+}
+
+interface GuardedStoreWrites {
+  readonly storeName: string
+  readonly records: readonly GuardedRecord[]
+}
+
 export class IndexedDbDocumentStore {
   private databasePromise: Promise<IDBDatabase> | undefined
 
@@ -178,39 +190,31 @@ export class IndexedDbDocumentStore {
     )
     const database = await this.open()
 
-    await new Promise<void>((resolve, reject) => {
-      const transaction = database.transaction(
-        [SNAPSHOTS, TRANSACTIONS, AUDITS, ASSETS],
-        'readwrite',
-        { durability: 'strict' },
-      )
-
-      transaction.oncomplete = () => resolve()
-      transaction.onabort = () => reject(storageError('FLOW_STORAGE_ABORTED', transaction.error))
-      transaction.onerror = () => {
-        // `abort` is the terminal event. Keeping this handler prevents an
-        // implementation-specific uncaught error while still rejecting only
-        // when the atomic transaction has definitively failed.
-      }
-
-      try {
-        const snapshots = transaction.objectStore(SNAPSHOTS)
-        const transactions = transaction.objectStore(TRANSACTIONS)
-        const audits = transaction.objectStore(AUDITS)
-        const assetStore = transaction.objectStore(ASSETS)
-        // `replaceExisting` marks a Rust-validated document boundary. It must
-        // never clear the whole physical database: an exact repeat is deduped
-        // by Rust during recovery and a divergent identity must stay visible
-        // so Rust can reject it rather than silently replacing durable truth.
-        if (snapshot !== null) snapshots.put(snapshot)
-        transactions.put(transactionRecord)
-        audits.put(audit)
-        for (const asset of assets) assetStore.put(asset)
-      } catch (error: unknown) {
-        transaction.abort()
-        reject(storageError('FLOW_STORAGE_WRITE_FAILED', error))
-      }
-    })
+    await commitGuardedRecords(
+      database,
+      [SNAPSHOTS, TRANSACTIONS, AUDITS, ASSETS],
+      [
+        {
+          storeName: SNAPSHOTS,
+          records:
+            snapshot === null
+              ? []
+              : [guardedRecord(snapshot, sameSnapshotIdentity)],
+        },
+        {
+          storeName: TRANSACTIONS,
+          records: [guardedRecord(transactionRecord, sameTransactionIdentity)],
+        },
+        {
+          storeName: AUDITS,
+          records: [guardedRecord(audit, sameAuditIdentity)],
+        },
+        {
+          storeName: ASSETS,
+          records: assets.map((asset) => guardedRecord(asset, sameAssetIdentity)),
+        },
+      ],
+    )
   }
 
   async commitMigration(commit: MigrationPersistenceCommitDto): Promise<void> {
@@ -224,30 +228,28 @@ export class IndexedDbDocumentStore {
     ])
     const database = await this.open()
 
-    await new Promise<void>((resolve, reject) => {
-      const transaction = database.transaction(
-        [SNAPSHOTS, AUDITS, ASSETS, SOURCES],
-        'readwrite',
-        { durability: 'strict' },
-      )
-
-      transaction.oncomplete = () => resolve()
-      transaction.onabort = () => reject(storageError('FLOW_STORAGE_ABORTED', transaction.error))
-      transaction.onerror = () => {
-        // `abort` is the terminal event; see the normal commit path.
-      }
-
-      try {
-        transaction.objectStore(SNAPSHOTS).put(snapshot)
-        transaction.objectStore(AUDITS).put(audit)
-        const assetStore = transaction.objectStore(ASSETS)
-        for (const asset of assets) assetStore.put(asset)
-        transaction.objectStore(SOURCES).put(source)
-      } catch (error: unknown) {
-        transaction.abort()
-        reject(storageError('FLOW_STORAGE_WRITE_FAILED', error))
-      }
-    })
+    await commitGuardedRecords(
+      database,
+      [SNAPSHOTS, AUDITS, ASSETS, SOURCES],
+      [
+        {
+          storeName: SNAPSHOTS,
+          records: [guardedRecord(snapshot, sameSnapshotIdentity)],
+        },
+        {
+          storeName: AUDITS,
+          records: [guardedRecord(audit, sameAuditIdentity)],
+        },
+        {
+          storeName: ASSETS,
+          records: assets.map((asset) => guardedRecord(asset, sameAssetIdentity)),
+        },
+        {
+          storeName: SOURCES,
+          records: [guardedRecord(source, sameMigrationSourceIdentity)],
+        },
+      ],
+    )
   }
 
   async loadRecords(options: { readonly allowEmpty?: boolean } = {}): Promise<RecoveryRecordsDto> {
@@ -325,6 +327,138 @@ async function recordEnvelope<T>(record: T, errorCode: string): Promise<StoredEn
   } catch (error: unknown) {
     throw storageError(errorCode, error)
   }
+}
+
+function guardedRecord<T>(
+  envelope: StoredEnvelope<T>,
+  sameIdentity: SameIdentity<T>,
+): GuardedRecord {
+  return {
+    envelope: envelope as StoredEnvelope<unknown>,
+    sameIdentity: (left, right) => sameIdentity(left as T, right as T),
+  }
+}
+
+function commitGuardedRecords(
+  database: IDBDatabase,
+  storeNames: readonly string[],
+  groups: readonly GuardedStoreWrites[],
+): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    const transaction = database.transaction(storeNames, 'readwrite', {
+      durability: 'strict',
+    })
+    const existingByStore = new Map<string, readonly StoredEnvelope<unknown>[]>()
+    const populatedGroups = groups.filter(({ records }) => records.length > 0)
+    let readsRemaining = populatedGroups.length
+    let failure: StorageError | undefined
+
+    transaction.oncomplete = () => resolve()
+    transaction.onabort = () =>
+      reject(failure ?? storageError('FLOW_STORAGE_ABORTED', transaction.error))
+    transaction.onerror = () => {
+      failure ??= storageError('FLOW_STORAGE_WRITE_FAILED', transaction.error)
+    }
+
+    const abort = (error: StorageError): void => {
+      failure ??= error
+      try {
+        transaction.abort()
+      } catch {
+        // An IndexedDB request error may already have started the abort. The
+        // terminal `onabort` callback still rejects with the recorded cause.
+      }
+    }
+
+    const validateAndWrite = (): void => {
+      try {
+        for (const group of populatedGroups) {
+          assertIdentityCompatibility(existingByStore.get(group.storeName) ?? [], group.records)
+        }
+        for (const group of populatedGroups) {
+          const objectStore = transaction.objectStore(group.storeName)
+          for (const { envelope } of group.records) objectStore.put(envelope)
+        }
+      } catch (error: unknown) {
+        abort(
+          error instanceof StorageError
+            ? error
+            : storageError('FLOW_STORAGE_WRITE_FAILED', error),
+        )
+      }
+    }
+
+    if (readsRemaining === 0) {
+      validateAndWrite()
+      return
+    }
+
+    for (const group of populatedGroups) {
+      const request = transaction.objectStore(group.storeName).getAll()
+      request.onsuccess = () => {
+        existingByStore.set(
+          group.storeName,
+          request.result as readonly StoredEnvelope<unknown>[],
+        )
+        readsRemaining -= 1
+        if (readsRemaining === 0) validateAndWrite()
+      }
+      request.onerror = () =>
+        abort(storageError('FLOW_STORAGE_READ_FAILED', request.error))
+    }
+  })
+}
+
+function assertIdentityCompatibility(
+  existing: readonly StoredEnvelope<unknown>[],
+  candidates: readonly GuardedRecord[],
+): void {
+  const observed = [...existing]
+  for (const candidate of candidates) {
+    for (const durable of observed) {
+      if (
+        candidate.sameIdentity(durable.record, candidate.envelope.record) &&
+        deterministicJson(durable.record) !== deterministicJson(candidate.envelope.record)
+      ) {
+        throw storageError('FLOW_STORE_IDENTITY_CONFLICT')
+      }
+    }
+    observed.push(candidate.envelope)
+  }
+}
+
+function sameSnapshotIdentity(left: SnapshotRecordDto, right: SnapshotRecordDto): boolean {
+  return (
+    left.documentId === right.documentId &&
+    left.schemaVersion === right.schemaVersion &&
+    left.revision === right.revision
+  )
+}
+
+function sameTransactionIdentity(
+  left: TransactionRecordDto,
+  right: TransactionRecordDto,
+): boolean {
+  return left.transactionId === right.transactionId
+}
+
+function sameAuditIdentity(left: AuditRecordDto, right: AuditRecordDto): boolean {
+  return left.auditId === right.auditId
+}
+
+function sameAssetIdentity(left: AssetRecordDto, right: AssetRecordDto): boolean {
+  return left.contentHash === right.contentHash
+}
+
+function sameMigrationSourceIdentity(
+  left: MigrationSourceRecordDto,
+  right: MigrationSourceRecordDto,
+): boolean {
+  return (
+    left.documentId === right.documentId &&
+    left.schemaVersion === right.schemaVersion &&
+    left.canonicalHash === right.canonicalHash
+  )
 }
 
 function deterministicJson(value: unknown): string {

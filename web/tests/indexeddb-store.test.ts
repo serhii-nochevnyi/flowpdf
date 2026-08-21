@@ -172,7 +172,106 @@ describe('IndexedDbDocumentStore', () => {
     expect(records.assets).toEqual([duplicate.assets[0]])
   })
 
-  it('keeps divergent opaque records visible for Rust conflict detection', async () => {
+  it('rejects every divergent logical record identity without partial writes', async () => {
+    const store = new IndexedDbDocumentStore()
+    const baseline = commitFor(1, 'asset-1')
+    const conflicts: readonly PersistenceCommitDto[] = [
+      {
+        ...baseline,
+        snapshot: {
+          ...baseline.snapshot,
+          canonicalJson: `{"documentId":"${documentId}","revision":1,"blocks":["divergent"]}`,
+          canonicalHash: 'divergent-snapshot-hash',
+        },
+      },
+      {
+        ...baseline,
+        transaction: {
+          ...baseline.transaction,
+          issuedAt: '2026-08-15T00:00:59Z',
+        },
+      },
+      {
+        ...baseline,
+        audit: {
+          ...baseline.audit,
+          timestamp: '2026-08-15T00:00:59Z',
+        },
+      },
+      {
+        ...baseline,
+        assets: [{ ...baseline.assets[0]!, bytes: [99, 100] }],
+      },
+    ]
+
+    await store.commit(baseline)
+    for (const conflict of conflicts) {
+      await expect(store.commit(conflict)).rejects.toMatchObject({
+        code: 'FLOW_STORE_IDENTITY_CONFLICT',
+      })
+    }
+
+    await expect(store.loadRecords()).resolves.toEqual({
+      snapshots: [baseline.snapshot],
+      transactions: [baseline.transaction],
+      audits: [baseline.audit],
+      assets: [baseline.assets[0]],
+      sources: [],
+    })
+  })
+
+  it('atomically admits exactly one of two overlapping divergent commits', async () => {
+    const firstStore = new IndexedDbDocumentStore()
+    const secondStore = new IndexedDbDocumentStore()
+    const first = commitFor(1, 'asset-1')
+    const second: PersistenceCommitDto = {
+      ...first,
+      transaction: {
+        ...first.transaction,
+        issuedAt: '2026-08-15T00:00:59Z',
+      },
+    }
+
+    const outcomes = await Promise.allSettled([
+      firstStore.commit(first),
+      secondStore.commit(second),
+    ])
+    expect(outcomes.filter(({ status }) => status === 'fulfilled')).toHaveLength(1)
+    const rejected = outcomes.find(({ status }) => status === 'rejected')
+    expect(rejected).toMatchObject({
+      status: 'rejected',
+      reason: { code: 'FLOW_STORE_IDENTITY_CONFLICT' },
+    })
+
+    const winner = outcomes[0]?.status === 'fulfilled' ? first : second
+    await expect(firstStore.loadRecords()).resolves.toEqual({
+      snapshots: [winner.snapshot],
+      transactions: [winner.transaction],
+      audits: [winner.audit],
+      assets: [winner.assets[0]],
+      sources: [],
+    })
+  })
+
+  it('allows overlapping exact retries to converge on one physical record set', async () => {
+    const firstStore = new IndexedDbDocumentStore()
+    const secondStore = new IndexedDbDocumentStore()
+    const repeated = commitFor(1, 'asset-1')
+
+    await expect(
+      Promise.all([firstStore.commit(repeated), secondStore.commit(repeated)]),
+    ).resolves.toEqual([undefined, undefined])
+
+    await expect(firstStore.loadRecords()).resolves.toEqual({
+      snapshots: [repeated.snapshot],
+      transactions: [repeated.transaction],
+      audits: [repeated.audit],
+      assets: [repeated.assets[0]],
+      sources: [],
+    })
+  })
+
+  it('keeps deliberately injected divergent opaque records visible for Rust validation', async () => {
     const store = new IndexedDbDocumentStore()
     const original = commitFor(1, 'asset-1')
     const candidate = commitFor(2, 'asset-2')
@@ -192,7 +291,28 @@ describe('IndexedDbDocumentStore', () => {
     }
 
     await store.commit(original)
-    await store.commit(divergent)
+    await injectRawRecords([
+      {
+        storeName: 'snapshots-v3',
+        physicalKey: 'injected-divergent-snapshot',
+        record: divergent.snapshot,
+      },
+      {
+        storeName: 'transactions-v3',
+        physicalKey: 'injected-divergent-transaction',
+        record: divergent.transaction,
+      },
+      {
+        storeName: 'audits-v3',
+        physicalKey: 'injected-divergent-audit',
+        record: divergent.audit,
+      },
+      {
+        storeName: 'assets-v3',
+        physicalKey: 'injected-divergent-asset',
+        record: divergent.assets[0],
+      },
+    ])
 
     const records = await store.loadRecords()
     expect(records.transactions).toHaveLength(2)
@@ -235,6 +355,7 @@ describe('IndexedDbDocumentStore', () => {
     const migration = migrationCommit()
 
     await store.commitMigration(migration)
+    await store.commitMigration(migration)
 
     await expect(store.loadRecords()).resolves.toEqual({
       snapshots: [migration.snapshot],
@@ -242,6 +363,39 @@ describe('IndexedDbDocumentStore', () => {
       audits: [migration.audit],
       assets: [migration.assets[0]],
       sources: [migration.source],
+    })
+  })
+
+  it('atomically admits exactly one overlapping migration with a divergent source identity', async () => {
+    const firstStore = new IndexedDbDocumentStore()
+    const secondStore = new IndexedDbDocumentStore()
+    const first = migrationCommit()
+    const second: MigrationPersistenceCommitDto = {
+      ...first,
+      source: {
+        ...first.source,
+        canonicalJson: `{"documentId":"${documentId}","schemaVersion":0,"divergent":true}`,
+      },
+    }
+
+    const outcomes = await Promise.allSettled([
+      firstStore.commitMigration(first),
+      secondStore.commitMigration(second),
+    ])
+    expect(outcomes.filter(({ status }) => status === 'fulfilled')).toHaveLength(1)
+    const rejected = outcomes.find(({ status }) => status === 'rejected')
+    expect(rejected).toMatchObject({
+      status: 'rejected',
+      reason: { code: 'FLOW_STORE_IDENTITY_CONFLICT' },
+    })
+
+    const winner = outcomes[0]?.status === 'fulfilled' ? first : second
+    await expect(firstStore.loadRecords()).resolves.toEqual({
+      snapshots: [winner.snapshot],
+      transactions: [],
+      audits: [winner.audit],
+      assets: [winner.assets[0]],
+      sources: [winner.source],
     })
   })
 
@@ -305,9 +459,38 @@ function openCurrentDatabase(): Promise<IDBDatabase> {
   })
 }
 
+interface RawStoredRecord {
+  readonly storeName: string
+  readonly physicalKey: string
+  readonly record: unknown
+}
+
+async function injectRawRecords(records: readonly RawStoredRecord[]): Promise<void> {
+  const database = await openCurrentDatabase()
+  const storeNames = [...new Set(records.map(({ storeName }) => storeName))]
+  const transaction = database.transaction(storeNames, 'readwrite', {
+    durability: 'strict',
+  })
+  for (const { storeName, physicalKey, record } of records) {
+    transaction.objectStore(storeName).put({ physicalKey, record })
+  }
+  await transactionCompleteForTest(transaction)
+  database.close()
+}
+
 function requestResultForTest<T>(request: IDBRequest<T>): Promise<T> {
   return new Promise<T>((resolve, reject) => {
     request.onsuccess = () => resolve(request.result)
     request.onerror = () => reject(request.error)
+  })
+}
+
+function transactionCompleteForTest(transaction: IDBTransaction): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    transaction.oncomplete = () => resolve()
+    transaction.onabort = () => reject(transaction.error)
+    transaction.onerror = () => {
+      // The abort is the terminal event.
+    }
   })
 }
