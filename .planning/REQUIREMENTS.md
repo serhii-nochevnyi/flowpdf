@@ -15,11 +15,11 @@
 
 ### FlowDocument
 
-- [ ] **FLOW-01**: User can create a new versioned FlowDocument with page settings, locale, styles, content, assets, and fields.
-- [ ] **FLOW-02**: User can save a FlowDocument and reopen it without semantic, style, field, or asset loss.
-- [ ] **FLOW-03**: User can open a document created by an older supported schema version through deterministic migrations.
-- [ ] **FLOW-04**: User can recover the last durable document revision after an editor refresh or worker failure.
-- [ ] **FLOW-05**: User can inspect the document revision and conversion provenance used for a preview or export.
+- [x] **FLOW-01**: User can create a new versioned FlowDocument with page settings, locale, styles, content, assets, and fields.
+- [x] **FLOW-02**: User can save a FlowDocument and reopen it without semantic, style, field, or asset loss.
+- [x] **FLOW-03**: User can open a document created by an older supported schema version through deterministic migrations.
+- [x] **FLOW-04**: User can recover the last durable document revision after an editor refresh or worker failure.
+- [x] **FLOW-05**: User can inspect the document revision and conversion provenance used for a preview or export.
 
 ### Editing
 
@@ -28,8 +28,8 @@
 - [ ] **EDIT-03**: User can split and merge paragraphs while preserving logical text order and compatible styles.
 - [ ] **EDIT-04**: User can apply bold, italic, underline, font, size, color, language, alignment, spacing, and list formatting.
 - [ ] **EDIT-05**: User can create headings, paragraphs, ordered lists, unordered lists, images, simple tables, and explicit page breaks.
-- [ ] **EDIT-06**: User can undo and redo every committed content, style, structure, and field operation as an atomic transaction.
-- [ ] **EDIT-07**: User receives a deterministic conflict instead of a misplaced edit when a command targets a stale revision or invalid anchor.
+- [x] **EDIT-06**: User can undo and redo every committed content, style, structure, and field operation as an atomic transaction.
+- [x] **EDIT-07**: User receives a deterministic conflict instead of a misplaced edit when a command targets a stale revision or invalid anchor.
 
 ### Layout and Pagination
 
@@ -100,7 +100,7 @@
 - [ ] **QUAL-05**: User receives bounded failure instead of a hung tab or service when a PDF exceeds object, depth, decoded-byte, image, page, memory, or time limits.
 - [ ] **QUAL-06**: Active PDF JavaScript, launch actions, embedded executables, and external resource actions are disabled during import and preview.
 - [ ] **QUAL-07**: User can reproduce an export from its FlowDocument revision, font hashes, engine version, locale data, and export options.
-- [ ] **QUAL-08**: User can inspect a concise audit history of document mutations without raw microphone audio or sensitive transcript analytics being retained by default.
+- [x] **QUAL-08**: User can inspect a concise audit history of document mutations without raw microphone audio or sensitive transcript analytics being retained by default.
 
 ## Acceptance Criteria
 
@@ -157,18 +157,18 @@ A v1 requirement is complete only when implementation, automated tests, relevant
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| FLOW-01 | Phase 1 | Pending |
-| FLOW-02 | Phase 1 | Pending |
-| FLOW-03 | Phase 1 | Pending |
-| FLOW-04 | Phase 1 | Pending |
-| FLOW-05 | Phase 1 | Pending |
+| FLOW-01 | Phase 1 | Complete |
+| FLOW-02 | Phase 1 | Complete |
+| FLOW-03 | Phase 1 | Complete |
+| FLOW-04 | Phase 1 | Complete |
+| FLOW-05 | Phase 1 | Complete |
 | EDIT-01 | Phase 2 | Pending |
 | EDIT-02 | Phase 2 | Pending |
 | EDIT-03 | Phase 2 | Pending |
 | EDIT-04 | Phase 2 | Pending |
 | EDIT-05 | Phase 2 | Pending |
-| EDIT-06 | Phase 1 | Pending |
-| EDIT-07 | Phase 1 | Pending |
+| EDIT-06 | Phase 1 | Complete |
+| EDIT-07 | Phase 1 | Complete |
 | LAYO-01 | Phase 3 | Pending |
 | LAYO-02 | Phase 3 | Pending |
 | LAYO-03 | Phase 3 | Pending |
@@ -218,9 +218,10 @@ A v1 requirement is complete only when implementation, automated tests, relevant
 | QUAL-05 | Phase 7 | Pending |
 | QUAL-06 | Phase 7 | Pending |
 | QUAL-07 | Phase 4 | Pending |
-| QUAL-08 | Phase 1 | Pending |
+| QUAL-08 | Phase 1 | Complete |
 
 **Coverage:**
+
 - v1 requirements: 62 total
 - Mapped to phases: 62
 - Unmapped: 0 ✓

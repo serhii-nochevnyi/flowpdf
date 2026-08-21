@@ -4,16 +4,16 @@ milestone: v1.0
 milestone_name: milestone
 current_phase: 1
 current_phase_name: Durable Flow Foundation
-status: executing
-stopped_at: Completed FLOWPDF-01-05-PLAN.md
-last_updated: "2026-08-21T08:35:15.515Z"
+status: verifying
+stopped_at: Completed FLOWPDF-01-06-PLAN.md
+last_updated: "2026-08-21T09:25:58.188Z"
 last_activity: 2026-08-21
-last_activity_desc: Durable recovery, provenance, audit privacy, migrated checkpoints, browser CAS, and source-bound benchmark completed
+last_activity_desc: Durable browser lifecycle, localized accessibility, privacy-safe inspection, and deterministic Phase 1 gate completed
 progress:
   total_phases: 1
-  completed_phases: 0
+  completed_phases: 1
   total_plans: 6
-  completed_plans: 5
+  completed_plans: 6
 ---
 
 # Project State
@@ -27,18 +27,18 @@ See: .planning/PROJECT.md (updated 2026-08-14)
 
 ## Current Position
 
-Phase: 1 (Durable Flow Foundation) — EXECUTING
+Phase: 1 (Durable Flow Foundation) — VERIFYING
 Plan: 6 of 6
-Status: Ready to execute
-Last activity: 2026-08-21 — Durable recovery, provenance, audit privacy, migrated checkpoints, browser CAS, and source-bound benchmark completed
+Status: Phase complete — ready for verification
+Last activity: 2026-08-21 — Durable browser lifecycle, localized accessibility, privacy-safe inspection, and deterministic Phase 1 gate completed
 
-Progress: [████████░░] 83%
+Progress: [██████████] 100%
 
 ## Performance Metrics
 
 **Velocity:**
 
-- Total plans completed: 5
+- Total plans completed: 6
 - Average duration: not comparable (Plan 05 was a multi-session closeout)
 - Total execution time: multi-session
 
@@ -46,9 +46,9 @@ Progress: [████████░░] 83%
 
 | Phase | Plans | Total | Avg/Plan |
 |-------|-------|-------|----------|
-| 1 | 5 | multi-session | n/a |
+| 1 | 6 | multi-session | n/a |
 
-**Recent Trend:** Waves 0–4 complete; durable recovery, browser CAS, migration lineage, privacy-safe audit/provenance, and the source-bound benchmark are green.
+**Recent Trend:** Waves 0–5 complete; the full browser lifecycle, accessible localized inspector, scope contract, and deterministic Phase 1 gate are green.
 **Per-Plan Metrics:**
 
 | Plan | Duration | Tasks | Files |
@@ -58,6 +58,7 @@ Progress: [████████░░] 83%
 | Phase 1 P03 | 35min | 3 tasks | 13 files |
 | Phase 1 P04 | 30min | 3 tasks | 13 files |
 | Phase FLOWPDF-01 P05 | 7d-multi-session | 3 tasks | 18 files |
+| Phase FLOWPDF-01 P06 | 46min | 3 tasks | 15 files |
 
 ## Accumulated Context
 
@@ -68,7 +69,7 @@ Decisions are logged in `.planning/PROJECT.md`.
 - FlowDocument is canonical for reflow; PDF remains a derived or native fixed-layout representation.
 - The implementation is writer-first and uses a Rust core compiled to native and WebAssembly.
 - Work is sequential because one autonomous executor owns the entire implementation.
-- [Phase ?]: Wave 0 requires successful official registry provenance before any Rust/npm/browser install; missing registry reachability is terminal.
+- [Phase 1]: Wave 0 requires successful official registry provenance before any Rust/npm/browser install; missing registry reachability is terminal.
 - [Phase 1]: JavaScript remains a DTO/storage/presentation adapter; Rust owns canonical creation, mutation, hashing, recovery validation, and audit redaction.
 - [Phase 1]: A browser save is published only after one strict IndexedDB transaction completes and Rust revalidates the recovered record set.
 - [Phase 1]: Generated WASM and compiled inspector assets are ignored build outputs; semantic source remains framework-free in Phase 1.
@@ -80,10 +81,14 @@ Decisions are logged in `.planning/PROJECT.md`.
 - [Phase FLOWPDF-01]: IndexedDB normal writes enforce logical-identity CAS inside one strict transaction. — Exact retries converge while divergent concurrent saves cannot both be acknowledged.
 - [Phase FLOWPDF-01]: A migration boundary is immutable lineage to the original source and migration output and is carried by later checkpoints. — Post-migration recovery stays bounded without losing or inventing ancestry.
 - [Phase FLOWPDF-01]: Recovery benchmark evidence is bound to the recursively discovered core source graph and recomputes percentiles from raw samples. — Stale or forged performance evidence fails closed.
+- [Phase 1]: Rust remains the sole semantic authority; browser code constructs typed commands, performs physical IndexedDB I/O, and renders verified DTOs only.
+- [Phase 1]: Foundation Inspector localization uses key-identical Ukrainian and English resources, while audit rendering is a closed privacy-safe DTO allowlist.
+- [Phase 1]: The Phase 1 gate validates one immutable passing benchmark artifact, runs all Chromium suites, and replays canonical and migration goldens twice.
+- [Phase 1]: Built browser modules use explicit .js relative specifiers so the dependency-free static inspector is the verified user artifact.
 
 ### Pending Todos
 
-None yet.
+- Verify and pin the fixed Vitest Browser Mode family through the dependency-provenance workflow before any non-local Browser Mode exposure; see Phase 1 `deferred-items.md`.
 
 ### Blockers/Concerns
 
@@ -94,9 +99,10 @@ None yet.
 | Category | Item | Status | Deferred At |
 |----------|------|--------|-------------|
 | Compatibility | Advanced layout, encryption, signatures, PDF/A, PDF/UA and broad malformed-PDF repair | v2 | Initialization |
+| Security | Verify and pin the fixed Vitest Browser Mode family | Open | Phase 1 Plan 06 |
 
 ## Session Continuity
 
-Last session: 2026-08-21T08:35:15.509Z
-Stopped at: Completed FLOWPDF-01-05-PLAN.md
+Last session: 2026-08-21T09:25:58.182Z
+Stopped at: Completed FLOWPDF-01-06-PLAN.md
 Resume file: None
