@@ -178,6 +178,12 @@ fn rejected_command_audit_is_redacted_atomic_and_idempotent_without_a_transactio
 
     let mut store = InMemoryDocumentStore::default();
     store.commit_atomic(created.commit).expect("create commit");
+    assert_eq!(
+        store
+            .commit_standalone_audit_atomic(response_audit)
+            .expect_err("unplanned logical-command identity must not be durable"),
+        StoreError::InvalidCommit
+    );
     let records = store.load_records().expect("creation records");
     let audit = success(plan_standalone_audit(PlanStandaloneAuditRequest {
         records,

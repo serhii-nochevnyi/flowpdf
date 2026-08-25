@@ -564,25 +564,36 @@ pub fn validate_standalone_audit(
     audit: &AuditRecord,
 ) -> Result<(), StoreError> {
     audit.validate().map_err(|_| StoreError::InvalidCommit)?;
+    let has_revision_anchor = records.snapshots.iter().any(|snapshot| {
+        snapshot.record_format_version == crate::RECORD_FORMAT_VERSION
+            && snapshot.schema_version == crate::model::SCHEMA_VERSION
+            && snapshot.document_id == *audit.document_id()
+            && snapshot.revision == audit.new_revision()
+    }) || records.transactions.iter().any(|transaction| {
+        transaction.record_format_version == crate::RECORD_FORMAT_VERSION
+            && transaction.schema_version == crate::model::SCHEMA_VERSION
+            && transaction.document_id == *audit.document_id()
+            && transaction.new_revision == audit.new_revision()
+    });
+    let valid_semantics = match (audit.action(), audit.outcome()) {
+        (crate::audit::AuditAction::Command { .. }, crate::audit::AuditOutcome::Failure { .. }) => {
+            audit.audit_id() != audit.command_id()
+                && audit.metadata()
+                    == [crate::audit::AuditMetadata::SchemaVersion {
+                        value: crate::model::SCHEMA_VERSION,
+                    }]
+        }
+        (
+            crate::audit::AuditAction::Recovery,
+            crate::audit::AuditOutcome::Success | crate::audit::AuditOutcome::Failure { .. },
+        ) => audit.audit_id() == audit.command_id(),
+        _ => false,
+    };
     if audit.record_format_version() != crate::RECORD_FORMAT_VERSION
         || audit.transaction_id() != audit.command_id()
-        || !matches!(
-            (audit.action(), audit.outcome()),
-            (
-                crate::audit::AuditAction::Command { .. },
-                crate::audit::AuditOutcome::Failure { .. }
-            ) | (
-                crate::audit::AuditAction::Recovery,
-                crate::audit::AuditOutcome::Success | crate::audit::AuditOutcome::Failure { .. }
-            )
-        )
-        || !(records.snapshots.iter().any(|snapshot| {
-            snapshot.document_id == *audit.document_id()
-                && snapshot.revision == audit.new_revision()
-        }) || records.transactions.iter().any(|transaction| {
-            transaction.document_id == *audit.document_id()
-                && transaction.new_revision == audit.new_revision()
-        }))
+        || audit.durable_sequence() != u64::from(audit.new_revision()) + 1
+        || !has_revision_anchor
+        || !valid_semantics
     {
         return Err(StoreError::InvalidCommit);
     }
