@@ -146,6 +146,11 @@ export interface RecoveryRecordsDto {
   readonly sources: readonly MigrationSourceRecordDto[]
 }
 
+export interface RecoveryImageDto {
+  readonly records: RecoveryRecordsDto
+  readonly head: DocumentHeadDto | null
+}
+
 const DEFAULT_DATABASE_NAME = 'flowpdf-foundation'
 const DATABASE_VERSION = 5
 const RECORD_FORMAT_VERSION = 1
@@ -160,6 +165,8 @@ const HEADS = 'document-heads'
 const LEGACY_MIGRATION_REQUIRED = 'legacy-migration-required'
 const HEAD_BOOTSTRAP_REQUIRED = 'head-bootstrap-required'
 const LEGACY_STORES = ['snapshots', 'transactions', 'audits', 'assets', 'migration-sources']
+const RECOVERY_RECORD_LIMIT = 10_000
+const RECOVERY_BYTE_LIMIT = 64 * 1024 * 1024
 
 interface StorageMetadata {
   readonly key: string
@@ -307,15 +314,17 @@ export class IndexedDbDocumentStore {
 
     await new Promise<void>((resolve, reject) => {
       const transaction = database.transaction(
-        [SNAPSHOTS, TRANSACTIONS, AUDITS, METADATA],
+        [SNAPSHOTS, TRANSACTIONS, AUDITS, ASSETS, SOURCES, METADATA],
         'readwrite',
         { durability: 'strict' },
       )
       let snapshots: readonly StoredEnvelope<SnapshotRecordDto>[] = []
       let transactions: readonly StoredEnvelope<TransactionRecordDto>[] = []
       let audits: readonly StoredEnvelope<AuditRecordDto>[] = []
+      let assets: readonly StoredEnvelope<AssetRecordDto>[] = []
+      let sources: readonly StoredEnvelope<MigrationSourceRecordDto>[] = []
       let metadata: readonly StorageMetadata[] = []
-      let readsRemaining = 4
+      let readsRemaining = 6
       let failure: StorageError | undefined
 
       transaction.oncomplete = () => resolve()
@@ -348,10 +357,17 @@ export class IndexedDbDocumentStore {
                 auditRecord.outcome.kind === 'failure'))
           if (
             auditRecord.recordFormatVersion !== RECORD_FORMAT_VERSION ||
-            auditRecord.auditId !== auditRecord.commandId ||
             auditRecord.transactionId !== auditRecord.commandId ||
             auditRecord.baseRevision !== auditRecord.newRevision ||
             !isSupportedStandaloneAudit
+          ) {
+            throw storageError('FLOW_STORE_INVALID_COMMIT')
+          }
+          if (
+            (auditRecord.action.type === 'command' &&
+              auditRecord.auditId === auditRecord.commandId) ||
+            (auditRecord.action.type === 'recovery' &&
+              auditRecord.auditId !== auditRecord.commandId)
           ) {
             throw storageError('FLOW_STORE_INVALID_COMMIT')
           }
@@ -368,6 +384,22 @@ export class IndexedDbDocumentStore {
             )
           if (!hasRevisionAnchor) throw storageError('FLOW_STORE_INVALID_COMMIT')
           assertIdentityCompatibility(audits, [guardedRecord(audit, sameAuditIdentity)])
+          assertRecoveryBudget(
+            new Map<string, readonly StoredEnvelope<unknown>[]>([
+              [SNAPSHOTS, snapshots],
+              [TRANSACTIONS, transactions],
+              [AUDITS, audits],
+              [ASSETS, assets],
+              [SOURCES, sources],
+            ]),
+            [
+              { storeName: SNAPSHOTS, records: [] },
+              { storeName: TRANSACTIONS, records: [] },
+              { storeName: AUDITS, records: [guardedRecord(audit, sameAuditIdentity)] },
+              { storeName: ASSETS, records: [] },
+              { storeName: SOURCES, records: [] },
+            ],
+          )
           transaction.objectStore(AUDITS).put(audit)
         } catch (error: unknown) {
           abort(
@@ -396,6 +428,12 @@ export class IndexedDbDocumentStore {
       read<StoredEnvelope<AuditRecordDto>>(AUDITS, (records) => {
         audits = records
       })
+      read<StoredEnvelope<AssetRecordDto>>(ASSETS, (records) => {
+        assets = records
+      })
+      read<StoredEnvelope<MigrationSourceRecordDto>>(SOURCES, (records) => {
+        sources = records
+      })
       read<StorageMetadata>(METADATA, (records) => {
         metadata = records
       })
@@ -403,9 +441,15 @@ export class IndexedDbDocumentStore {
   }
 
   async loadRecords(options: { readonly allowEmpty?: boolean } = {}): Promise<RecoveryRecordsDto> {
+    return (await this.loadRecoveryImage(options)).records
+  }
+
+  async loadRecoveryImage(
+    options: { readonly allowEmpty?: boolean } = {},
+  ): Promise<RecoveryImageDto> {
     const database = await this.open()
     const transaction = database.transaction(
-      [SNAPSHOTS, TRANSACTIONS, AUDITS, ASSETS, SOURCES, METADATA],
+      [SNAPSHOTS, TRANSACTIONS, AUDITS, ASSETS, SOURCES, METADATA, HEADS],
       'readonly',
     )
     const snapshotsRequest = transaction.objectStore(SNAPSHOTS).getAll()
@@ -416,6 +460,7 @@ export class IndexedDbDocumentStore {
     const migrationRequiredRequest = transaction
       .objectStore(METADATA)
       .get(LEGACY_MIGRATION_REQUIRED)
+    const headsRequest = transaction.objectStore(HEADS).getAll()
 
     const [
       snapshotEnvelopes,
@@ -424,6 +469,7 @@ export class IndexedDbDocumentStore {
       assetEnvelopes,
       sourceEnvelopes,
       migrationRequired,
+      heads,
     ] = await Promise.all([
       requestResult<StoredEnvelope<SnapshotRecordDto>[]>(snapshotsRequest),
       requestResult<StoredEnvelope<TransactionRecordDto>[]>(transactionsRequest),
@@ -431,6 +477,7 @@ export class IndexedDbDocumentStore {
       requestResult<StoredEnvelope<AssetRecordDto>[]>(assetsRequest),
       requestResult<StoredEnvelope<MigrationSourceRecordDto>[]>(sourcesRequest),
       requestResult<StorageMetadata | undefined>(migrationRequiredRequest),
+      requestResult<DocumentHeadDto[]>(headsRequest),
       transactionComplete(transaction),
     ])
     const snapshots = snapshotEnvelopes.map(({ record }) => record)
@@ -442,6 +489,7 @@ export class IndexedDbDocumentStore {
     if (migrationRequired?.value === true) {
       throw storageError('FLOW_STORAGE_MIGRATION_REQUIRED')
     }
+    if (heads.length > 1) throw storageError('FLOW_STORE_HEAD_CONFLICT')
 
     const isEmpty =
       snapshots.length === 0 &&
@@ -454,11 +502,8 @@ export class IndexedDbDocumentStore {
     }
 
     return {
-      snapshots,
-      transactions,
-      audits,
-      assets,
-      sources,
+      records: { snapshots, transactions, audits, assets, sources },
+      head: heads[0] ?? null,
     }
   }
 
@@ -613,6 +658,9 @@ export class IndexedDbDocumentStore {
           database.close()
           if (this.databasePromise === pending) this.databasePromise = undefined
         }
+        database.onclose = () => {
+          if (this.databasePromise === pending) this.databasePromise = undefined
+        }
         resolve(database)
       }
       request.onerror = () => reject(storageError('FLOW_STORAGE_OPEN_FAILED', request.error))
@@ -722,6 +770,7 @@ function commitGuardedRecords(
           throw storageError('FLOW_STORE_HEAD_CONFLICT')
         }
         if (expectedMatches) validateIdentities()
+        assertRecoveryBudget(existingByStore, groups)
         for (const group of populatedGroups) {
           const objectStore = transaction.objectStore(group.storeName)
           for (const { envelope } of group.records) objectStore.put(envelope)
@@ -778,6 +827,34 @@ function commitGuardedRecords(
         abort(storageError('FLOW_STORAGE_READ_FAILED', request.error))
     }
   })
+}
+
+function assertRecoveryBudget(
+  existingByStore: ReadonlyMap<string, readonly StoredEnvelope<unknown>[]>,
+  groups: readonly GuardedStoreWrites[],
+): void {
+  let recordCount = 0
+  let replayBytes = 0
+  const encoder = new TextEncoder()
+  for (const group of groups) {
+    const projected = new Map(
+      (existingByStore.get(group.storeName) ?? []).map((envelope) => [
+        envelope.physicalKey,
+        envelope,
+      ]),
+    )
+    for (const { envelope } of group.records) projected.set(envelope.physicalKey, envelope)
+    recordCount += projected.size
+    for (const { record } of projected.values()) {
+      replayBytes += encoder.encode(deterministicJson(record)).byteLength
+    }
+  }
+  if (recordCount > RECOVERY_RECORD_LIMIT) {
+    throw storageError('FLOW_LIMIT_RECOVERY_RECORDS')
+  }
+  if (replayBytes > RECOVERY_BYTE_LIMIT) {
+    throw storageError('FLOW_LIMIT_RECOVERY_BYTES')
+  }
 }
 
 function assertIdentityCompatibility(

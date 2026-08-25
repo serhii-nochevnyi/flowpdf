@@ -244,13 +244,14 @@ describe('Foundation Inspector approved contract', () => {
       '2026-08-14T12:00:01.123Z',
       '2026-08-14T12:00:02.456Z',
       '2026-08-14T12:00:03.789Z',
+      '2026-08-14T12:00:04.987Z',
     ]
     let clockIndex = 0
     const root = rootFixture()
     const inspector = await mountWithOptions(root, {
       databaseName: 'flowpdf-inspector-clock-unit',
       locale: 'uk',
-      clock: () => new Date(instants[clockIndex++] ?? '2026-08-14T12:00:03.789Z'),
+      clock: () => new Date(instants[clockIndex++] ?? '2026-08-14T12:00:04.987Z'),
     })
 
     await clickAndWait(inspector, root, 'create-sample')
@@ -259,12 +260,12 @@ describe('Foundation Inspector approved contract', () => {
     await clickAndWait(inspector, root, 'redo')
 
     const timestamps = [...root.querySelectorAll<HTMLTimeElement>('[data-audit-row] time')]
-      .slice(1)
       .map(({ dateTime }) => dateTime)
     expect(timestamps).toEqual([
       '2026-08-14T12:00:01Z',
       '2026-08-14T12:00:02Z',
       '2026-08-14T12:00:03Z',
+      '2026-08-14T12:00:04Z',
     ])
   })
 })

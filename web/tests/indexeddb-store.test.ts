@@ -1,4 +1,4 @@
-import { IDBFactory, IDBObjectStore } from 'fake-indexeddb'
+import { IDBFactory, IDBObjectStore, forceCloseDatabase } from 'fake-indexeddb'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import {
@@ -73,13 +73,14 @@ function commitFor(revision: number, assetId: string): PersistenceCommitDto {
 
 function failedCommandAuditAt(
   commit: PersistenceCommitDto,
-  auditId = `failed-command-${commit.snapshot.revision}`,
+  auditId = `failed-command-attempt-${commit.snapshot.revision}`,
 ): AuditRecordDto {
+  const commandId = `failed-command-${commit.snapshot.revision}`
   return {
     ...commit.audit,
     auditId,
-    transactionId: auditId,
-    commandId: auditId,
+    transactionId: commandId,
+    commandId,
     baseRevision: commit.snapshot.revision,
     newRevision: commit.snapshot.revision,
     durableSequence: commit.snapshot.revision + 1,
@@ -213,9 +214,9 @@ describe('IndexedDbDocumentStore', () => {
     await expect(
       store.commitStandaloneAudit({
         ...failure,
-        auditId: 'unanchored-failure',
-        transactionId: 'unanchored-failure',
-        commandId: 'unanchored-failure',
+        auditId: 'unanchored-failure-attempt',
+        transactionId: 'unanchored-failure-command',
+        commandId: 'unanchored-failure-command',
         baseRevision: 99,
         newRevision: 99,
       }),
@@ -228,6 +229,29 @@ describe('IndexedDbDocumentStore', () => {
     const saved = await store.loadRecords()
     expect(saved.transactions).toHaveLength(2)
     expect(saved.snapshots).toHaveLength(2)
+  })
+
+  it('rejects an audit-only write when its atomic post-image exceeds the recovery record limit', async () => {
+    const store = new IndexedDbDocumentStore()
+    const baseline = commitFor(1, 'asset-1')
+    await store.commit(baseline)
+
+    await injectRawRecords(
+      Array.from({ length: 9_996 }, (_, index) => ({
+        storeName: 'assets-v3',
+        physicalKey: `budget-asset-${index}`,
+        record: {
+          recordFormatVersion: 1,
+          contentHash: `budget-hash-${index}`,
+          bytes: [],
+        },
+      })),
+    )
+
+    await expect(
+      store.commitStandaloneAudit(failedCommandAuditAt(baseline)),
+    ).rejects.toMatchObject({ code: 'FLOW_LIMIT_RECOVERY_RECORDS' })
+    expect((await store.loadRecords()).audits).toEqual([baseline.audit])
   })
 
   it('rejects every divergent logical record identity without partial writes', async () => {
@@ -626,6 +650,22 @@ describe('IndexedDbDocumentStore', () => {
       snapshots: [],
     })
     expect(open).toHaveBeenCalledTimes(3)
+  })
+
+  it('reopens after an abnormal IndexedDB close instead of retaining a poisoned cache', async () => {
+    const open = vi.spyOn(globalThis.indexedDB, 'open')
+    const store = new IndexedDbDocumentStore()
+    await store.loadRecords({ allowEmpty: true })
+    const firstRequest = open.mock.results[0]?.value as IDBOpenDBRequest
+
+    forceCloseDatabase(
+      firstRequest.result as unknown as Parameters<typeof forceCloseDatabase>[0],
+    )
+
+    await expect(store.loadRecords({ allowEmpty: true })).resolves.toMatchObject({
+      snapshots: [],
+    })
+    expect(open).toHaveBeenCalledTimes(2)
   })
 
   it('preserves incompatible v2 records and blocks v3 reads and writes pending migration', async () => {

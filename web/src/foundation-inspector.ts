@@ -27,6 +27,36 @@ interface ApiResponse<T> {
   readonly error: ErrorDto | null
 }
 
+interface ApplyCommandRequestDto {
+  readonly canonicalJson: string
+  readonly history: HistoryStateDto
+  readonly command: {
+    readonly commandId: string
+    readonly baseRevision: number
+    readonly modality: 'ui' | 'keyboard' | 'voice' | 'api' | 'system'
+    readonly issuedAt: string
+    readonly kind: unknown
+  }
+}
+
+interface RecoveryAuditContextDto {
+  readonly attemptId: string
+  readonly documentId: string
+  readonly expectedRevision: number
+  readonly issuedAt: string
+}
+
+type StandaloneAuditDerivationDto =
+  | {
+      readonly type: 'commandFailure'
+      readonly request: ApplyCommandRequestDto
+      readonly attemptId: string
+    }
+  | {
+      readonly type: 'recovery'
+      readonly auditContext: RecoveryAuditContextDto
+    }
+
 interface SessionDto {
   readonly canonicalJson: string
   readonly canonicalHash: string
@@ -319,6 +349,7 @@ class FoundationInspector implements FoundationInspectorController {
       const result = unwrap(
         this.wasm.create_sample({
           requestedLocale: this.locale === 'uk' ? 'uk-UA' : 'en-US',
+          issuedAt: this.currentTimestamp(),
         }),
       )
       await this.persistPlanned(result.commit, 'creation')
@@ -338,22 +369,24 @@ class FoundationInspector implements FoundationInspectorController {
     const issuedAt = this.currentTimestamp()
     this.setPending()
     try {
-      const result = unwrap(
-        this.wasm.apply_command({
-          canonicalJson: session.canonicalJson,
-          history: session.history,
-          command: {
-            commandId: newCommandId(),
-            baseRevision: session.revision,
-            modality: 'ui',
-            issuedAt,
-            kind: {
-              type: 'insertText',
-              target,
-              text: ' — typed mutation',
-            },
+      const request: ApplyCommandRequestDto = {
+        canonicalJson: session.canonicalJson,
+        history: session.history,
+        command: {
+          commandId: newCommandId(),
+          baseRevision: session.revision,
+          modality: 'ui',
+          issuedAt,
+          kind: {
+            type: 'insertText',
+            target,
+            text: ' — typed mutation',
           },
-        }),
+        },
+      }
+      const result = unwrap(
+        this.wasm.apply_command(request),
+        commandFailureDerivation(request),
       )
       await this.persistPlanned(result.commit, 'committedTransaction')
       this.lastCommit = result.commit
@@ -374,22 +407,24 @@ class FoundationInspector implements FoundationInspectorController {
     const issuedAt = this.currentTimestamp()
     this.setPending()
     try {
-      unwrap(
-        this.wasm.apply_command({
-          canonicalJson: session.canonicalJson,
-          history: session.history,
-          command: {
-            commandId: newCommandId(),
-            baseRevision: Math.max(0, session.revision - 1),
-            modality: 'ui',
-            issuedAt,
-            kind: {
-              type: 'insertText',
-              target,
-              text: ' — stale diagnostic',
-            },
+      const request: ApplyCommandRequestDto = {
+        canonicalJson: session.canonicalJson,
+        history: session.history,
+        command: {
+          commandId: newCommandId(),
+          baseRevision: Math.max(0, session.revision - 1),
+          modality: 'ui',
+          issuedAt,
+          kind: {
+            type: 'insertText',
+            target,
+            text: ' — stale diagnostic',
           },
-        }),
+        },
+      }
+      unwrap(
+        this.wasm.apply_command(request),
+        commandFailureDerivation(request),
       )
       throw new FoundationError('FLOW_STALE_DIAGNOSTIC_ACCEPTED')
     } finally {
@@ -402,7 +437,7 @@ class FoundationInspector implements FoundationInspectorController {
     const issuedAt = this.currentTimestamp()
     this.setPending()
     try {
-      const request = {
+      const request: ApplyCommandRequestDto = {
         canonicalJson: session.canonicalJson,
         history: session.history,
         command: {
@@ -415,6 +450,7 @@ class FoundationInspector implements FoundationInspectorController {
       }
       const result = unwrap(
         kind === 'undo' ? this.wasm.undo(request) : this.wasm.redo(request),
+        commandFailureDerivation(request),
       )
       await this.persistPlanned(result.commit, 'committedTransaction')
       this.lastCommit = result.commit
@@ -502,19 +538,29 @@ class FoundationInspector implements FoundationInspectorController {
   private async restoreFromStorage(mode: 'open' | 'reload' | 'recover'): Promise<void> {
     this.setPending()
     try {
-      const records = await this.store.loadRecords()
+      const recoveryImage = await this.store.loadRecoveryImage()
+      const records = recoveryImage.records
       const expectedSession =
-        this.session ?? unwrap(this.wasm.query_document(records)).session
+        this.session ??
+        (recoveryImage.head === null
+          ? unwrap(this.wasm.query_document(records)).session
+          : recoveryImage.head)
+      const auditContext: RecoveryAuditContextDto = {
+        attemptId: newCommandId(),
+        documentId: expectedSession.documentId,
+        expectedRevision: expectedSession.revision,
+        issuedAt: this.currentTimestamp(),
+      }
+      const derivation: StandaloneAuditDerivationDto = {
+        type: 'recovery',
+        auditContext,
+      }
       const audited = unwrap(
         this.wasm.recover_document_audited({
           records,
-          auditContext: {
-            attemptId: newCommandId(),
-            documentId: expectedSession.documentId,
-            expectedRevision: expectedSession.revision,
-            issuedAt: this.currentTimestamp(),
-          },
+          auditContext,
         }),
+        derivation,
       )
       const recovered = audited.recovered
       await this.store.installRecoveredHead(records, {
@@ -522,7 +568,7 @@ class FoundationInspector implements FoundationInspectorController {
         revision: recovered.session.revision,
         canonicalHash: recovered.session.canonicalHash,
       })
-      await this.persistStandaloneAudit(audited.audit)
+      await this.persistStandaloneAudit(derivation)
       const refreshed = await this.refreshVerifiedState()
       this.lastCommit = undefined
       const statusKey =
@@ -572,12 +618,14 @@ class FoundationInspector implements FoundationInspectorController {
     this.hasDurableRecords = true
   }
 
-  private async persistStandaloneAudit(audit: AuditRecordDto): Promise<void> {
+  private async persistStandaloneAudit(
+    derivation: StandaloneAuditDerivationDto,
+  ): Promise<void> {
     const records = await this.store.loadRecords()
     const authorized = unwrap(
       this.wasm.plan_standalone_audit({
         records,
-        audit,
+        derivation,
       }),
     )
     await this.store.commitStandaloneAudit(authorized)
@@ -588,8 +636,8 @@ class FoundationInspector implements FoundationInspectorController {
     error: unknown,
     retainViewOnRefreshFailure: boolean,
   ): Promise<void> {
-    if (!(error instanceof FoundationError) || error.audit === null) return
-    await this.persistStandaloneAudit(error.audit)
+    if (!(error instanceof FoundationError) || error.auditDerivation === null) return
+    await this.persistStandaloneAudit(error.auditDerivation)
     try {
       await this.refreshVerifiedState()
       this.render()
@@ -922,11 +970,14 @@ export async function mountFoundationInspector(
   return inspector
 }
 
-function unwrap<T>(response: ApiResponse<T>): T {
+function unwrap<T>(
+  response: ApiResponse<T>,
+  auditDerivation: StandaloneAuditDerivationDto | null = null,
+): T {
   if (!response.ok || response.value === null) {
     throw new FoundationError(
       response.error?.code ?? 'FLOW_UNKNOWN_CORE_ERROR',
-      response.error?.audit ?? null,
+      auditDerivation,
     )
   }
   return response.value
@@ -936,10 +987,18 @@ function newCommandId(): string {
   return globalThis.crypto.randomUUID()
 }
 
+function commandFailureDerivation(
+  request: ApplyCommandRequestDto,
+): StandaloneAuditDerivationDto {
+  let attemptId = newCommandId()
+  while (attemptId === request.command.commandId) attemptId = newCommandId()
+  return { type: 'commandFailure', request, attemptId }
+}
+
 class FoundationError extends Error {
   constructor(
     readonly code: string,
-    readonly audit: AuditRecordDto | null = null,
+    readonly auditDerivation: StandaloneAuditDerivationDto | null = null,
   ) {
     super(code)
     this.name = 'FoundationError'

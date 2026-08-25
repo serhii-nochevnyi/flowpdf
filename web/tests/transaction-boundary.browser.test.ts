@@ -52,7 +52,10 @@ test('WASM command DTO preserves the native transaction, UTF-16, stale, and dupl
   await init()
 
   const createdResponse = response<OperationResultDto>(
-    create_sample({ requestedLocale: 'uk-UA' }),
+    create_sample({
+      requestedLocale: 'uk-UA',
+      issuedAt: '2026-08-14T00:00:00Z',
+    }),
   )
   expect(createdResponse.ok).toBe(true)
   const created = createdResponse.value

@@ -129,6 +129,34 @@ for (const corruption of ['hash', 'gap', 'conflict'] as const) {
   })
 }
 
+test('recovery: a cold remount derives and durably records corruption from the atomic head', async () => {
+  const databaseName = 'flowpdf-cold-corrupt-recovery-browser-test'
+  const baseline = await createDurableBaseline(databaseName)
+  await injectCorruption(databaseName, 'hash')
+
+  const coldRoot = document.createElement('div')
+  document.body.replaceChildren(coldRoot)
+  const coldInspector = await mountWithOptions(coldRoot, { databaseName })
+  await clickAndWait(coldInspector, coldRoot, 'open-last')
+
+  expect(coldRoot.querySelector('[role="alert"]')?.textContent).toMatch(
+    /FLOW_(HASH_MISMATCH|RECOVERY_GAP)/,
+  )
+  const auditRecords = await allEnvelopes(databaseName, auditStore)
+  const failure = auditRecords.find(
+    ({ record }) =>
+      (record.action as { readonly type?: string } | undefined)?.type === 'recovery' &&
+      (record.outcome as { readonly kind?: string } | undefined)?.kind === 'failure',
+  )
+  expect(failure?.record).toMatchObject({
+    documentId: baseline.snapshot.documentId,
+    baseRevision: baseline.snapshot.revision,
+    newRevision: baseline.snapshot.revision,
+    action: { type: 'recovery' },
+    outcome: { kind: 'failure' },
+  })
+})
+
 async function injectCorruption(
   databaseName: string,
   kind: 'hash' | 'gap' | 'conflict',
