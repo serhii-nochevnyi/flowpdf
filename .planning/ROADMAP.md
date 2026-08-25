@@ -49,7 +49,7 @@ FlowPDF progresses through nine dependency-ordered vertical capabilities. The ro
 
 ### Phase 2: Accessible Rich-Text Editing
 
-**Goal**: Users can author structured Ukrainian and English content with correct logical selection, IME input, formatting and non-voice alternatives.
+**Goal**: As a document author, I want to edit structured Ukrainian and English text, so that I can create accessible documents.
 **Mode:** mvp
 **Depends on**: Phase 1
 **Requirements**: EDIT-01, EDIT-02, EDIT-03, EDIT-04, EDIT-05, QUAL-03, QUAL-04
