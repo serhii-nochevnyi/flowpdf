@@ -1,6 +1,6 @@
 ---
 phase: FLOWPDF-01-durable-flow-foundation
-reviewed: 2026-08-25T07:30:50Z
+reviewed: 2026-08-25T08:00:46Z
 depth: standard
 files_reviewed: 64
 files_reviewed_list:
@@ -74,20 +74,20 @@ findings:
   info: 0
   total: 0
 status: clean
-reviewed_commit: d6bdb65
+reviewed_commit: 9e76093
 ---
 
 # Phase FLOWPDF-01: Code Review Report
 
-**Reviewed:** 2026-08-25T07:30:50Z
+**Reviewed:** 2026-08-25T08:00:46Z
 **Depth:** standard
 **Files Reviewed:** 64
 **Status:** clean
-**Reviewed Commit:** `d6bdb65`
+**Reviewed Commit:** `9e76093`
 
 ## Summary
 
-Phase 1 is clean at the reviewed commit. The convergence pass rechecked the complete original scope, every file changed by the fix iterations, and the relevant cross-module boundaries. No unresolved critical, warning, or informational findings remain.
+Phase 1 is clean at the reviewed commit. The convergence pass rechecked the complete original scope, every file changed by the fix iterations, the two UAT-discovered repairs, and the relevant cross-module boundaries. No unresolved critical, warning, or informational findings remain.
 
 The first fix pass resolved 24 of 28 findings. The second pass resolved the remaining four original findings, four incomplete fixes, and seven newly exposed boundary findings. A final adversarial rereview additionally found and closed a direct native standalone-audit identity bypass before this clean report was issued.
 
@@ -115,9 +115,13 @@ The first fix pass resolved 24 of 28 findings. The second pass resolved the rema
 
 The final rereview found that a caller could still submit an otherwise valid original command-failure audit directly through the native standalone path. Branch-specific validation now binds command-failure audits to current schema/format metadata, a distinct attempt identity, a valid revision anchor, and the durable sequence; recovery audits retain their required identity equality. A negative in-memory regression proves the bypass is rejected (`f1f2c73`).
 
+## Post-Review UAT Repairs
+
+The built-page UAT exposed two additional edge cases after the original convergence commit. Audit events sharing a durable sequence and revision now use timestamp before stable identity, so the inspector presents them chronologically (`91a261d`). When an undo/redo/create command disables or hides its initiating control, focus now moves to the nearest meaningful enabled control instead of falling to the document body (`9e76093`). Regression tests cover revision/timestamp/identity ordering, both history fallback directions, hidden-control fallback, and the failure path. An independent focused rereview found no remaining actionable issue.
+
 ## Verification Evidence
 
-- `npm run check` passed end to end in 33.05 seconds.
+- `npm run check` passed end to end in 21.26 seconds after the post-review UAT repairs.
 - Exact dependency coverage passed for 67 Cargo packages and 83 npm packages, including live provenance validation.
 - Node regression tests: 7 passed.
 - Phase boundary contract tests: 8 passed.
@@ -126,8 +130,8 @@ The final rereview found that a caller could still submit an otherwise valid ori
 - Unit/inspector tests: 27 passed.
 - Accessibility browser tests: 4 passed; full Chromium browser tests: 13 passed.
 - Canonical and migration deterministic replay each passed twice.
-- Recovery benchmark evidence passed with 200 page equivalents, 1,000 transactions, p50 484.6955 ms, and p95 496.90875 ms against a 2,000 ms target.
-- The benchmark artifact is bound to a 16-file source manifest with digest `sha256:919699a39a06b3a683db33dfbeaee9558edf112badb58fabd7d60d0b78e0c659` and its validator rejected eight adversarial cases.
+- Recovery benchmark evidence passed with 200 page equivalents, 1,000 transactions, p50 484.121791 ms, and p95 505.361541 ms against a 2,000 ms target.
+- The benchmark artifact is bound to a 16-file source manifest with digest `sha256:5a050bcfd1688e8a1fc5dd5d8fb7a07cbf9d36c7cc571ac40eea6750375cd93f` and its validator rejected eight adversarial cases.
 
 ## Conclusion
 
@@ -135,5 +139,5 @@ No known review finding remains in the Phase 1 scope. The durable model, recover
 
 ---
 
-_Reviewer: Codex (inline convergence fallback after reviewer-agent quota exhaustion)_
+_Reviewer: Codex (inline convergence plus independent focused UAT-fix rereview)_
 _Depth: standard_
