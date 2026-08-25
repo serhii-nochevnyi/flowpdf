@@ -21,7 +21,7 @@
       },
       {
         "path": "crates/flow-core/examples/recovery_benchmark.rs",
-        "sha256": "sha256:4c082e7a0967f924ec5ac7ff811e9737c6f8e21a79c0f2760e60a96761bcceb6"
+        "sha256": "sha256:25edfbc5acc52aa354538b0bdff84f5fdb30c327fdc8d13ca301fbc645cee835"
       },
       {
         "path": "crates/flow-core/src/anchor/mod.rs",
@@ -37,11 +37,11 @@
       },
       {
         "path": "crates/flow-core/src/lib.rs",
-        "sha256": "sha256:e1ec17c60b3fb64545c128d44af39a4c033950a3f292f0cffd2676d70781ecfe"
+        "sha256": "sha256:1e9437e1e26f43b2c2048ab465eca532c980c2a72ce0ccbebbb5b6dfd42e9f05"
       },
       {
         "path": "crates/flow-core/src/model/mod.rs",
-        "sha256": "sha256:b4bd30ad5765b2148f7230f62fd6f6b8098fb17f82e4d0609d7dde226f541b29"
+        "sha256": "sha256:8d52af59829c0fdd701e5fb5a17df35abd7aaf512d0eb5c4c6efbe2b21b5d70c"
       },
       {
         "path": "crates/flow-core/src/provenance/mod.rs",
@@ -49,11 +49,11 @@
       },
       {
         "path": "crates/flow-core/src/schema/mod.rs",
-        "sha256": "sha256:876529550d8f64c08330afa201a2b9c1a36d3c92bc872b860f5516392cb5bbea"
+        "sha256": "sha256:fcb0365d5abd1820584fbcf262294352fefd182c8a2f5ec06cfa46089dafcd86"
       },
       {
         "path": "crates/flow-core/src/store/mod.rs",
-        "sha256": "sha256:1ca4f790b403f32b43e76e41ca6b8193470ca24c7c51e2bf2fd440645a88fcbf"
+        "sha256": "sha256:a0500be4043836695b2c37617f76cc06ededef7e65dc7a882ef0afa41eb371a8"
       },
       {
         "path": "crates/flow-core/src/transaction/mod.rs",
@@ -72,7 +72,7 @@
         "sha256": "sha256:9d50a6f28923fc94c0d56dccc9038a12a8ff040f764a8ff048fa6d5a9eba722c"
       }
     ],
-    "digest": "sha256:2b43c52fd566c892ec328e63b2d920340e1e83d44378e13bcef3504302b1004e"
+    "digest": "sha256:c1bdc839c1e5f59163c546466836898942cb70907a9e6dd534e929e575d9bc8d"
   },
   "toolchain": {
     "node": "v24.10.0",
@@ -117,37 +117,37 @@
         "plannedTransactionCount": 1000
       },
       "durationsMilliseconds": [
-        456.983708,
-        460.492,
-        459.37970900000005,
-        462.365625,
-        472.026167,
-        473.596541,
-        469.243584,
-        477.201959,
-        469.9595,
-        467.349666,
-        457.882125,
-        504.487958,
-        479.419625,
-        487.241458,
-        476.095333,
-        476.12795800000004,
-        471.91808299999997,
-        474.43437500000005,
-        476.755833,
-        472.580167
+        462.710167,
+        462.739667,
+        468.17958300000004,
+        492.121792,
+        484.632166,
+        486.193625,
+        479.353375,
+        489.081916,
+        479.570667,
+        465.386667,
+        465.553875,
+        478.671083,
+        480.966459,
+        490.06508399999996,
+        483.633333,
+        481.74525,
+        473.426917,
+        467.197875,
+        470.67641599999996,
+        470.013042
       ],
-      "p50Milliseconds": 472.026167,
-      "p95Milliseconds": 487.241458
+      "p50Milliseconds": 478.671083,
+      "p95Milliseconds": 490.06508399999996
     }
   ],
   "selectedPolicy": {
     "transactionInterval": 100,
     "byteInterval": 4194304
   },
-  "p50Milliseconds": 472.026167,
-  "p95Milliseconds": 487.241458,
+  "p50Milliseconds": 478.671083,
+  "p95Milliseconds": 490.06508399999996,
   "p95TargetMilliseconds": 2000,
   "passed": true,
   "blocked": false
