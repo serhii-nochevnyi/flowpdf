@@ -2,15 +2,15 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-current_phase: 1
-current_phase_name: Durable Flow Foundation
-status: verifying
-stopped_at: Completed FLOWPDF-01-06-PLAN.md
-last_updated: "2026-08-21T09:25:58.188Z"
-last_activity: 2026-08-21
-last_activity_desc: Durable browser lifecycle, localized accessibility, privacy-safe inspection, and deterministic Phase 1 gate completed
+current_phase: 2
+current_phase_name: Accessible Rich-Text Editing
+status: planning
+stopped_at: Phase 1 complete; ready to plan Phase 2
+last_updated: "2026-08-25T09:02:58Z"
+last_activity: 2026-08-25
+last_activity_desc: Phase 1 complete, transitioned to Phase 2
 progress:
-  total_phases: 1
+  total_phases: 9
   completed_phases: 1
   total_plans: 6
   completed_plans: 6
@@ -20,19 +20,19 @@ progress:
 
 ## Project Reference
 
-See: .planning/PROJECT.md (updated 2026-08-14)
+See: .planning/PROJECT.md (updated 2026-08-25)
 
 **Core value:** A user can edit semantic document text naturally, repaginate following content, and export a visually consistent, selectable, form-capable PDF.
-**Current focus:** Phase 1 — Durable Flow Foundation
+**Current focus:** Phase 2 — Accessible Rich-Text Editing
 
 ## Current Position
 
-Phase: 1 (Durable Flow Foundation) — VERIFYING
-Plan: 6 of 6
-Status: Phase complete — ready for verification
-Last activity: 2026-08-21 — Durable browser lifecycle, localized accessibility, privacy-safe inspection, and deterministic Phase 1 gate completed
+Phase: 2 — Accessible Rich-Text Editing
+Plan: Not started
+Status: Ready to plan
+Last activity: 2026-08-25 — Phase 1 complete, transitioned to Phase 2
 
-Progress: [██████████] 100%
+Progress: [█░░░░░░░░] 11%
 
 ## Performance Metrics
 
@@ -46,9 +46,9 @@ Progress: [██████████] 100%
 
 | Phase | Plans | Total | Avg/Plan |
 |-------|-------|-------|----------|
-| 1 | 6 | multi-session | n/a |
+| 1 | 6 | - | - |
 
-**Recent Trend:** Waves 0–5 complete; the full browser lifecycle, accessible localized inspector, scope contract, and deterministic Phase 1 gate are green.
+**Recent Trend:** Phase 1 closed with 27/27 UAT, 48/48 verified truths, 25/25 security threats closed, and a 24/24 UI audit; Phase 2 is ready for specification and planning.
 **Per-Plan Metrics:**
 
 | Plan | Duration | Tasks | Files |
@@ -67,24 +67,10 @@ Progress: [██████████] 100%
 Decisions are logged in `.planning/PROJECT.md`.
 
 - FlowDocument is canonical for reflow; PDF remains a derived or native fixed-layout representation.
-- The implementation is writer-first and uses a Rust core compiled to native and WebAssembly.
-- Work is sequential because one autonomous executor owns the entire implementation.
-- [Phase 1]: Wave 0 requires successful official registry provenance before any Rust/npm/browser install; missing registry reachability is terminal.
-- [Phase 1]: JavaScript remains a DTO/storage/presentation adapter; Rust owns canonical creation, mutation, hashing, recovery validation, and audit redaction.
-- [Phase 1]: A browser save is published only after one strict IndexedDB transaction completes and Rust revalidates the recovered record set.
-- [Phase 1]: Generated WASM and compiled inspector assets are ignored build outputs; semantic source remains framework-free in Phase 1.
-- [Phase 1]: Canonical storage preserves exact UTF-8 text while public logical positions use explicit UTF-16 offsets and affinity.
-- [Phase 1]: Schema migrations are pure contiguous hops; success creates a validated current-schema replay boundary while preserving source lineage.
-- [Phase 1]: Every input modality uses one typed Rust command service; undo and redo are fresh transactions that apply stored executable operations. — This keeps UI, keyboard, voice, API, native, and WASM behavior atomic and identical.
-- [Phase 1]: Recovery replays transactions backward and forward and rebuilds history before publication; unkeyed hashes prove consistency, not external authenticity. — Stored operations and mappings must be semantically bound to the snapshot without overstating the security of an untrusted rewritten store.
-- [Phase FLOWPDF-01]: Rust CommitPlanner owns snapshot cadence and recovery semantics; physical adapters persist opaque planned records only. — This keeps browser storage from becoming a second semantic implementation.
-- [Phase FLOWPDF-01]: IndexedDB normal writes enforce logical-identity CAS inside one strict transaction. — Exact retries converge while divergent concurrent saves cannot both be acknowledged.
-- [Phase FLOWPDF-01]: A migration boundary is immutable lineage to the original source and migration output and is carried by later checkpoints. — Post-migration recovery stays bounded without losing or inventing ancestry.
-- [Phase FLOWPDF-01]: Recovery benchmark evidence is bound to the recursively discovered core source graph and recomputes percentiles from raw samples. — Stale or forged performance evidence fails closed.
-- [Phase 1]: Rust remains the sole semantic authority; browser code constructs typed commands, performs physical IndexedDB I/O, and renders verified DTOs only.
-- [Phase 1]: Foundation Inspector localization uses key-identical Ukrainian and English resources, while audit rendering is a closed privacy-safe DTO allowlist.
-- [Phase 1]: The Phase 1 gate validates one immutable passing benchmark artifact, runs all Chromium suites, and replays canonical and migration goldens twice.
-- [Phase 1]: Built browser modules use explicit .js relative specifiers so the dependency-free static inspector is the verified user artifact.
+- Rust is the sole semantic authority on native and WASM targets; TypeScript constructs DTOs, performs physical browser I/O, and renders verified results.
+- UI, keyboard, API, and future voice input share one typed transactional command service with revision checks, deterministic undo/redo, and explicit anchor invalidation.
+- Browser durability is acknowledged only after one atomic IndexedDB transaction completes and Rust revalidates the recovered record set; exact retries converge and divergent writes conflict.
+- Canonical UTF-8 bytes, UTF-16 public positions, contiguous schema migrations, provenance, and closed audit projections are versioned and deterministic; hashes prove consistency rather than external authenticity.
 
 ### Pending Todos
 
@@ -103,6 +89,6 @@ Decisions are logged in `.planning/PROJECT.md`.
 
 ## Session Continuity
 
-Last session: 2026-08-21T09:25:58.182Z
-Stopped at: Completed FLOWPDF-01-06-PLAN.md
+Last session: 2026-08-25T09:02:58Z
+Stopped at: Phase 1 complete; ready to plan Phase 2
 Resume file: None

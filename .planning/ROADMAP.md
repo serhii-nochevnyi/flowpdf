@@ -11,7 +11,7 @@ FlowPDF progresses through nine dependency-ordered vertical capabilities. The ro
 - Integer phases are planned milestone work.
 - Decimal phases are urgent insertions between planned phases.
 
-- [ ] **Phase 1: Durable Flow Foundation** - Users can create, save, recover, inspect, undo, and safely target versioned FlowDocuments.
+- [x] **Phase 1: Durable Flow Foundation** - Users can create, save, recover, inspect, undo, and safely target versioned FlowDocuments. (completed 2026-08-25)
 - [ ] **Phase 2: Accessible Rich-Text Editing** - Users can edit semantic Ukrainian and English content through correct keyboard, IME, UI, and assistive-technology interactions.
 - [ ] **Phase 3: Deterministic Reflow and Pagination** - Document edits reshape, fragment, and repaginate predictably with incremental/full equivalence.
 - [ ] **Phase 4: Owned PDF Preview and Export** - Users can preview and export selectable, reproducible PDFs and recover the exact owned source.
@@ -186,7 +186,7 @@ FlowPDF progresses through nine dependency-ordered vertical capabilities. The ro
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Durable Flow Foundation | 6/6 | In Progress|  |
+| 1. Durable Flow Foundation | 6/6 | Complete    | 2026-08-25 |
 | 2. Accessible Rich-Text Editing | 0/TBD | Not started | - |
 | 3. Deterministic Reflow and Pagination | 0/TBD | Not started | - |
 | 4. Owned PDF Preview and Export | 0/TBD | Not started | - |
