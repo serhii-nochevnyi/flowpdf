@@ -29,7 +29,7 @@
       },
       {
         "path": "crates/flow-core/src/audit/mod.rs",
-        "sha256": "sha256:fab166e022098c60a96f93f2119ad23c500d470616461e508a05a727c629fe3c"
+        "sha256": "sha256:f9f9064c837935a3cdd47bee6926b7fbae2ebe90e6908495ce7379a20a9a4fb8"
       },
       {
         "path": "crates/flow-core/src/canonical/mod.rs",
@@ -72,7 +72,7 @@
         "sha256": "sha256:9d50a6f28923fc94c0d56dccc9038a12a8ff040f764a8ff048fa6d5a9eba722c"
       }
     ],
-    "digest": "sha256:919699a39a06b3a683db33dfbeaee9558edf112badb58fabd7d60d0b78e0c659"
+    "digest": "sha256:5a050bcfd1688e8a1fc5dd5d8fb7a07cbf9d36c7cc571ac40eea6750375cd93f"
   },
   "toolchain": {
     "node": "v24.10.0",
@@ -117,37 +117,37 @@
         "plannedTransactionCount": 1000
       },
       "durationsMilliseconds": [
-        485.755167,
-        475.954916,
-        478.404458,
-        479.494417,
-        475.02545899999996,
-        484.6955,
-        485.267334,
-        481.262334,
-        489.116542,
-        492.463708,
-        498.03037500000005,
-        492.124083,
-        486.328417,
-        474.465292,
-        484.28575,
-        496.90875,
-        475.63320799999997,
-        487.099,
-        482.197875,
-        490.005
+        480.569542,
+        475.645542,
+        480.259083,
+        483.480458,
+        484.12916700000005,
+        482.851916,
+        484.36875000000003,
+        494.42637499999995,
+        513.5120410000001,
+        484.12179100000003,
+        486.52641600000004,
+        487.517666,
+        478.696208,
+        491.639,
+        497.490667,
+        482.786833,
+        477.974709,
+        505.361541,
+        482.205125,
+        486.389792
       ],
-      "p50Milliseconds": 484.6955,
-      "p95Milliseconds": 496.90875
+      "p50Milliseconds": 484.12179100000003,
+      "p95Milliseconds": 505.361541
     }
   ],
   "selectedPolicy": {
     "transactionInterval": 100,
     "byteInterval": 4194304
   },
-  "p50Milliseconds": 484.6955,
-  "p95Milliseconds": 496.90875,
+  "p50Milliseconds": 484.12179100000003,
+  "p95Milliseconds": 505.361541,
   "p95TargetMilliseconds": 2000,
   "passed": true,
   "blocked": false

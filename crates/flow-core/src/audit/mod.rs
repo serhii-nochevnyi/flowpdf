@@ -464,6 +464,7 @@ pub fn sort_events(events: &mut [AuditEvent]) {
         left.durable_sequence
             .cmp(&right.durable_sequence)
             .then_with(|| left.new_revision.cmp(&right.new_revision))
+            .then_with(|| left.timestamp.cmp(&right.timestamp))
             .then_with(|| left.audit_id.cmp(&right.audit_id))
     });
 }

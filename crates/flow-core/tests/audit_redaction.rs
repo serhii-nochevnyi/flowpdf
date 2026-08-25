@@ -12,6 +12,10 @@ fn command_id(value: u32) -> CommandId {
 }
 
 fn event(sequence: u64, command: u32, timestamp: &str) -> AuditEvent {
+    event_at_revision(sequence, 2, command, timestamp)
+}
+
+fn event_at_revision(sequence: u64, revision: u32, command: u32, timestamp: &str) -> AuditEvent {
     let document = FlowDocument::deterministic_sample("uk-UA").expect("sample");
     let command_id = command_id(command);
     AuditEvent::success(
@@ -19,8 +23,8 @@ fn event(sequence: u64, command: u32, timestamp: &str) -> AuditEvent {
         document.document_id,
         command_id.clone(),
         command_id,
-        1,
-        2,
+        revision.saturating_sub(1),
+        revision,
         sequence,
         AuditTimestamp::parse(timestamp).expect("safe timestamp"),
         AuditAction::Command {
@@ -360,17 +364,23 @@ fn audit_actions_enforce_revision_and_metadata_semantics() {
 }
 
 #[test]
-fn audit_order_uses_durable_sequence_then_revision_then_identity() {
+fn audit_order_uses_durable_sequence_then_revision_timestamp_and_identity() {
     let mut events = vec![
         event(3, 503, "2026-08-14T20:50:00Z"),
+        event(2, 501, "2026-08-14T20:50:01Z"),
         event(2, 502, "2026-08-14T20:50:00Z"),
-        event(2, 501, "2026-08-14T20:50:00Z"),
+        event(2, 500, "2026-08-14T20:50:00Z"),
+        event_at_revision(2, 3, 504, "2026-08-14T20:49:59Z"),
     ];
     sort_events(&mut events);
 
     assert_eq!(events[0].durable_sequence(), 2);
-    assert_eq!(events[0].audit_id().as_str(), command_id(501).as_str());
+    assert_eq!(events[0].audit_id().as_str(), command_id(500).as_str());
+    assert_eq!(events[0].timestamp().as_str(), "2026-08-14T20:50:00Z");
     assert_eq!(events[1].durable_sequence(), 2);
-    assert_eq!(events[2].durable_sequence(), 3);
-    assert_eq!(events.len(), 3, "queries never coalesce adjacent events");
+    assert_eq!(events[1].audit_id().as_str(), command_id(502).as_str());
+    assert_eq!(events[2].audit_id().as_str(), command_id(501).as_str());
+    assert_eq!(events[3].audit_id().as_str(), command_id(504).as_str());
+    assert_eq!(events[4].durable_sequence(), 3);
+    assert_eq!(events.len(), 5, "queries never coalesce adjacent events");
 }
