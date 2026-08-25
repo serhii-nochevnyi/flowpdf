@@ -45,6 +45,7 @@ pub const RECORD_FORMAT_VERSION: u32 = 1;
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CreateSampleRequest {
     pub requested_locale: String,
+    pub issued_at: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -227,7 +228,24 @@ pub struct PlanPersistenceCommitRequest {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PlanStandaloneAuditRequest {
     pub records: RecoverRequest,
-    pub audit: AuditRecord,
+    pub derivation: StandaloneAuditDerivation,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(
+    tag = "type",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
+)]
+pub enum StandaloneAuditDerivation {
+    CommandFailure {
+        request: Box<ApplyCommandRequest>,
+        attempt_id: CommandId,
+    },
+    Recovery {
+        audit_context: RecoveryAuditContext,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -371,7 +389,9 @@ pub fn create_sample(request: CreateSampleRequest) -> ApiResponse<OperationResul
 }
 
 fn create_sample_inner(request: CreateSampleRequest) -> Result<OperationResult, CoreError> {
-    let document = FlowDocument::deterministic_sample(&request.requested_locale)?;
+    AuditTimestamp::parse(request.issued_at.clone())?;
+    let document =
+        FlowDocument::deterministic_sample_at(&request.requested_locale, &request.issued_at)?;
     let canonical_json = canonical_string(&document)?;
     let canonical_hash = canonical_hash(canonical_json.as_bytes());
     let command_id = CommandId::new(SAMPLE_CREATE_COMMAND_ID)?;
@@ -390,7 +410,7 @@ fn create_sample_inner(request: CreateSampleRequest) -> Result<OperationResult, 
         new_revision: 1,
         command_type: "createSample".to_owned(),
         modality: SourceModality::System,
-        issued_at: "2026-08-14T00:00:00Z".to_owned(),
+        issued_at: request.issued_at.clone(),
         before_hash: "none".to_owned(),
         after_hash: canonical_hash.clone(),
         forward_operations: vec![Operation::CreateDocument],
@@ -404,7 +424,7 @@ fn create_sample_inner(request: CreateSampleRequest) -> Result<OperationResult, 
         0,
         "createSample",
         SourceModality::System,
-        "2026-08-14T00:00:00Z",
+        &request.issued_at,
     )?;
     operation_result(
         document,
@@ -421,7 +441,8 @@ pub fn apply_command(request: ApplyCommandRequest) -> ApiResponse<OperationResul
     match apply_command_inner(request.clone()) {
         Ok(result) => ApiResponse::success(result),
         Err(error) => {
-            let audit = rejected_command_audit(&request, &error);
+            let audit =
+                rejected_command_audit(&request, &error, request.command.command_id.clone());
             ApiResponse::failure_with_audit(error, audit)
         }
     }
@@ -460,9 +481,51 @@ pub fn plan_persistence_commit(
 /// idempotent and independent from the document head.
 #[must_use]
 pub fn plan_standalone_audit(request: PlanStandaloneAuditRequest) -> ApiResponse<AuditRecord> {
-    match store::validate_standalone_audit(&request.records, &request.audit) {
-        Ok(()) => ApiResponse::success(request.audit),
-        Err(error) => ApiResponse::failure(error.into()),
+    match derive_standalone_audit(&request.records, request.derivation).and_then(|audit| {
+        store::validate_standalone_audit(&request.records, &audit)?;
+        let mut candidate = request.records;
+        if !candidate.audits.iter().any(|existing| existing == &audit) {
+            candidate.audits.push(audit.clone());
+        }
+        preflight_recovery_records(&candidate)?;
+        Ok(audit)
+    }) {
+        Ok(audit) => ApiResponse::success(audit),
+        Err(error) => ApiResponse::failure(error),
+    }
+}
+
+fn derive_standalone_audit(
+    records: &RecoverRequest,
+    derivation: StandaloneAuditDerivation,
+) -> Result<AuditRecord, CoreError> {
+    match derivation {
+        StandaloneAuditDerivation::CommandFailure {
+            request,
+            attempt_id,
+        } => {
+            if attempt_id == request.command.command_id {
+                return Err(CoreError::UnsafeAuditRecord);
+            }
+            match apply_command_inner(*request.clone()) {
+                Ok(_) => Err(CoreError::UnsafeAuditRecord),
+                Err(error) => rejected_command_audit(&request, &error, attempt_id)
+                    .ok_or(CoreError::UnsafeAuditRecord),
+            }
+        }
+        StandaloneAuditDerivation::Recovery { audit_context } => {
+            let error = match recover_inner(records.clone()) {
+                Ok(recovered)
+                    if recovered.session.document_id == audit_context.document_id
+                        && recovered.session.revision == audit_context.expected_revision =>
+                {
+                    None
+                }
+                Ok(_) => Some(CoreError::RecoveryGap),
+                Err(error) => Some(error),
+            };
+            recovery_audit(&audit_context, error.as_ref()).ok_or(CoreError::UnsafeAuditRecord)
+        }
     }
 }
 
@@ -527,12 +590,20 @@ fn migrate_document_inner(
             canonical_json: request.canonical_json,
             canonical_hash: source_hash_for_record,
         };
-        Some(MigrationPersistenceCommit {
+        let commit = MigrationPersistenceCommit {
             snapshot,
             audit,
             assets: request.assets,
             source,
-        })
+        };
+        preflight_recovery_records(&RecoverRequest {
+            snapshots: vec![commit.snapshot.clone()],
+            transactions: Vec::new(),
+            audits: vec![commit.audit.clone()],
+            assets: commit.assets.clone(),
+            sources: vec![commit.source.clone()],
+        })?;
+        Some(commit)
     } else {
         None
     };
@@ -576,12 +647,16 @@ fn apply_command_inner(request: ApplyCommandRequest) -> Result<OperationResult, 
     )
 }
 
-fn rejected_command_audit(request: &ApplyCommandRequest, error: &CoreError) -> Option<AuditRecord> {
+fn rejected_command_audit(
+    request: &ApplyCommandRequest,
+    error: &CoreError,
+    attempt_id: CommandId,
+) -> Option<AuditRecord> {
     let document = decode_canonical(request.canonical_json.as_bytes()).ok()?;
     let code = AuditErrorCode::from_stable_code(error.code())?;
     let command_id = request.command.command_id.clone();
     AuditRecord::failure(
-        command_id.clone(),
+        attempt_id,
         document.document_id,
         command_id.clone(),
         command_id,
@@ -786,7 +861,7 @@ fn recover_from_snapshot(
     Ok(RecoverResult { session, view })
 }
 
-fn preflight_recovery_records(request: &RecoverRequest) -> Result<(), CoreError> {
+pub(crate) fn preflight_recovery_records(request: &RecoverRequest) -> Result<(), CoreError> {
     let record_count = request
         .snapshots
         .len()
@@ -1002,7 +1077,10 @@ fn normalize_transactions(
 ) -> Result<Vec<TransactionRecord>, CoreError> {
     let mut by_id = BTreeMap::<String, TransactionRecord>::new();
     for record in transactions {
-        if &record.document_id != document_id {
+        if record.record_format_version != RECORD_FORMAT_VERSION
+            || record.schema_version != SCHEMA_VERSION
+            || &record.document_id != document_id
+        {
             return Err(CoreError::RecoveryGap);
         }
         match by_id.get(record.transaction_id.as_str()) {
@@ -1020,10 +1098,7 @@ fn normalize_transactions(
             .then_with(|| left.transaction_id.cmp(&right.transaction_id))
     });
     for pair in records.windows(2) {
-        if pair[0].schema_version == SCHEMA_VERSION
-            && pair[1].schema_version == SCHEMA_VERSION
-            && pair[0].new_revision == pair[1].new_revision
-        {
+        if pair[0].new_revision == pair[1].new_revision {
             return Err(CoreError::RecoveryGap);
         }
     }
@@ -1233,8 +1308,42 @@ fn normalize_and_bind_audits(
                     return Err(CoreError::RecoveryGap);
                 }
             }
-            (AuditAction::Command { .. }, AuditOutcome::Failure { .. })
-            | (AuditAction::Recovery, AuditOutcome::Success | AuditOutcome::Failure { .. }) => {}
+            (AuditAction::Command { .. }, AuditOutcome::Failure { .. }) => {
+                let has_revision_anchor = transactions.iter().any(|transaction| {
+                    transaction.document_id == *audit.document_id()
+                        && transaction.new_revision == audit.new_revision()
+                }) || migration_boundary.is_some_and(|boundary| {
+                    boundary.document_id == *audit.document_id()
+                        && boundary.revision == audit.new_revision()
+                });
+                if audit.audit_id() == audit.command_id()
+                    || audit.transaction_id() != audit.command_id()
+                    || audit.durable_sequence() != u64::from(audit.new_revision()) + 1
+                    || audit.metadata()
+                        != [AuditMetadata::SchemaVersion {
+                            value: document.schema_version,
+                        }]
+                    || !has_revision_anchor
+                {
+                    return Err(CoreError::RecoveryGap);
+                }
+            }
+            (AuditAction::Recovery, AuditOutcome::Success | AuditOutcome::Failure { .. }) => {
+                let has_revision_anchor = transactions.iter().any(|transaction| {
+                    transaction.document_id == *audit.document_id()
+                        && transaction.new_revision == audit.new_revision()
+                }) || migration_boundary.is_some_and(|boundary| {
+                    boundary.document_id == *audit.document_id()
+                        && boundary.revision == audit.new_revision()
+                });
+                if audit.audit_id() != audit.command_id()
+                    || audit.transaction_id() != audit.command_id()
+                    || audit.durable_sequence() != u64::from(audit.new_revision()) + 1
+                    || !has_revision_anchor
+                {
+                    return Err(CoreError::RecoveryGap);
+                }
+            }
             (AuditAction::Migration, AuditOutcome::Success) => {
                 let boundary = migration_boundary.ok_or(CoreError::RecoveryGap)?;
                 if audit.audit_id() != &boundary.migration_id
@@ -1516,10 +1625,7 @@ fn safe_audit(
 
 fn validate_audit(audit: &AuditRecord) -> Result<(), CoreError> {
     audit.validate()?;
-    if audit.audit_id() != audit.command_id()
-        || audit.transaction_id() != audit.command_id()
-        || audit.timestamp().as_str().is_empty()
-    {
+    if audit.transaction_id() != audit.command_id() || audit.timestamp().as_str().is_empty() {
         return Err(CoreError::UnsafeAuditRecord);
     }
     Ok(())
@@ -1570,6 +1676,7 @@ mod tests {
     fn sample_command_and_recovery_preserve_the_canonical_hash() {
         let created = success(create_sample(CreateSampleRequest {
             requested_locale: "uk-UA".to_owned(),
+            issued_at: "2026-08-14T00:00:00Z".to_owned(),
         }));
         let command_id =
             CommandId::new("00000000-0000-4000-8000-000000000202").expect("command id");
@@ -1682,6 +1789,7 @@ mod tests {
     fn stale_command_is_atomic() {
         let created = success(create_sample(CreateSampleRequest {
             requested_locale: "uk-UA".to_owned(),
+            issued_at: "2026-08-14T00:00:00Z".to_owned(),
         }));
         let before_hash = created.session.canonical_hash.clone();
         let history = created.session.history.clone();

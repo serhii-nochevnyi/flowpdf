@@ -339,6 +339,16 @@ pub fn validate_document(document: &FlowDocument) -> Result<(), SchemaError> {
             limits.check(LimitKind::RecoveryBytes, encoded_asset_bytes)?;
         }
     }
+    // Every recoverable document needs at least one checkpoint plus its
+    // creation/migration audit and either a transaction or migration source.
+    // Reserve that irreducible overhead so a schema-valid asset set can still
+    // be represented by a valid recovery image.
+    const MINIMUM_NON_ASSET_RECORDS: usize = 3;
+    let minimum_recovery_records = asset_lengths
+        .len()
+        .checked_add(MINIMUM_NON_ASSET_RECORDS)
+        .ok_or_else(SchemaError::invalid_document)?;
+    limits.check(LimitKind::RecoveryRecords, minimum_recovery_records)?;
 
     let mut node_ids = BTreeSet::new();
     let mut total_text_bytes = 0_usize;
@@ -585,21 +595,29 @@ pub fn utf16_to_byte_offset(value: &str, utf16_offset: u32) -> Option<usize> {
 }
 
 pub type MigrationFunction = fn(&[u8]) -> Result<Vec<u8>, SchemaError>;
+pub type MigrationValidator = fn(&[u8]) -> Result<(), SchemaError>;
 
 #[derive(Clone, Copy)]
 pub struct MigrationStep {
     pub from_version: u32,
     pub to_version: u32,
     migrate: MigrationFunction,
+    validate_output: MigrationValidator,
 }
 
 impl MigrationStep {
     #[must_use]
-    pub const fn new(from_version: u32, to_version: u32, migrate: MigrationFunction) -> Self {
+    pub const fn new(
+        from_version: u32,
+        to_version: u32,
+        migrate: MigrationFunction,
+        validate_output: MigrationValidator,
+    ) -> Self {
         Self {
             from_version,
             to_version,
             migrate,
+            validate_output,
         }
     }
 }
@@ -612,7 +630,12 @@ pub struct MigrationRegistry {
 impl MigrationRegistry {
     #[must_use]
     pub fn current() -> Self {
-        Self::new(vec![MigrationStep::new(0, 1, migrate_v0_to_v1)])
+        Self::new(vec![MigrationStep::new(
+            0,
+            1,
+            migrate_v0_to_v1,
+            validate_v1_migration_output,
+        )])
     }
 
     #[must_use]
@@ -660,11 +683,8 @@ impl MigrationRegistry {
             if candidate_version != expected_to {
                 return Err(SchemaError::migration_intermediate_invalid());
             }
-            if candidate_version == SCHEMA_VERSION
-                && crate::canonical::decode_canonical(&candidate).is_err()
-            {
-                return Err(SchemaError::migration_intermediate_invalid());
-            }
+            (step.validate_output)(&candidate)
+                .map_err(|_| SchemaError::migration_intermediate_invalid())?;
             bytes = candidate;
             hops.push(MigrationHop {
                 from_version: version,
@@ -688,6 +708,10 @@ impl MigrationRegistry {
             },
         })
     }
+}
+
+fn validate_v1_migration_output(input: &[u8]) -> Result<(), SchemaError> {
+    crate::canonical::decode_canonical(input).map(|_| ())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

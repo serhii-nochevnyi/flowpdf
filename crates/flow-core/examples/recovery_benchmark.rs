@@ -127,8 +127,8 @@ fn main() -> Result<(), String> {
 
     let mut ordered = durations_milliseconds.clone();
     ordered.sort_by(f64::total_cmp);
-    let p50_milliseconds = percentile(&ordered, 0.50);
-    let p95_milliseconds = percentile(&ordered, 0.95);
+    let p50_milliseconds = percentile(&ordered, 0.50)?;
+    let p95_milliseconds = percentile(&ordered, 0.95)?;
     let measurement = Measurement {
         fixture_hash: format!("blake3:{}", blake3::hash(&fixture_bytes).to_hex()),
         fixture_name: recipe.name,
@@ -160,6 +160,15 @@ fn validate_recipe(recipe: &Recipe) -> Result<(), String> {
         || recipe.page_equivalent.words_per_paragraph < 16
         || recipe.background_mutation_utf8_bytes < 16
         || recipe.page_equivalent.minimum_utf8_bytes_per_page == 0
+        || recipe.warmups == 0
+        || recipe.measurements == 0
+        || !recipe.p95_target_milliseconds.is_finite()
+        || recipe.p95_target_milliseconds <= 0.0
+        || recipe.candidates.is_empty()
+        || recipe
+            .candidates
+            .iter()
+            .any(|candidate| candidate.transaction_interval == 0 || candidate.byte_interval == 0)
         || recipe.page_equivalent.vocabulary.len() < 8
         || recipe
             .page_equivalent
@@ -214,6 +223,7 @@ fn build_workload(recipe: &Recipe, policy: &Policy) -> Result<BenchmarkWorkload,
     };
     let created = successful(create_sample(CreateSampleRequest {
         requested_locale: "uk-UA".to_owned(),
+        issued_at: "2026-08-14T00:00:00Z".to_owned(),
     }))?;
     let planned = planner
         .plan(&records, created.commit, SnapshotReason::Creation)
@@ -584,7 +594,34 @@ fn successful<T>(response: ApiResponse<T>) -> Result<T, String> {
     }
 }
 
-fn percentile(sorted: &[f64], percentile: f64) -> f64 {
+fn percentile(sorted: &[f64], percentile: f64) -> Result<f64, String> {
+    if sorted.is_empty() || !percentile.is_finite() || !(0.0..=1.0).contains(&percentile) {
+        return Err(
+            "benchmark percentile requires a non-empty sample and a finite rank".to_owned(),
+        );
+    }
     let index = ((sorted.len() as f64 * percentile).ceil() as usize).saturating_sub(1);
-    sorted[index]
+    sorted
+        .get(index)
+        .copied()
+        .ok_or_else(|| "benchmark percentile rank exceeded its sample".to_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Recipe, percentile, validate_recipe};
+
+    #[test]
+    fn zero_measurements_fail_without_indexing_an_empty_sample() {
+        assert!(percentile(&[], 0.95).is_err());
+        let mut recipe: Recipe = serde_json::from_str(include_str!(
+            "../../../fixtures/recovery/benchmark-200-page.recipe.json"
+        ))
+        .expect("benchmark recipe");
+        recipe.measurements = 0;
+        assert_eq!(
+            validate_recipe(&recipe).expect_err("zero measurements"),
+            "benchmark page-equivalent recipe is not structurally meaningful"
+        );
+    }
 }

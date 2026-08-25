@@ -217,13 +217,16 @@ impl CommitPlanner {
         let keep_snapshot =
             self.policy
                 .should_snapshot(reason, uncheckpointed_transactions, uncheckpointed_bytes);
-        Ok(PlannedPersistenceCommit {
+        let planned = PlannedPersistenceCommit {
             replace_existing: commit.replace_existing,
             snapshot: keep_snapshot.then_some(commit.snapshot),
             transaction: commit.transaction,
             audit: commit.audit,
             assets: commit.assets,
-        })
+        };
+        let candidate = project_planned_records(records, &planned)?;
+        crate::preflight_recovery_records(&candidate).map_err(|_| StoreError::InvalidCommit)?;
+        Ok(planned)
     }
 
     pub fn commit<S: DocumentStore>(
@@ -254,6 +257,52 @@ fn validate_snapshot_reason(
 fn transaction_record_bytes(transaction: &TransactionRecord) -> Result<u64, StoreError> {
     let bytes = serde_json::to_vec(transaction).map_err(|_| StoreError::InvalidCommit)?;
     u64::try_from(bytes.len()).map_err(|_| StoreError::InvalidCommit)
+}
+
+fn project_planned_records(
+    records: &RecoverRequest,
+    planned: &PlannedPersistenceCommit,
+) -> Result<RecoverRequest, StoreError> {
+    let mut candidate = records.clone();
+    if let Some(snapshot) = &planned.snapshot {
+        project_record(&mut candidate.snapshots, snapshot, |record| {
+            record.document_id == snapshot.document_id
+                && record.schema_version == snapshot.schema_version
+                && record.revision == snapshot.revision
+        })?;
+    }
+    project_record(
+        &mut candidate.transactions,
+        &planned.transaction,
+        |record| record.transaction_id == planned.transaction.transaction_id,
+    )?;
+    project_record(&mut candidate.audits, &planned.audit, |record| {
+        record.audit_id() == planned.audit.audit_id()
+    })?;
+    for asset in &planned.assets {
+        project_record(&mut candidate.assets, asset, |record| {
+            record.content_hash == asset.content_hash
+        })?;
+    }
+    Ok(candidate)
+}
+
+fn project_record<T: Clone + PartialEq>(
+    records: &mut Vec<T>,
+    candidate: &T,
+    same_identity: impl Fn(&T) -> bool,
+) -> Result<(), StoreError> {
+    let mut found = false;
+    for record in records.iter().filter(|record| same_identity(record)) {
+        if record != candidate {
+            return Err(StoreError::IdentityConflict);
+        }
+        found = true;
+    }
+    if !found {
+        records.push(candidate.clone());
+    }
+    Ok(())
 }
 
 /// Operation DTOs are intentionally independent of the physical store, so a
@@ -516,7 +565,6 @@ pub fn validate_standalone_audit(
 ) -> Result<(), StoreError> {
     audit.validate().map_err(|_| StoreError::InvalidCommit)?;
     if audit.record_format_version() != crate::RECORD_FORMAT_VERSION
-        || audit.audit_id() != audit.command_id()
         || audit.transaction_id() != audit.command_id()
         || !matches!(
             (audit.action(), audit.outcome()),
@@ -828,15 +876,19 @@ impl DocumentStore for InMemoryDocumentStore {
         audit: AuditRecord,
     ) -> Result<CommitDisposition, StoreError> {
         validate_standalone_audit(&self.load_records()?, &audit)?;
+        let mut candidate = self.clone();
         match record_state(
-            &self.audits,
+            &candidate.audits,
             |record| record.audit_id() == audit.audit_id(),
             &audit,
         ) {
-            RecordState::Missing => self.audits.push(audit),
+            RecordState::Missing => candidate.audits.push(audit),
             RecordState::Exact => return Ok(CommitDisposition::Idempotent),
             RecordState::Conflict => return Err(StoreError::IdentityConflict),
         }
+        crate::preflight_recovery_records(&candidate.load_records()?)
+            .map_err(|_| StoreError::InvalidCommit)?;
+        *self = candidate;
         Ok(CommitDisposition::Committed)
     }
 }

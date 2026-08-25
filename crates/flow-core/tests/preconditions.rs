@@ -421,6 +421,7 @@ fn oversized_batch_is_rejected_before_any_target_is_examined() {
 fn recovery_replays_transaction_meaning_and_rejects_tampered_inverse() {
     let created = flow_core::create_sample(CreateSampleRequest {
         requested_locale: "uk-UA".to_owned(),
+        issued_at: "2026-08-14T00:00:00Z".to_owned(),
     })
     .value
     .expect("sample");

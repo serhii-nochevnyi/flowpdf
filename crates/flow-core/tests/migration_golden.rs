@@ -86,11 +86,19 @@ fn interrupted(_: &[u8]) -> Result<Vec<u8>, SchemaError> {
     Err(SchemaError::migration_aborted())
 }
 
+fn validate_current(input: &[u8]) -> Result<(), SchemaError> {
+    flow_core::canonical::decode_canonical(input).map(|_| ())
+}
+
 #[test]
 fn invalid_or_interrupted_hops_never_publish_a_partial_current_document() {
     let input = payload(OLDER_FILE).to_vec();
-    let invalid_registry =
-        MigrationRegistry::new(vec![MigrationStep::new(0, 1, invalid_intermediate)]);
+    let invalid_registry = MigrationRegistry::new(vec![MigrationStep::new(
+        0,
+        1,
+        invalid_intermediate,
+        validate_current,
+    )]);
     assert_eq!(
         invalid_registry
             .migrate(&input)
@@ -100,7 +108,12 @@ fn invalid_or_interrupted_hops_never_publish_a_partial_current_document() {
     );
     assert_eq!(input, payload(OLDER_FILE));
 
-    let interrupted_registry = MigrationRegistry::new(vec![MigrationStep::new(0, 1, interrupted)]);
+    let interrupted_registry = MigrationRegistry::new(vec![MigrationStep::new(
+        0,
+        1,
+        interrupted,
+        validate_current,
+    )]);
     assert_eq!(
         interrupted_registry
             .migrate(&input)

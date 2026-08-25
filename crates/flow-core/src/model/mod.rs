@@ -267,6 +267,10 @@ pub struct MigrationHop {
 
 impl FlowDocument {
     pub fn deterministic_sample(locale: &str) -> Result<Self, SchemaError> {
+        Self::deterministic_sample_at(locale, "2026-08-14T00:00:00Z")
+    }
+
+    pub fn deterministic_sample_at(locale: &str, created_at: &str) -> Result<Self, SchemaError> {
         if locale != "uk-UA" && locale != "en-US" {
             return Err(SchemaError::invalid_document());
         }
@@ -462,7 +466,7 @@ impl FlowDocument {
                 },
             ],
             provenance: Provenance::LocalSample {
-                created_at: "2026-08-14T00:00:00Z".to_owned(),
+                created_at: created_at.to_owned(),
             },
         };
         validate_document(&document)?;

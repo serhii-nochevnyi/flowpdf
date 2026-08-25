@@ -24,6 +24,7 @@ fn command_id(value: u32) -> CommandId {
 fn chain_with_commands(command_count: u32) -> Vec<OperationResult> {
     let created = success(create_sample(CreateSampleRequest {
         requested_locale: "uk-UA".to_owned(),
+        issued_at: "2026-08-14T00:00:00Z".to_owned(),
     }));
     let mut results = vec![created];
     for index in 0..command_count {
@@ -428,6 +429,14 @@ fn gaps_conflicts_identity_schema_hash_and_atomicity_fail_without_publication() 
     let mut unknown_record_format = request(&chain, &[0]);
     unknown_record_format.snapshots[0].record_format_version = 99;
     assert_failure(unknown_record_format, "FLOW_RECOVERY_GAP");
+
+    let mut future_transaction_below_checkpoint = request(&chain, &[2]);
+    future_transaction_below_checkpoint.transactions[0].schema_version = 99;
+    assert_failure(future_transaction_below_checkpoint, "FLOW_RECOVERY_GAP");
+
+    let mut future_format_below_checkpoint = request(&chain, &[2]);
+    future_format_below_checkpoint.transactions[0].record_format_version = 99;
+    assert_failure(future_format_below_checkpoint, "FLOW_RECOVERY_GAP");
 
     let mut interrupted = request(&chain[..2], &[0, 1]);
     interrupted.audits.pop();

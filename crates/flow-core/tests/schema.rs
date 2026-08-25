@@ -236,6 +236,26 @@ fn asset_descriptors_use_canonical_hashes_and_fit_the_encoded_recovery_budget() 
         code(validate_document(&aggregate).expect_err("aggregate encoded asset budget")),
         "FLOW_LIMIT_RECOVERY_BYTES"
     );
+
+    let mut record_heavy = FlowDocument::deterministic_sample("uk-UA").expect("sample");
+    record_heavy.content.retain(|node| node.asset_id.is_none());
+    let template = record_heavy.assets[0].clone();
+    record_heavy.assets.clear();
+    for index in 0..(DocumentLimits::V1.recovery_records - 2) {
+        let mut asset = template.clone();
+        asset.id = flow_core::model::AssetId::new(format!(
+            "00000000-0000-4000-8000-{:012}",
+            index + 10_000
+        ))
+        .expect("asset ID");
+        asset.content_hash = format!("blake3:{:064x}", index + 1);
+        asset.byte_length = 0;
+        record_heavy.assets.push(asset);
+    }
+    assert_eq!(
+        code(validate_document(&record_heavy).expect_err("recovery record reserve")),
+        "FLOW_LIMIT_RECOVERY_RECORDS"
+    );
 }
 
 #[test]

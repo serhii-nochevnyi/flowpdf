@@ -1,10 +1,12 @@
-use flow_core::model::CommandId;
+use flow_core::model::{CommandId, FlowDocument, Provenance};
 use flow_core::{
     ApiResponse, ApplyCommandRequest, AuditOutcome, AuditRecord, AuditedRecoverRequest, CommandDto,
     CommandKind, CreateSampleRequest, MigrateDocumentRequest, OperationResult,
-    PlanStandaloneAuditRequest, RecoverResult, RecoveryAuditContext, SourceModality, apply_command,
+    PlanStandaloneAuditRequest, RecoverRequest, RecoverResult, RecoveryAuditContext,
+    SourceModality, StandaloneAuditDerivation, apply_command,
     audit::{AuditAction, AuditCommandKind, AuditErrorCode, AuditMetadata, AuditTimestamp},
     create_sample, migrate_document, plan_standalone_audit, recover, recover_audited,
+    schema::DocumentLimits,
     store::{
         CommitDisposition, CommitPlanner, DocumentStore, InMemoryDocumentStore, SnapshotPolicy,
         SnapshotReason, StoreError,
@@ -20,6 +22,7 @@ fn success<T>(response: ApiResponse<T>) -> T {
 fn repeated_create_is_idempotent_and_divergent_same_identity_never_replaces_truth() {
     let created = success(create_sample(CreateSampleRequest {
         requested_locale: "uk-UA".to_owned(),
+        issued_at: "2026-08-14T00:00:00Z".to_owned(),
     }));
     let mut store = InMemoryDocumentStore::default();
     assert_eq!(
@@ -66,9 +69,30 @@ fn repeated_create_is_idempotent_and_divergent_same_identity_never_replaces_trut
 }
 
 #[test]
+fn sample_creation_uses_the_caller_timestamp_for_document_transaction_and_audit() {
+    let issued_at = "2026-08-14T12:34:56Z";
+    let created = success(create_sample(CreateSampleRequest {
+        requested_locale: "uk-UA".to_owned(),
+        issued_at: issued_at.to_owned(),
+    }));
+    let document: FlowDocument =
+        serde_json::from_str(&created.session.canonical_json).expect("canonical document");
+
+    assert_eq!(
+        document.provenance,
+        Provenance::LocalSample {
+            created_at: issued_at.to_owned(),
+        }
+    );
+    assert_eq!(created.commit.transaction.issued_at, issued_at);
+    assert_eq!(created.commit.audit.timestamp().as_str(), issued_at);
+}
+
+#[test]
 fn store_replays_a_mutation_before_acknowledging_its_atomic_commit() {
     let created = success(create_sample(CreateSampleRequest {
         requested_locale: "uk-UA".to_owned(),
+        issued_at: "2026-08-14T00:00:00Z".to_owned(),
     }));
     let applied = apply_one(&created);
     let mut store = InMemoryDocumentStore::default();
@@ -91,6 +115,7 @@ fn store_replays_a_mutation_before_acknowledging_its_atomic_commit() {
 fn a_deserialized_exact_plus_divergent_identity_is_always_a_conflict() {
     let created = success(create_sample(CreateSampleRequest {
         requested_locale: "uk-UA".to_owned(),
+        issued_at: "2026-08-14T00:00:00Z".to_owned(),
     }));
     let mut original = InMemoryDocumentStore::default();
     original
@@ -118,12 +143,13 @@ fn a_deserialized_exact_plus_divergent_identity_is_always_a_conflict() {
 fn rejected_command_audit_is_redacted_atomic_and_idempotent_without_a_transaction() {
     let created = success(create_sample(CreateSampleRequest {
         requested_locale: "uk-UA".to_owned(),
+        issued_at: "2026-08-14T00:00:00Z".to_owned(),
     }));
-    let rejected = apply_command(ApplyCommandRequest {
+    let rejected_request = ApplyCommandRequest {
         canonical_json: created.session.canonical_json.clone(),
         history: created.session.history.clone(),
         command: CommandDto {
-            command_id: CommandId::new("00000000-0000-4000-8000-000000000902").expect("attempt ID"),
+            command_id: CommandId::new("00000000-0000-4000-8000-000000000902").expect("command ID"),
             base_revision: 0,
             modality: SourceModality::Voice,
             issued_at: "2026-08-14T20:40:02Z".to_owned(),
@@ -136,21 +162,35 @@ fn rejected_command_audit_is_redacted_atomic_and_idempotent_without_a_transactio
                 text: "SENSITIVE_REJECTED_TEXT".to_owned(),
             },
         },
-    });
+    };
+    let rejected = apply_command(rejected_request.clone());
     assert!(!rejected.ok);
-    let audit = rejected
+    let response_audit = rejected
         .error
         .expect("rejection")
         .audit
         .expect("standalone audit");
     assert!(
-        !serde_json::to_string(&audit)
+        !serde_json::to_string(&response_audit)
             .expect("audit JSON")
             .contains("SENSITIVE_REJECTED_TEXT")
     );
 
     let mut store = InMemoryDocumentStore::default();
     store.commit_atomic(created.commit).expect("create commit");
+    let records = store.load_records().expect("creation records");
+    let audit = success(plan_standalone_audit(PlanStandaloneAuditRequest {
+        records,
+        derivation: StandaloneAuditDerivation::CommandFailure {
+            request: Box::new(rejected_request),
+            attempt_id: CommandId::new("00000000-0000-4000-8000-000000000903").expect("attempt ID"),
+        },
+    }));
+    assert_ne!(audit.audit_id(), audit.command_id());
+    assert_eq!(
+        audit.command_id().as_str(),
+        "00000000-0000-4000-8000-000000000902"
+    );
     assert_eq!(
         store
             .commit_standalone_audit_atomic(audit.clone())
@@ -166,6 +206,150 @@ fn rejected_command_audit_is_redacted_atomic_and_idempotent_without_a_transactio
     let recovered = success(recover(store.load_records().expect("records")));
     assert_eq!(recovered.view.audit.len(), 2);
     assert_eq!(recovered.session.revision, 1);
+}
+
+#[test]
+fn standalone_audit_planning_rejects_successful_commands_and_an_over_budget_post_image() {
+    let created = success(create_sample(CreateSampleRequest {
+        requested_locale: "uk-UA".to_owned(),
+        issued_at: "2026-08-14T00:00:00Z".to_owned(),
+    }));
+    let successful_request = ApplyCommandRequest {
+        canonical_json: created.session.canonical_json.clone(),
+        history: created.session.history.clone(),
+        command: CommandDto {
+            command_id: CommandId::new("00000000-0000-4000-8000-000000000904").expect("command ID"),
+            base_revision: created.session.revision,
+            modality: SourceModality::Ui,
+            issued_at: "2026-08-14T20:40:04Z".to_owned(),
+            kind: CommandKind::InsertText {
+                target: created
+                    .session
+                    .next_command_target
+                    .clone()
+                    .expect("command target"),
+                text: "valid command".to_owned(),
+            },
+        },
+    };
+    let forged = plan_standalone_audit(PlanStandaloneAuditRequest {
+        records: RecoverRequest {
+            snapshots: vec![created.commit.snapshot.clone()],
+            transactions: vec![created.commit.transaction.clone()],
+            audits: vec![created.commit.audit.clone()],
+            assets: created.commit.assets.clone(),
+            sources: Vec::new(),
+        },
+        derivation: StandaloneAuditDerivation::CommandFailure {
+            request: Box::new(successful_request),
+            attempt_id: CommandId::new("00000000-0000-4000-8000-000000000905").expect("attempt ID"),
+        },
+    });
+    assert_eq!(
+        forged.error.expect("forged audit rejection").code,
+        "FLOW_UNSAFE_AUDIT_RECORD"
+    );
+
+    let stale_request = ApplyCommandRequest {
+        canonical_json: created.session.canonical_json.clone(),
+        history: created.session.history.clone(),
+        command: CommandDto {
+            command_id: CommandId::new("00000000-0000-4000-8000-000000000906").expect("command ID"),
+            base_revision: 0,
+            modality: SourceModality::Ui,
+            issued_at: "2026-08-14T20:40:06Z".to_owned(),
+            kind: CommandKind::InsertText {
+                target: created
+                    .session
+                    .next_command_target
+                    .clone()
+                    .expect("command target"),
+                text: "stale command".to_owned(),
+            },
+        },
+    };
+    let mut records = RecoverRequest {
+        snapshots: vec![created.commit.snapshot],
+        transactions: vec![created.commit.transaction],
+        audits: vec![created.commit.audit],
+        assets: created.commit.assets,
+        sources: Vec::new(),
+    };
+    let current_count = records.snapshots.len()
+        + records.transactions.len()
+        + records.audits.len()
+        + records.assets.len();
+    records.assets.extend(vec![
+        records.assets[0].clone();
+        DocumentLimits::V1.recovery_records - current_count
+    ]);
+    let over_budget = plan_standalone_audit(PlanStandaloneAuditRequest {
+        records,
+        derivation: StandaloneAuditDerivation::CommandFailure {
+            request: Box::new(stale_request),
+            attempt_id: CommandId::new("00000000-0000-4000-8000-000000000907").expect("attempt ID"),
+        },
+    });
+    assert_eq!(
+        over_budget.error.expect("post-image limit").code,
+        "FLOW_LIMIT_RECOVERY_RECORDS"
+    );
+}
+
+#[test]
+fn duplicate_command_failure_has_a_distinct_attempt_identity_and_preserves_the_success_audit() {
+    let created = success(create_sample(CreateSampleRequest {
+        requested_locale: "uk-UA".to_owned(),
+        issued_at: "2026-08-14T00:00:00Z".to_owned(),
+    }));
+    let applied = apply_one(&created);
+    let duplicate_request = ApplyCommandRequest {
+        canonical_json: applied.session.canonical_json.clone(),
+        history: applied.session.history.clone(),
+        command: CommandDto {
+            command_id: applied.commit.transaction.command_id.clone(),
+            base_revision: applied.session.revision,
+            modality: SourceModality::Voice,
+            issued_at: "2026-08-14T20:40:10Z".to_owned(),
+            kind: CommandKind::InsertText {
+                target: applied
+                    .session
+                    .next_command_target
+                    .clone()
+                    .expect("command target"),
+                text: "duplicate payload".to_owned(),
+            },
+        },
+    };
+    assert_eq!(
+        apply_command(duplicate_request.clone())
+            .error
+            .expect("duplicate rejection")
+            .code,
+        "FLOW_DUPLICATE_COMMAND"
+    );
+
+    let mut store = InMemoryDocumentStore::default();
+    store.commit_atomic(created.commit).expect("creation");
+    store
+        .commit_atomic(applied.commit.clone())
+        .expect("successful command");
+    let failure = success(plan_standalone_audit(PlanStandaloneAuditRequest {
+        records: store.load_records().expect("durable prefix"),
+        derivation: StandaloneAuditDerivation::CommandFailure {
+            request: Box::new(duplicate_request),
+            attempt_id: CommandId::new("00000000-0000-4000-8000-000000000910").expect("attempt ID"),
+        },
+    }));
+    assert_eq!(failure.command_id(), applied.commit.audit.command_id());
+    assert_ne!(failure.audit_id(), applied.commit.audit.audit_id());
+    store
+        .commit_standalone_audit_atomic(failure.clone())
+        .expect("failure audit");
+
+    let recovered = success(recover(store.load_records().expect("records")));
+    assert!(recovered.view.audit.contains(&applied.commit.audit));
+    assert!(recovered.view.audit.contains(&failure));
 }
 
 fn apply_one(created: &OperationResult) -> OperationResult {
@@ -193,6 +377,7 @@ fn apply_one(created: &OperationResult) -> OperationResult {
 fn atomic_store_commit_recovers_the_exact_immutable_revision_and_redacted_audit() {
     let created = success(create_sample(CreateSampleRequest {
         requested_locale: "uk-UA".to_owned(),
+        issued_at: "2026-08-14T00:00:00Z".to_owned(),
     }));
     let applied = apply_one(&created);
     let mut store = InMemoryDocumentStore::default();
@@ -257,6 +442,7 @@ fn atomic_store_commit_recovers_the_exact_immutable_revision_and_redacted_audit(
 fn verified_recovery_audit_is_nonmutating_and_idempotent_by_attempt_identity() {
     let created = success(create_sample(CreateSampleRequest {
         requested_locale: "uk-UA".to_owned(),
+        issued_at: "2026-08-14T00:00:00Z".to_owned(),
     }));
     let applied = apply_one(&created);
     let mut store = InMemoryDocumentStore::default();
@@ -272,12 +458,14 @@ fn verified_recovery_audit_is_nonmutating_and_idempotent_by_attempt_identity() {
     };
     let audited = success(recover_audited(AuditedRecoverRequest {
         records: store.load_records().expect("records"),
-        audit_context: context,
+        audit_context: context.clone(),
     }));
     assert_eq!(audited.recovered.session.revision, applied.session.revision);
     let authorized = success(plan_standalone_audit(PlanStandaloneAuditRequest {
         records: store.load_records().expect("authorization records"),
-        audit: audited.audit.clone(),
+        derivation: StandaloneAuditDerivation::Recovery {
+            audit_context: context,
+        },
     }));
     assert_eq!(
         store
@@ -300,6 +488,7 @@ fn verified_recovery_audit_is_nonmutating_and_idempotent_by_attempt_identity() {
 fn recovery_context_mismatch_returns_an_authorizable_nonmutating_failure_audit() {
     let created = success(create_sample(CreateSampleRequest {
         requested_locale: "uk-UA".to_owned(),
+        issued_at: "2026-08-14T00:00:00Z".to_owned(),
     }));
     let applied = apply_one(&created);
     let mut store = InMemoryDocumentStore::default();
@@ -309,15 +498,15 @@ fn recovery_context_mismatch_returns_an_authorizable_nonmutating_failure_audit()
         .expect("mutation commit");
 
     let records = store.load_records().expect("records");
+    let context = RecoveryAuditContext {
+        attempt_id: CommandId::new("00000000-0000-4000-8000-000000000909").expect("recovery ID"),
+        document_id: applied.session.document_id,
+        expected_revision: 1,
+        issued_at: "2026-08-14T20:40:09Z".to_owned(),
+    };
     let response = recover_audited(AuditedRecoverRequest {
         records: records.clone(),
-        audit_context: RecoveryAuditContext {
-            attempt_id: CommandId::new("00000000-0000-4000-8000-000000000909")
-                .expect("recovery ID"),
-            document_id: applied.session.document_id,
-            expected_revision: 1,
-            issued_at: "2026-08-14T20:40:09Z".to_owned(),
-        },
+        audit_context: context.clone(),
     });
     assert!(!response.ok);
     let error = response.error.expect("mismatch diagnostic");
@@ -333,7 +522,9 @@ fn recovery_context_mismatch_returns_an_authorizable_nonmutating_failure_audit()
     ));
     let authorized = success(plan_standalone_audit(PlanStandaloneAuditRequest {
         records,
-        audit: audit.clone(),
+        derivation: StandaloneAuditDerivation::Recovery {
+            audit_context: context,
+        },
     }));
     assert_eq!(
         store
