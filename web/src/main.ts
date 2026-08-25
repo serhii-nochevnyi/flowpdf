@@ -1,4 +1,17 @@
-import { mountFoundationInspector } from './foundation-inspector.js'
+import {
+  foundationInspectorMessages,
+  mountFoundationInspector,
+  type FoundationInspectorLocale,
+} from './foundation-inspector.js'
+
+const locale: FoundationInspectorLocale = document.documentElement.lang
+  .toLowerCase()
+  .startsWith('en')
+  ? 'en'
+  : 'uk'
+const copy = foundationInspectorMessages[locale]
+
+document.title = copy['foundationInspector.documentTitle']
 
 const root = document.querySelector<HTMLElement>('#app')
 if (root === null) {
@@ -6,11 +19,11 @@ if (root === null) {
 }
 
 try {
-  await mountFoundationInspector(root)
+  await mountFoundationInspector(root, { locale })
 } catch {
   const alert = document.createElement('p')
   alert.className = 'startup-error'
   alert.setAttribute('role', 'alert')
-  alert.textContent = 'Не вдалося запустити локальний інспектор. Код: FLOW_STARTUP_FAILED.'
+  alert.textContent = copy['foundationInspector.error.startup']
   root.replaceChildren(alert)
 }

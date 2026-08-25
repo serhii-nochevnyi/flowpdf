@@ -1,6 +1,8 @@
 import type { FoundationInspectorMessageKey } from './uk.js'
 
 export const foundationInspectorEn = {
+  'foundationInspector.documentTitle': 'FlowPDF — Foundation Inspector',
+  'foundationInspector.noscript': 'JavaScript is required for local FlowPDF verification.',
   'foundationInspector.app.product': 'FlowPDF',
   'foundationInspector.app.localOnly': 'Local verification',
   'foundationInspector.app.title': 'Foundation Inspector',
@@ -52,6 +54,8 @@ export const foundationInspectorEn = {
   'foundationInspector.error.recovery':
     'The document could not be recovered safely. Local data was not changed; review code {code}.',
   'foundationInspector.error.copy': 'The value could not be copied. Code: {code}.',
+  'foundationInspector.error.startup':
+    'The local inspector could not start. Code: FLOW_STARTUP_FAILED.',
   'foundationInspector.summary':
     'Structure: blocks — {nodes}, fields — {fields}, assets — {assets}.',
   'foundationInspector.provenance.created': 'Created {createdAt}.',

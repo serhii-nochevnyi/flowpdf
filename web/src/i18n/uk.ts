@@ -1,4 +1,6 @@
 export const foundationInspectorUk = {
+  'foundationInspector.documentTitle': 'FlowPDF — Інспектор основи',
+  'foundationInspector.noscript': 'Для локальної перевірки FlowPDF потрібен JavaScript.',
   'foundationInspector.app.product': 'FlowPDF',
   'foundationInspector.app.localOnly': 'Локальна перевірка',
   'foundationInspector.app.title': 'Інспектор основи',
@@ -50,6 +52,8 @@ export const foundationInspectorUk = {
   'foundationInspector.error.recovery':
     'Не вдалося безпечно відновити документ. Локальні дані не змінено; перегляньте код {code}.',
   'foundationInspector.error.copy': 'Не вдалося скопіювати значення. Код: {code}.',
+  'foundationInspector.error.startup':
+    'Не вдалося запустити локальний інспектор. Код: FLOW_STARTUP_FAILED.',
   'foundationInspector.summary':
     'Структура: блоків — {nodes}, полів — {fields}, ресурсів — {assets}.',
   'foundationInspector.provenance.created': 'Створено {createdAt}.',

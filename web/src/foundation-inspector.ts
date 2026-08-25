@@ -141,7 +141,7 @@ interface WasmBoundary {
   readonly recover_document_audited: (request: unknown) => ApiResponse<AuditedRecoverResultDto>
 }
 
-type ErrorPresentation = 'command' | 'stale' | 'recovery' | 'copy'
+type ErrorPresentation = 'command' | 'stale' | 'recovery'
 
 export interface FoundationInspectorSnapshot {
   readonly documentId: string
@@ -222,7 +222,7 @@ class FoundationInspector implements FoundationInspectorController {
   private hasDurableRecords = false
   private pending: Promise<void> = Promise.resolve()
   private busy = false
-  private activeControl: HTMLButtonElement | undefined
+  private copyGeneration = 0
 
   constructor(
     root: HTMLElement,
@@ -325,7 +325,6 @@ class FoundationInspector implements FoundationInspectorController {
     errorKind: ErrorPresentation = 'command',
   ): void {
     if (this.busy || control.disabled) return
-    this.activeControl = control
     this.pending = operation()
       .then(() => this.restoreFocus(control))
       .catch(async (error: unknown) => {
@@ -721,16 +720,37 @@ class FoundationInspector implements FoundationInspectorController {
       | 'foundationInspector.copy.hash.visible',
   ): Promise<void> {
     if (value === undefined) return
+    const generation = ++this.copyGeneration
+    this.clearCopyFeedback()
     try {
       await navigator.clipboard.writeText(value)
-      this.setStatus(
+      if (generation !== this.copyGeneration) return
+      this.setCopyStatus(
         message(this.locale, 'foundationInspector.copy.success', {
           label: message(this.locale, labelKey),
         }),
       )
     } catch {
-      this.setError('FLOW_CLIPBOARD_WRITE_FAILED', 'copy')
+      if (generation !== this.copyGeneration) return
+      this.setCopyError(
+        message(this.locale, 'foundationInspector.error.copy', {
+          code: 'FLOW_CLIPBOARD_WRITE_FAILED',
+        }),
+      )
     }
+  }
+
+  private clearCopyFeedback(): void {
+    this.elements.copyStatus.textContent = ''
+    this.elements.copyAlert.textContent = ''
+  }
+
+  private setCopyStatus(text: string): void {
+    this.elements.copyStatus.textContent = text
+  }
+
+  private setCopyError(text: string): void {
+    this.elements.copyAlert.textContent = text
   }
 
   private setPending(): void {
@@ -753,9 +773,7 @@ class FoundationInspector implements FoundationInspectorController {
         ? 'foundationInspector.error.stale'
         : kind === 'recovery'
           ? 'foundationInspector.error.recovery'
-          : kind === 'copy'
-            ? 'foundationInspector.error.copy'
-            : 'foundationInspector.error.command'
+          : 'foundationInspector.error.command'
     this.elements.alert.textContent = message(this.locale, key, { code })
     this.elements.status.dataset.state = 'idle'
     this.elements.statusText.textContent = ''
@@ -785,8 +803,8 @@ class FoundationInspector implements FoundationInspectorController {
     this.elements.recover.disabled = !hasSession || !this.hasDurableRecords
     this.elements.copyDocumentId.disabled = !hasSession
     this.elements.copyHash.disabled = !hasSession
-    if (this.busy && this.activeControl !== undefined) {
-      this.activeControl.disabled = true
+    if (this.busy) {
+      for (const control of this.elements.controls) control.disabled = true
     }
   }
 
@@ -913,15 +931,21 @@ function auditRow(
   const timestamp = element('time', 'audit-time', entry.timestamp)
   timestamp.dateTime = entry.timestamp
   row.append(
-    tableCell(timestamp, identity),
-    tableCell(document.createTextNode(`${entry.baseRevision} → ${entry.newRevision}`)),
-    tableCell(
+    auditCell(locale, 0, timestamp, identity),
+    auditCell(
+      locale,
+      1,
+      document.createTextNode(`${entry.baseRevision} → ${entry.newRevision}`),
+    ),
+    auditCell(
+      locale,
+      2,
       document.createTextNode(auditAction(locale, entry)),
       auditMetadata(locale, entry),
     ),
-    tableCell(document.createTextNode(auditModality(locale, entry.modality))),
-    tableCell(document.createTextNode(auditOutcome(locale, entry))),
-    tableCell(document.createTextNode(entry.commandId)),
+    auditCell(locale, 3, document.createTextNode(auditModality(locale, entry.modality))),
+    auditCell(locale, 4, document.createTextNode(auditOutcome(locale, entry))),
+    auditCell(locale, 5, element('span', 'audit-command-id', entry.commandId)),
   )
   return row
 }
@@ -976,9 +1000,19 @@ function auditMetadata(
   )
 }
 
-function tableCell(...children: readonly Node[]): HTMLTableCellElement {
+function auditCell(
+  locale: FoundationInspectorLocale,
+  columnIndex: 0 | 1 | 2 | 3 | 4 | 5,
+  ...children: readonly Node[]
+): HTMLTableCellElement {
+  const column = AUDIT_COLUMNS[columnIndex]
   const cell = document.createElement('td')
-  cell.append(...children)
+  const label = message(locale, column.key)
+  const visibleLabel = element('span', 'audit-cell-label', label)
+  visibleLabel.setAttribute('aria-hidden', 'true')
+  cell.dataset.label = label
+  cell.headers = column.id
+  cell.append(visibleLabel, ...children)
   return cell
 }
 
@@ -1077,8 +1111,40 @@ interface InspectorElements {
   readonly auditEmpty: HTMLElement
   readonly status: HTMLElement
   readonly statusText: HTMLElement
+  readonly copyStatus: HTMLElement
+  readonly copyAlert: HTMLElement
   readonly alert: HTMLElement
 }
+
+const AUDIT_COLUMNS = [
+  {
+    id: 'audit-column-timestamp',
+    key: 'foundationInspector.audit.header.timestamp',
+  },
+  {
+    id: 'audit-column-revision',
+    key: 'foundationInspector.audit.header.revision',
+  },
+  {
+    id: 'audit-column-action',
+    key: 'foundationInspector.audit.header.action',
+  },
+  {
+    id: 'audit-column-source',
+    key: 'foundationInspector.audit.header.source',
+  },
+  {
+    id: 'audit-column-outcome',
+    key: 'foundationInspector.audit.header.outcome',
+  },
+  {
+    id: 'audit-column-command-id',
+    key: 'foundationInspector.audit.header.commandId',
+  },
+] as const satisfies readonly {
+  readonly id: string
+  readonly key: FoundationInspectorMessageKey
+}[]
 
 function createInspectorDom(
   root: HTMLElement,
@@ -1208,6 +1274,17 @@ function createInspectorDom(
   statusMarker.setAttribute('aria-hidden', 'true')
   const statusText = element('span', 'status-text')
   status.append(statusMarker, statusText)
+  const copyFeedback = element('div', 'copy-feedback-region')
+  const copyStatus = element('p', 'copy-feedback-message copy-status')
+  copyStatus.dataset.copyStatus = ''
+  copyStatus.setAttribute('role', 'status')
+  copyStatus.setAttribute('aria-live', 'polite')
+  copyStatus.setAttribute('aria-atomic', 'true')
+  const copyAlert = element('p', 'copy-feedback-message copy-alert')
+  copyAlert.dataset.copyAlert = ''
+  copyAlert.setAttribute('role', 'alert')
+  copyAlert.setAttribute('aria-atomic', 'true')
+  copyFeedback.append(copyStatus, copyAlert)
   const alert = element('p', 'alert-region')
   alert.setAttribute('role', 'alert')
   alert.setAttribute('aria-atomic', 'true')
@@ -1221,6 +1298,7 @@ function createInspectorDom(
     durabilityActions,
     status,
     alert,
+    copyFeedback,
   )
 
   const session = element('section', 'card session-card')
@@ -1332,15 +1410,9 @@ function createInspectorDom(
   )
   const auditHead = document.createElement('thead')
   const auditHeadRow = document.createElement('tr')
-  for (const key of [
-    'foundationInspector.audit.header.timestamp',
-    'foundationInspector.audit.header.revision',
-    'foundationInspector.audit.header.action',
-    'foundationInspector.audit.header.source',
-    'foundationInspector.audit.header.outcome',
-    'foundationInspector.audit.header.commandId',
-  ] as const) {
-    const heading = element('th', '', message(localeCode, key))
+  for (const column of AUDIT_COLUMNS) {
+    const heading = element('th', '', message(localeCode, column.key))
+    heading.id = column.id
     heading.scope = 'col'
     auditHeadRow.append(heading)
   }
@@ -1398,6 +1470,8 @@ function createInspectorDom(
     auditEmpty,
     status,
     statusText,
+    copyStatus,
+    copyAlert,
     alert,
   }
 }

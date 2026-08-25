@@ -1,5 +1,5 @@
 import { page } from 'vitest/browser'
-import { expect, test } from 'vitest'
+import { expect, test, vi } from 'vitest'
 
 import {
   mountFoundationInspector,
@@ -50,7 +50,19 @@ for (const locale of ['uk', 'en'] as const) {
       expect(action(root, 'undo').disabled).toBe(true)
       expect(action(root, 'redo').disabled).toBe(true)
       expect(root.querySelector('[aria-live="polite"][data-durability-status]')).not.toBeNull()
-      expect(root.querySelector('[role="alert"]')).not.toBeNull()
+      const copyStatus = root.querySelector<HTMLElement>('[data-copy-status]')
+      expect(copyStatus?.getAttribute('role')).toBe('status')
+      expect(copyStatus?.getAttribute('aria-live')).toBe('polite')
+      expect(copyStatus?.getAttribute('aria-atomic')).toBe('true')
+      const copyAlert = root.querySelector<HTMLElement>('[data-copy-alert]')
+      expect(copyAlert?.getAttribute('role')).toBe('alert')
+      expect(copyAlert?.getAttribute('aria-atomic')).toBe('true')
+      const lifecycleAlert = root.querySelector<HTMLElement>(
+        '.alert-region[role="alert"]',
+      )
+      expect(lifecycleAlert).not.toBeNull()
+      expect(root.querySelector('[role="alert"]')).toBe(lifecycleAlert)
+      expect(copyAlert).not.toBe(lifecycleAlert)
       expect(root.querySelector('[data-provenance-unavailable]')?.textContent).toMatch(
         copy.unavailableProvenance,
       )
@@ -61,6 +73,14 @@ for (const locale of ['uk', 'en'] as const) {
       expect(focusStyle.outlineStyle).toBe('solid')
       expect(focusStyle.outlineWidth).toBe('3px')
       expect(focusStyle.outlineOffset).toBe('2px')
+      expect(
+        getComputedStyle(action(root, 'open-older-schema')).borderTopColor,
+      ).toBe('rgb(71, 85, 105)')
+      const emptyHeadingStyle = getComputedStyle(
+        requiredElement(root, '[data-empty-document] h3'),
+      )
+      expect(emptyHeadingStyle.fontSize).toBe('20px')
+      expect(emptyHeadingStyle.fontWeight).toBe('600')
       assertTargetSizes(root)
       assertResponsiveColumns(root, width)
       assertNoViewportOverflow(root, width)
@@ -76,14 +96,38 @@ for (const locale of ['uk', 'en'] as const) {
       expect(root.querySelectorAll('[data-audit-row]')).toHaveLength(1)
       expect(root.querySelector('time[datetime]')).not.toBeNull()
       expect(action(root, 'undo').disabled).toBe(true)
+      expect(getComputedStyle(requiredElement(root, '.command-group-heading')).fontSize).toBe(
+        '14px',
+      )
+      assertAuditRecordsFit(root)
 
       const fullDocumentId = root.querySelector<HTMLElement>('[data-full-document-id]')
       const fullHash = root.querySelector<HTMLElement>('[data-full-revision-hash]')
+      const idCopy = root.querySelector<HTMLButtonElement>('[data-copy="document-id"]')
       const hashCopy = root.querySelector<HTMLButtonElement>('[data-copy="revision-hash"]')
       expect(fullDocumentId?.textContent).toBe(created.documentId)
       expect(fullHash?.textContent).toBe(created.hash)
       expect(fullHash?.getAttribute('aria-label')).toBe(created.hash)
       expect(hashCopy?.getAttribute('aria-label')).toContain(created.hash)
+
+      const clipboardWrite = vi
+        .spyOn(navigator.clipboard, 'writeText')
+        .mockResolvedValue(undefined)
+      try {
+        idCopy?.click()
+        await waitUntil(() => copyStatus?.textContent.trim() !== '')
+        expect(clipboardWrite).toHaveBeenCalledWith(created.documentId)
+        assertVisibleFeedback(copyStatus)
+
+        clipboardWrite.mockRejectedValueOnce(new Error('clipboard denied'))
+        hashCopy?.click()
+        await waitUntil(() => copyAlert?.textContent.includes('FLOW_CLIPBOARD_WRITE_FAILED') === true)
+        expect(copyStatus?.textContent).toBe('')
+        assertVisibleFeedback(copyAlert)
+        expect(lifecycleAlert?.hidden).toBe(true)
+      } finally {
+        clipboardWrite.mockRestore()
+      }
 
       await clickAndWait(inspector, root, 'apply-mutation')
       await clickAndWait(inspector, root, 'apply-mutation')
@@ -173,7 +217,7 @@ for (const locale of ['uk', 'en'] as const) {
         action: { type: 'command', commandKind: 'insertText' },
         outcome: { kind: 'failure', code: 'staleRevision' },
       })
-      expect(root.querySelector('[role="alert"]')?.textContent).toContain(
+      expect(root.querySelector('.alert-region[role="alert"]')?.textContent).toContain(
         'FLOW_STALE_REVISION',
       )
       expect(document.activeElement).toBe(action(root, 'stale-command'))
@@ -202,6 +246,7 @@ for (const locale of ['uk', 'en'] as const) {
       assertMinimumTextSize(root)
       assertResponsiveColumns(root, width)
       assertNoViewportOverflow(root, width)
+      assertAuditRecordsFit(root)
     })
   }
 }
@@ -219,6 +264,14 @@ async function clickAndWait(
 ): Promise<void> {
   action(root, name).click()
   await inspector.whenIdle()
+}
+
+async function waitUntil(predicate: () => boolean): Promise<void> {
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    if (predicate()) return
+    await new Promise((resolve) => setTimeout(resolve, 0))
+  }
+  throw new Error('condition was not reached')
 }
 
 function focusableControlOrder(root: HTMLElement): string[] {
@@ -239,6 +292,18 @@ function assertTargetSizes(root: HTMLElement): void {
     expect(bounds.height).toBeGreaterThanOrEqual(44)
     expect(accessibleName(control)).not.toBe('')
   }
+}
+
+function assertVisibleFeedback(node: HTMLElement | null): void {
+  expect(node?.textContent.trim()).not.toBe('')
+  if (node === null) throw new Error('missing copy feedback')
+  const style = getComputedStyle(node)
+  expect(style.display).not.toBe('none')
+  expect(style.visibility).toBe('visible')
+  expect(Number.parseFloat(style.opacity)).toBeGreaterThan(0)
+  const bounds = node.getBoundingClientRect()
+  expect(bounds.width).toBeGreaterThan(0)
+  expect(bounds.height).toBeGreaterThan(0)
 }
 
 function assertMinimumTextSize(root: HTMLElement): void {
@@ -267,6 +332,24 @@ function assertNoViewportOverflow(root: HTMLElement, width: number): void {
     const bounds = node.getBoundingClientRect()
     expect(bounds.left).toBeGreaterThanOrEqual(0)
     expect(bounds.right).toBeLessThanOrEqual(width)
+  }
+}
+
+function assertAuditRecordsFit(root: HTMLElement): void {
+  const wrapper = requiredElement(root, '.audit-table-wrapper')
+  expect(wrapper.scrollWidth).toBeLessThanOrEqual(wrapper.clientWidth)
+  const headingIds = new Set(
+    [...root.querySelectorAll<HTMLElement>('table[data-audit] th[scope="col"]')].map(
+      ({ id }) => id,
+    ),
+  )
+  for (const row of root.querySelectorAll<HTMLElement>('[data-audit-row]')) {
+    const cells = [...row.querySelectorAll<HTMLTableCellElement>('td')]
+    expect(cells).toHaveLength(6)
+    for (const cell of cells) {
+      expect(cell.dataset.label?.trim()).not.toBe('')
+      expect(headingIds.has(cell.headers)).toBe(true)
+    }
   }
 }
 

@@ -9,7 +9,10 @@
   </head>
   <body>
     <div id="app"></div>
-    <noscript>Для локальної перевірки FlowPDF потрібен JavaScript.</noscript>
+    <!-- Static Ukrainian fallback is intentional: runtime localization requires JavaScript. -->
+    <noscript data-i18n-fallback="foundationInspector.noscript"
+      >Для локальної перевірки FlowPDF потрібен JavaScript.</noscript
+    >
     <script type="module" src="/src/main.js"></script>
   </body>
 </html>
