@@ -1,6 +1,6 @@
 ---
 phase: FLOWPDF-01-durable-flow-foundation
-reviewed: 2026-08-25T08:39:19Z
+reviewed: 2026-08-25T08:49:59Z
 depth: standard
 files_reviewed: 64
 files_reviewed_list:
@@ -74,16 +74,16 @@ findings:
   info: 0
   total: 0
 status: clean
-reviewed_commit: 71c7c05
+reviewed_commit: f9d1e19
 ---
 
 # Phase FLOWPDF-01: Code Review Report
 
-**Reviewed:** 2026-08-25T08:39:19Z
+**Reviewed:** 2026-08-25T08:49:59Z
 **Depth:** standard
 **Files Reviewed:** 64
 **Status:** clean
-**Reviewed Commit:** `71c7c05`
+**Reviewed Commit:** `f9d1e19`
 
 ## Summary
 
@@ -125,9 +125,11 @@ The Nyquist audit found one split-test gap: non-empty asset bytes had not crosse
 
 The UI audit then identified misleading busy controls, narrow-inspector audit clipping, untokenized/low-contrast control boundaries, and smaller localization, typography, spacing, and status-semantics inconsistencies. Commit `71c7c05` resolves them with truthful busy availability, labelled stacked audit records that retain native table/header semantics, semantic color tokens, localized runtime/no-JavaScript copy, visible isolated clipboard feedback, and a generation guard against out-of-order clipboard completion. The first full rerun exposed a DOM-order regression in the new copy alert; it was corrected before commit, and the unchanged walking-skeleton/recovery browser scenarios passed. An independent exact-diff rereview finished clean after focused type, inspector, and accessibility checks.
 
+The final visual re-audit found three advisory polish gaps. Commit `f9d1e19` gives copy success natural noun-based Ukrainian/English wording, collapses the zero-row audit frame while restoring the same semantic table when populated, and dynamically places the single guarded feedback channel beside the invoking ID/hash control with bounded mobile scrolling. Real-browser geometry assertions cover the 320px viewport, and a second independent exact-diff review found no remaining actionable issue.
+
 ## Verification Evidence
 
-- `npm run check` passed end to end in 20.46 seconds after the asset tracer and final UI remediation.
+- `npm run check` passed end to end in 21.07 seconds after the asset tracer and final UI remediation.
 - Exact dependency coverage passed for 67 Cargo packages and 83 npm packages, including live provenance validation.
 - Node regression tests: 7 passed.
 - Phase boundary contract tests: 8 passed.

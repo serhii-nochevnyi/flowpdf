@@ -9,7 +9,7 @@ source:
   - 01-05-SUMMARY.md
   - 01-06-SUMMARY.md
 started: 2026-08-25T07:54:08Z
-updated: 2026-08-25T08:39:19Z
+updated: 2026-08-25T08:49:59Z
 ---
 
 ## Current Test
@@ -191,7 +191,7 @@ expected: One command verifies dependency locks, boundaries, formatting, Clippy,
 result: pass
 source: automated
 coverage_id: 01-06:D7
-evidence: The final `npm run check` completed successfully in 20.46 seconds.
+evidence: The final `npm run check` completed successfully in 21.07 seconds.
 
 ### 26. Honest PDF provenance boundary
 expected: The inspector does not imply that Phase 1 lineage proves a PDF preview or export that does not yet exist.
@@ -211,7 +211,7 @@ evidence: After a full reload, “Відкрити останній локаль
 - Fixed focus restoration when a completed undo/redo command disables the initiating button; fallback behavior is covered for both directions, hidden controls, and the error path.
 - Fixed audit ordering for same-revision recovery events by using timestamp before stable audit identity; revision, timestamp, and identity tie-breaks are covered.
 - Added a real-Chromium tracer that migrates, commits, cold-reopens, and queries exact non-empty asset bytes through IndexedDB and the Rust/WASM boundary.
-- Remediated the UI audit with truthful busy controls, non-clipping semantic audit records, localized fallbacks, tokenized accessible colors, and isolated visible clipboard feedback guarded against out-of-order completion.
+- Remediated the UI audit with truthful busy controls, non-clipping semantic audit records, localized fallbacks, tokenized accessible colors, collapsed zero-audit framing, and natural visible clipboard feedback placed beside the invoking mobile control and guarded against out-of-order completion.
 - Re-ran the complete Phase 1 gate after all repairs and obtained a clean pass.
 
 ## Summary
