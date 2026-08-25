@@ -265,11 +265,16 @@ class FoundationInspector implements FoundationInspectorController {
     this.elements.copyDocumentId.addEventListener('click', () => {
       void this.copyValue(
         this.view?.documentId,
-        'foundationInspector.copy.documentId.visible',
+        'foundationInspector.copy.documentId.noun',
+        this.elements.copyDocumentId,
       )
     })
     this.elements.copyHash.addEventListener('click', () => {
-      void this.copyValue(this.view?.canonicalHash, 'foundationInspector.copy.hash.visible')
+      void this.copyValue(
+        this.view?.canonicalHash,
+        'foundationInspector.copy.hash.noun',
+        this.elements.copyHash,
+      )
     })
     root.addEventListener('keydown', (event) => this.handleKeyboard(event))
     this.render()
@@ -715,19 +720,21 @@ class FoundationInspector implements FoundationInspectorController {
 
   private async copyValue(
     value: string | undefined,
-    labelKey:
-      | 'foundationInspector.copy.documentId.visible'
-      | 'foundationInspector.copy.hash.visible',
+    nounKey:
+      | 'foundationInspector.copy.documentId.noun'
+      | 'foundationInspector.copy.hash.noun',
+    control: HTMLButtonElement,
   ): Promise<void> {
     if (value === undefined) return
     const generation = ++this.copyGeneration
+    this.placeCopyFeedback(control)
     this.clearCopyFeedback()
     try {
       await navigator.clipboard.writeText(value)
       if (generation !== this.copyGeneration) return
       this.setCopyStatus(
         message(this.locale, 'foundationInspector.copy.success', {
-          label: message(this.locale, labelKey),
+          item: message(this.locale, nounKey),
         }),
       )
     } catch {
@@ -745,12 +752,26 @@ class FoundationInspector implements FoundationInspectorController {
     this.elements.copyAlert.textContent = ''
   }
 
+  private placeCopyFeedback(control: HTMLButtonElement): void {
+    const definition = control.closest<HTMLElement>('.copy-definition')
+    if (definition === null) return
+    definition.append(this.elements.copyFeedback)
+    this.elements.copyFeedback.dataset.copyTarget = control.dataset.copy ?? ''
+  }
+
   private setCopyStatus(text: string): void {
     this.elements.copyStatus.textContent = text
+    this.keepCopyFeedbackVisible()
   }
 
   private setCopyError(text: string): void {
     this.elements.copyAlert.textContent = text
+    this.keepCopyFeedbackVisible()
+  }
+
+  private keepCopyFeedbackVisible(): void {
+    if (window.innerWidth > 479) return
+    this.elements.copyFeedback.scrollIntoView({ block: 'nearest', inline: 'nearest' })
   }
 
   private setPending(): void {
@@ -810,6 +831,7 @@ class FoundationInspector implements FoundationInspectorController {
 
   private render(): void {
     const populated = this.view !== undefined
+    const auditCount = this.view?.audit.length ?? 0
     this.elements.empty.hidden = populated
     this.elements.session.hidden = !populated
     this.elements.create.hidden = populated
@@ -820,7 +842,8 @@ class FoundationInspector implements FoundationInspectorController {
     this.elements.historyActions.hidden = !populated
     this.elements.durabilityActions.hidden = !populated
     for (const control of this.elements.sessionControls) control.hidden = !populated
-    this.elements.auditEmpty.hidden = populated && this.view?.audit.length !== 0
+    this.elements.auditEmpty.hidden = auditCount !== 0
+    this.elements.auditWrapper.hidden = auditCount === 0
     this.elements.provenanceUnavailable.hidden = false
     this.updateControlAvailability()
 
@@ -1107,12 +1130,14 @@ interface InspectorElements {
   readonly provenanceUnavailable: HTMLElement
   readonly lastCommand: HTMLElement
   readonly auditBody: HTMLTableSectionElement
+  readonly auditWrapper: HTMLElement
   readonly auditCount: HTMLElement
   readonly auditEmpty: HTMLElement
   readonly status: HTMLElement
   readonly statusText: HTMLElement
   readonly copyStatus: HTMLElement
   readonly copyAlert: HTMLElement
+  readonly copyFeedback: HTMLElement
   readonly alert: HTMLElement
 }
 
@@ -1275,6 +1300,7 @@ function createInspectorDom(
   const statusText = element('span', 'status-text')
   status.append(statusMarker, statusText)
   const copyFeedback = element('div', 'copy-feedback-region')
+  copyFeedback.dataset.copyFeedback = ''
   const copyStatus = element('p', 'copy-feedback-message copy-status')
   copyStatus.dataset.copyStatus = ''
   copyStatus.setAttribute('role', 'status')
@@ -1400,6 +1426,7 @@ function createInspectorDom(
   )
   auditEmpty.dataset.auditEmpty = ''
   const auditWrapper = element('div', 'audit-table-wrapper')
+  auditWrapper.hidden = true
   const audit = document.createElement('table')
   audit.className = 'audit-table'
   audit.dataset.audit = ''
@@ -1466,12 +1493,14 @@ function createInspectorDom(
     provenanceUnavailable,
     lastCommand,
     auditBody,
+    auditWrapper,
     auditCount,
     auditEmpty,
     status,
     statusText,
     copyStatus,
     copyAlert,
+    copyFeedback,
     alert,
   }
 }

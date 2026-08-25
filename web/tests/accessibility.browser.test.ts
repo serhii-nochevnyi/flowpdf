@@ -12,6 +12,8 @@ interface LocaleExpectation {
   readonly create: string
   readonly inspector: string
   readonly unavailableProvenance: RegExp
+  readonly documentIdCopied: string
+  readonly hashCopied: string
 }
 
 const localeExpectations: Readonly<Record<FoundationInspectorLocale, LocaleExpectation>> = {
@@ -19,11 +21,15 @@ const localeExpectations: Readonly<Record<FoundationInspectorLocale, LocaleExpec
     create: 'Створити тестовий документ',
     inspector: 'Інспектор документа',
     unavailableProvenance: /наступній фазі/i,
+    documentIdCopied: 'Скопійовано ID документа.',
+    hashCopied: 'Скопійовано хеш ревізії.',
   },
   en: {
     create: 'Create sample document',
     inspector: 'Document inspector',
     unavailableProvenance: /next phase/i,
+    documentIdCopied: 'Document ID copied.',
+    hashCopied: 'Revision hash copied.',
   },
 }
 
@@ -51,6 +57,7 @@ for (const locale of ['uk', 'en'] as const) {
       expect(action(root, 'redo').disabled).toBe(true)
       expect(root.querySelector('[aria-live="polite"][data-durability-status]')).not.toBeNull()
       const copyStatus = root.querySelector<HTMLElement>('[data-copy-status]')
+      const copyFeedback = root.querySelector<HTMLElement>('[data-copy-feedback]')
       expect(copyStatus?.getAttribute('role')).toBe('status')
       expect(copyStatus?.getAttribute('aria-live')).toBe('polite')
       expect(copyStatus?.getAttribute('aria-atomic')).toBe('true')
@@ -63,6 +70,12 @@ for (const locale of ['uk', 'en'] as const) {
       expect(lifecycleAlert).not.toBeNull()
       expect(root.querySelector('[role="alert"]')).toBe(lifecycleAlert)
       expect(copyAlert).not.toBe(lifecycleAlert)
+      expect(root.querySelectorAll('[data-copy-status]')).toHaveLength(1)
+      expect(root.querySelectorAll('[data-copy-alert]')).toHaveLength(1)
+      const emptyAuditFrame = requiredElement(root, '.audit-table-wrapper')
+      expect(emptyAuditFrame.hidden).toBe(true)
+      expect(getComputedStyle(emptyAuditFrame).display).toBe('none')
+      expect(emptyAuditFrame.getBoundingClientRect().height).toBe(0)
       expect(root.querySelector('[data-provenance-unavailable]')?.textContent).toMatch(
         copy.unavailableProvenance,
       )
@@ -94,6 +107,7 @@ for (const locale of ['uk', 'en'] as const) {
       )
       expect(root.querySelectorAll('table[data-audit] th[scope="col"]')).toHaveLength(6)
       expect(root.querySelectorAll('[data-audit-row]')).toHaveLength(1)
+      expect(emptyAuditFrame.hidden).toBe(false)
       expect(root.querySelector('time[datetime]')).not.toBeNull()
       expect(action(root, 'undo').disabled).toBe(true)
       expect(getComputedStyle(requiredElement(root, '.command-group-heading')).fontSize).toBe(
@@ -114,10 +128,21 @@ for (const locale of ['uk', 'en'] as const) {
         .spyOn(navigator.clipboard, 'writeText')
         .mockResolvedValue(undefined)
       try {
-        idCopy?.click()
+        const copyControl = width === 320 ? hashCopy : idCopy
+        const copiedValue = width === 320 ? created.hash : created.documentId
+        const copiedMessage = width === 320 ? copy.hashCopied : copy.documentIdCopied
+        copyControl?.scrollIntoView({
+          block: width === 320 ? 'end' : 'center',
+          inline: 'nearest',
+        })
+        copyControl?.click()
         await waitUntil(() => copyStatus?.textContent.trim() !== '')
-        expect(clipboardWrite).toHaveBeenCalledWith(created.documentId)
+        expect(clipboardWrite).toHaveBeenCalledWith(copiedValue)
+        expect(copyStatus?.textContent).toBe(copiedMessage)
+        expect(copyFeedback?.parentElement).toBe(copyControl?.parentElement)
+        expect(copyFeedback?.dataset.copyTarget).toBe(copyControl?.dataset.copy)
         assertVisibleFeedback(copyStatus)
+        if (width === 320) assertIntersectsViewport(copyStatus)
 
         clipboardWrite.mockRejectedValueOnce(new Error('clipboard denied'))
         hashCopy?.click()
@@ -304,6 +329,15 @@ function assertVisibleFeedback(node: HTMLElement | null): void {
   const bounds = node.getBoundingClientRect()
   expect(bounds.width).toBeGreaterThan(0)
   expect(bounds.height).toBeGreaterThan(0)
+}
+
+function assertIntersectsViewport(node: HTMLElement | null): void {
+  if (node === null) throw new Error('missing mobile copy feedback')
+  const bounds = node.getBoundingClientRect()
+  expect(bounds.right).toBeGreaterThan(0)
+  expect(bounds.left).toBeLessThan(window.innerWidth)
+  expect(bounds.bottom).toBeGreaterThan(0)
+  expect(bounds.top).toBeLessThan(window.innerHeight)
 }
 
 function assertMinimumTextSize(root: HTMLElement): void {

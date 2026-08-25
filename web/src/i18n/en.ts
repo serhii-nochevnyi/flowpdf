@@ -46,7 +46,7 @@ export const foundationInspectorEn = {
   'foundationInspector.save.success': 'Saved locally — revision {revision}.',
   'foundationInspector.reload.success': 'Reloaded local revision {revision}.',
   'foundationInspector.recover.success': 'Recovered durable revision {revision}.',
-  'foundationInspector.copy.success': 'Copied {label}.',
+  'foundationInspector.copy.success': '{item} copied.',
   'foundationInspector.error.command':
     'The command was not completed. Data was not changed. Check code {code} and retry from the current revision.',
   'foundationInspector.error.stale':
@@ -74,8 +74,10 @@ export const foundationInspectorEn = {
   'foundationInspector.durable.verified': 'Verified from storage',
   'foundationInspector.value.unavailable': '—',
   'foundationInspector.copy.documentId.visible': 'Copy ID',
+  'foundationInspector.copy.documentId.noun': 'Document ID',
   'foundationInspector.copy.documentId.label': 'Copy full document ID {value}',
   'foundationInspector.copy.hash.visible': 'Copy hash',
+  'foundationInspector.copy.hash.noun': 'Revision hash',
   'foundationInspector.copy.hash.label': 'Copy full revision hash {value}',
   'foundationInspector.audit.header.timestamp': 'Time',
   'foundationInspector.audit.header.revision': 'Revision',

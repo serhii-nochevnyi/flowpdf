@@ -245,6 +245,10 @@ a:focus-visible {
   margin-top: 8px;
 }
 
+.copy-definition .copy-feedback-region {
+  grid-column: 1 / -1;
+}
+
 .copy-feedback-message {
   grid-area: 1 / 1;
   margin: 0;

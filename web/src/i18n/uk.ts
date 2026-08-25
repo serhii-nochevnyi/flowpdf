@@ -44,7 +44,7 @@ export const foundationInspectorUk = {
   'foundationInspector.save.success': 'Збережено локально — ревізія {revision}.',
   'foundationInspector.reload.success': 'Перезавантажено локальну ревізію {revision}.',
   'foundationInspector.recover.success': 'Відновлено стійку ревізію {revision}.',
-  'foundationInspector.copy.success': 'Скопійовано {label}.',
+  'foundationInspector.copy.success': 'Скопійовано {item}.',
   'foundationInspector.error.command':
     'Команду не виконано. Дані не змінено. Перевірте код {code} і повторіть дію з поточної ревізії.',
   'foundationInspector.error.stale':
@@ -72,8 +72,10 @@ export const foundationInspectorUk = {
   'foundationInspector.durable.verified': 'Перевірено зі сховища',
   'foundationInspector.value.unavailable': '—',
   'foundationInspector.copy.documentId.visible': 'Копіювати ID',
+  'foundationInspector.copy.documentId.noun': 'ID документа',
   'foundationInspector.copy.documentId.label': 'Скопіювати повний ID документа {value}',
   'foundationInspector.copy.hash.visible': 'Копіювати хеш',
+  'foundationInspector.copy.hash.noun': 'хеш ревізії',
   'foundationInspector.copy.hash.label': 'Скопіювати повний хеш ревізії {value}',
   'foundationInspector.audit.header.timestamp': 'Час',
   'foundationInspector.audit.header.revision': 'Ревізія',

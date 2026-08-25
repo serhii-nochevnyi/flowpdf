@@ -75,6 +75,14 @@ describe('Foundation Inspector approved contract', () => {
     expect(
       localization.foundationInspectorMessages.en['foundationInspector.documentTitle'],
     ).toBe('FlowPDF — Foundation Inspector')
+    expect(
+      localization.foundationInspectorMessages.uk[
+        'foundationInspector.copy.documentId.noun'
+      ],
+    ).toBe('ID документа')
+    expect(
+      localization.foundationInspectorMessages.en['foundationInspector.copy.hash.noun'],
+    ).toBe('Revision hash')
 
     const root = rootFixture()
     const inspector = await mountWithOptions(root, {
@@ -134,12 +142,14 @@ describe('Foundation Inspector approved contract', () => {
     expect(root.querySelector('aside[aria-label="Інспектор документа"]')).not.toBeNull()
     expect(root.querySelector<HTMLElement>('[data-audit-empty]')?.hidden).toBe(false)
     expect(root.querySelector('[data-audit-count]')?.textContent).toContain('0')
+    expect(root.querySelector<HTMLElement>('.audit-table-wrapper')?.hidden).toBe(true)
 
     await clickAndWait(inspector, root, 'create-sample')
     expect(inspector.snapshot().locale).toBe('uk-UA')
 
     const auditTable = root.querySelector<HTMLTableElement>('table[data-audit]')
     expect(auditTable).not.toBeNull()
+    expect(root.querySelector<HTMLElement>('.audit-table-wrapper')?.hidden).toBe(false)
     expect(auditTable?.querySelectorAll('th[scope="col"]')).toHaveLength(6)
     expect(auditTable?.querySelectorAll('tbody tr[data-audit-row]')).toHaveLength(1)
     expect(auditTable?.querySelectorAll('tbody td[data-label][headers]')).toHaveLength(6)
@@ -332,7 +342,7 @@ describe('Foundation Inspector approved contract', () => {
       expect(operationCompletion).toContain('Команду виконано')
 
       releaseClipboard()
-      await waitUntil(() => copyStatus?.textContent.includes('Скопійовано') === true)
+      await waitUntil(() => copyStatus?.textContent === 'Скопійовано ID документа.')
       expect(lifecycleStatus?.textContent).toBe(operationCompletion)
       expect(copyStatus?.getAttribute('role')).toBe('status')
       expect(copyStatus?.getAttribute('aria-live')).toBe('polite')
