@@ -1,6 +1,6 @@
 ---
 phase: FLOWPDF-01-durable-flow-foundation
-reviewed: 2026-08-25T08:00:46Z
+reviewed: 2026-08-25T08:39:19Z
 depth: standard
 files_reviewed: 64
 files_reviewed_list:
@@ -74,20 +74,20 @@ findings:
   info: 0
   total: 0
 status: clean
-reviewed_commit: 9e76093
+reviewed_commit: 71c7c05
 ---
 
 # Phase FLOWPDF-01: Code Review Report
 
-**Reviewed:** 2026-08-25T08:00:46Z
+**Reviewed:** 2026-08-25T08:39:19Z
 **Depth:** standard
 **Files Reviewed:** 64
 **Status:** clean
-**Reviewed Commit:** `9e76093`
+**Reviewed Commit:** `71c7c05`
 
 ## Summary
 
-Phase 1 is clean at the reviewed commit. The convergence pass rechecked the complete original scope, every file changed by the fix iterations, the two UAT-discovered repairs, and the relevant cross-module boundaries. No unresolved critical, warning, or informational findings remain.
+Phase 1 is clean at the reviewed commit. The convergence pass rechecked the complete original scope, every file changed by the fix iterations, the two UAT-discovered repairs, the Nyquist asset tracer, the final UI-audit remediation, and the relevant cross-module boundaries. No unresolved critical, warning, or informational findings remain.
 
 The first fix pass resolved 24 of 28 findings. The second pass resolved the remaining four original findings, four incomplete fixes, and seven newly exposed boundary findings. A final adversarial rereview additionally found and closed a direct native standalone-audit identity bypass before this clean report was issued.
 
@@ -119,25 +119,31 @@ The final rereview found that a caller could still submit an otherwise valid ori
 
 The built-page UAT exposed two additional edge cases after the original convergence commit. Audit events sharing a durable sequence and revision now use timestamp before stable identity, so the inspector presents them chronologically (`91a261d`). When an undo/redo/create command disables or hides its initiating control, focus now moves to the nearest meaningful enabled control instead of falling to the document body (`9e76093`). Regression tests cover revision/timestamp/identity ordering, both history fallback directions, hidden-control fallback, and the failure path. An independent focused rereview found no remaining actionable issue.
 
+## Final Validation and UI Remediation
+
+The Nyquist audit found one split-test gap: non-empty asset bytes had not crossed the entire migration, atomic IndexedDB commit, cold-remount, and Rust/WASM query path in one real-browser scenario. Commit `91bb923` adds that tracer with exact non-empty bytes and a verified BLAKE3 digest.
+
+The UI audit then identified misleading busy controls, narrow-inspector audit clipping, untokenized/low-contrast control boundaries, and smaller localization, typography, spacing, and status-semantics inconsistencies. Commit `71c7c05` resolves them with truthful busy availability, labelled stacked audit records that retain native table/header semantics, semantic color tokens, localized runtime/no-JavaScript copy, visible isolated clipboard feedback, and a generation guard against out-of-order clipboard completion. The first full rerun exposed a DOM-order regression in the new copy alert; it was corrected before commit, and the unchanged walking-skeleton/recovery browser scenarios passed. An independent exact-diff rereview finished clean after focused type, inspector, and accessibility checks.
+
 ## Verification Evidence
 
-- `npm run check` passed end to end in 21.26 seconds after the post-review UAT repairs.
+- `npm run check` passed end to end in 20.46 seconds after the asset tracer and final UI remediation.
 - Exact dependency coverage passed for 67 Cargo packages and 83 npm packages, including live provenance validation.
 - Node regression tests: 7 passed.
 - Phase boundary contract tests: 8 passed.
 - Rust: formatting and workspace Clippy with warnings denied passed; 78 tests passed across unit, integration, property, recovery, migration, provenance, audit, and benchmark targets.
 - TypeScript type checking and WASM target/build passed.
-- Unit/inspector tests: 27 passed.
-- Accessibility browser tests: 4 passed; full Chromium browser tests: 13 passed.
+- Unit/inspector tests: 29 passed.
+- Accessibility browser tests: 4 passed; full Chromium browser tests: 14 passed.
 - Canonical and migration deterministic replay each passed twice.
 - Recovery benchmark evidence passed with 200 page equivalents, 1,000 transactions, p50 484.121791 ms, and p95 505.361541 ms against a 2,000 ms target.
 - The benchmark artifact is bound to a 16-file source manifest with digest `sha256:5a050bcfd1688e8a1fc5dd5d8fb7a07cbf9d36c7cc571ac40eea6750375cd93f` and its validator rejected eight adversarial cases.
 
 ## Conclusion
 
-No known review finding remains in the Phase 1 scope. The durable model, recovery boundary, browser persistence adapter, audit derivation, provenance gate, WASM tool verification, and phase boundary checks are suitable to proceed to formal phase verification.
+No known review finding remains in the Phase 1 scope. The durable model, recovery boundary, browser persistence adapter, audit derivation, provenance gate, WASM tool verification, UI contract, and phase boundary checks are suitable to proceed to formal phase verification.
 
 ---
 
-_Reviewer: Codex (inline convergence plus independent focused UAT-fix rereview)_
+_Reviewer: Codex (inline convergence plus independent focused UAT/UI rereviews)_
 _Depth: standard_
