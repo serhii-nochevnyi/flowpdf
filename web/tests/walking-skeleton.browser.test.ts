@@ -1,9 +1,58 @@
 import { expect, test } from 'vitest'
 
+import init, {
+  create_sample,
+  migrate_document,
+  query_document,
+} from '../generated/flow_wasm.js'
+import {
+  IndexedDbDocumentStore,
+  type MigrationPersistenceCommitDto,
+} from '../persistence/indexeddb-store'
 import {
   mountFoundationInspector,
   type FoundationInspectorController,
 } from '../src/foundation-inspector'
+
+const NON_EMPTY_ASSET_BYTES = [97, 98, 99] as const
+const NON_EMPTY_ASSET_HASH =
+  'blake3:6437b3ac38465133ffb63b75273a8db548c558465d79db03fd359c6cd5bd9d85'
+
+interface ApiResponse<T> {
+  readonly ok: boolean
+  readonly value: T | null
+  readonly error: { readonly code: string } | null
+}
+
+interface CanonicalAssetDescriptor {
+  readonly contentHash: string
+  readonly byteLength: number
+}
+
+interface CanonicalFixture {
+  readonly schemaVersion: number
+  readonly assets: readonly CanonicalAssetDescriptor[]
+  readonly provenance: unknown
+  readonly [key: string]: unknown
+}
+
+interface MigrationResultDto {
+  readonly canonicalJson: string
+  readonly canonicalHash: string
+  readonly commit: MigrationPersistenceCommitDto | null
+}
+
+interface RecoverResultDto {
+  readonly session: {
+    readonly canonicalJson: string
+    readonly canonicalHash: string
+    readonly documentId: string
+    readonly revision: number
+  }
+  readonly view: {
+    readonly assetCount: number
+  }
+}
 
 interface MountOptionsContract {
   readonly databaseName: string
@@ -27,6 +76,14 @@ async function clickAndWait(
 ): Promise<void> {
   action(root, name).click()
   await inspector.whenIdle()
+}
+
+function unwrap<T>(response: unknown): T {
+  const typed = response as ApiResponse<T>
+  expect(typed.ok, typed.error?.code).toBe(true)
+  expect(typed.value).not.toBeNull()
+  if (typed.value === null) throw new Error(typed.error?.code ?? 'missing WASM value')
+  return typed.value
 }
 
 test('walking-skeleton: completes conflict, undo/redo, save, reload, and recovery through real WASM and IndexedDB', async () => {
@@ -148,4 +205,88 @@ test('walking-skeleton: opens the supported older fixture through Rust migration
   expect(reopened.revisionProvenance).toEqual(migrated.revisionProvenance)
   expect(reopened.audit).toHaveLength(migrated.audit.length + 1)
   expect(reopened.audit.some(({ action }) => action.type === 'recovery')).toBe(true)
+})
+
+test('walking-skeleton: preserves a validated non-empty asset through atomic migration commit and cold reopen', async () => {
+  await init()
+
+  const created = unwrap<{
+    readonly session: { readonly canonicalJson: string }
+  }>(
+    create_sample({
+      requestedLocale: 'uk-UA',
+      issuedAt: '2026-08-14T00:00:00Z',
+    }),
+  )
+  const current = JSON.parse(created.session.canonicalJson) as CanonicalFixture
+  const sourceDescriptor = current.assets[0]
+  if (sourceDescriptor === undefined) throw new Error('sample asset descriptor is required')
+
+  const olderFixture = JSON.stringify({
+    ...current,
+    schemaVersion: 0,
+    assets: [
+      {
+        ...sourceDescriptor,
+        contentHash: NON_EMPTY_ASSET_HASH,
+        byteLength: NON_EMPTY_ASSET_BYTES.length,
+      },
+    ],
+    provenance: { createdAt: '2026-08-14T00:00:00Z' },
+  })
+  const migrated = unwrap<MigrationResultDto>(
+    migrate_document({
+      canonicalJson: olderFixture,
+      migrationId: '00000000-0000-4000-8000-000000009903',
+      issuedAt: '2026-08-14T21:00:00Z',
+      assets: [
+        {
+          recordFormatVersion: 1,
+          contentHash: NON_EMPTY_ASSET_HASH,
+          bytes: NON_EMPTY_ASSET_BYTES,
+        },
+      ],
+    }),
+  )
+  expect(migrated.commit).not.toBeNull()
+  if (migrated.commit === null) throw new Error('migration commit is required')
+
+  const migratedDocument = JSON.parse(migrated.canonicalJson) as CanonicalFixture
+  expect(migratedDocument.assets).toEqual([
+    expect.objectContaining({
+      contentHash: NON_EMPTY_ASSET_HASH,
+      byteLength: NON_EMPTY_ASSET_BYTES.length,
+    }),
+  ])
+
+  const databaseName = 'flowpdf-non-empty-asset-browser-test'
+  const initialStore = new IndexedDbDocumentStore(databaseName)
+  await initialStore.commitMigration(migrated.commit)
+
+  const reconstructedRoot = document.createElement('div')
+  document.body.replaceChildren(reconstructedRoot)
+  const reconstructed = await mountWithOptions(reconstructedRoot, { databaseName })
+  const reopened = await reconstructed.reloadFromStorage()
+  expect(reopened.revision).toBe(migrated.commit.snapshot.revision)
+  expect(reopened.hash).toBe(migrated.canonicalHash)
+  expect(reopened.assetCount).toBe(1)
+
+  const reconstructedStore = new IndexedDbDocumentStore(databaseName)
+  const records = await reconstructedStore.loadRecords()
+  expect(records.assets).toEqual([
+    {
+      recordFormatVersion: 1,
+      contentHash: NON_EMPTY_ASSET_HASH,
+      bytes: NON_EMPTY_ASSET_BYTES,
+    },
+  ])
+
+  const queried = unwrap<RecoverResultDto>(query_document(records))
+  expect(queried.session.documentId).toBe(migrated.commit.snapshot.documentId)
+  expect(queried.session.revision).toBe(migrated.commit.snapshot.revision)
+  expect(queried.session.canonicalHash).toBe(migrated.canonicalHash)
+  expect(queried.view.assetCount).toBe(1)
+  expect((JSON.parse(queried.session.canonicalJson) as CanonicalFixture).assets).toEqual(
+    migratedDocument.assets,
+  )
 })
