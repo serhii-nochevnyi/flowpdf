@@ -327,7 +327,7 @@ class FoundationInspector implements FoundationInspectorController {
     if (this.busy || control.disabled) return
     this.activeControl = control
     this.pending = operation()
-      .then(() => control.focus())
+      .then(() => this.restoreFocus(control))
       .catch(async (error: unknown) => {
         this.setBusy(true)
         let presentedError = error
@@ -338,9 +338,37 @@ class FoundationInspector implements FoundationInspectorController {
         } finally {
           this.setBusy(false)
           this.setError(errorCode(presentedError), errorKind)
-          control.focus()
+          this.restoreFocus(control)
         }
       })
+  }
+
+  private restoreFocus(control: HTMLButtonElement): void {
+    const historyFallback =
+      control === this.elements.redo
+        ? this.elements.undo
+        : control === this.elements.undo
+          ? this.elements.redo
+          : undefined
+    const candidates = [
+      control,
+      historyFallback,
+      this.elements.apply,
+      this.elements.stale,
+      this.elements.undo,
+      this.elements.redo,
+      this.elements.save,
+      this.elements.reload,
+      this.elements.recover,
+      this.elements.create,
+      this.elements.openLast,
+      this.elements.openOlder,
+    ]
+    const target = candidates.find(
+      (candidate): candidate is HTMLButtonElement =>
+        candidate !== undefined && !candidate.hidden && !candidate.disabled,
+    )
+    target?.focus()
   }
 
   private async createSample(): Promise<void> {

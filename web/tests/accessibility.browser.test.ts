@@ -67,6 +67,7 @@ for (const locale of ['uk', 'en'] as const) {
 
       await clickAndWait(inspector, root, 'create-sample')
       const created = inspector.snapshot()
+      expect(document.activeElement).toBe(action(root, 'apply-mutation'))
       expect(root.querySelector('[data-durability-status]')?.textContent).not.toBe('')
       expect(root.querySelector('[data-audit-count]')?.getAttribute('aria-live')).toBe(
         'polite',
@@ -117,6 +118,19 @@ for (const locale of ['uk', 'en'] as const) {
       })
       expect(action(root, 'redo').disabled).toBe(false)
 
+      undo.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'z',
+          ctrlKey: true,
+          bubbles: true,
+          cancelable: true,
+        }),
+      )
+      await inspector.whenIdle()
+      expect(action(root, 'undo').disabled).toBe(true)
+      expect(document.activeElement).toBe(action(root, 'redo'))
+
+      const redo = action(root, 'redo')
       const redoShortcut = new KeyboardEvent('keydown', {
         key: 'z',
         ctrlKey: true,
@@ -124,9 +138,24 @@ for (const locale of ['uk', 'en'] as const) {
         bubbles: true,
         cancelable: true,
       })
-      undo.dispatchEvent(redoShortcut)
+      redo.dispatchEvent(redoShortcut)
       await inspector.whenIdle()
       expect(redoShortcut.defaultPrevented).toBe(true)
+      expect(action(root, 'redo').disabled).toBe(false)
+      expect(document.activeElement).toBe(redo)
+
+      redo.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'z',
+          ctrlKey: true,
+          shiftKey: true,
+          bubbles: true,
+          cancelable: true,
+        }),
+      )
+      await inspector.whenIdle()
+      expect(action(root, 'redo').disabled).toBe(true)
+      expect(document.activeElement).toBe(undo)
       expect(inspector.snapshot().audit.at(-1)?.action).toEqual({
         type: 'command',
         commandKind: 'redo',
@@ -147,6 +176,7 @@ for (const locale of ['uk', 'en'] as const) {
       expect(root.querySelector('[role="alert"]')?.textContent).toContain(
         'FLOW_STALE_REVISION',
       )
+      expect(document.activeElement).toBe(action(root, 'stale-command'))
 
       const audit = root.querySelector<HTMLElement>('[aria-labelledby="audit-heading"]')
       expect(audit?.textContent).not.toMatch(
@@ -159,14 +189,14 @@ for (const locale of ['uk', 'en'] as const) {
         [...root.querySelectorAll<HTMLElement>('[data-audit-row]')].map(
           ({ dataset }) => dataset.sourceIndex,
         ),
-      ).toEqual(['0', '1', '2', '3', '4', '5'])
+      ).toEqual(Array.from({ length: rejected.audit.length }, (_, index) => String(index)))
       expect(
         new Set(
           [...root.querySelectorAll<HTMLElement>('[data-audit-row]')].map(
             ({ dataset }) => dataset.auditId,
           ),
         ).size,
-      ).toBe(6)
+      ).toBe(rejected.audit.length)
 
       assertTargetSizes(root)
       assertMinimumTextSize(root)
