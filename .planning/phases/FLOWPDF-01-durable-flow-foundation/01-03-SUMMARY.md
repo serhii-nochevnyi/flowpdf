@@ -38,7 +38,7 @@ coverage:
       - kind: integration
         ref: "crates/flow-core/tests/schema.rs"
         status: pass
-      - kind: golden
+      - kind: integration
         ref: "fixtures/flowdoc/current.json"
         status: pass
     human_judgment: false
@@ -54,10 +54,10 @@ coverage:
     description: "The supported old document migrates deterministically to exact current bytes/hash; current input is a no-op and invalid paths publish nothing."
     requirement: FLOW-03
     verification:
-      - kind: golden
+      - kind: integration
         ref: "crates/flow-core/tests/migration_golden.rs"
         status: pass
-      - kind: compile
+      - kind: integration
         ref: "crates/flow-wasm/src/lib.rs"
         status: pass
     human_judgment: false

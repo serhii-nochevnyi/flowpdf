@@ -25,7 +25,7 @@ FlowPDF progresses through nine dependency-ordered vertical capabilities. The ro
 
 ### Phase 1: Durable Flow Foundation
 
-**Goal**: Users have a versioned, recoverable FlowDocument and transactional editing foundation on which every later input and renderer can depend.
+**Goal**: As a document author, I want to create, save, reopen, migrate, mutate, undo, redo, and recover a versioned FlowDocument, so that later editor inputs and renderers can rely on durable semantic content and auditable revisions.
 **Mode:** mvp
 **Depends on**: Nothing (first phase)
 **Requirements**: FLOW-01, FLOW-02, FLOW-03, FLOW-04, FLOW-05, EDIT-06, EDIT-07, QUAL-08

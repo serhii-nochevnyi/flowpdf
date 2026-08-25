@@ -40,7 +40,7 @@ coverage:
       - kind: integration
         ref: "crates/flow-core/tests/transaction_tracer.rs"
         status: pass
-      - kind: property
+      - kind: integration
         ref: "crates/flow-core/tests/transaction_properties.rs"
         status: pass
     human_judgment: false
@@ -51,7 +51,7 @@ coverage:
       - kind: integration
         ref: "crates/flow-core/tests/preconditions.rs"
         status: pass
-      - kind: browser
+      - kind: e2e
         ref: "web/tests/transaction-boundary.browser.test.ts"
         status: pass
     human_judgment: false

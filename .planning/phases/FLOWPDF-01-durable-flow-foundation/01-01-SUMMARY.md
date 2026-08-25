@@ -33,10 +33,10 @@ coverage:
   - id: D2
     description: "The exact Rust native/WASM toolchain and Cargo dependency graph are installed and locked."
     verification:
-      - kind: command
+      - kind: integration
         ref: "cargo check --workspace --all-targets --locked"
         status: pass
-      - kind: command
+      - kind: integration
         ref: "wasm-bindgen --version"
         status: pass
     human_judgment: false
@@ -46,7 +46,7 @@ coverage:
       - kind: unit
         ref: "node --test scripts/verify-dependency-locks.mjs"
         status: pass
-      - kind: browser
+      - kind: e2e
         ref: "npm run test:browser"
         status: pass
     human_judgment: false
