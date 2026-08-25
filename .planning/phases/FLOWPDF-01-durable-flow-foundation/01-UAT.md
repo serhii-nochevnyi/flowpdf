@@ -9,7 +9,7 @@ source:
   - 01-05-SUMMARY.md
   - 01-06-SUMMARY.md
 started: 2026-08-25T07:54:08Z
-updated: 2026-08-25T07:54:08Z
+updated: 2026-08-25T08:39:19Z
 ---
 
 ## Current Test
@@ -37,7 +37,7 @@ expected: Exact npm locks, named test projects, and real local Chromium executio
 result: pass
 source: automated
 coverage_id: 01-01:D3
-evidence: Dependency-lock tests and all 13 real-Chromium tests passed.
+evidence: Dependency-lock tests and all 14 real-Chromium tests passed.
 
 ### 4. Durable browser walking skeleton
 expected: Chromium creates, mutates, reloads, and renders the same Rust-verified canonical document hash.
@@ -58,7 +58,7 @@ expected: The local inspector shows semantic landmarks, native controls, durabil
 result: pass
 source: agent-observed
 coverage_id: 01-02:D3
-evidence: The built page was inspected at 320x900 and 1280x900; the page had no horizontal overflow, controls remained at least 44px high, focus was visible, and only the audit table scrolled internally.
+evidence: The final built page was inspected at 320x900 and 1280x900; the page and stacked audit records had no horizontal overflow, controls remained at least 44px high, focus was visible, and every audit cell retained its semantic column-header association.
 
 ### 7. Exact semantic schema round trip
 expected: Ukrainian/English content, styles, assets, and all fillable-field descriptors survive exact canonical save and reopen.
@@ -191,7 +191,7 @@ expected: One command verifies dependency locks, boundaries, formatting, Clippy,
 result: pass
 source: automated
 coverage_id: 01-06:D7
-evidence: `npm run check` completed successfully in 21.26 seconds.
+evidence: The final `npm run check` completed successfully in 20.46 seconds.
 
 ### 26. Honest PDF provenance boundary
 expected: The inspector does not imply that Phase 1 lineage proves a PDF preview or export that does not yet exist.
@@ -204,13 +204,15 @@ evidence: The populated page clearly separated available FlowDocument lineage fr
 expected: A fresh page load offers the last local document and reopens its exact durable revision and hash without requiring a new sample.
 result: pass
 source: agent-observed
-evidence: After a full reload, “Відкрити останній локальний документ” reopened durable revision 6 with the same canonical hash and verified-storage status.
+evidence: After a full reload, “Відкрити останній локальний документ” reopened durable revision 7 with the same canonical hash and verified-storage status.
 
 ## Verification Repairs
 
 - Fixed focus restoration when a completed undo/redo command disables the initiating button; fallback behavior is covered for both directions, hidden controls, and the error path.
 - Fixed audit ordering for same-revision recovery events by using timestamp before stable audit identity; revision, timestamp, and identity tie-breaks are covered.
-- Re-ran the complete Phase 1 gate after both repairs and obtained a clean pass.
+- Added a real-Chromium tracer that migrates, commits, cold-reopens, and queries exact non-empty asset bytes through IndexedDB and the Rust/WASM boundary.
+- Remediated the UI audit with truthful busy controls, non-clipping semantic audit records, localized fallbacks, tokenized accessible colors, and isolated visible clipboard feedback guarded against out-of-order completion.
+- Re-ran the complete Phase 1 gate after all repairs and obtained a clean pass.
 
 ## Summary
 
