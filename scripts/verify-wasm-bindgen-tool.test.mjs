@@ -1,8 +1,15 @@
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
+import { access, chmod, mkdir, mkdtemp, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import test from 'node:test'
 
-import { validateWasmBindgenInstallation } from './verify-wasm-bindgen-tool.mjs'
+import {
+  validateWasmBindgenInstallation,
+  verifyInstalledTool,
+  verifyWasmBindgenTool,
+} from './verify-wasm-bindgen-tool.mjs'
 
 const target = 'test-target'
 const trustedBinary = Buffer.from('trusted wasm-bindgen fixture')
@@ -59,4 +66,58 @@ test('rejects wrong-version and replaced wasm-bindgen binaries', () => {
     }),
     /checksum mismatch/,
   )
+})
+
+test('never executes a wasm-bindgen binary before its receipt and checksum are trusted', () => {
+  let executions = 0
+  assert.throws(
+    () => verifyWasmBindgenTool({
+      approved,
+      report,
+      receipt,
+      binaryBytes: Buffer.from('untrusted executable bytes'),
+      executeVersion: () => {
+        executions += 1
+        throw new Error('untrusted binary was executed')
+      },
+    }),
+    /checksum mismatch/,
+  )
+  assert.equal(executions, 0)
+
+  assert.doesNotThrow(() => verifyWasmBindgenTool({
+    approved,
+    report,
+    receipt,
+    binaryBytes: trustedBinary,
+    executeVersion: () => {
+      executions += 1
+      return 'wasm-bindgen 0.2.108\n'
+    },
+  }))
+  assert.equal(executions, 1)
+})
+
+test('a checksum-mismatched sentinel executable is never invoked by the filesystem verifier', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'flowpdf-wasm-tool-'))
+  const cargoHome = join(root, 'work/toolchains/cargo')
+  const binary = join(cargoHome, 'bin/wasm-bindgen')
+  const marker = join(root, 'sentinel-was-invoked')
+  await Promise.all([
+    mkdir(join(root, 'config'), { recursive: true }),
+    mkdir(join(root, 'artifacts/provenance'), { recursive: true }),
+    mkdir(join(cargoHome, 'bin'), { recursive: true }),
+  ])
+  await Promise.all([
+    writeFile(join(root, 'config/dependency-provenance.json'), JSON.stringify({
+      crates: [approved],
+    })),
+    writeFile(join(root, 'artifacts/provenance/phase1-dependencies.json'), JSON.stringify(report)),
+    writeFile(join(cargoHome, '.crates2.json'), JSON.stringify(receipt)),
+    writeFile(binary, `#!/bin/sh\ntouch "${marker}"\nprintf 'wasm-bindgen 0.2.108\\n'\n`),
+  ])
+  await chmod(binary, 0o700)
+
+  assert.throws(() => verifyInstalledTool(root), /checksum mismatch/)
+  await assert.rejects(() => access(marker))
 })

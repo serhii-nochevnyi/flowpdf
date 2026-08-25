@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdtemp, readFile, writeFile } from 'node:fs/promises'
+import { mkdtemp, readFile, readdir, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -25,6 +25,129 @@ export function parseCargoPackages(source) {
         checksum: value('checksum'),
       }
     })
+}
+
+export function parseWorkspaceDependencies(source) {
+  const dependencies = []
+  let foundSection = false
+  let inSection = false
+  for (const rawLine of source.split('\n')) {
+    const line = rawLine.replace(/\s+#.*$/, '').trim()
+    if (line.length === 0) continue
+    if (line.startsWith('[')) {
+      inSection = line === '[workspace.dependencies]'
+      foundSection ||= inSection
+      continue
+    }
+    if (!inSection) continue
+    const match = line.match(/^([A-Za-z0-9_-]+)\s*=\s*(?:"([^"]+)"|\{([\s\S]*)\})$/)
+    invariant(match, `Cargo.toml workspace dependency is not a supported exact registry entry: ${line}`)
+    const rawVersion = match[2] ?? match[3]?.match(/(?:^|,)\s*version\s*=\s*"([^"]+)"/)?.[1]
+    invariant(rawVersion?.startsWith('=') && EXACT_VERSION.test(rawVersion.slice(1)), `${match[1]}: workspace Cargo dependency is not exact`)
+    dependencies.push({ name: match[1], version: rawVersion.slice(1), kind: 'dependency' })
+  }
+  invariant(foundSection, 'Cargo.toml workspace dependencies section is missing')
+  invariant(dependencies.length > 0, 'Cargo.toml workspace dependencies section is empty')
+  return dependencies
+}
+
+export function parseCargoManifestDependencies(source, workspaceDependencies) {
+  const workspaceByName = new Map(workspaceDependencies.map((entry) => [entry.name, entry]))
+  const dependencies = []
+  let inDependencySection = false
+  for (const rawLine of source.split('\n')) {
+    const line = rawLine.replace(/\s+#.*$/, '').trim()
+    if (line.length === 0) continue
+    if (line.startsWith('[')) {
+      const section = line.slice(1, -1)
+      inDependencySection = /^(?:.*\.)?(?:build-|dev-)?dependencies$/.test(section)
+      continue
+    }
+    if (!inDependencySection) continue
+    const match = line.match(/^([A-Za-z0-9_-]+)(\.workspace)?\s*=\s*(.*)$/)
+    invariant(match, `Cargo manifest dependency entry is malformed: ${line}`)
+    const [, localName, workspaceSuffix, value] = match
+    const packageName = value.match(/(?:^|[,{])\s*package\s*=\s*"([^"]+)"/)?.[1] ?? localName
+    const usesWorkspace = workspaceSuffix !== undefined || /(?:^|[,{])\s*workspace\s*=\s*true(?:\s*[,}]|$)/.test(value)
+    if (usesWorkspace) {
+      const workspace = workspaceByName.get(packageName)
+      invariant(workspace, `${packageName}: workspace dependency declaration is missing`)
+      dependencies.push(workspace)
+      continue
+    }
+    const rawVersion = value.match(/^"([^"]+)"$/)?.[1]
+      ?? value.match(/(?:^|[,{])\s*version\s*=\s*"([^"]+)"/)?.[1]
+    if (rawVersion === undefined && /(?:^|[,{])\s*(?:path|git)\s*=/.test(value)) continue
+    invariant(rawVersion?.startsWith('=') && EXACT_VERSION.test(rawVersion.slice(1)), `${packageName}: direct Cargo dependency is not exact`)
+    dependencies.push({ name: packageName, version: rawVersion.slice(1), kind: 'dependency' })
+  }
+  return dependencies
+}
+
+function identity(entry, ecosystem) {
+  return `${ecosystem}:${entry.name}@${entry.version}:${entry.kind ?? 'dependency'}`
+}
+
+function assertExactIdentities(actual, expected, label, ecosystem) {
+  const actualKeys = actual.map((entry) => identity(entry, ecosystem)).sort()
+  const expectedKeys = expected.map((entry) => identity(entry, ecosystem)).sort()
+  invariant(
+    JSON.stringify(actualKeys) === JSON.stringify(expectedKeys),
+    `${label} identity coverage differs: expected ${expectedKeys.join(', ')}, received ${actualKeys.join(', ')}`,
+  )
+}
+
+export function verifyManifestCoverage(
+  packageJson,
+  cargoToml,
+  config,
+  provenance,
+  cargoMemberManifests = [],
+) {
+  const workspaceDependencies = parseWorkspaceDependencies(cargoToml)
+  const cargoDependencies = [
+    ...new Map(
+      [
+        ...workspaceDependencies,
+        ...cargoMemberManifests.flatMap((source) =>
+          parseCargoManifestDependencies(source, workspaceDependencies)),
+      ].map((entry) => [identity(entry, 'crates.io'), entry]),
+    ).values(),
+  ]
+  const npmDependencies = Object.entries({
+    ...packageJson.dependencies,
+    ...packageJson.devDependencies,
+  }).map(([name, version]) => ({ name, version, kind: 'dependency' }))
+  assertExactIdentities(
+    config.crates.filter((entry) => (entry.kind ?? 'dependency') !== 'tool'),
+    cargoDependencies,
+    'Cargo provenance manifest',
+    'crates.io',
+  )
+  assertExactIdentities(config.npm, npmDependencies, 'npm provenance manifest', 'npm')
+  assertExactIdentities(provenance.crates, config.crates, 'Cargo provenance report', 'crates.io')
+  assertExactIdentities(provenance.npm, config.npm, 'npm provenance report', 'npm')
+}
+
+export function isExpectedNpmTarball(packageName, version, value) {
+  if (typeof value !== 'string') return false
+  let url
+  try {
+    url = new URL(value)
+  } catch {
+    return false
+  }
+  const basename = packageName.split('/').at(-1)
+  return (
+    url.protocol === 'https:' &&
+    url.hostname === 'registry.npmjs.org' &&
+    url.port === '' &&
+    url.username === '' &&
+    url.password === '' &&
+    url.search === '' &&
+    url.hash === '' &&
+    url.pathname === `/${packageName}/-/${basename}-${version}.tgz`
+  )
 }
 
 export function verifyCargoLock(cargoLock, provenance) {
@@ -57,8 +180,8 @@ export function verifyNpmLock(packageJson, packageLock, provenance) {
     if (path === '' || pkg.link) continue
     invariant(typeof pkg.version === 'string' && EXACT_VERSION.test(pkg.version), `${path}: locked npm version missing or invalid`)
     invariant(typeof pkg.resolved === 'string', `${path}: npm resolution missing`)
-    const resolved = new URL(pkg.resolved)
-    invariant(resolved.protocol === 'https:' && resolved.hostname === 'registry.npmjs.org', `${path}: non-registry npm resolution`)
+    const packageName = path.split('node_modules/').at(-1)
+    invariant(isExpectedNpmTarball(packageName, pkg.version, pkg.resolved), `${path}: noncanonical npm registry resolution`)
     invariant(typeof pkg.integrity === 'string' && pkg.integrity.startsWith('sha512-'), `${path}: sha512 integrity missing`)
   }
   for (const direct of provenance.npm) {
@@ -69,13 +192,23 @@ export function verifyNpmLock(packageJson, packageLock, provenance) {
 }
 
 export async function verifyDependencyLocks(root = process.cwd()) {
-  const [packageJson, packageLock, cargoLock, provenance] = await Promise.all([
+  const crateDirectories = await readdir(join(root, 'crates'), { withFileTypes: true })
+    .catch(() => [])
+  const cargoMemberManifests = await Promise.all(
+    crateDirectories
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => readFile(join(root, 'crates', entry.name, 'Cargo.toml'), 'utf8')),
+  )
+  const [packageJson, packageLock, cargoLock, cargoToml, config, provenance] = await Promise.all([
     readFile(join(root, 'package.json'), 'utf8').then(JSON.parse),
     readFile(join(root, 'package-lock.json'), 'utf8').then(JSON.parse),
     readFile(join(root, 'Cargo.lock'), 'utf8'),
+    readFile(join(root, 'Cargo.toml'), 'utf8'),
+    readFile(join(root, 'config/dependency-provenance.json'), 'utf8').then(JSON.parse),
     readFile(join(root, 'artifacts/provenance/phase1-dependencies.json'), 'utf8').then(JSON.parse),
   ])
   invariant(provenance.status === 'success', 'dependency provenance report is not successful')
+  verifyManifestCoverage(packageJson, cargoToml, config, provenance, cargoMemberManifests)
   verifyCargoLock(cargoLock, provenance)
   verifyNpmLock(packageJson, packageLock, provenance)
   return { cargoPackages: parseCargoPackages(cargoLock).length, npmPackages: Object.keys(packageLock.packages).length - 1 }
@@ -106,8 +239,17 @@ test('rejects npm origin, integrity, and floating direct-version drift', () => {
   }
   assert.doesNotThrow(() => verifyNpmLock(packageJson, packageLock, provenance))
   assert.throws(() => verifyNpmLock({ devDependencies: { vitest: '^4.1.6' } }, packageLock, provenance), /not exact/)
-  assert.throws(() => verifyNpmLock(packageJson, { ...packageLock, packages: { ...packageLock.packages, 'node_modules/vitest': { ...packageLock.packages['node_modules/vitest'], resolved: 'https://example.invalid/vitest.tgz' } } }, provenance), /non-registry/)
+  assert.throws(() => verifyNpmLock(packageJson, { ...packageLock, packages: { ...packageLock.packages, 'node_modules/vitest': { ...packageLock.packages['node_modules/vitest'], resolved: 'https://example.invalid/vitest.tgz' } } }, provenance), /noncanonical/)
   assert.throws(() => verifyNpmLock(packageJson, { ...packageLock, packages: { ...packageLock.packages, 'node_modules/vitest': { ...packageLock.packages['node_modules/vitest'], integrity: undefined } } }, provenance), /integrity/)
+  for (const resolved of [
+    'https://user:password@registry.npmjs.org/vitest/-/vitest-4.1.6.tgz',
+    'https://registry.npmjs.org:444/vitest/-/vitest-4.1.6.tgz',
+    'https://registry.npmjs.org/other/-/vitest-4.1.6.tgz',
+    'https://registry.npmjs.org/vitest/-/vitest-4.1.6.tgz?token=secret',
+    'https://registry.npmjs.org/vitest/-/vitest-4.1.6.tgz#fragment',
+  ]) {
+    assert.throws(() => verifyNpmLock(packageJson, { ...packageLock, packages: { ...packageLock.packages, 'node_modules/vitest': { ...packageLock.packages['node_modules/vitest'], resolved } } }, provenance), /noncanonical/)
+  }
 })
 
 test('runs against an isolated on-disk lock fixture', async () => {
@@ -117,10 +259,54 @@ test('runs against an isolated on-disk lock fixture', async () => {
     writeFile(join(root, 'package.json'), JSON.stringify({ devDependencies: { vitest: '4.1.6' } })),
     writeFile(join(root, 'package-lock.json'), JSON.stringify({ lockfileVersion: 3, packages: { '': { devDependencies: { vitest: '4.1.6' } }, 'node_modules/vitest': { version: '4.1.6', resolved: 'https://registry.npmjs.org/vitest/-/vitest-4.1.6.tgz', integrity } } })),
     writeFile(join(root, 'Cargo.lock'), `version = 4\n\n[[package]]\nname = "serde"\nversion = "1.0.228"\nsource = "${CRATES_IO_SOURCE}"\nchecksum = "${'a'.repeat(64)}"\n`),
+    writeFile(join(root, 'Cargo.toml'), '[workspace.dependencies]\nserde = "=1.0.228"\n'),
   ])
-  await import('node:fs/promises').then(({ mkdir }) => mkdir(join(root, 'artifacts/provenance'), { recursive: true }))
-  await writeFile(join(root, 'artifacts/provenance/phase1-dependencies.json'), JSON.stringify({ status: 'success', crates: [{ name: 'serde', version: '1.0.228', checksum: 'a'.repeat(64) }], npm: [{ name: 'vitest', version: '4.1.6', integrity }] }))
+  await import('node:fs/promises').then(({ mkdir }) => Promise.all([
+    mkdir(join(root, 'artifacts/provenance'), { recursive: true }),
+    mkdir(join(root, 'config'), { recursive: true }),
+  ]))
+  const config = { crates: [{ name: 'serde', version: '1.0.228' }], npm: [{ name: 'vitest', version: '4.1.6' }] }
+  await Promise.all([
+    writeFile(join(root, 'config/dependency-provenance.json'), JSON.stringify(config)),
+    writeFile(join(root, 'artifacts/provenance/phase1-dependencies.json'), JSON.stringify({ status: 'success', crates: [{ name: 'serde', version: '1.0.228', kind: 'dependency', checksum: 'a'.repeat(64) }], npm: [{ name: 'vitest', version: '4.1.6', kind: 'dependency', integrity }] })),
+  ])
   assert.deepEqual(await verifyDependencyLocks(root), { cargoPackages: 1, npmPackages: 1 })
+})
+
+test('rejects omitted, extra, and version-drifted direct dependency provenance identities', () => {
+  const packageJson = { devDependencies: { vitest: '4.1.6' } }
+  const cargoToml = '[workspace.dependencies]\nserde = "=1.0.228"\n'
+  const config = {
+    crates: [{ name: 'serde', version: '1.0.228' }],
+    npm: [{ name: 'vitest', version: '4.1.6' }],
+  }
+  const report = {
+    crates: [{ name: 'serde', version: '1.0.228', kind: 'dependency' }],
+    npm: [{ name: 'vitest', version: '4.1.6', kind: 'dependency' }],
+  }
+  assert.doesNotThrow(() => verifyManifestCoverage(packageJson, cargoToml, config, report))
+  assert.throws(
+    () => verifyManifestCoverage(packageJson, cargoToml, { ...config, crates: [] }, report),
+    /Cargo provenance manifest identity coverage differs/,
+  )
+  assert.throws(
+    () => verifyManifestCoverage(packageJson, cargoToml, { ...config, npm: [...config.npm, { name: 'extra', version: '1.0.0' }] }, report),
+    /npm provenance manifest identity coverage differs/,
+  )
+  assert.throws(
+    () => verifyManifestCoverage(packageJson, cargoToml, config, { ...report, npm: [{ name: 'vitest', version: '4.1.7', kind: 'dependency' }] }),
+    /npm provenance report identity coverage differs/,
+  )
+  assert.throws(
+    () => verifyManifestCoverage(
+      packageJson,
+      cargoToml,
+      config,
+      report,
+      ['[dependencies]\nextra = "=1.2.3"\n'],
+    ),
+    /Cargo provenance manifest identity coverage differs/,
+  )
 })
 
 test('recognizes an encoded main-module path containing spaces', () => {

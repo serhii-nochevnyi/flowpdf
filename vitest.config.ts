@@ -5,6 +5,9 @@ export default defineConfig({
   test: {
     projects: [
       {
+        define: {
+          __FLOWPDF_VITEST_PROJECT__: JSON.stringify('unit'),
+        },
         test: {
           name: 'unit',
           environment: 'node',

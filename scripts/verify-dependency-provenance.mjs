@@ -46,6 +46,25 @@ function githubApiUrl(repository) {
   return `https://api.github.com/repos${parsed.pathname}`;
 }
 
+export function isExpectedNpmTarball(packageName, version, value) {
+  if (typeof value !== 'string') return false;
+  let url;
+  try {
+    url = new URL(value);
+  } catch {
+    return false;
+  }
+  const basename = packageName.split('/').at(-1);
+  return url.protocol === 'https:'
+    && url.hostname === 'registry.npmjs.org'
+    && !url.port
+    && !url.username
+    && !url.password
+    && !url.search
+    && !url.hash
+    && url.pathname === `/${packageName}/-/${basename}-${version}.tgz`;
+}
+
 async function fetchJson(url, { fetchImpl, timeoutMs, retries, packageName, check }) {
   let lastError;
   for (let attempt = 0; attempt <= retries; attempt += 1) {
@@ -217,7 +236,7 @@ async function verifyNpm(entry, options) {
   const integrity = data.dist?.integrity;
   expect(typeof integrity === 'string' && integrity.startsWith('sha512-'), entry.name, 'integrity', 'sha512 integrity missing');
   const tarball = data.dist?.tarball;
-  expect(typeof tarball === 'string' && new URL(tarball).hostname === 'registry.npmjs.org', entry.name, 'tarball', 'tarball is not registry-hosted');
+  expect(isExpectedNpmTarball(entry.name, entry.version, tarball), entry.name, 'tarball', 'tarball is not the exact canonical registry artifact');
   const repository = await verifyRepository(entry, data.repository?.url ?? data.repository, options);
   // The exact-version endpoint intentionally omits the package-level `time`
   // map. Resolve the timestamp from the authoritative package document while
@@ -367,7 +386,7 @@ test('fails closed for every required negative provenance invariant', async () =
   await assert.rejects(() => verifyManifest({ config: npmConfig, fetchImpl: missingIntegrity }), /integrity/);
   const nonRegistryTarball = async () => new Response(JSON.stringify({ name: 'vitest', version: '4.1.6', time: { '4.1.6': '2026-01-01T00:00:00Z' }, repository: { url: 'https://github.com/vitest-dev/vitest' }, dist: { integrity: 'sha512-test', tarball: 'https://example.invalid/vitest.tgz' } }), { status: 200 });
   await assert.rejects(() => verifyManifest({ config: npmConfig, fetchImpl: nonRegistryTarball }), /tarball/);
-  const repositoryMismatch = async () => new Response(JSON.stringify({ name: 'vitest', version: '4.1.6', time: { '4.1.6': '2026-01-01T00:00:00Z' }, repository: { url: 'https://github.com/example/untrusted' }, dist: { integrity: 'sha512-test', tarball: 'https://registry.npmjs.org/vitest/-/x.tgz' } }), { status: 200 });
+  const repositoryMismatch = async () => new Response(JSON.stringify({ name: 'vitest', version: '4.1.6', time: { '4.1.6': '2026-01-01T00:00:00Z' }, repository: { url: 'https://github.com/example/untrusted' }, dist: { integrity: 'sha512-test', tarball: 'https://registry.npmjs.org/vitest/-/vitest-4.1.6.tgz' } }), { status: 200 });
   await assert.rejects(() => verifyManifest({ config: npmConfig, fetchImpl: repositoryMismatch }), /repository/);
   const deprecated = async () => new Response(JSON.stringify({ name: 'vitest', version: '4.1.6', deprecated: 'no longer supported', time: { '4.1.6': '2026-01-01T00:00:00Z' }, repository: { url: 'https://github.com/vitest-dev/vitest' }, dist: { integrity: 'sha512-test', tarball: 'https://registry.npmjs.org/vitest/-/x.tgz' } }), { status: 200 });
   await assert.rejects(() => verifyManifest({ config: npmConfig, fetchImpl: deprecated }), /release state/);
@@ -377,6 +396,27 @@ test('fails closed for every required negative provenance invariant', async () =
   await assert.rejects(() => verifyManifest({ config: base, fetchImpl: httpFailure }), /HTTP 503/);
   const timeout = async (_url, options) => new Promise((_, reject) => options.signal.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError'))));
   await assert.rejects(() => verifyManifest({ config: { ...base, timeoutMs: 1 }, fetchImpl: timeout }), /timeout/);
+});
+
+test('accepts only the exact credential-free npm registry tarball URL', () => {
+  assert.equal(
+    isExpectedNpmTarball('vitest', '4.1.6', 'https://registry.npmjs.org/vitest/-/vitest-4.1.6.tgz'),
+    true,
+  );
+  assert.equal(
+    isExpectedNpmTarball('@vitest/browser-playwright', '4.1.11', 'https://registry.npmjs.org/@vitest/browser-playwright/-/browser-playwright-4.1.11.tgz'),
+    true,
+  );
+  for (const url of [
+    'http://registry.npmjs.org/vitest/-/vitest-4.1.6.tgz',
+    'https://user:password@registry.npmjs.org/vitest/-/vitest-4.1.6.tgz',
+    'https://registry.npmjs.org:444/vitest/-/vitest-4.1.6.tgz',
+    'https://registry.npmjs.org/other/-/vitest-4.1.6.tgz',
+    'https://registry.npmjs.org/vitest/-/vitest-4.1.6.tgz?token=secret',
+    'https://registry.npmjs.org/vitest/-/vitest-4.1.6.tgz#fragment',
+  ]) {
+    assert.equal(isExpectedNpmTarball('vitest', '4.1.6', url), false, url);
+  }
 });
 
 test('retries only transient HTTP statuses and exhausts the configured budget', async () => {

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { existsSync, readFileSync, readdirSync } from 'node:fs'
-import { join, relative, resolve } from 'node:path'
+import { join, posix, relative, resolve } from 'node:path'
 import test from 'node:test'
 import ts from 'typescript'
 
@@ -145,6 +145,23 @@ test('boundary fixture resolves deferred browser capabilities through aliases', 
   assert.match(diagnostics, /Object\.assign|mutates semantic state/i)
 })
 
+test('boundary fixture resolves deferred capabilities through cross-module export aliases', () => {
+  const fixture = validFixture()
+  fixture.typescript.set(
+    'web/src/capabilities.ts',
+    'export const remoteRequest = globalThis.fetch',
+  )
+  fixture.typescript.set(
+    'web/src/use-capability.ts',
+    `
+      import { remoteRequest as request } from './capabilities.js'
+      request('/api/documents')
+    `,
+  )
+
+  assert.match(boundaryDiagnostics(fixture).join('\n'), /deferred backend runtime surface/i)
+})
+
 test('boundary fixture parses annotated WASM items and enforces typed signatures', () => {
   const fixture = validFixture()
   fixture.wasmSource += `
@@ -163,8 +180,21 @@ test('boundary fixture parses annotated WASM items and enforces typed signatures
 
   const diagnostics = boundaryDiagnostics(fixture).join('\n')
   assert.match(diagnostics, /unexpected WASM export annotated_escape/i)
-  assert.match(diagnostics, /create_sample.*typed WASM signature|duplicate WASM export create_sample/i)
+  assert.match(diagnostics, /unexpected WASM export invalidCreateSample/i)
+  assert.match(diagnostics, /invalidCreateSample.*typed WASM signature/i)
   assert.match(diagnostics, /mutable WASM struct/i)
+})
+
+test('boundary fixture validates the effective js_name instead of the Rust function name', () => {
+  const fixture = validFixture()
+  fixture.wasmSource = fixture.wasmSource.replace(
+    '#[wasm_bindgen]\npub fn create_sample',
+    '#[wasm_bindgen(js_name = hiddenCreate)]\npub fn create_sample',
+  )
+
+  const diagnostics = boundaryDiagnostics(fixture).join('\n')
+  assert.match(diagnostics, /unexpected WASM export hiddenCreate/i)
+  assert.match(diagnostics, /missing typed WASM export create_sample/i)
 })
 
 function loadWorkspaceSnapshot(root) {
@@ -224,11 +254,21 @@ function boundaryDiagnostics(snapshot) {
       }
     }
   }
-  for (const [path, source] of snapshot.typescript) {
+  const typescriptProgram = parseTypeScriptProgram(snapshot.typescript)
+  const capabilities = createCapabilityResolver(
+    [...typescriptProgram.sources.values()],
+    typescriptProgram.checker,
+  )
+  for (const [path] of snapshot.typescript) {
     if (forbiddenWebPathSegment.test(path)) {
       diagnostics.push(`${path}: deferred web path entered Phase 1`)
     }
-    validateTypeScript(path, source, diagnostics)
+    validateTypeScript(
+      path,
+      typescriptProgram.sources.get(path),
+      diagnostics,
+      capabilities,
+    )
   }
   validateWasmBoundary(snapshot.wasmSource, diagnostics)
   return diagnostics.sort()
@@ -255,13 +295,15 @@ function validatePackageManifest(packageJson, diagnostics) {
   }
 }
 
-function validateTypeScript(path, sourceText, diagnostics) {
-  const { checker, source } = parseTypeScript(path, sourceText)
+function validateTypeScript(path, source, diagnostics, capabilities) {
+  if (source === undefined) {
+    diagnostics.push(`${path}: TypeScript source could not be loaded`)
+    return
+  }
   if (source.parseDiagnostics.length > 0) {
     diagnostics.push(`${path}: TypeScript source does not parse`)
     return
   }
-  const capabilities = createCapabilityResolver(source, checker)
 
   function visit(node) {
     if (ts.isImportDeclaration(node) && ts.isStringLiteral(node.moduleSpecifier)) {
@@ -339,39 +381,68 @@ function validateCall(path, source, call, diagnostics, capabilities) {
   }
 }
 
-function parseTypeScript(path, sourceText) {
-  const virtualPath = `/phase-boundary/${path}`
-  const scriptKind = /x$/.test(path) ? ts.ScriptKind.TSX : ts.ScriptKind.TS
-  const source = ts.createSourceFile(
-    virtualPath,
-    sourceText,
-    ts.ScriptTarget.ESNext,
-    true,
-    scriptKind,
-  )
+function parseTypeScriptProgram(files) {
+  const virtualFiles = new Map()
+  const sourceByPath = new Map()
+  for (const [path, sourceText] of files) {
+    const virtualPath = `/phase-boundary/${path}`
+    const scriptKind = /x$/.test(path) ? ts.ScriptKind.TSX : ts.ScriptKind.TS
+    const source = ts.createSourceFile(
+      virtualPath,
+      sourceText,
+      ts.ScriptTarget.ESNext,
+      true,
+      scriptKind,
+    )
+    virtualFiles.set(virtualPath, { source, sourceText })
+    sourceByPath.set(path, source)
+  }
   const options = {
     module: ts.ModuleKind.ESNext,
     noLib: true,
-    noResolve: true,
+    moduleResolution: ts.ModuleResolutionKind.Bundler,
     target: ts.ScriptTarget.ESNext,
   }
   const host = {
-    fileExists: (candidate) => candidate === virtualPath,
+    fileExists: (candidate) => virtualFiles.has(candidate),
     getCanonicalFileName: (candidate) => candidate,
     getCurrentDirectory: () => '/',
     getDefaultLibFileName: () => '/lib.d.ts',
     getDirectories: () => [],
     getNewLine: () => '\n',
-    getSourceFile: (candidate) => (candidate === virtualPath ? source : undefined),
-    readFile: (candidate) => (candidate === virtualPath ? sourceText : undefined),
+    getSourceFile: (candidate) => virtualFiles.get(candidate)?.source,
+    readFile: (candidate) => virtualFiles.get(candidate)?.sourceText,
+    resolveModuleNames: (moduleNames, containingFile) =>
+      moduleNames.map((specifier) => resolveVirtualModule(specifier, containingFile, virtualFiles)),
     useCaseSensitiveFileNames: () => true,
     writeFile: () => {},
   }
-  const program = ts.createProgram([virtualPath], options, host)
-  return { checker: program.getTypeChecker(), source: program.getSourceFile(virtualPath) }
+  const program = ts.createProgram([...virtualFiles.keys()], options, host)
+  return { checker: program.getTypeChecker(), sources: sourceByPath }
 }
 
-function createCapabilityResolver(source, checker) {
+function resolveVirtualModule(specifier, containingFile, virtualFiles) {
+  if (!specifier.startsWith('.')) return undefined
+  const base = posix.resolve(posix.dirname(containingFile), specifier)
+  const withoutJavaScriptExtension = base.replace(/\.(?:mjs|cjs|js|jsx)$/, '')
+  for (const candidate of [
+    base,
+    `${withoutJavaScriptExtension}.ts`,
+    `${withoutJavaScriptExtension}.tsx`,
+    `${withoutJavaScriptExtension}/index.ts`,
+    `${withoutJavaScriptExtension}/index.tsx`,
+  ]) {
+    if (!virtualFiles.has(candidate)) continue
+    return {
+      resolvedFileName: candidate,
+      extension: candidate.endsWith('.tsx') ? ts.Extension.Tsx : ts.Extension.Ts,
+      isExternalLibraryImport: false,
+    }
+  }
+  return undefined
+}
+
+function createCapabilityResolver(sources, checker) {
   const aliases = new Map()
   const globalAliases = new Set()
   const globalCapabilities = new Map([
@@ -387,7 +458,17 @@ function createCapabilityResolver(source, checker) {
   ])
 
   function symbolOf(identifier) {
-    return ts.isIdentifier(identifier) ? checker.getSymbolAtLocation(identifier) : undefined
+    if (!ts.isIdentifier(identifier)) return undefined
+    let symbol = checker.getSymbolAtLocation(identifier)
+    const visited = new Set()
+    while (symbol !== undefined && (symbol.flags & ts.SymbolFlags.Alias) !== 0) {
+      if (visited.has(symbol)) break
+      visited.add(symbol)
+      const target = checker.getAliasedSymbol(symbol)
+      if (target === symbol) break
+      symbol = target
+    }
+    return symbol
   }
 
   function unwrap(expression) {
@@ -468,7 +549,7 @@ function createCapabilityResolver(source, checker) {
       }
       if (
         property === 'getUserMedia' &&
-        /^(?:globalThis\.)?navigator\.mediaDevices$/.test(current.expression.getText(source))
+        /^(?:globalThis\.)?navigator\.mediaDevices$/.test(current.expression.getText())
       ) {
         return 'getUserMedia'
       }
@@ -551,7 +632,7 @@ function createCapabilityResolver(source, checker) {
       }
       ts.forEachChild(node, collect)
     }
-    collect(source)
+    for (const source of sources) collect(source)
   } while (changed)
 
   return { of }
@@ -597,13 +678,13 @@ function validateWasmBoundary(source, diagnostics) {
       )
       continue
     }
-    exports.push(item.name)
-    if (!allowedWasmExports.has(item.name)) {
-      diagnostics.push(`crates/flow-wasm/src/lib.rs: unexpected WASM export ${item.name}`)
+    exports.push(item.exportName)
+    if (!allowedWasmExports.has(item.exportName)) {
+      diagnostics.push(`crates/flow-wasm/src/lib.rs: unexpected WASM export ${item.exportName}`)
     }
     if (!hasTypedWasmSignature(item)) {
       diagnostics.push(
-        `crates/flow-wasm/src/lib.rs: ${item.name} has an invalid typed WASM signature`,
+        `crates/flow-wasm/src/lib.rs: ${item.exportName} has an invalid typed WASM signature`,
       )
     }
   }
@@ -651,7 +732,10 @@ function rustWasmItems(source) {
     const item = parseRustItem(tokens, index)
     if (item !== undefined) {
       if (attributes.some((attribute) => attribute.includes('wasm_bindgen'))) {
-        items.push(item)
+        items.push({
+          ...item,
+          exportName: wasmExportName(attributes, item.rustName),
+        })
       }
       attributes.length = 0
       index = item.end
@@ -682,12 +766,27 @@ function parseRustItem(tokens, start) {
   if (!/^(?:enum|fn|impl|mod|static|struct|trait|type|union)$/.test(kind ?? '')) {
     return undefined
   }
-  const name = /^[A-Za-z_][A-Za-z0-9_]*$/.test(tokens[cursor + 1] ?? '')
+  const rustName = /^[A-Za-z_][A-Za-z0-9_]*$/.test(tokens[cursor + 1] ?? '')
     ? tokens[cursor + 1]
     : '<anonymous>'
   let end = cursor + 1
   while (end < tokens.length && tokens[end] !== '{' && tokens[end] !== ';') end += 1
-  return { end, header: tokens.slice(start, end), kind, name }
+  return { end, header: tokens.slice(start, end), kind, rustName }
+}
+
+function wasmExportName(attributes, rustName) {
+  for (const attribute of attributes) {
+    const wasmIndex = attribute.indexOf('wasm_bindgen')
+    if (wasmIndex < 0) continue
+    for (let index = wasmIndex + 1; index < attribute.length - 2; index += 1) {
+      if (attribute[index] !== 'js_name' || attribute[index + 1] !== '=') continue
+      const candidate = attribute[index + 2]
+      return /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(candidate)
+        ? candidate
+        : '<invalid-js-name>'
+    }
+  }
+  return rustName
 }
 
 function hasTypedWasmSignature(item) {
@@ -695,7 +794,7 @@ function hasTypedWasmSignature(item) {
   if (
     tokens[0] !== 'pub' ||
     tokens[1] !== 'fn' ||
-    tokens[2] !== item.name ||
+    tokens[2] !== item.rustName ||
     tokens[3] !== '('
   ) {
     return false
@@ -826,6 +925,8 @@ function assertGateContract(gate) {
     'browser-suites',
     'dependency-locks',
     'dependency-provenance',
+    'dependency-provenance-live',
+    'node-regressions',
     'recovery-benchmark',
     'rust-clippy',
     'rust-format',

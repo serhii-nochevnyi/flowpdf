@@ -28,8 +28,29 @@ export const phaseOneSteps = Object.freeze([
     process.execPath,
     ['--test', 'scripts/verify-dependency-provenance.mjs'],
   ),
+  step(
+    'dependency-provenance-live',
+    'Live dependency provenance verification',
+    process.execPath,
+    [
+      'scripts/verify-dependency-provenance.mjs',
+      '--config',
+      'config/dependency-provenance.json',
+      '--report',
+      'artifacts/provenance/phase1-dependencies.json',
+      '--blocker',
+      'artifacts/provenance/phase1-blocker.json',
+    ],
+  ),
   step('dependency-locks', 'Pinned dependency lock verification', process.execPath, [
     'scripts/verify-dependency-locks.mjs',
+  ]),
+  step('node-regressions', 'Node build, server, version, and tool regressions', process.execPath, [
+    '--test',
+    'scripts/build-web.test.mjs',
+    'scripts/node-version.test.mjs',
+    'scripts/serve-inspector.test.mjs',
+    'scripts/verify-wasm-bindgen-tool.test.mjs',
   ]),
   step('boundary-contract', 'Phase 1 ownership and deferred-scope contract', process.execPath, [
     '--test',
