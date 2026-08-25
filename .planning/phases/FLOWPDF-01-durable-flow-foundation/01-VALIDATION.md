@@ -21,7 +21,7 @@ created: 2026-08-14
 | **Config file** | `Cargo.toml` and `vitest.config.ts` |
 | **Quick run command** | `cargo test -p flow-core --lib` |
 | **Full suite command** | `npm run check` (orchestrates format, Clippy, Rust tests, WASM target check, Vitest unit, and Chromium browser tests) |
-| **Observed runtime** | Focused Chromium accessibility: 1.03 seconds; full Phase 1 gate: 21.26 seconds on 2026-08-25 |
+| **Observed runtime** | Focused Chromium accessibility: 1.39 seconds; full Phase 1 gate: 20.46 seconds on 2026-08-25 |
 
 ---
 
@@ -103,8 +103,10 @@ The Codex executor may visually inspect current Chrome/Edge at 320px and 1280px 
 |--------|-------|
 | Requirements audited | 8 |
 | Task rows audited | 17 |
-| Gaps found | 0 |
-| Resolved | 0 |
+| Gaps found | 1 |
+| Resolved | 1 |
 | Escalated | 0 |
 
-The terminal `npm run check` run passed on commit `9e76093`, covering dependency provenance and locks, structural boundaries, Rust formatting and warnings-as-errors, 78 Rust tests, WASM, TypeScript, 27 unit/inspector tests, 13 Chromium tests, benchmark validation, and two deterministic replay rounds.
+The audit found that the split asset tests did not prove a non-empty asset through the complete browser boundary. Commit `91bb923` closes that gap with a real Chromium tracer that migrates a legacy document containing exact non-empty bytes and a verified BLAKE3 digest, commits it atomically to IndexedDB, cold-remounts the application, and queries the reopened document through the real Rust/WASM boundary.
+
+The terminal `npm run check` run passed after the gap closure and UI remediation, covering dependency provenance and locks, structural boundaries, Rust formatting and warnings-as-errors, 78 Rust tests, WASM, TypeScript, 29 unit/inspector tests, 14 Chromium tests, benchmark validation, and two deterministic replay rounds. The focused accessibility pass completed in 1.39 seconds and the full gate in 20.46 seconds.
