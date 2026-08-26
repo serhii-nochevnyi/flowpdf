@@ -8,3 +8,4 @@ dist/
 web/generated/
 web/tests/__screenshots__/
 .vitest-attachments/
+.planning/research/.cache/
