@@ -60,7 +60,27 @@ FlowPDF progresses through nine dependency-ordered vertical capabilities. The ro
   3. Keyboard, visible controls and synchronized semantic accessibility content expose every implemented mutation.
   4. Screen-reader users can navigate semantic content, fields, statuses and errors without relying on the page canvas alone.
 
-**Plans**: TBD
+**Plans**: 18 plans
+
+Plans:
+- [ ] 02-01-PLAN.md — Admit and lock exact Phase 2 dependencies without lifecycle execution.
+- [ ] 02-02-PLAN.md — Pin Unicode conformance data, numerical WASM growth, and retained boundaries.
+- [ ] 02-03-PLAN.md — Execute the one-way legacy freeze and every schema-v2 migration route.
+- [ ] 02-04-PLAN.md — Establish Rust grapheme, atomic-position, and editor-session authority.
+- [ ] 02-05-PLAN.md — Prove the core/WASM/persistence/minimal-React paragraph tracer.
+- [ ] 02-06-PLAN.md — Add controlled input, directional selection, paste, and real Chromium IME.
+- [ ] 02-07-PLAN.md — Implement exact structural and deletion/preimage/recovery algebra.
+- [ ] 02-08-PLAN.md — Attach durable visible and keyboard structural product paths.
+- [ ] 02-09-PLAN.md — Implement closed formatting, pending state, and list semantics in Rust.
+- [ ] 02-10-PLAN.md — Expose accessible formatting/list controls and parity.
+- [ ] 02-11-PLAN.md — Implement complete table headers/removal and page-break semantics in Rust.
+- [ ] 02-12-PLAN.md — Expose native table/page-break controls, semantics, and confirmation.
+- [ ] 02-13-PLAN.md — Implement complete image lifecycle, BLAKE3 identity, and shared reachability.
+- [ ] 02-14-PLAN.md — Carry image lifecycle through WASM, atomic storage, and accessible controls.
+- [ ] 02-15-PLAN.md — Generate exhaustive command parity and retained boundary contracts.
+- [ ] 02-16-PLAN.md — Keep existing fields and the editor shell semantically accessible.
+- [ ] 02-17-PLAN.md — Close the exact 108-pair UI contract and honest AT evidence.
+- [ ] 02-18-PLAN.md — Add fast scale feedback and the deterministic dual-run release gate.
 **UI hint**: yes
 
 ### Phase 3: Deterministic Reflow and Pagination

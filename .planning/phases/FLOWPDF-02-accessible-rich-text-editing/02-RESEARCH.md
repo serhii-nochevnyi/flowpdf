@@ -761,25 +761,15 @@ The user authorized recommended defaults. These assumptions are bounded implemen
 | A17 | Existing Phase 1 field descriptors can be keyboard/semantically navigated in Phase 2 through valid-anchor inline groups and an explicit review section for `LegacyInvalid`, without implementing field authoring/filling. | Pattern 8; Validation Architecture | If an assistive technology cannot navigate the projection, change its native semantics/focus pattern, not the canonical descriptor or Phase 5 scope. |
 | A18 | ICU `compiled_data` is acceptable only when its measured release-WASM delta is at most 512 KiB raw and 160 KiB gzip over the Phase 1 baseline. | Standard Stack; Validation Architecture | Exceeding either threshold automatically rejects that dependency configuration and triggers a smaller provider/feature strategy; do not waive the gate. |
 
-## Open Questions
+## Open Questions (RESOLVED)
 
-1. **What exact input-proxy/focus pattern works best with the supported screen-reader/browser matrix?**
-   - What we know: the locked design requires controlled browser input and one visible native semantic document, and a focusable host must not be `aria-hidden`. [VERIFIED: `.planning/phases/FLOWPDF-02-accessible-rich-text-editing/02-CONTEXT.md`; https://www.w3.org/TR/wai-aria-1.2/#aria-hidden]
-   - What's unclear: automated DOM/accessibility snapshots cannot predict browse-mode and composition speech across all AT combinations. [ASSUMED]
-   - Recommendation: prove the one-paragraph and existing-field tracer with local Chromium keyboard/accessibility-tree automation and a VoiceOver smoke pass before scaling components; retain the proxy architecture but adapt focus/labeling from observed evidence. Record Edge-on-Windows plus Windows-screen-reader UAT as an unavailable external checkpoint, not a local pass. [ASSUMED]
+1. **RESOLVED — controlled input proxy and focus pattern.** Use one focusable controlled input host synchronized with one visible native semantic document; the host is never `aria-hidden`, DOM state is never canonical, logical selection/focus comes from Rust, and real evidence may adjust labels/focus without duplicating text or changing authority. Implemented by **02-06-01** (accepted controller/selection bridge), **02-06-02** (input host/IME), **02-16-02** (semantic editor/field accessibility), and **02-17-02** (local/external AT evidence state). Edge-on-Windows plus Windows screen reader remains `unavailable/outstanding`, never a local pass. [VERIFIED decision: D-03/D-13; implementation assignment: revised plans]
 
-2. **How should each v1 `style_id` map into v2 block defaults and inline marks?**
-   - What we know: v1 `StyleDefinition` has exact fields `id`, `name`, `font_family`, and `font_size_millipoints`; `ContentNode` has `style_id`. [VERIFIED: `crates/flow-core/src/model/mod.rs:106-123`; verbatim field names quoted]
-   - What's unclear: whether v2 retains reusable style references in addition to direct overrides. [ASSUMED]
-   - Recommendation: preserve the style table and `style_id` as a block default reference, create one inline run with no direct overrides, and make computed formatting a Rust projection; lock with current-fixture migration golden. [ASSUMED]
+2. **RESOLVED — v1 style migration.** Preserve the v1 style table and each block's `style_id` as its reusable block-default reference; migrate paragraph text into one inline run with no direct overrides and compute effective formatting only in the Rust projection. Unknown legacy families remain explicit rather than silently substituted. Implemented and golden-locked by **02-03-02**. [VERIFIED source fields: `crates/flow-core/src/model/mod.rs:106-123`; implementation assignment: revised plan]
 
-3. **Should CDP IME automation be a separate script or a Vitest browser test?**
-   - What we know: the existing Vitest browser provider exposes real Chromium, but raw CDP is straightforward in a standalone Playwright context. [VERIFIED: `vitest.config.ts`; https://playwright.dev/docs/api/class-browsercontext#browser-context-new-cdp-session]
-   - Recommendation: use `scripts/verify-ime-chromium.mjs` as a deterministic target-browser lane and keep synthetic controller cases in Vitest; both run under `check:phase2`. [ASSUMED]
+3. **RESOLVED — real Chromium IME lane.** Use standalone deterministic `scripts/verify-ime-chromium.mjs` for raw CDP composition and keep controller/browser cases in Vitest; the exact standalone plus browser command is owned by **02-06-02** and included unchanged in the final gate by **02-18-02**. [VERIFIED: `vitest.config.ts`; official Playwright CDP API; implementation assignment: revised plans]
 
-4. **How should object-URL preview lifetime be managed?**
-   - What we know: accepted bytes live in the existing durable asset path, while browser previews are noncanonical. [VERIFIED: `.planning/phases/FLOWPDF-02-accessible-rich-text-editing/02-CONTEXT.md`]
-   - Recommendation: controller owns object URLs, revokes them on replacement/removal/unmount, and regenerates them only from accepted stored bytes; test leak-free lifecycle. [ASSUMED]
+4. **RESOLVED — object-URL lifetime.** The browser controller/component owns preview URLs and revokes them on replacement, removal, cancel, rejection, unmount, and supersession; accepted snapshots, Rust DTOs, audit, errors, and storage never contain object URLs. Regenerate previews only from accepted stored bytes. Implemented and browser-tested by **02-14-02**. [VERIFIED decision: D-14; implementation assignment: revised plan]
 
 ## Environment Availability
 
