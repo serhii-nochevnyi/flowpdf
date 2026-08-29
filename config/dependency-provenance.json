@@ -19,13 +19,90 @@
       }
     },
     { "name": "serde-wasm-bindgen", "version": "0.6.5", "repository": "https://github.com/RReverser/serde-wasm-bindgen" },
-    { "name": "proptest", "version": "1.8.0", "repository": "https://github.com/proptest-rs/proptest" }
+    { "name": "proptest", "version": "1.8.0", "repository": "https://github.com/proptest-rs/proptest" },
+    { "name": "icu_segmenter", "version": "2.3.0", "repository": "https://github.com/unicode-org/icu4x" },
+    { "name": "image", "version": "0.25.10", "repository": "https://github.com/image-rs/image" }
   ],
   "npm": [
     { "name": "typescript", "version": "5.9.3", "repository": "https://github.com/microsoft/TypeScript" },
     { "name": "vitest", "version": "4.1.11", "repository": "https://github.com/vitest-dev/vitest" },
     { "name": "fake-indexeddb", "version": "6.2.4", "repository": "https://github.com/dumbmatter/fakeIndexedDB" },
     { "name": "@vitest/browser-playwright", "version": "4.1.11", "repository": "https://github.com/vitest-dev/vitest" },
-    { "name": "playwright", "version": "1.57.0", "repository": "https://github.com/microsoft/playwright" }
-  ]
+    { "name": "playwright", "version": "1.57.0", "repository": "https://github.com/microsoft/playwright" },
+    { "name": "react", "version": "19.2.8", "repository": "https://github.com/react/react" },
+    { "name": "react-dom", "version": "19.2.8", "repository": "https://github.com/react/react" },
+    { "name": "@types/react", "version": "19.2.17", "repository": "https://github.com/DefinitelyTyped/DefinitelyTyped" },
+    { "name": "@types/react-dom", "version": "19.2.3", "repository": "https://github.com/DefinitelyTyped/DefinitelyTyped" },
+    { "name": "vite", "version": "8.1.5", "repository": "https://github.com/vitejs/vite" },
+    { "name": "@vitejs/plugin-react", "version": "6.0.5", "repository": "https://github.com/vitejs/vite-plugin-react" }
+  ],
+  "phase2": {
+    "policy": {
+      "minimumAgeDays": 30,
+      "minimumWeeklyDownloads": 1000,
+      "forbiddenLifecycleScripts": ["preinstall", "install", "postinstall"]
+    },
+    "npm": [
+      {
+        "name": "react",
+        "repository": "https://github.com/react/react",
+        "candidates": ["19.2.8"],
+        "lockIntent": { "section": "dependencies", "version": "19.2.8" }
+      },
+      {
+        "name": "react-dom",
+        "repository": "https://github.com/react/react",
+        "candidates": ["19.2.8"],
+        "lockIntent": { "section": "dependencies", "version": "19.2.8" }
+      },
+      {
+        "name": "@types/react",
+        "repository": "https://github.com/DefinitelyTyped/DefinitelyTyped",
+        "candidates": ["19.2.18", "19.2.17"],
+        "lockIntent": { "section": "devDependencies", "version": "19.2.17" }
+      },
+      {
+        "name": "@types/react-dom",
+        "repository": "https://github.com/DefinitelyTyped/DefinitelyTyped",
+        "candidates": ["19.2.5", "19.2.3"],
+        "lockIntent": { "section": "devDependencies", "version": "19.2.3" }
+      },
+      {
+        "name": "vite",
+        "repository": "https://github.com/vitejs/vite",
+        "candidates": ["8.2.2", "8.1.5"],
+        "lockIntent": { "section": "devDependencies", "version": "8.1.5" }
+      },
+      {
+        "name": "@vitejs/plugin-react",
+        "repository": "https://github.com/vitejs/vite-plugin-react",
+        "candidates": ["6.1.0", "6.0.5"],
+        "lockIntent": { "section": "devDependencies", "version": "6.0.5" }
+      }
+    ],
+    "crates": [
+      {
+        "name": "icu_segmenter",
+        "repository": "https://github.com/unicode-org/icu4x",
+        "candidates": ["2.3.0"],
+        "lockIntent": {
+          "manifest": "crates/flow-core/Cargo.toml",
+          "version": "2.3.0",
+          "defaultFeatures": false,
+          "features": ["compiled_data"]
+        }
+      },
+      {
+        "name": "image",
+        "repository": "https://github.com/image-rs/image",
+        "candidates": ["0.25.10"],
+        "lockIntent": {
+          "manifest": "crates/flow-core/Cargo.toml",
+          "version": "0.25.10",
+          "defaultFeatures": false,
+          "features": ["png", "jpeg"]
+        }
+      }
+    ]
+  }
 }

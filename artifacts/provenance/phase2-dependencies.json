@@ -1,0 +1,362 @@
+{
+  "schemaVersion": 1,
+  "status": "success",
+  "phase": "FLOWPDF-02",
+  "observedAt": "2026-08-29T11:04:02.568Z",
+  "policy": {
+    "minimumAgeDays": 30,
+    "minimumWeeklyDownloads": 1000,
+    "forbiddenLifecycleScripts": [
+      "preinstall",
+      "install",
+      "postinstall"
+    ]
+  },
+  "lockIntentDigest": "27c9a5f2f41d0148ee1ff8e277ee1990f48135f367f555d709daed7604666bae",
+  "lockIntent": {
+    "npm": [
+      {
+        "name": "react",
+        "section": "dependencies",
+        "version": "19.2.8"
+      },
+      {
+        "name": "react-dom",
+        "section": "dependencies",
+        "version": "19.2.8"
+      },
+      {
+        "name": "@types/react",
+        "section": "devDependencies",
+        "version": "19.2.17"
+      },
+      {
+        "name": "@types/react-dom",
+        "section": "devDependencies",
+        "version": "19.2.3"
+      },
+      {
+        "name": "vite",
+        "section": "devDependencies",
+        "version": "8.1.5"
+      },
+      {
+        "name": "@vitejs/plugin-react",
+        "section": "devDependencies",
+        "version": "6.0.5"
+      }
+    ],
+    "crates": [
+      {
+        "name": "icu_segmenter",
+        "manifest": "crates/flow-core/Cargo.toml",
+        "version": "2.3.0",
+        "defaultFeatures": false,
+        "features": [
+          "compiled_data"
+        ]
+      },
+      {
+        "name": "image",
+        "manifest": "crates/flow-core/Cargo.toml",
+        "version": "0.25.10",
+        "defaultFeatures": false,
+        "features": [
+          "png",
+          "jpeg"
+        ]
+      }
+    ]
+  },
+  "npm": [
+    {
+      "name": "react",
+      "version": "19.2.8",
+      "repository": "https://github.com/react/react",
+      "publishedAt": "2026-07-21T15:41:28.716Z",
+      "tarball": "https://registry.npmjs.org/react/-/react-19.2.8.tgz",
+      "integrity": "sha512-PWaYA1L/q9u2u7xYQi+Y3L3Yfnie7XyLeaJICV1MGD6LprsBxcAqGjYyr0eY3p+QdsA+x/Irkt4Qif8D63+Sbw==",
+      "deprecated": null,
+      "lifecycle": {
+        "preinstall": null,
+        "install": null,
+        "postinstall": null
+      },
+      "numericSnapshot": {
+        "metric": "weeklyDownloads",
+        "value": 173164181,
+        "period": "last-week",
+        "start": "2026-08-22",
+        "end": "2026-08-28",
+        "source": "https://api.npmjs.org/downloads/point/last-week/react"
+      },
+      "sources": {
+        "package": "https://registry.npmjs.org/react",
+        "version": "https://registry.npmjs.org/react/19.2.8",
+        "repository": "https://api.github.com/repos/react/react"
+      },
+      "legitimacy": {
+        "verdict": "OK",
+        "reasons": []
+      },
+      "lockIntent": {
+        "section": "dependencies",
+        "version": "19.2.8"
+      },
+      "candidateIndex": 0,
+      "candidatesConsidered": 1
+    },
+    {
+      "name": "react-dom",
+      "version": "19.2.8",
+      "repository": "https://github.com/react/react",
+      "publishedAt": "2026-07-21T15:41:41.267Z",
+      "tarball": "https://registry.npmjs.org/react-dom/-/react-dom-19.2.8.tgz",
+      "integrity": "sha512-rVprimfGBG3DR+Tq0IQG2DT5PxKth1WIGDmj5yPmlzr4YBe7uyE+Du4oVqTDXZSHGGGXRtTJEGSSePyQCMBglQ==",
+      "deprecated": null,
+      "lifecycle": {
+        "preinstall": null,
+        "install": null,
+        "postinstall": null
+      },
+      "numericSnapshot": {
+        "metric": "weeklyDownloads",
+        "value": 162029750,
+        "period": "last-week",
+        "start": "2026-08-22",
+        "end": "2026-08-28",
+        "source": "https://api.npmjs.org/downloads/point/last-week/react-dom"
+      },
+      "sources": {
+        "package": "https://registry.npmjs.org/react-dom",
+        "version": "https://registry.npmjs.org/react-dom/19.2.8",
+        "repository": "https://api.github.com/repos/react/react"
+      },
+      "legitimacy": {
+        "verdict": "OK",
+        "reasons": []
+      },
+      "lockIntent": {
+        "section": "dependencies",
+        "version": "19.2.8"
+      },
+      "candidateIndex": 0,
+      "candidatesConsidered": 1
+    },
+    {
+      "name": "@types/react",
+      "version": "19.2.17",
+      "repository": "https://github.com/DefinitelyTyped/DefinitelyTyped",
+      "publishedAt": "2026-06-05T20:10:24.692Z",
+      "tarball": "https://registry.npmjs.org/@types/react/-/react-19.2.17.tgz",
+      "integrity": "sha512-MXfmqaVPEVgkBT/aY0aGCkRWWtByiYQXo3xdQ8r5RzuFrPiRn8Gar2tQdXSUQ2GKV3bkXckek89V8wQBY2Q/Aw==",
+      "deprecated": null,
+      "lifecycle": {
+        "preinstall": null,
+        "install": null,
+        "postinstall": null
+      },
+      "numericSnapshot": {
+        "metric": "weeklyDownloads",
+        "value": 158684269,
+        "period": "last-week",
+        "start": "2026-08-22",
+        "end": "2026-08-28",
+        "source": "https://api.npmjs.org/downloads/point/last-week/%40types%2Freact"
+      },
+      "sources": {
+        "package": "https://registry.npmjs.org/%40types%2Freact",
+        "version": "https://registry.npmjs.org/%40types%2Freact/19.2.17",
+        "repository": "https://api.github.com/repos/DefinitelyTyped/DefinitelyTyped"
+      },
+      "legitimacy": {
+        "verdict": "OK",
+        "reasons": []
+      },
+      "lockIntent": {
+        "section": "devDependencies",
+        "version": "19.2.17"
+      },
+      "candidateIndex": 1,
+      "candidatesConsidered": 2
+    },
+    {
+      "name": "@types/react-dom",
+      "version": "19.2.3",
+      "repository": "https://github.com/DefinitelyTyped/DefinitelyTyped",
+      "publishedAt": "2025-11-12T04:37:39.524Z",
+      "tarball": "https://registry.npmjs.org/@types/react-dom/-/react-dom-19.2.3.tgz",
+      "integrity": "sha512-jp2L/eY6fn+KgVVQAOqYItbF0VY/YApe5Mz2F0aykSO8gx31bYCZyvSeYxCHKvzHG5eZjc+zyaS5BrBWya2+kQ==",
+      "deprecated": null,
+      "lifecycle": {
+        "preinstall": null,
+        "install": null,
+        "postinstall": null
+      },
+      "numericSnapshot": {
+        "metric": "weeklyDownloads",
+        "value": 131628603,
+        "period": "last-week",
+        "start": "2026-08-22",
+        "end": "2026-08-28",
+        "source": "https://api.npmjs.org/downloads/point/last-week/%40types%2Freact-dom"
+      },
+      "sources": {
+        "package": "https://registry.npmjs.org/%40types%2Freact-dom",
+        "version": "https://registry.npmjs.org/%40types%2Freact-dom/19.2.3",
+        "repository": "https://api.github.com/repos/DefinitelyTyped/DefinitelyTyped"
+      },
+      "legitimacy": {
+        "verdict": "OK",
+        "reasons": []
+      },
+      "lockIntent": {
+        "section": "devDependencies",
+        "version": "19.2.3"
+      },
+      "candidateIndex": 1,
+      "candidatesConsidered": 2
+    },
+    {
+      "name": "vite",
+      "version": "8.1.5",
+      "repository": "https://github.com/vitejs/vite",
+      "publishedAt": "2026-07-16T06:51:13.015Z",
+      "tarball": "https://registry.npmjs.org/vite/-/vite-8.1.5.tgz",
+      "integrity": "sha512-7ULLwsCdYx/nRyrpiEwvqb5TFHrMVZyBt+rg/OAXT7rgj/z+DtTDyKFeLAdDkubDVDKD8jOsndmy7m55XcfUsw==",
+      "deprecated": null,
+      "lifecycle": {
+        "preinstall": null,
+        "install": null,
+        "postinstall": null
+      },
+      "numericSnapshot": {
+        "metric": "weeklyDownloads",
+        "value": 176223418,
+        "period": "last-week",
+        "start": "2026-08-22",
+        "end": "2026-08-28",
+        "source": "https://api.npmjs.org/downloads/point/last-week/vite"
+      },
+      "sources": {
+        "package": "https://registry.npmjs.org/vite",
+        "version": "https://registry.npmjs.org/vite/8.1.5",
+        "repository": "https://api.github.com/repos/vitejs/vite"
+      },
+      "legitimacy": {
+        "verdict": "OK",
+        "reasons": []
+      },
+      "lockIntent": {
+        "section": "devDependencies",
+        "version": "8.1.5"
+      },
+      "candidateIndex": 1,
+      "candidatesConsidered": 2
+    },
+    {
+      "name": "@vitejs/plugin-react",
+      "version": "6.0.5",
+      "repository": "https://github.com/vitejs/vite-plugin-react",
+      "publishedAt": "2026-07-30T10:12:02.149Z",
+      "tarball": "https://registry.npmjs.org/@vitejs/plugin-react/-/plugin-react-6.0.5.tgz",
+      "integrity": "sha512-BOVzne/NL162sMdResB25mUv+vWMF5NoAjNf09TeGlE7ZpszZWSD3winycicLJw72yeVsoCn/2kOhEuCvEShMA==",
+      "deprecated": null,
+      "lifecycle": {
+        "preinstall": null,
+        "install": null,
+        "postinstall": null
+      },
+      "numericSnapshot": {
+        "metric": "weeklyDownloads",
+        "value": 84087839,
+        "period": "last-week",
+        "start": "2026-08-22",
+        "end": "2026-08-28",
+        "source": "https://api.npmjs.org/downloads/point/last-week/%40vitejs%2Fplugin-react"
+      },
+      "sources": {
+        "package": "https://registry.npmjs.org/%40vitejs%2Fplugin-react",
+        "version": "https://registry.npmjs.org/%40vitejs%2Fplugin-react/6.0.5",
+        "repository": "https://api.github.com/repos/vitejs/vite-plugin-react"
+      },
+      "legitimacy": {
+        "verdict": "OK",
+        "reasons": []
+      },
+      "lockIntent": {
+        "section": "devDependencies",
+        "version": "6.0.5"
+      },
+      "candidateIndex": 1,
+      "candidatesConsidered": 2
+    }
+  ],
+  "crates": [
+    {
+      "name": "icu_segmenter",
+      "version": "2.3.0",
+      "repository": "https://github.com/unicode-org/icu4x",
+      "publishedAt": "2026-08-13T23:30:08.159Z",
+      "checksum": "82d07aafccd67af15d02512a6adf5896fbc5ed00f2e99b471d2efa14016db3db",
+      "yanked": false,
+      "numericSnapshot": {
+        "metric": "recentDownloads",
+        "value": 6153130,
+        "source": "https://crates.io/api/v1/crates/icu_segmenter"
+      },
+      "sources": {
+        "package": "https://crates.io/api/v1/crates/icu_segmenter",
+        "version": "https://crates.io/api/v1/crates/icu_segmenter/2.3.0",
+        "repository": "https://api.github.com/repos/unicode-org/icu4x"
+      },
+      "legitimacy": {
+        "verdict": "OK",
+        "reasons": []
+      },
+      "lockIntent": {
+        "manifest": "crates/flow-core/Cargo.toml",
+        "version": "2.3.0",
+        "defaultFeatures": false,
+        "features": [
+          "compiled_data"
+        ]
+      },
+      "candidateIndex": 0,
+      "candidatesConsidered": 1
+    },
+    {
+      "name": "image",
+      "version": "0.25.10",
+      "repository": "https://github.com/image-rs/image",
+      "publishedAt": "2026-03-10T16:29:18.250Z",
+      "checksum": "85ab80394333c02fe689eaf900ab500fbd0c2213da414687ebf995a65d5a6104",
+      "yanked": false,
+      "numericSnapshot": {
+        "metric": "recentDownloads",
+        "value": 45722670,
+        "source": "https://crates.io/api/v1/crates/image"
+      },
+      "sources": {
+        "package": "https://crates.io/api/v1/crates/image",
+        "version": "https://crates.io/api/v1/crates/image/0.25.10",
+        "repository": "https://api.github.com/repos/image-rs/image"
+      },
+      "legitimacy": {
+        "verdict": "OK",
+        "reasons": []
+      },
+      "lockIntent": {
+        "manifest": "crates/flow-core/Cargo.toml",
+        "version": "0.25.10",
+        "defaultFeatures": false,
+        "features": [
+          "png",
+          "jpeg"
+        ]
+      },
+      "candidateIndex": 0,
+      "candidatesConsidered": 1
+    }
+  ]
+}
