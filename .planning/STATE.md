@@ -4,16 +4,16 @@ milestone: v1.0
 current_phase: 2
 current_phase_name: Accessible Rich-Text Editing
 status: executing
-stopped_at: Phase 2 UI-SPEC approved
-last_updated: "2026-08-29T10:48:01.385Z"
+stopped_at: Completed 02-01-PLAN.md
+last_updated: "2026-08-29T11:11:47.295Z"
 last_activity: 2026-08-29
 last_activity_desc: Phase 2 execution started
-state_head: 71a046d2d697431cd699533117dd3c0b7678117b
+state_head: 7396d8a51655d3965aa58944194e4b9d0da96dbd
 progress:
   total_phases: 9
   completed_phases: 1
   total_plans: 24
-  completed_plans: 6
+  completed_plans: 7
 milestone_name: milestone
 ---
 
@@ -29,8 +29,8 @@ See: .planning/PROJECT.md (updated 2026-08-25)
 ## Current Position
 
 Phase: 2 (Accessible Rich-Text Editing) — EXECUTING
-Plan: 1 of 18
-Status: Executing Phase 2
+Plan: 2 of 18
+Status: Ready to execute
 Last activity: 2026-08-29 — Phase 2 execution started
 
 Progress: [█░░░░░░░░] 11%
@@ -60,6 +60,7 @@ Progress: [█░░░░░░░░] 11%
 | Phase 1 P04 | 30min | 3 tasks | 13 files |
 | Phase FLOWPDF-01 P05 | 7d-multi-session | 3 tasks | 18 files |
 | Phase FLOWPDF-01 P06 | 46min | 3 tasks | 15 files |
+| Phase FLOWPDF-02 P01 | 17m 7s | 2 tasks | 11 files |
 
 ## Accumulated Context
 
@@ -72,6 +73,9 @@ Decisions are logged in `.planning/PROJECT.md`.
 - UI, keyboard, API, and future voice input share one typed transactional command service with revision checks, deterministic undo/redo, and explicit anchor invalidation.
 - Browser durability is acknowledged only after one atomic IndexedDB transaction completes and Rust revalidates the recovered record set; exact retries converge and divergent writes conflict.
 - Canonical UTF-8 bytes, UTF-16 public positions, contiguous schema migrations, provenance, and closed audit projections are versioned and deterministic; hashes prove consistency rather than external authenticity.
+- [Phase 2]: Candidate fallback is allowed only across predeclared exact versions; missing or contradictory official evidence is terminal.
+- [Phase 2]: npm legitimacy uses exact-release age; crate legitimacy uses package inception age while retaining exact-release evidence.
+- [Phase 2]: ICU segmentation is locked to compiled_data and image decoding to PNG/JPEG with default Cargo features disabled.
 
 ### Pending Todos
 
@@ -90,6 +94,6 @@ Decisions are logged in `.planning/PROJECT.md`.
 
 ## Session Continuity
 
-Last session: 2026-08-25T09:31:37.505Z
-Stopped at: Phase 2 UI-SPEC approved
-Resume file: .planning/phases/FLOWPDF-02-accessible-rich-text-editing/02-UI-SPEC.md
+Last session: 2026-08-29T11:11:47.243Z
+Stopped at: Completed 02-01-PLAN.md
+Resume file: None

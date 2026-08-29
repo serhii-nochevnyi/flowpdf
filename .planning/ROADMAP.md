@@ -60,10 +60,11 @@ FlowPDF progresses through nine dependency-ordered vertical capabilities. The ro
   3. Keyboard, visible controls and synchronized semantic accessibility content expose every implemented mutation.
   4. Screen-reader users can navigate semantic content, fields, statuses and errors without relying on the page canvas alone.
 
-**Plans**: 18 plans
+**Plans**: 1/18 plans executed
 
 Plans:
-- [ ] 02-01-PLAN.md — Admit and lock exact Phase 2 dependencies without lifecycle execution.
+
+- [x] 02-01-PLAN.md — Admit and lock exact Phase 2 dependencies without lifecycle execution.
 - [ ] 02-02-PLAN.md — Pin Unicode conformance data, numerical WASM growth, and retained boundaries.
 - [ ] 02-03-PLAN.md — Execute the one-way legacy freeze and every schema-v2 migration route.
 - [ ] 02-04-PLAN.md — Establish Rust grapheme, atomic-position, and editor-session authority.
@@ -81,6 +82,7 @@ Plans:
 - [ ] 02-16-PLAN.md — Keep existing fields and the editor shell semantically accessible.
 - [ ] 02-17-PLAN.md — Close the exact 108-pair UI contract and honest AT evidence.
 - [ ] 02-18-PLAN.md — Add fast scale feedback and the deterministic dual-run release gate.
+
 **UI hint**: yes
 
 ### Phase 3: Deterministic Reflow and Pagination
@@ -207,7 +209,7 @@ Plans:
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Durable Flow Foundation | 6/6 | Complete    | 2026-08-25 |
-| 2. Accessible Rich-Text Editing | 0/TBD | Not started | - |
+| 2. Accessible Rich-Text Editing | 1/18 | In Progress|  |
 | 3. Deterministic Reflow and Pagination | 0/TBD | Not started | - |
 | 4. Owned PDF Preview and Export | 0/TBD | Not started | - |
 | 5. Semantic Fillable Forms | 0/TBD | Not started | - |
