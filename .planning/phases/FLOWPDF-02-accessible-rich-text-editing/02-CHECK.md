@@ -1,4 +1,4 @@
-# Phase 2 — Plan Checker Findings
+# Phase 2 — Planning Checker Findings
 
 **Checked:** 2026-08-28
 **Verdict:** ISSUES FOUND — revision required before execution
