@@ -97,6 +97,52 @@ function assertExactIdentities(actual, expected, label, ecosystem) {
   )
 }
 
+export function mergeProvenanceReports(reports) {
+  const merged = { status: 'success', crates: [], npm: [] }
+  for (const report of reports) {
+    invariant(report?.status === 'success', 'dependency provenance report is not successful')
+    merged.crates.push(...(report.crates ?? []))
+    merged.npm.push(...(report.npm ?? []))
+  }
+  for (const [ecosystem, entries] of [['crates.io', merged.crates], ['npm', merged.npm]]) {
+    const identities = entries.map((entry) => identity(entry, ecosystem))
+    invariant(new Set(identities).size === identities.length, `${ecosystem} provenance reports contain duplicate identities`)
+  }
+  return merged
+}
+
+function parseFeatureList(value, label) {
+  const featureSource = value.match(/(?:^|,)\s*features\s*=\s*\[([^\]]*)\]/)?.[1]
+  invariant(featureSource !== undefined, `${label}: feature list is missing`)
+  return [...featureSource.matchAll(/"([^"]+)"/g)].map((match) => match[1]).sort()
+}
+
+export function verifyPhase2LockIntent(packageJson, cargoToml, cargoMemberManifests, phase2) {
+  invariant(phase2?.status === 'success', 'Phase 2 dependency provenance report is not successful')
+  for (const item of phase2.npm ?? []) {
+    invariant(item.legitimacy?.verdict === 'OK', `${item.name}@${item.version}: npm legitimacy is not OK`)
+    invariant(item.lockIntent?.version === item.version, `${item.name}@${item.version}: npm report lock intent is stale`)
+    invariant(packageJson[item.lockIntent.section]?.[item.name] === item.version, `${item.name}@${item.version}: package.json differs from accepted lock intent`)
+  }
+  for (const item of phase2.crates ?? []) {
+    invariant(item.legitimacy?.verdict === 'OK', `${item.name}@${item.version}: crate legitimacy is not OK`)
+    invariant(item.lockIntent?.version === item.version, `${item.name}@${item.version}: crate report lock intent is stale`)
+    const escapedName = item.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    const workspaceValue = cargoToml.match(new RegExp(`^${escapedName}\\s*=\\s*\\{([^\\n]+)\\}$`, 'm'))?.[1]
+    invariant(workspaceValue, `${item.name}: workspace dependency declaration is missing`)
+    invariant(new RegExp(`(?:^|,)\\s*version\\s*=\\s*"=${item.version.replace(/\./g, '\\.')}"(?:\\s*[,]|$)`).test(workspaceValue), `${item.name}: workspace version differs from accepted lock intent`)
+    invariant(/(?:^|,)\s*default-features\s*=\s*false(?:\s*[,]?|$)/.test(workspaceValue), `${item.name}: default Cargo features must be disabled`)
+    invariant(
+      JSON.stringify(parseFeatureList(workspaceValue, item.name)) === JSON.stringify([...item.lockIntent.features].sort()),
+      `${item.name}: Cargo feature set differs from accepted lock intent`,
+    )
+    invariant(item.lockIntent.defaultFeatures === false, `${item.name}: report must disable default Cargo features`)
+    const memberSource = cargoMemberManifests.get(item.lockIntent.manifest)
+    invariant(memberSource, `${item.name}: lock-intent manifest ${item.lockIntent.manifest} is missing`)
+    invariant(new RegExp(`^${escapedName}\\.workspace\\s*=\\s*true$`, 'm').test(memberSource), `${item.name}: lock-intent manifest does not consume the workspace pin`)
+  }
+}
+
 export function verifyManifestCoverage(
   packageJson,
   cargoToml,
@@ -197,18 +243,23 @@ export async function verifyDependencyLocks(root = process.cwd()) {
   const cargoMemberManifests = await Promise.all(
     crateDirectories
       .filter((entry) => entry.isDirectory())
-      .map((entry) => readFile(join(root, 'crates', entry.name, 'Cargo.toml'), 'utf8')),
+      .map(async (entry) => ({
+        path: `crates/${entry.name}/Cargo.toml`,
+        source: await readFile(join(root, 'crates', entry.name, 'Cargo.toml'), 'utf8'),
+      })),
   )
-  const [packageJson, packageLock, cargoLock, cargoToml, config, provenance] = await Promise.all([
+  const [packageJson, packageLock, cargoLock, cargoToml, config, phase1, phase2] = await Promise.all([
     readFile(join(root, 'package.json'), 'utf8').then(JSON.parse),
     readFile(join(root, 'package-lock.json'), 'utf8').then(JSON.parse),
     readFile(join(root, 'Cargo.lock'), 'utf8'),
     readFile(join(root, 'Cargo.toml'), 'utf8'),
     readFile(join(root, 'config/dependency-provenance.json'), 'utf8').then(JSON.parse),
     readFile(join(root, 'artifacts/provenance/phase1-dependencies.json'), 'utf8').then(JSON.parse),
+    readFile(join(root, 'artifacts/provenance/phase2-dependencies.json'), 'utf8').then(JSON.parse),
   ])
-  invariant(provenance.status === 'success', 'dependency provenance report is not successful')
-  verifyManifestCoverage(packageJson, cargoToml, config, provenance, cargoMemberManifests)
+  const provenance = mergeProvenanceReports([phase1, phase2])
+  verifyManifestCoverage(packageJson, cargoToml, config, provenance, cargoMemberManifests.map(({ source }) => source))
+  verifyPhase2LockIntent(packageJson, cargoToml, new Map(cargoMemberManifests.map((entry) => [entry.path, entry.source])), phase2)
   verifyCargoLock(cargoLock, provenance)
   verifyNpmLock(packageJson, packageLock, provenance)
   return { cargoPackages: parseCargoPackages(cargoLock).length, npmPackages: Object.keys(packageLock.packages).length - 1 }
@@ -269,6 +320,7 @@ test('runs against an isolated on-disk lock fixture', async () => {
   await Promise.all([
     writeFile(join(root, 'config/dependency-provenance.json'), JSON.stringify(config)),
     writeFile(join(root, 'artifacts/provenance/phase1-dependencies.json'), JSON.stringify({ status: 'success', crates: [{ name: 'serde', version: '1.0.228', kind: 'dependency', checksum: 'a'.repeat(64) }], npm: [{ name: 'vitest', version: '4.1.6', kind: 'dependency', integrity }] })),
+    writeFile(join(root, 'artifacts/provenance/phase2-dependencies.json'), JSON.stringify({ status: 'success', crates: [], npm: [] })),
   ])
   assert.deepEqual(await verifyDependencyLocks(root), { cargoPackages: 1, npmPackages: 1 })
 })
@@ -306,6 +358,47 @@ test('rejects omitted, extra, and version-drifted direct dependency provenance i
       ['[dependencies]\nextra = "=1.2.3"\n'],
     ),
     /Cargo provenance manifest identity coverage differs/,
+  )
+})
+
+test('rejects Phase 2 lock-intent and Cargo feature drift', () => {
+  const packageJson = { dependencies: { react: '19.2.8' } }
+  const cargoToml = '[workspace.dependencies]\nicu_segmenter = { version = "=2.3.0", default-features = false, features = ["compiled_data"] }\n'
+  const memberManifests = new Map([
+    ['crates/flow-core/Cargo.toml', '[dependencies]\nicu_segmenter.workspace = true\n'],
+  ])
+  const phase2 = {
+    status: 'success',
+    npm: [{
+      name: 'react',
+      version: '19.2.8',
+      legitimacy: { verdict: 'OK' },
+      lockIntent: { section: 'dependencies', version: '19.2.8' },
+    }],
+    crates: [{
+      name: 'icu_segmenter',
+      version: '2.3.0',
+      legitimacy: { verdict: 'OK' },
+      lockIntent: {
+        manifest: 'crates/flow-core/Cargo.toml',
+        version: '2.3.0',
+        defaultFeatures: false,
+        features: ['compiled_data'],
+      },
+    }],
+  }
+  assert.doesNotThrow(() => verifyPhase2LockIntent(packageJson, cargoToml, memberManifests, phase2))
+  assert.throws(
+    () => verifyPhase2LockIntent({ dependencies: { react: '19.2.7' } }, cargoToml, memberManifests, phase2),
+    /package.json differs/,
+  )
+  assert.throws(
+    () => verifyPhase2LockIntent(packageJson, cargoToml.replace('default-features = false, ', ''), memberManifests, phase2),
+    /default Cargo features/,
+  )
+  assert.throws(
+    () => verifyPhase2LockIntent(packageJson, cargoToml.replace('"compiled_data"', '"compiled_data", "serde"'), memberManifests, phase2),
+    /feature set differs/,
   )
 })
 
