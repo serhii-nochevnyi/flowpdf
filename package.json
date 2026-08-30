@@ -15,7 +15,7 @@
     "check": "node scripts/check-phase1.mjs",
     "dev": "vite",
     "inspector": "npm run build:web && node scripts/serve-inspector.mjs",
-    "test": "vitest run",
+    "test": "PLAYWRIGHT_BROWSERS_PATH=./work/playwright vitest run",
     "test:browser": "PLAYWRIGHT_BROWSERS_PATH=./work/playwright vitest run --project browser",
     "test:unit": "PLAYWRIGHT_BROWSERS_PATH=./work/playwright vitest run --project unit --project inspector-unit",
     "typecheck": "tsc --noEmit"
