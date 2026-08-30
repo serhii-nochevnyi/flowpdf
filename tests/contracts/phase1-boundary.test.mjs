@@ -63,7 +63,7 @@ const semanticOwnerName = /^(?:apply|canonicalize|hash|migrate|mutate|recover|re
 
 test('the checked-in Phase 1 workspace preserves deferred scope and Rust semantic ownership', async () => {
   const snapshot = loadWorkspaceSnapshot(projectRoot)
-  assert.deepEqual(boundaryDiagnostics(snapshot), [])
+  assert.deepEqual(boundaryDiagnostics(snapshot, { phase: 2 }), [])
 
   const gatePath = resolve(projectRoot, 'scripts/check-phase1.mjs')
   assert.equal(existsSync(gatePath), true, 'scripts/check-phase1.mjs must close the phase')
@@ -196,6 +196,169 @@ test('boundary fixture validates the effective js_name instead of the Rust funct
   assert.match(diagnostics, /unexpected WASM export hiddenCreate/i)
   assert.match(diagnostics, /missing typed WASM export create_sample/i)
 })
+
+test('Phase 2 admits only exact React and Vite pins plus a safe editor TSX path', () => {
+  const fixture = validFixture()
+  fixture.packageJson.dependencies = {
+    react: '19.2.8',
+    'react-dom': '19.2.8',
+  }
+  fixture.packageJson.devDependencies = {
+    ...fixture.packageJson.devDependencies,
+    '@types/react': '19.2.17',
+    '@types/react-dom': '19.2.3',
+    '@vitejs/plugin-react': '6.0.5',
+    vite: '8.1.5',
+  }
+  fixture.packageJson.scripts = { dev: 'vite', 'build:vite': 'vite build' }
+  fixture.typescript.set(
+    'web/src/editor/editor-shell.tsx',
+    `
+      import React from 'react'
+      export function EditorShell({ label }) {
+        return <article aria-label={label}><p>{label}</p></article>
+      }
+    `,
+  )
+
+  assert.deepEqual(boundaryDiagnostics(fixture, { phase: 2 }), [])
+
+  fixture.packageJson.dependencies.react = '19.2.9'
+  assert.match(
+    boundaryDiagnostics(fixture, { phase: 2 }).join('\n'),
+    /react.*exact approved Phase 2 version/i,
+  )
+})
+
+test('Phase 2 editor allowance retains semantic, unsafe DOM, layout, voice, and backend bans', () => {
+  const fixture = validFixture()
+  fixture.packageJson.dependencies = { react: '19.2.8', 'react-dom': '19.2.8' }
+  fixture.packageJson.devDependencies = {
+    ...fixture.packageJson.devDependencies,
+    '@types/react': '19.2.17',
+    '@types/react-dom': '19.2.3',
+    '@vitejs/plugin-react': '6.0.5',
+    vite: '8.1.5',
+  }
+  fixture.typescript.set(
+    'web/src/editor/unsafe-editor.tsx',
+    `
+      import React from 'react'
+      export function mutateFlowDocument(canonicalJson, root) {
+        const documentState = JSON.parse(canonicalJson)
+        documentState.revision += 1
+        root.innerHTML = canonicalJson
+        document.createElement('canvas')
+        navigator.mediaDevices.getUserMedia({ audio: true })
+        fetch('/api/documents')
+        return <article>{documentState.revision}</article>
+      }
+    `,
+  )
+
+  const diagnostics = boundaryDiagnostics(fixture, { phase: 2 }).join('\n')
+  assert.match(diagnostics, /semantic owner|semantic JSON|semantic state/i)
+  assert.match(diagnostics, /innerHTML|unsafe or deferred DOM/i)
+  assert.match(diagnostics, /canvas/i)
+  assert.match(diagnostics, /voice/i)
+  assert.match(diagnostics, /backend/i)
+})
+
+test('WASM size report rejects forged measurements, stale inputs, and either exceeded budget', async () => {
+  const { validateWasmSizeReport, WASM_SIZE_LIMITS } = await import('../../scripts/verify-wasm-size.mjs')
+  const validReport = wasmSizeReportFixture(WASM_SIZE_LIMITS)
+  const expected = expectedWasmSizeContext(validReport)
+  assert.doesNotThrow(() => validateWasmSizeReport(validReport, expected))
+
+  const adversarialCases = [
+    ['forged baseline total', (report) => { report.baseline.rawBytes += 1 }],
+    ['forged raw delta', (report) => { report.delta.rawBytes += 1 }],
+    ['stale source manifest', (report) => { report.sourceManifest.digest = `sha256:${'f'.repeat(64)}` }],
+    ['changed build inputs', (report) => { report.buildConfiguration.candidateFeatures.push('auto') }],
+  ]
+  for (const [name, mutate] of adversarialCases) {
+    const report = structuredClone(validReport)
+    mutate(report)
+    assert.throws(
+      () => validateWasmSizeReport(report, expected),
+      undefined,
+      name,
+    )
+  }
+
+  const rawOverBudget = structuredClone(validReport)
+  rawOverBudget.candidate.rawBytes = rawOverBudget.baseline.rawBytes + WASM_SIZE_LIMITS.rawDeltaBytes + 1
+  rawOverBudget.delta.rawBytes = WASM_SIZE_LIMITS.rawDeltaBytes + 1
+  assert.throws(
+    () => validateWasmSizeReport(rawOverBudget, expectedWasmSizeContext(rawOverBudget)),
+    /raw.*budget/i,
+  )
+
+  const gzipOverBudget = structuredClone(validReport)
+  gzipOverBudget.candidate.gzipBytes = gzipOverBudget.baseline.gzipBytes + WASM_SIZE_LIMITS.gzipDeltaBytes + 1
+  gzipOverBudget.delta.gzipBytes = WASM_SIZE_LIMITS.gzipDeltaBytes + 1
+  assert.throws(
+    () => validateWasmSizeReport(gzipOverBudget, expectedWasmSizeContext(gzipOverBudget)),
+    /gzip.*budget/i,
+  )
+})
+
+function wasmSizeReportFixture(limits) {
+  return {
+    formatVersion: 1,
+    status: 'passed',
+    sourceManifest: {
+      formatVersion: 1,
+      algorithm: 'sha256',
+      files: [{ path: 'crates/flow-wasm/src/lib.rs', sha256: `sha256:${'a'.repeat(64)}` }],
+      digest: `sha256:${'b'.repeat(64)}`,
+    },
+    toolchain: {
+      cargoVersion: 'cargo 1.97.1',
+      rustcVersion: 'rustc 1.97.1',
+      wasmBindgenVersion: 'wasm-bindgen 0.2.108',
+      target: 'wasm32-unknown-unknown',
+    },
+    buildConfiguration: {
+      profile: 'release',
+      locked: true,
+      target: 'wasm32-unknown-unknown',
+      package: 'flow-wasm',
+      baselineFeatures: [],
+      candidateFeatures: ['icu-segmenter'],
+      rustFlags: '-C debuginfo=0',
+      bindgenTarget: 'web',
+    },
+    compression: { algorithm: 'gzip', level: 9, mtime: 0 },
+    limits: { ...limits },
+    baseline: {
+      label: 'phase1-compatible',
+      rawBytes: 100_000,
+      gzipBytes: 30_000,
+      sha256: `sha256:${'c'.repeat(64)}`,
+    },
+    candidate: {
+      label: 'icu-compiled-data',
+      rawBytes: 110_000,
+      gzipBytes: 35_000,
+      sha256: `sha256:${'d'.repeat(64)}`,
+    },
+    delta: { rawBytes: 10_000, gzipBytes: 5_000 },
+    passed: true,
+    blocked: false,
+  }
+}
+
+function expectedWasmSizeContext(report) {
+  return structuredClone({
+    sourceManifest: report.sourceManifest,
+    toolchain: report.toolchain,
+    buildConfiguration: report.buildConfiguration,
+    compression: report.compression,
+    baseline: report.baseline,
+    candidate: report.candidate,
+  })
+}
 
 function loadWorkspaceSnapshot(root) {
   const typescript = new Map()
