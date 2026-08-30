@@ -43,16 +43,17 @@ key-files:
     - crates/flow-core/Cargo.toml
 decisions:
   - Candidate fallback is allowed only across predeclared exact versions; missing or contradictory official evidence remains terminal.
+  - Once admitted, the exact lock intent is immutable across later policy-age changes and is revalidated rather than reselected.
   - npm legitimacy uses exact-release age, while crate legitimacy uses package inception age and still records exact-release publication evidence.
   - ICU segmentation is locked to compiled_data only and image decoding to PNG/JPEG only, with default Cargo features disabled.
 metrics:
-  duration: 17m 7s
-  completed: 2026-08-29
+  duration: 20m 7s active execution
+  completed: 2026-08-30
 status: complete
 actuals:
-  tokens: 23090
+  tokens: 23110
   tasks: 2
-  commits: 3
+  commits: 6
 ---
 
 # Phase 2 Plan 01: Dependency and Build Graph Admission Summary
@@ -61,12 +62,13 @@ Fail-closed official-registry admission now binds exact React/Vite and ICU4X/ima
 
 ## Performance
 
-- **Duration:** 17m 7s
+- **Duration:** 20m 7s active execution (17m 7s original execution + 3m post-wave repair)
 - **Started:** 2026-08-29T10:52:19Z
-- **Completed:** 2026-08-29T11:09:26Z
+- **Original completion:** 2026-08-29T11:09:26Z
+- **Post-wave repair completed:** 2026-08-30
 - **Tasks:** 2
 - **Files changed:** 11
-- **Actual diff scale:** 92,363 characters / 4 = 23,090 tokens
+- **Actual diff scale:** 92,442 characters / 4 = 23,110 tokens
 
 ## Accomplishments
 
@@ -75,6 +77,7 @@ Fail-closed official-registry admission now binds exact React/Vite and ICU4X/ima
 - Admitted six npm packages and two crates with `OK` legitimacy evidence and a stable lock-intent digest of `27c9a5f2f41d0148ee1ff8e277ee1990f48135f367f555d709daed7604666bae`.
 - Materialized npm and Cargo locks without npm lifecycle execution and enforced the closed `icu_segmenter/compiled_data` and `image/png,jpeg` feature graph.
 - Added a Vite configuration for the existing `web/index.html`/WASM Inspector entry while retaining all named Vitest projects and the Foundation Inspector route.
+- Kept admitted dependency pins stable across policy-age rollover and made the generic full test command launch all browser projects from the pinned workspace Playwright cache.
 
 ## Task Commits
 
@@ -82,6 +85,8 @@ Each task was committed atomically:
 
 1. **Task 1: Prove exact dependency candidates** — `fdf7378` (`feat`)
 2. **Task 2: Lock accepted dependencies and build seam** — `7396d8a` (`chore`)
+3. **Post-wave: Preserve admitted pins across policy-age rollover** — `f5d8d75` (`fix`)
+4. **Post-wave: Use the local Playwright cache in full tests** — `acb04ed` (`fix`)
 
 ## Files Created/Modified
 
@@ -89,7 +94,7 @@ Each task was committed atomically:
 - `scripts/verify-phase2-dependencies.test.mjs` — Deterministic and adversarial dependency-admission tests.
 - `config/dependency-provenance.json` — Ordered exact candidates, accepted lock intent, repositories, and lifecycle/adoption policy.
 - `artifacts/provenance/phase2-dependencies.json` — Accepted npm/crate identities and evidence snapshots.
-- `package.json` / `package-lock.json` — Exact React, type, Vite, and plugin dependencies with canonical lock integrity.
+- `package.json` / `package-lock.json` — Exact React, type, Vite, and plugin dependencies with canonical lock integrity; the full test script uses the pinned local Playwright browser cache.
 - `Cargo.toml` / `Cargo.lock` / `crates/flow-core/Cargo.toml` — Exact ICU4X and image dependencies with closed feature sets.
 - `vite.config.ts` — Existing Inspector entry, React plugin, strict filesystem boundary, and deterministic output directory.
 - `scripts/verify-dependency-locks.mjs` — Phase 1 + Phase 2 provenance merge and explicit Phase 2 manifest/feature intent checks.
@@ -98,6 +103,7 @@ Each task was committed atomically:
 
 - No package name or version was substituted after registry inspection. Only candidates listed in the committed configuration could be selected.
 - Contradictory or missing official metadata is a hard failure. A fallback candidate is considered only when the preceding exact candidate has complete evidence but a non-OK policy verdict.
+- A later policy-age change cannot replace the committed accepted pin; repeat verification revalidates the immutable lock intent while still checking earlier configured candidates for contradictory evidence.
 - npm install hooks remain disabled during lock materialization and verification; the admission verifier has no child-process execution path.
 - Existing Vitest project names and the Phase 1 Inspector source route remain unchanged; Vite adapts the legacy stylesheet reference during its own HTML transform.
 
@@ -121,6 +127,22 @@ Each task was committed atomically:
 - **Files modified:** `vite.config.ts`
 - **Commit:** `7396d8a`
 
+**3. [Rule 1 - Bug] Kept admitted pins stable after candidate policy-age rollover**
+
+- **Found during:** Post-wave Plan 02-01 provenance rerun on 2026-08-30
+- **Issue:** `@types/react@19.2.18`, rejected during initial admission for being under 30 days old, later crossed the age threshold and the selector attempted to replace the committed `19.2.17` lock intent.
+- **Fix:** Candidate evidence is still checked in order, but repeat verification now revalidates the immutable admitted lock intent instead of selecting a newly eligible release. The deterministic test advances far enough for the earlier candidate to age into policy.
+- **Files modified:** `scripts/verify-phase2-dependencies.mjs`, `scripts/verify-phase2-dependencies.test.mjs`
+- **Commit:** `f5d8d75`
+
+**4. [Rule 3 - Blocking] Pointed the generic full test command at the project-local Chromium cache**
+
+- **Found during:** Post-wave integration verification
+- **Issue:** `npm test` ran the Node projects but browser projects could not locate Chromium because only `test:unit` and `test:browser` exported `PLAYWRIGHT_BROWSERS_PATH`.
+- **Fix:** Kept one-shot `vitest run` and added `PLAYWRIGHT_BROWSERS_PATH=./work/playwright` to the generic `test` script; no browser download, dependency, or lockfile change was made.
+- **Files modified:** `package.json`
+- **Commit:** `acb04ed`
+
 ## Authentication Gates
 
 None.
@@ -130,6 +152,8 @@ None.
 - `node --test scripts/verify-phase2-dependencies.test.mjs && node scripts/verify-phase2-dependencies.mjs` — passed; 12/12 tests, 6 npm packages and 2 crates accepted.
 - `npm ci --ignore-scripts && node scripts/verify-dependency-locks.mjs && npm ls --all && RUSTUP_HOME=./work/toolchains/rustup CARGO_HOME=./work/toolchains/cargo PATH=./work/toolchains/cargo/bin:$PATH cargo tree --locked -e features` — passed; 6/6 lock tests, 96 npm entries and 107 Cargo packages verified.
 - `npm run build:vite` — passed; existing Inspector entry built with hashed CSS and JavaScript assets.
+- `npm test` — passed on the final code state; 8/8 test files and 43/43 tests, including browser projects using the existing local Chromium executable.
+- Post-wave provenance rerun — passed after the age-rollover fix; 12/12 admission tests and the same 6 npm / 2 crate lock intent remained accepted.
 - Tracer feedback gate was rerun after Task 1 commit and passed before Task 2 began.
 
 ## Threat Scan
@@ -147,4 +171,4 @@ None. A scan of all created and modified files found no TODO/FIXME/placeholder t
 
 ## Self-Check: PASSED
 
-All created artifacts exist, both task commits are reachable, and the committed provenance report retains successful evidence for six npm packages and two crates.
+All created artifacts exist, both original task commits and both post-wave fix commits are reachable, the full suite passes 43/43 tests across 8/8 files, and the committed provenance report retains successful evidence for six npm packages and two crates.
