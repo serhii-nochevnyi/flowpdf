@@ -1,0 +1,36 @@
+{
+  "schemaVersion": 1,
+  "corpus": {
+    "relativePath": "fixtures/unicode/17.0.0/GraphemeBreakTest.txt",
+    "sourceUrl": "https://www.unicode.org/Public/17.0.0/ucd/auxiliary/GraphemeBreakTest.txt",
+    "byteLength": 126570,
+    "sha256": "e2d134d2c52919bace503ebb6a551c1855fe1a1faec18478c78fff254a1793ec",
+    "unicodeVersion": "17.0.0",
+    "header": "# GraphemeBreakTest-17.0.0.txt",
+    "retrievedAt": "2026-08-30",
+    "licenseUrl": "https://www.unicode.org/terms_of_use.html"
+  },
+  "icu4x": {
+    "crate": "icu_segmenter",
+    "crateVersion": "2.3.0",
+    "dataCrate": "icu_segmenter_data",
+    "dataCrateVersion": "2.3.0",
+    "repository": "https://github.com/unicode-org/icu4x",
+    "testedUnicodeTag": "17.0.0",
+    "testedCldrTag": "48.2.1",
+    "testedIcuExportTag": "release-78.1rc",
+    "testedSegmenterLstmTag": "v0.1.0",
+    "features": [
+      "compiled_data"
+    ],
+    "crateSourceUrl": "https://docs.rs/icu_segmenter/2.3.0/src/icu_segmenter/grapheme.rs.html",
+    "dataSourceUrl": "https://docs.rs/crate/icu_segmenter_data/2.3.0/source/Cargo.toml.orig"
+  },
+  "dependencyEvidence": {
+    "relativePath": "artifacts/provenance/phase2-dependencies.json",
+    "phase": "FLOWPDF-02",
+    "status": "success",
+    "lockIntentDigest": "27c9a5f2f41d0148ee1ff8e277ee1990f48135f367f555d709daed7604666bae",
+    "crateChecksum": "82d07aafccd67af15d02512a6adf5896fbc5ed00f2e99b471d2efa14016db3db"
+  }
+}
