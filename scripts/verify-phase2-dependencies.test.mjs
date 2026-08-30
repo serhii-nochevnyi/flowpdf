@@ -128,12 +128,12 @@ async function rejectsCode(config, mutate, code) {
   )
 }
 
-test('selects the first OK exact candidate and is deterministic apart from observation time', async () => {
+test('revalidates the admitted exact pin even after a newer candidate ages into policy', async () => {
   const config = fixtureConfig()
   const first = await buildPhase2DependencyReport(config, { fetchImpl: makeFixtureFetch(), now: NOW })
   const second = await buildPhase2DependencyReport(config, {
     fetchImpl: makeFixtureFetch(),
-    now: new Date('2026-08-30T12:00:00.000Z'),
+    now: new Date('2026-10-01T12:00:00.000Z'),
   })
   assert.equal(first.npm[0].version, '1.9.0')
   assert.equal(first.npm[0].candidateIndex, 1)

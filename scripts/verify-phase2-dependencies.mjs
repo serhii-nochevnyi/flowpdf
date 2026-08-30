@@ -262,18 +262,20 @@ async function inspectCrateCandidate(entry, version, context) {
 }
 
 async function selectCandidate(kind, entry, context) {
-  const rejected = []
-  for (const version of entry.candidates) {
+  const lockIndex = entry.candidates.indexOf(entry.lockIntent.version)
+  for (const [candidateIndex, version] of entry.candidates.entries()) {
     const inspected = kind === 'npm'
       ? await inspectNpmCandidate(entry, version, context)
       : await inspectCrateCandidate(entry, version, context)
-    if (inspected.accepted) {
-      requireFact(version === entry.lockIntent.version, 'stale_lock_intent', `${kind}:${entry.name} accepted ${version}, but lock intent pins ${entry.lockIntent.version}`)
-      return { ...inspected.evidence, candidateIndex: entry.candidates.indexOf(version), candidatesConsidered: rejected.length + 1 }
-    }
-    rejected.push(`${version} (${inspected.reasons.join('; ')})`)
+    if (candidateIndex < lockIndex) continue
+    requireFact(
+      inspected.accepted,
+      'legitimacy_not_ok',
+      `${kind}:${entry.name}@${version} admitted lock intent is no longer OK: ${inspected.reasons.join('; ')}`,
+    )
+    return { ...inspected.evidence, candidateIndex, candidatesConsidered: candidateIndex + 1 }
   }
-  throw new EvidenceError('legitimacy_not_ok', `${kind}:${entry.name} has no OK candidate: ${rejected.join(', ')}`)
+  throw new EvidenceError('stale_lock_intent', `${kind}:${entry.name} lock intent ${entry.lockIntent.version} was not evaluated`)
 }
 
 export async function buildPhase2DependencyReport(config, options = {}) {
