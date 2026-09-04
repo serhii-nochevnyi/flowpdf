@@ -99,14 +99,36 @@ function assertExactIdentities(actual, expected, label, ecosystem) {
 
 export function mergeProvenanceReports(reports) {
   const merged = { status: 'success', crates: [], npm: [] }
+  const seen = { crates: new Map(), npm: new Map() }
   for (const report of reports) {
     invariant(report?.status === 'success', 'dependency provenance report is not successful')
-    merged.crates.push(...(report.crates ?? []))
-    merged.npm.push(...(report.npm ?? []))
-  }
-  for (const [ecosystem, entries] of [['crates.io', merged.crates], ['npm', merged.npm]]) {
-    const identities = entries.map((entry) => identity(entry, ecosystem))
-    invariant(new Set(identities).size === identities.length, `${ecosystem} provenance reports contain duplicate identities`)
+    for (const [ecosystem, key] of [['crates.io', 'crates'], ['npm', 'npm']]) {
+      const reportIdentities = new Set()
+      for (const entry of report[key] ?? []) {
+        const entryIdentity = identity(entry, ecosystem)
+        invariant(!reportIdentities.has(entryIdentity), `${ecosystem} provenance reports contain duplicate identities`)
+        reportIdentities.add(entryIdentity)
+        const existing = seen[key].get(entryIdentity)
+        if (existing) {
+          const fields = ecosystem === 'crates.io'
+            ? ['repository', 'checksum']
+            : ['repository', 'integrity', 'tarball']
+          const source = entry.source ?? entry.sources?.version
+          const existingSource = existing.source ?? existing.sources?.version
+          const publishedAt = Date.parse(entry.publishedAt)
+          const existingPublishedAt = Date.parse(existing.publishedAt)
+          invariant(
+            fields.every((field) => entry[field] !== undefined && entry[field] === existing[field]) &&
+              source !== undefined && source === existingSource &&
+              Number.isFinite(publishedAt) && publishedAt === existingPublishedAt,
+            `${ecosystem} provenance reports contain conflicting provenance for duplicate identity ${entryIdentity}`,
+          )
+          continue
+        }
+        seen[key].set(entryIdentity, entry)
+        merged[key].push(entry)
+      }
+    }
   }
   return merged
 }
@@ -323,6 +345,67 @@ test('runs against an isolated on-disk lock fixture', async () => {
     writeFile(join(root, 'artifacts/provenance/phase2-dependencies.json'), JSON.stringify({ status: 'success', crates: [], npm: [] })),
   ])
   assert.deepEqual(await verifyDependencyLocks(root), { cargoPackages: 1, npmPackages: 1 })
+})
+
+test('collapses equivalent cross-report provenance without accepting duplicate or contradictory evidence', () => {
+  const crate = {
+    name: 'image',
+    version: '0.25.10',
+    kind: 'dependency',
+    repository: 'https://github.com/image-rs/image',
+    publishedAt: '2026-03-10T16:29:18.250581Z',
+    checksum: 'a'.repeat(64),
+    source: 'https://crates.io/api/v1/crates/image/0.25.10',
+  }
+  const phase2Crate = {
+    ...crate,
+    kind: undefined,
+    publishedAt: '2026-03-10T16:29:18.250Z',
+    source: undefined,
+    sources: { version: crate.source },
+  }
+  const npm = {
+    name: 'react',
+    version: '19.2.8',
+    kind: 'dependency',
+    repository: 'https://github.com/react/react',
+    publishedAt: '2026-07-21T15:41:28.716Z',
+    integrity: 'sha512-test',
+    tarball: 'https://registry.npmjs.org/react/-/react-19.2.8.tgz',
+    source: 'https://registry.npmjs.org/react/19.2.8',
+  }
+  const phase2Npm = {
+    ...npm,
+    kind: undefined,
+    source: undefined,
+    sources: { version: npm.source },
+  }
+
+  assert.deepEqual(
+    mergeProvenanceReports([
+      { status: 'success', crates: [crate], npm: [npm] },
+      { status: 'success', crates: [phase2Crate], npm: [phase2Npm] },
+    ]),
+    { status: 'success', crates: [crate], npm: [npm] },
+  )
+  assert.throws(
+    () => mergeProvenanceReports([{ status: 'success', crates: [crate, crate], npm: [] }]),
+    /duplicate identities/,
+  )
+  assert.throws(
+    () => mergeProvenanceReports([
+      { status: 'success', crates: [crate], npm: [npm] },
+      { status: 'success', crates: [{ ...phase2Crate, checksum: 'b'.repeat(64) }], npm: [] },
+    ]),
+    /conflicting provenance/,
+  )
+  assert.throws(
+    () => mergeProvenanceReports([
+      { status: 'success', crates: [], npm: [npm] },
+      { status: 'success', crates: [], npm: [{ ...phase2Npm, integrity: 'sha512-other' }] },
+    ]),
+    /conflicting provenance/,
+  )
 })
 
 test('rejects omitted, extra, and version-drifted direct dependency provenance identities', () => {

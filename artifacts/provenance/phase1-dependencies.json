@@ -91,6 +91,26 @@
       "publishedAt": "2025-09-20T18:12:30.564021Z",
       "checksum": "2bb0be07becd10686a0bb407298fb425360a5c44a663774406340c59a22de4ce",
       "source": "https://crates.io/api/v1/crates/proptest/1.8.0"
+    },
+    {
+      "ecosystem": "crates.io",
+      "name": "icu_segmenter",
+      "version": "2.3.0",
+      "kind": "dependency",
+      "repository": "https://github.com/unicode-org/icu4x",
+      "publishedAt": "2026-08-13T23:30:08.159533Z",
+      "checksum": "82d07aafccd67af15d02512a6adf5896fbc5ed00f2e99b471d2efa14016db3db",
+      "source": "https://crates.io/api/v1/crates/icu_segmenter/2.3.0"
+    },
+    {
+      "ecosystem": "crates.io",
+      "name": "image",
+      "version": "0.25.10",
+      "kind": "dependency",
+      "repository": "https://github.com/image-rs/image",
+      "publishedAt": "2026-03-10T16:29:18.250581Z",
+      "checksum": "85ab80394333c02fe689eaf900ab500fbd0c2213da414687ebf995a65d5a6104",
+      "source": "https://crates.io/api/v1/crates/image/0.25.10"
     }
   ],
   "npm": [
@@ -148,6 +168,72 @@
       "integrity": "sha512-ilYQj1s8sr2ppEJ2YVadYBN0Mb3mdo9J0wQ+UuDhzYqURwSoW4n1Xs5vs7ORwgDGmyEh33tRMeS8KhdkMoLXQw==",
       "source": "https://registry.npmjs.org/playwright/1.57.0",
       "tarball": "https://registry.npmjs.org/playwright/-/playwright-1.57.0.tgz"
+    },
+    {
+      "ecosystem": "npm",
+      "name": "react",
+      "version": "19.2.8",
+      "kind": "dependency",
+      "repository": "https://github.com/react/react",
+      "publishedAt": "2026-07-21T15:41:28.716Z",
+      "integrity": "sha512-PWaYA1L/q9u2u7xYQi+Y3L3Yfnie7XyLeaJICV1MGD6LprsBxcAqGjYyr0eY3p+QdsA+x/Irkt4Qif8D63+Sbw==",
+      "source": "https://registry.npmjs.org/react/19.2.8",
+      "tarball": "https://registry.npmjs.org/react/-/react-19.2.8.tgz"
+    },
+    {
+      "ecosystem": "npm",
+      "name": "react-dom",
+      "version": "19.2.8",
+      "kind": "dependency",
+      "repository": "https://github.com/react/react",
+      "publishedAt": "2026-07-21T15:41:41.267Z",
+      "integrity": "sha512-rVprimfGBG3DR+Tq0IQG2DT5PxKth1WIGDmj5yPmlzr4YBe7uyE+Du4oVqTDXZSHGGGXRtTJEGSSePyQCMBglQ==",
+      "source": "https://registry.npmjs.org/react-dom/19.2.8",
+      "tarball": "https://registry.npmjs.org/react-dom/-/react-dom-19.2.8.tgz"
+    },
+    {
+      "ecosystem": "npm",
+      "name": "@types/react",
+      "version": "19.2.17",
+      "kind": "dependency",
+      "repository": "https://github.com/DefinitelyTyped/DefinitelyTyped",
+      "publishedAt": "2026-06-05T20:10:24.692Z",
+      "integrity": "sha512-MXfmqaVPEVgkBT/aY0aGCkRWWtByiYQXo3xdQ8r5RzuFrPiRn8Gar2tQdXSUQ2GKV3bkXckek89V8wQBY2Q/Aw==",
+      "source": "https://registry.npmjs.org/%40types%2Freact/19.2.17",
+      "tarball": "https://registry.npmjs.org/@types/react/-/react-19.2.17.tgz"
+    },
+    {
+      "ecosystem": "npm",
+      "name": "@types/react-dom",
+      "version": "19.2.3",
+      "kind": "dependency",
+      "repository": "https://github.com/DefinitelyTyped/DefinitelyTyped",
+      "publishedAt": "2025-11-12T04:37:39.524Z",
+      "integrity": "sha512-jp2L/eY6fn+KgVVQAOqYItbF0VY/YApe5Mz2F0aykSO8gx31bYCZyvSeYxCHKvzHG5eZjc+zyaS5BrBWya2+kQ==",
+      "source": "https://registry.npmjs.org/%40types%2Freact-dom/19.2.3",
+      "tarball": "https://registry.npmjs.org/@types/react-dom/-/react-dom-19.2.3.tgz"
+    },
+    {
+      "ecosystem": "npm",
+      "name": "vite",
+      "version": "8.1.5",
+      "kind": "dependency",
+      "repository": "https://github.com/vitejs/vite",
+      "publishedAt": "2026-07-16T06:51:13.015Z",
+      "integrity": "sha512-7ULLwsCdYx/nRyrpiEwvqb5TFHrMVZyBt+rg/OAXT7rgj/z+DtTDyKFeLAdDkubDVDKD8jOsndmy7m55XcfUsw==",
+      "source": "https://registry.npmjs.org/vite/8.1.5",
+      "tarball": "https://registry.npmjs.org/vite/-/vite-8.1.5.tgz"
+    },
+    {
+      "ecosystem": "npm",
+      "name": "@vitejs/plugin-react",
+      "version": "6.0.5",
+      "kind": "dependency",
+      "repository": "https://github.com/vitejs/vite-plugin-react",
+      "publishedAt": "2026-07-30T10:12:02.149Z",
+      "integrity": "sha512-BOVzne/NL162sMdResB25mUv+vWMF5NoAjNf09TeGlE7ZpszZWSD3winycicLJw72yeVsoCn/2kOhEuCvEShMA==",
+      "source": "https://registry.npmjs.org/%40vitejs%2Fplugin-react/6.0.5",
+      "tarball": "https://registry.npmjs.org/@vitejs/plugin-react/-/plugin-react-6.0.5.tgz"
     }
   ]
 }

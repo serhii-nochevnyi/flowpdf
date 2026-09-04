@@ -91,7 +91,7 @@ async function fetchJson(url, { fetchImpl, timeoutMs, retries, packageName, chec
       lastError = error instanceof ProvenanceError
         ? error
         : new ProvenanceError(packageName, check, error?.name === 'AbortError' ? 'timeout' : 'network failure');
-      if (error instanceof ProvenanceError || attempt === retries) break;
+      if (attempt === retries) break;
     } finally {
       clearTimeout(timer);
     }
@@ -390,8 +390,13 @@ test('fails closed for every required negative provenance invariant', async () =
   await assert.rejects(() => verifyManifest({ config: npmConfig, fetchImpl: repositoryMismatch }), /repository/);
   const deprecated = async () => new Response(JSON.stringify({ name: 'vitest', version: '4.1.6', deprecated: 'no longer supported', time: { '4.1.6': '2026-01-01T00:00:00Z' }, repository: { url: 'https://github.com/vitest-dev/vitest' }, dist: { integrity: 'sha512-test', tarball: 'https://registry.npmjs.org/vitest/-/x.tgz' } }), { status: 200 });
   await assert.rejects(() => verifyManifest({ config: npmConfig, fetchImpl: deprecated }), /release state/);
-  const malformed = async () => new Response('{', { status: 200 });
+  let malformedCalls = 0;
+  const malformed = async () => {
+    malformedCalls += 1;
+    return new Response('{', { status: 200 });
+  };
   await assert.rejects(() => verifyManifest({ config: base, fetchImpl: malformed }), /malformed JSON/);
+  assert.equal(malformedCalls, 1);
   const httpFailure = async () => new Response('', { status: 503 });
   await assert.rejects(() => verifyManifest({ config: base, fetchImpl: httpFailure }), /HTTP 503/);
   const timeout = async (_url, options) => new Promise((_, reject) => options.signal.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError'))));
@@ -471,6 +476,62 @@ test('retries only transient HTTP statuses and exhausts the configured budget', 
     /HTTP 429/,
   );
   assert.equal(exhaustedCalls, 3);
+});
+
+test('retries a malformed JSON response before accepting a valid response', async () => {
+  let calls = 0;
+  const malformedThenValid = async () => {
+    calls += 1;
+    return calls === 1
+      ? new Response('{', { status: 200 })
+      : new Response(JSON.stringify({ ok: true }), { status: 200 });
+  };
+
+  assert.deepEqual(
+    await fetchJson('https://example.invalid', {
+      fetchImpl: malformedThenValid,
+      timeoutMs: 10,
+      retries: 1,
+      packageName: 'fixture',
+      check: 'malformed then valid',
+    }),
+    { ok: true },
+  );
+  assert.equal(calls, 2);
+});
+
+test('malformed JSON exhaustion remains fail closed after using the retry budget', async (t) => {
+  const config = {
+    schemaVersion: 1,
+    timeoutMs: 10,
+    retries: 2,
+    npm: [],
+    crates: [{ name: 'serde', version: '1.0.228', repository: 'https://github.com/serde-rs/serde' }],
+  };
+  let calls = 0;
+  const alwaysMalformed = async () => {
+    calls += 1;
+    return new Response('{', { status: 200 });
+  };
+  const directory = await mkdtemp(join(tmpdir(), 'flowpdf-provenance-malformed-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const reportPath = join(directory, 'report.json');
+  const blockerPath = join(directory, 'blocker.json');
+  await writeFile(reportPath, 'stale success evidence');
+
+  const result = await writeVerificationOutcome({
+    config,
+    fetchImpl: alwaysMalformed,
+    reportPath,
+    blockerPath,
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(calls, 3);
+  await assert.rejects(() => readFile(reportPath));
+  const blocker = JSON.parse(await readFile(blockerPath, 'utf8'));
+  assert.equal(blocker.status, 'blocked');
+  assert.equal(blocker.reason, 'malformed JSON response');
 });
 
 if (process.argv.includes('--config')) {
