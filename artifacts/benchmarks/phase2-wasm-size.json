@@ -1,0 +1,186 @@
+{
+  "formatVersion": 1,
+  "status": "passed",
+  "sourceManifest": {
+    "formatVersion": 1,
+    "algorithm": "sha256",
+    "files": [
+      {
+        "path": "$measurement/flow-wasm-Cargo.append.toml",
+        "sha256": "sha256:6c161e104ae4895d82345cd911e76fa739124e65ffc7d584f3dd72c9ac927d52"
+      },
+      {
+        "path": "$measurement/flow-wasm-src.append.rs",
+        "sha256": "sha256:d9d77454c2b1d3b19672e154d3130ff68a0a208c00c069f7aed76c561263b819"
+      },
+      {
+        "path": "$provenance/icu-segmenter.json",
+        "sha256": "sha256:cbbfc8c4a78e5cc350b65b5d9a5b1fe5cd5b21f33d0dbdc9ea7ec1c417e52ff3"
+      },
+      {
+        "path": "$provenance/wasm-bindgen-cli.json",
+        "sha256": "sha256:97159724e6a26b68eeaa3a9f858cc476d5f0fbeece5ed71234df0d5afcddf4ed"
+      },
+      {
+        "path": "Cargo.lock",
+        "sha256": "sha256:df14e4a9f177f1bd66b679f2b90033e617a45849606eb584ec3a6b8227a3ff88"
+      },
+      {
+        "path": "Cargo.toml",
+        "sha256": "sha256:75190e7758c01b9a33b7895475d09a38f8fcf438d9433eb7715fa57df1394d25"
+      },
+      {
+        "path": "config/dependency-provenance.json",
+        "sha256": "sha256:911d02fd82ee3dcc5b4bd7793a981190eca9590a827f3eea99df1f463a19572b"
+      },
+      {
+        "path": "crates/flow-core/Cargo.toml",
+        "sha256": "sha256:5899297abeedf25b2a06bd0c22a7a205024f04d52274f8caa85fbed6b4b3e69f"
+      },
+      {
+        "path": "crates/flow-core/src/anchor/mod.rs",
+        "sha256": "sha256:1fbdb16d147345fc0c436930a6a104653ba012b815a64dde7fce264e4a52d146"
+      },
+      {
+        "path": "crates/flow-core/src/audit/mod.rs",
+        "sha256": "sha256:f9f9064c837935a3cdd47bee6926b7fbae2ebe90e6908495ce7379a20a9a4fb8"
+      },
+      {
+        "path": "crates/flow-core/src/canonical/mod.rs",
+        "sha256": "sha256:e0537a6bd8de7773bfe60a85938ca787b7610b5eb6b6986925460039557cd385"
+      },
+      {
+        "path": "crates/flow-core/src/lib.rs",
+        "sha256": "sha256:1e9437e1e26f43b2c2048ab465eca532c980c2a72ce0ccbebbb5b6dfd42e9f05"
+      },
+      {
+        "path": "crates/flow-core/src/model/mod.rs",
+        "sha256": "sha256:8d52af59829c0fdd701e5fb5a17df35abd7aaf512d0eb5c4c6efbe2b21b5d70c"
+      },
+      {
+        "path": "crates/flow-core/src/provenance/mod.rs",
+        "sha256": "sha256:8cf41e7873cc3ae417536c1f1a7870cbb300e585c99a092f9890138477e755fc"
+      },
+      {
+        "path": "crates/flow-core/src/schema/mod.rs",
+        "sha256": "sha256:fcb0365d5abd1820584fbcf262294352fefd182c8a2f5ec06cfa46089dafcd86"
+      },
+      {
+        "path": "crates/flow-core/src/store/mod.rs",
+        "sha256": "sha256:d766d91695bbbf91260776afae76c1a5f824566953d767ae36ee1d7c09e528e4"
+      },
+      {
+        "path": "crates/flow-core/src/transaction/mod.rs",
+        "sha256": "sha256:b0d643d51df9c81aa15268858482d27159e44d89ce073aef9857d3a428ce24c5"
+      },
+      {
+        "path": "crates/flow-wasm/Cargo.toml",
+        "sha256": "sha256:47496cc695838c00a31d7e7feaa25bc49c0130c29749d87bfb5c25dc0dacb3d6"
+      },
+      {
+        "path": "crates/flow-wasm/src/lib.rs",
+        "sha256": "sha256:ee26043783b65942532229a0f66a1c660c225d82c0c4ba192933006df550d97a"
+      },
+      {
+        "path": "fixtures/flowdoc/older.json",
+        "sha256": "sha256:a8500c921b409f151fc2e1328f1bcdb362624cc215a7632decba52c0b057beee"
+      },
+      {
+        "path": "rust-toolchain.toml",
+        "sha256": "sha256:683619e182e9d4e060bf754a8385eed1a1220cbc3e5a09e8c2dd22520af25dc6"
+      },
+      {
+        "path": "scripts/verify-wasm-bindgen-tool.mjs",
+        "sha256": "sha256:e4d79b7771a9b062ece9bb778664261f88919579bc012ec66620508bd3404e48"
+      },
+      {
+        "path": "scripts/verify-wasm-size.mjs",
+        "sha256": "sha256:8c0bb4385894b38107c65bce4fe1b750e3ba8ad8a5624b68b5eb6e2d3b31009b"
+      }
+    ],
+    "digest": "sha256:6e1f36635a34593dd7c9d5352c7d5a6d9ee63e75dc2552acea66903271a6a667"
+  },
+  "toolchain": {
+    "cargoVersion": "cargo 1.97.1 (c980f4866 2026-06-30)",
+    "rustcVersion": "rustc 1.97.1 (8bab26f4f 2026-07-14)",
+    "wasmBindgenVersion": "wasm-bindgen 0.2.108",
+    "wasmBindgenBinarySha256": "sha256:a82196546fb05070608b5dc59997d38ebe0a01cc55ba25f1911a2bf44e597307",
+    "wasmBindgenReceiptTarget": "aarch64-apple-darwin",
+    "wasmBindgenProvenanceIdentity": {
+      "name": "wasm-bindgen-cli",
+      "version": "0.2.108",
+      "kind": "tool"
+    },
+    "nodeVersion": "v24.10.0",
+    "zlibVersion": "1.2.12",
+    "target": "wasm32-unknown-unknown"
+  },
+  "buildConfiguration": {
+    "profile": "release",
+    "locked": true,
+    "frozen": true,
+    "target": "wasm32-unknown-unknown",
+    "package": "flow-wasm",
+    "baselineFeatures": [],
+    "candidateFeatures": [
+      "icu-segmenter"
+    ],
+    "rustFlags": "-C debuginfo=0",
+    "bindgenTarget": "web",
+    "commonCargoArguments": [
+      "build",
+      "--package",
+      "flow-wasm",
+      "--target",
+      "wasm32-unknown-unknown",
+      "--release",
+      "--frozen"
+    ],
+    "commonBindgenArguments": [
+      "--target",
+      "web",
+      "--out-name",
+      "flow_wasm"
+    ],
+    "measuredOutput": "flow_wasm_bg.wasm",
+    "onlyVariant": "icu-segmenter feature activation"
+  },
+  "compression": {
+    "algorithm": "gzip",
+    "level": 9,
+    "mtime": 0,
+    "normalizedHeader": {
+      "mtimeBytes": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "operatingSystem": 255
+    }
+  },
+  "limits": {
+    "rawDeltaBytes": 524288,
+    "gzipDeltaBytes": 163840
+  },
+  "baseline": {
+    "label": "phase1-compatible",
+    "rawBytes": 1378296,
+    "gzipBytes": 321227,
+    "sha256": "sha256:170cf4bf0908004b1e948d1e889c4cefc80331633257e9e7aeacea72f026e37b",
+    "gzipSha256": "sha256:48083bc027354095afc72f6c454b1a3dacd524e6f4a62140cd5373ac15979f54"
+  },
+  "candidate": {
+    "label": "icu-compiled-data",
+    "rawBytes": 1394012,
+    "gzipBytes": 326710,
+    "sha256": "sha256:534d97c11efff3004715f2bbf83e6eedda2741bde4fe3772ebf8cd8da422a0dd",
+    "gzipSha256": "sha256:6eabf4fe148f7bf4159d04faa6d2ee90337d93220e4922461297b2278fbb91b4"
+  },
+  "delta": {
+    "rawBytes": 15716,
+    "gzipBytes": 5483
+  },
+  "passed": true,
+  "blocked": false
+}

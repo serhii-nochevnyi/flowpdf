@@ -1,5 +1,16 @@
 import assert from 'node:assert/strict'
-import { existsSync, readFileSync, readdirSync } from 'node:fs'
+import { createHash } from 'node:crypto'
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs'
+import { tmpdir } from 'node:os'
 import { join, posix, relative, resolve } from 'node:path'
 import test from 'node:test'
 import ts from 'typescript'
@@ -58,7 +69,21 @@ const forbiddenRuntimeImports = new Set([
   'vite',
   'ws',
 ])
-const forbiddenWebPathSegment = /(?:^|\/)(?:auth|backend|collaboration|editor|forms?|layout|pdf|voice)(?:\/|\.|$)/i
+const forbiddenPhaseOneWebPathSegment = /(?:^|[\/._-])(?:auth|backend|collaboration|editor|forms?|layout|pdf|voice)(?=[\/._-]|$)/i
+const forbiddenPhaseTwoWebPathSegment = /(?:^|[\/._-])(?:auth|backend|collaboration|forms?|layout|pdf|voice)(?=[\/._-]|$)/i
+const phaseTwoEditorSource = /^(?:web\/src\/main\.tsx|web\/src\/editor\/[A-Za-z0-9._/-]+\.(?:ts|tsx))$/
+const phaseTwoPackagePins = new Map([
+  ['react', { section: 'dependencies', version: '19.2.8' }],
+  ['react-dom', { section: 'dependencies', version: '19.2.8' }],
+  ['@types/react', { section: 'devDependencies', version: '19.2.17' }],
+  ['@types/react-dom', { section: 'devDependencies', version: '19.2.3' }],
+  ['@vitejs/plugin-react', { section: 'devDependencies', version: '6.0.5' }],
+  ['vite', { section: 'devDependencies', version: '8.1.5' }],
+])
+const phaseTwoViteScripts = new Map([
+  ['dev', 'vite'],
+  ['build:vite', 'vite build'],
+])
 const semanticOwnerName = /^(?:apply|canonicalize|hash|migrate|mutate|recover|redact|replay|serialize)(?:Flow)?(?:Audit|Document|Revision|Transaction)/i
 
 test('the checked-in Phase 1 workspace preserves deferred scope and Rust semantic ownership', async () => {
@@ -251,7 +276,7 @@ test('Phase 2 editor allowance retains semantic, unsafe DOM, layout, voice, and 
         document.createElement('canvas')
         navigator.mediaDevices.getUserMedia({ audio: true })
         fetch('/api/documents')
-        return <article>{documentState.revision}</article>
+        return <form contentEditable dangerouslySetInnerHTML={{ __html: canonicalJson }}><canvas /></form>
       }
     `,
   )
@@ -260,8 +285,29 @@ test('Phase 2 editor allowance retains semantic, unsafe DOM, layout, voice, and 
   assert.match(diagnostics, /semantic owner|semantic JSON|semantic state/i)
   assert.match(diagnostics, /innerHTML|unsafe or deferred DOM/i)
   assert.match(diagnostics, /canvas/i)
+  assert.match(diagnostics, /form/i)
+  assert.match(diagnostics, /contenteditable/i)
+  assert.match(diagnostics, /dangerouslySetInnerHTML/i)
   assert.match(diagnostics, /voice/i)
   assert.match(diagnostics, /backend/i)
+})
+
+test('Phase 2 rejects deferred filename tokens nested under the editor allowance', () => {
+  const fixture = validFixture()
+  for (const path of [
+    'web/src/editor/pdf-export.ts',
+    'web/src/editor/layout_engine.ts',
+    'web/src/editor/voice-controller.ts',
+    'web/src/editor/backend.client.ts',
+  ]) {
+    fixture.typescript.set(path, 'export const deferredSurface = true')
+  }
+
+  const diagnostics = boundaryDiagnostics(fixture, { phase: 2 }).join('\n')
+  assert.match(diagnostics, /pdf-export\.ts: deferred web path/i)
+  assert.match(diagnostics, /layout_engine\.ts: deferred web path/i)
+  assert.match(diagnostics, /voice-controller\.ts: deferred web path/i)
+  assert.match(diagnostics, /backend\.client\.ts: deferred web path/i)
 })
 
 test('WASM size report rejects forged measurements, stale inputs, and either exceeded budget', async () => {
@@ -303,6 +349,58 @@ test('WASM size report rejects forged measurements, stale inputs, and either exc
   )
 })
 
+test('WASM size verifier rejects a same-version substituted bindgen binary before execution', async () => {
+  const { materializeVerifiedWasmBindgen } = await import('../../scripts/verify-wasm-size.mjs')
+  const root = mkdtempSync(join(tmpdir(), 'flowpdf-size-integrity-test-'))
+  const cargoHome = join(root, 'work/toolchains/cargo')
+  const binaryPath = join(cargoHome, 'bin/wasm-bindgen')
+  const markerPath = join(root, 'substituted-binary-executed')
+  const target = 'test-target'
+  const approvedBytes = Buffer.from('approved wasm-bindgen fixture bytes')
+  const approvedChecksum = createHash('sha256').update(approvedBytes).digest('hex')
+  const receiptKey = 'wasm-bindgen-cli 0.2.108 (registry+https://github.com/rust-lang/crates.io-index)'
+  try {
+    mkdirSync(join(root, 'config'), { recursive: true })
+    mkdirSync(join(root, 'artifacts/provenance'), { recursive: true })
+    mkdirSync(join(cargoHome, 'bin'), { recursive: true })
+    writeFileSync(join(root, 'config/dependency-provenance.json'), JSON.stringify({
+      crates: [{
+        name: 'wasm-bindgen-cli',
+        version: '0.2.108',
+        kind: 'tool',
+        binarySha256: { [target]: approvedChecksum },
+      }],
+    }))
+    writeFileSync(join(root, 'artifacts/provenance/phase1-dependencies.json'), JSON.stringify({
+      status: 'success',
+      crates: [{ name: 'wasm-bindgen-cli', version: '0.2.108', kind: 'tool' }],
+    }))
+    writeFileSync(join(cargoHome, '.crates2.json'), JSON.stringify({
+      installs: {
+        [receiptKey]: {
+          version_req: '=0.2.108',
+          bins: ['wasm-bindgen'],
+          target,
+        },
+      },
+    }))
+    writeFileSync(
+      binaryPath,
+      `#!/bin/sh\ntouch ${JSON.stringify(markerPath)}\nprintf 'wasm-bindgen 0.2.108\\n'\n`,
+      { mode: 0o700 },
+    )
+    chmodSync(binaryPath, 0o700)
+
+    assert.throws(
+      () => materializeVerifiedWasmBindgen(root),
+      /checksum mismatch/,
+    )
+    assert.equal(existsSync(markerPath), false, 'substituted executable must never run')
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
 function wasmSizeReportFixture(limits) {
   return {
     formatVersion: 1,
@@ -317,6 +415,15 @@ function wasmSizeReportFixture(limits) {
       cargoVersion: 'cargo 1.97.1',
       rustcVersion: 'rustc 1.97.1',
       wasmBindgenVersion: 'wasm-bindgen 0.2.108',
+      wasmBindgenBinarySha256: `sha256:${'e'.repeat(64)}`,
+      wasmBindgenReceiptTarget: 'aarch64-apple-darwin',
+      wasmBindgenProvenanceIdentity: {
+        name: 'wasm-bindgen-cli',
+        version: '0.2.108',
+        kind: 'tool',
+      },
+      nodeVersion: 'v24.10.0',
+      zlibVersion: '1.2.12',
       target: 'wasm32-unknown-unknown',
     },
     buildConfiguration: {
@@ -407,9 +514,10 @@ function validFixture() {
   }
 }
 
-function boundaryDiagnostics(snapshot) {
+function boundaryDiagnostics(snapshot, options = {}) {
+  const policy = boundaryPolicy(options)
   const diagnostics = []
-  validatePackageManifest(snapshot.packageJson, diagnostics)
+  validatePackageManifest(snapshot.packageJson, diagnostics, policy)
   for (const [path, source] of snapshot.cargoManifests) {
     for (const dependency of cargoDependencies(source)) {
       if (forbiddenDirectPackages.has(dependency)) {
@@ -423,7 +531,7 @@ function boundaryDiagnostics(snapshot) {
     typescriptProgram.checker,
   )
   for (const [path] of snapshot.typescript) {
-    if (forbiddenWebPathSegment.test(path)) {
+    if (policy.forbiddenWebPathSegment.test(path)) {
       diagnostics.push(`${path}: deferred web path entered Phase 1`)
     }
     validateTypeScript(
@@ -431,25 +539,54 @@ function boundaryDiagnostics(snapshot) {
       typescriptProgram.sources.get(path),
       diagnostics,
       capabilities,
+      policy,
     )
   }
   validateWasmBoundary(snapshot.wasmSource, diagnostics)
   return diagnostics.sort()
 }
 
-function validatePackageManifest(packageJson, diagnostics) {
-  const direct = {
-    ...packageJson.dependencies,
-    ...packageJson.devDependencies,
-    ...packageJson.optionalDependencies,
+function boundaryPolicy(options) {
+  const phase = options.phase ?? 1
+  if (phase === 1) {
+    return {
+      phase,
+      forbiddenWebPathSegment: forbiddenPhaseOneWebPathSegment,
+      allowsEditorSource: () => false,
+    }
   }
-  for (const dependency of Object.keys(direct)) {
-    if (forbiddenDirectPackages.has(dependency)) {
-      diagnostics.push(`package.json: deferred runtime dependency ${dependency}`)
+  if (phase === 2) {
+    return {
+      phase,
+      forbiddenWebPathSegment: forbiddenPhaseTwoWebPathSegment,
+      allowsEditorSource: (path) => phaseTwoEditorSource.test(path),
+    }
+  }
+  throw new RangeError(`unsupported boundary policy phase ${phase}`)
+}
+
+function validatePackageManifest(packageJson, diagnostics, policy) {
+  for (const section of ['dependencies', 'devDependencies', 'optionalDependencies']) {
+    for (const [dependency, version] of Object.entries(packageJson[section] ?? {})) {
+      const phaseTwoPin = policy.phase === 2 ? phaseTwoPackagePins.get(dependency) : undefined
+      if (phaseTwoPin !== undefined) {
+        if (section !== phaseTwoPin.section || version !== phaseTwoPin.version) {
+          diagnostics.push(
+            `package.json: ${dependency} must use exact approved Phase 2 version ${phaseTwoPin.version} in ${phaseTwoPin.section}`,
+          )
+        }
+      } else if (forbiddenDirectPackages.has(dependency)) {
+        diagnostics.push(`package.json: deferred runtime dependency ${dependency}`)
+      }
     }
   }
   for (const [name, command] of Object.entries(packageJson.scripts ?? {})) {
-    if (/\b(?:drizzle-kit|next|prisma|react-scripts|schema\s+push|vite)\b/i.test(command)) {
+    const exactPhaseTwoViteCommand =
+      policy.phase === 2 && phaseTwoViteScripts.get(name) === command
+    if (
+      /\b(?:drizzle-kit|next|prisma|react-scripts|schema\s+push|vite)\b/i.test(command) &&
+      !exactPhaseTwoViteCommand
+    ) {
       diagnostics.push(`package.json script ${name}: deferred runtime command`)
     }
     if (/\b(?:--watch|watch)\b/.test(command)) {
@@ -458,7 +595,7 @@ function validatePackageManifest(packageJson, diagnostics) {
   }
 }
 
-function validateTypeScript(path, source, diagnostics, capabilities) {
+function validateTypeScript(path, source, diagnostics, capabilities, policy) {
   if (source === undefined) {
     diagnostics.push(`${path}: TypeScript source could not be loaded`)
     return
@@ -471,7 +608,11 @@ function validateTypeScript(path, source, diagnostics, capabilities) {
   function visit(node) {
     if (ts.isImportDeclaration(node) && ts.isStringLiteral(node.moduleSpecifier)) {
       const root = packageRoot(node.moduleSpecifier.text)
-      if (forbiddenRuntimeImports.has(root)) {
+      const exactPhaseTwoReactImport =
+        policy.phase === 2 &&
+        /^(?:react|react-dom)$/.test(root) &&
+        policy.allowsEditorSource(path)
+      if (forbiddenRuntimeImports.has(root) && !exactPhaseTwoReactImport) {
         diagnostics.push(`${path}: deferred runtime import ${node.moduleSpecifier.text}`)
       }
     }
@@ -480,7 +621,11 @@ function validateTypeScript(path, source, diagnostics, capabilities) {
       ts.isJsxSelfClosingElement(node) ||
       ts.isJsxFragment(node)
     ) {
-      diagnostics.push(`${path}: JSX/React editor surface is deferred`)
+      if (policy.phase !== 2 || !policy.allowsEditorSource(path)) {
+        diagnostics.push(`${path}: JSX/React editor surface is deferred`)
+      } else {
+        validateJsxElement(path, node, diagnostics)
+      }
     }
     if (hasDeclarationName(node) && semanticOwnerName.test(node.name.text)) {
       diagnostics.push(`${path}: TypeScript semantic owner ${node.name.text}`)
@@ -500,6 +645,38 @@ function validateTypeScript(path, source, diagnostics, capabilities) {
     ts.forEachChild(node, visit)
   }
   visit(source)
+}
+
+function validateJsxElement(path, node, diagnostics) {
+  const tagName = ts.isJsxElement(node)
+    ? node.openingElement.tagName
+    : ts.isJsxSelfClosingElement(node) ? node.tagName : undefined
+  if (tagName && ts.isIdentifier(tagName) && /^(?:canvas|form)$/.test(tagName.text)) {
+    diagnostics.push(`${path}: deferred ${tagName.text} UI surface`)
+  }
+  const attributes =
+    ts.isJsxElement(node) ? node.openingElement.attributes :
+      ts.isJsxSelfClosingElement(node) ? node.attributes : undefined
+  for (const attribute of attributes?.properties ?? []) {
+    if (!ts.isJsxAttribute(attribute)) continue
+    const name = attribute.name.getText()
+    if (name === 'dangerouslySetInnerHTML') {
+      diagnostics.push(`${path}: unsafe JSX dangerouslySetInnerHTML surface`)
+    }
+    if (name.toLowerCase() === 'contenteditable' && jsxAttributeIsActive(attribute)) {
+      diagnostics.push(`${path}: deferred contenteditable editor surface`)
+    }
+  }
+}
+
+function jsxAttributeIsActive(attribute) {
+  if (attribute.initializer === undefined) return true
+  if (ts.isStringLiteral(attribute.initializer)) {
+    return attribute.initializer.text.toLowerCase() !== 'false'
+  }
+  if (!ts.isJsxExpression(attribute.initializer)) return true
+  const expression = attribute.initializer.expression
+  return expression?.kind !== ts.SyntaxKind.FalseKeyword
 }
 
 function validateCall(path, source, call, diagnostics, capabilities) {
