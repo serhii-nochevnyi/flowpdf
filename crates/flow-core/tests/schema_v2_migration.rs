@@ -4,6 +4,7 @@
 mod legacy;
 
 use flow_core::canonical::canonical_hash;
+use flow_core::schema::MigrationRegistry;
 
 const OLD: &[u8] = include_bytes!("../../../fixtures/flowdoc/older.json");
 const V1: &[u8] = include_bytes!("../../../fixtures/flowdoc/current.json");
@@ -97,4 +98,40 @@ fn legacy_freeze_gate() {
         canonical_hash(decoder_source.as_bytes()),
         "flowpdf:blake3:v1:7bf6c1002bca88c5454b017b3facddc4f3555ce0c76ecc20d26e85b8929b4f81"
     );
+}
+
+#[test]
+fn migration_routes_preserve_semantics_and_execute_current_no_op() {
+    for (source, versions) in [(OLD, vec![(0, 1), (1, 2)]), (VALID, vec![(1, 2)]), (INVALID, vec![(1, 2)])] {
+        let first = MigrationRegistry::current().migrate(payload(source)).expect("migration");
+        assert_eq!(first.document.schema_version, 2);
+        assert_eq!(first.report.hops.iter().map(|hop| (hop.from_version, hop.to_version)).collect::<Vec<_>>(), versions);
+        let repeated = MigrationRegistry::current().migrate(payload(source)).unwrap();
+        assert_eq!(first, repeated);
+        let json = serde_json::to_value(&first.document).unwrap();
+        assert_eq!(json["content"][0]["body"]["kind"], "paragraph");
+        assert!(json["content"][0].get("text").is_none());
+        assert!(json["content"][0]["body"]["runs"].is_array());
+        let noop = MigrationRegistry::current().migrate(&first.canonical_bytes).unwrap();
+        assert_eq!(noop.document, first.document);
+        assert_eq!(noop.canonical_bytes, first.canonical_bytes);
+        assert_eq!(noop.canonical_hash, first.canonical_hash);
+        assert!(noop.report.hops.is_empty());
+        assert!(!noop.report.requires_new_snapshot);
+        assert!(noop.report.preserve_source_records);
+    }
+    let valid = MigrationRegistry::current().migrate(payload(VALID)).unwrap();
+    let invalid = MigrationRegistry::current().migrate(payload(INVALID)).unwrap();
+    let valid = serde_json::to_value(valid.document).unwrap();
+    let invalid = serde_json::to_value(invalid.document).unwrap();
+    assert_eq!(valid["fields"][0]["anchor"]["status"], "graphemeSafe");
+    assert_eq!(valid["fields"][0]["anchor"]["original"]["utf16Offset"], 2);
+    assert_eq!(invalid["fields"][0]["anchor"]["status"], "legacyInvalid");
+    assert_eq!(invalid["fields"][0]["anchor"]["reason"], "nonGraphemeBoundary");
+    assert_eq!(invalid["fields"][0]["anchor"]["original"]["utf16Offset"], 1);
+    assert_eq!(invalid["fields"][1]["anchor"]["reason"], "missingNode");
+    assert_eq!(invalid["styles"][0]["fontFamily"]["kind"], "legacyUnknown");
+    assert_eq!(invalid["styles"][0]["fontFamily"]["original"], "Historical Font");
+    assert_eq!(valid["content"][2]["body"]["accessibility"]["kind"], "described");
+    assert_eq!(invalid["content"][2]["body"]["accessibility"]["kind"], "missingLegacy");
 }
