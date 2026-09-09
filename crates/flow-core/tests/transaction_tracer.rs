@@ -71,7 +71,7 @@ fn typed_replace_becomes_one_immutable_transaction_with_executable_inverse() {
     );
     assert!(
         applied.state.document().content[1]
-            .text
+            .text()
             .starts_with("Англійський")
     );
 
@@ -149,7 +149,7 @@ fn adjacent_mutations_keep_declared_forward_order_and_reverse_rollback_order() {
     let applied = TransactionService::apply(&state, command).expect("batch");
     assert_eq!(applied.transaction.forward_operations.len(), 2);
     assert_eq!(applied.transaction.inverse_operations.len(), 2);
-    assert!(applied.state.document().content[1].text.starts_with("AB"));
+    assert!(applied.state.document().content[1].text().starts_with("AB"));
     let undone = TransactionService::apply(
         &applied.state,
         Command {
@@ -162,7 +162,7 @@ fn adjacent_mutations_keep_declared_forward_order_and_reverse_rollback_order() {
     )
     .expect("undo batch");
     assert_eq!(
-        undone.state.document().content[1].text,
-        document.content[1].text
+        undone.state.document().content[1].text(),
+        document.content[1].text()
     );
 }

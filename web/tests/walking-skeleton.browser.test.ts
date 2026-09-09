@@ -1,7 +1,6 @@
 import { expect, test } from 'vitest'
 
 import init, {
-  create_sample,
   migrate_document,
   query_document,
 } from '../generated/flow_wasm.js'
@@ -180,14 +179,14 @@ test('walking-skeleton: opens the supported older fixture through Rust migration
   expect(root.querySelector('[role="alert"]')?.textContent).toBe('')
 
   const migrated = inspector.snapshot()
-  expect(migrated.schemaVersion).toBe(1)
+  expect(migrated.schemaVersion).toBe(2)
   expect(migrated.revisionProvenance.lineage).toMatchObject({
     kind: 'migrated',
     sourceSchemaVersion: 0,
-    currentSchemaVersion: 1,
+    currentSchemaVersion: 2,
   })
   expect(migrated.audit.map(({ action }) => action.type)).toEqual(['migration'])
-  expect(root.querySelector('[data-provenance]')?.textContent).toMatch(/схеми 0.*схеми 1/i)
+  expect(root.querySelector('[data-provenance]')?.textContent).toMatch(/схеми 0.*схеми 2/i)
   expect(root.querySelector('[data-provenance-unavailable]')?.textContent).toMatch(
     /наступній фазі/i,
   )
@@ -210,20 +209,14 @@ test('walking-skeleton: opens the supported older fixture through Rust migration
 test('walking-skeleton: preserves a validated non-empty asset through atomic migration commit and cold reopen', async () => {
   await init()
 
-  const created = unwrap<{
-    readonly session: { readonly canonicalJson: string }
-  }>(
-    create_sample({
-      requestedLocale: 'uk-UA',
-      issuedAt: '2026-08-14T00:00:00Z',
-    }),
-  )
-  const current = JSON.parse(created.session.canonicalJson) as CanonicalFixture
-  const sourceDescriptor = current.assets[0]
+  const fixtureResponse = await fetch(new URL('../../fixtures/flowdoc/older.json', import.meta.url))
+  expect(fixtureResponse.ok).toBe(true)
+  const historical = (await fixtureResponse.json()) as CanonicalFixture
+  const sourceDescriptor = historical.assets[0]
   if (sourceDescriptor === undefined) throw new Error('sample asset descriptor is required')
 
   const olderFixture = JSON.stringify({
-    ...current,
+    ...historical,
     schemaVersion: 0,
     assets: [
       {

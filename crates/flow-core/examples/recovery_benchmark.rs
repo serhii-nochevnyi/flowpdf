@@ -10,7 +10,7 @@ use std::{env, fs, time::Instant};
 use flow_core::{
     ApiResponse, ApplyCommandRequest, CommandDto, CommandKind, CreateSampleRequest, HistoryState,
     RecoverRequest, SourceModality, apply_command, create_sample,
-    model::{CommandId, ContentNode, ContentNodeKind, FlowDocument, NodeId},
+    model::{BlockKind, CommandId, ContentNode, FlowDocument, NodeId},
     recover,
     store::{CommitPlanner, PlannedPersistenceCommit, SnapshotPolicy, SnapshotReason},
     transaction::Mutation,
@@ -235,7 +235,7 @@ fn build_workload(recipe: &Recipe, policy: &Policy) -> Result<BenchmarkWorkload,
     let body_style_id = initial_document
         .content
         .iter()
-        .find(|node| node.kind == ContentNodeKind::Paragraph)
+        .find(|node| matches!(node.body, BlockKind::Paragraph { .. }))
         .and_then(|node| node.style_id.clone())
         .ok_or_else(|| "sample document has no styled paragraph".to_owned())?;
     let mut canonical_json = created.session.canonical_json;
@@ -343,13 +343,11 @@ fn page_equivalent_mutations(
                 .ok_or_else(|| "benchmark insertion index overflowed".to_owned())?;
             Ok(Mutation::InsertNode {
                 index,
-                node: ContentNode {
-                    id: node_id(sequence)?,
-                    kind: ContentNodeKind::Paragraph,
-                    style_id: Some(body_style_id.clone()),
-                    text: generated_paragraph(recipe, sequence)?,
-                    asset_id: None,
-                },
+                node: ContentNode::paragraph(
+                    node_id(sequence)?,
+                    Some(body_style_id.clone()),
+                    generated_paragraph(recipe, sequence)?,
+                ),
             })
         })
         .collect()
@@ -422,17 +420,17 @@ fn derive_workload_proof(
             .ok_or_else(|| "generated page-equivalent node is missing".to_owned())?;
         let expected_text = generated_paragraph(recipe, sequence)?;
         if node.id != node_id(sequence)?
-            || node.kind != ContentNodeKind::Paragraph
+            || !matches!(node.body, BlockKind::Paragraph { .. })
             || node.style_id.is_none()
-            || node.asset_id.is_some()
-            || node.text != expected_text
-            || node.text.split_whitespace().count()
+            || node.asset_id().is_some()
+            || node.text() != expected_text
+            || node.text().split_whitespace().count()
                 != usize::try_from(recipe.page_equivalent.words_per_paragraph)
                     .map_err(|_| "paragraph word count overflowed".to_owned())?
         {
             return Err("generated semantic paragraph diverged from the locked recipe".to_owned());
         }
-        let node_bytes = u64::try_from(node.text.len())
+        let node_bytes = u64::try_from(node.text().len())
             .map_err(|_| "generated paragraph byte count overflowed".to_owned())?;
         generated_utf8_bytes = generated_utf8_bytes
             .checked_add(node_bytes)
@@ -442,7 +440,7 @@ fn derive_workload_proof(
             .ok_or_else(|| "page payload byte count overflowed".to_owned())?;
         semantic_hasher.update(node.id.as_str().as_bytes());
         semantic_hasher.update(&[0]);
-        semantic_hasher.update(node.text.as_bytes());
+        semantic_hasher.update(node.text().as_bytes());
         semantic_hasher.update(&[0xff]);
         if sequence % recipe.page_equivalent.paragraphs_per_page == 0 {
             if page_utf8_bytes < recipe.page_equivalent.minimum_utf8_bytes_per_page {

@@ -7,8 +7,8 @@ use flow_core::{
     schema::{DocumentLimits, LimitKind},
 };
 
-const CURRENT_JSON: &[u8] = include_bytes!("../../../fixtures/flowdoc/current.json");
-const CURRENT_HASH: &str = include_str!("../../../fixtures/flowdoc/current.hash");
+const CURRENT_JSON: &[u8] = include_bytes!("../../../fixtures/flowdoc/schema-v2-current.json");
+const CURRENT_HASH: &str = include_str!("../../../fixtures/flowdoc/schema-v2-current.hash");
 
 fn current_payload() -> &'static [u8] {
     CURRENT_JSON.strip_suffix(b"\n").unwrap_or(CURRENT_JSON)

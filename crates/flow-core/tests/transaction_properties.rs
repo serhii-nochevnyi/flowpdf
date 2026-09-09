@@ -112,8 +112,11 @@ fn empty_single_and_repeated_history_commands_are_atomic_and_idempotent() {
 #[test]
 fn replacement_boundary_affinity_makes_field_anchor_undo_exactly_reversible() {
     let document = FlowDocument::deterministic_sample("uk-UA").expect("sample");
-    assert_eq!(document.fields[0].anchor.utf16_offset.get(), 0);
-    assert_eq!(document.fields[0].anchor.affinity, Affinity::Forward);
+    assert_eq!(document.fields[0].anchor.original().utf16_offset.get(), 0);
+    assert_eq!(
+        document.fields[0].anchor.original().affinity,
+        Affinity::Forward
+    );
     let initial_hash = semantic_hash(&document).expect("initial hash");
     let initial = EditorState::new(document.clone()).expect("state");
     let range = TextRange {
@@ -294,7 +297,7 @@ fn run_mixed_sequence(actions: &[u8]) -> (EditorState, Vec<Transaction>, String,
                 CommandKind::InsertText {
                     target: position(
                         text_node_id.clone(),
-                        node.text.encode_utf16().count() as u32,
+                        node.text().encode_utf16().count() as u32,
                         Affinity::Forward,
                     ),
                     text: char::from(b'a' + (*action % 26)).to_string(),

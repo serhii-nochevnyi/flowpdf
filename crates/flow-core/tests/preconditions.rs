@@ -108,8 +108,8 @@ fn stale_duplicate_invalid_and_broken_commands_are_exactly_non_mutating() {
     assert_unchanged(&initial, &before_out_of_range);
 
     let emoji_node = document.content[0].clone();
-    let emoji_byte = emoji_node.text.find('😀').expect("emoji");
-    let before_emoji = emoji_node.text[..emoji_byte].encode_utf16().count() as u32;
+    let emoji_byte = emoji_node.text().find('😀').expect("emoji");
+    let before_emoji = emoji_node.text()[..emoji_byte].encode_utf16().count() as u32;
     let surrogate_half = Command {
         command_id: id(715),
         base_revision: 1,
@@ -157,12 +157,12 @@ fn same_base_race_has_one_winner_and_never_retargets_the_loser() {
     let document = FlowDocument::deterministic_sample("uk-UA").expect("sample");
     let state = EditorState::new(document.clone()).expect("state");
     let winner = TransactionService::apply(&state, insert(&document, id(721), 1)).expect("winner");
-    let loser_target = winner.state.document().content[1].text.clone();
+    let loser_target = winner.state.document().content[1].text().clone();
     let loser = TransactionService::apply(&winner.state, insert(&document, id(722), 1))
         .expect_err("same-base loser");
 
     assert_eq!(loser.code(), "FLOW_STALE_REVISION");
-    assert_eq!(winner.state.document().content[1].text, loser_target);
+    assert_eq!(winner.state.document().content[1].text(), loser_target);
 }
 
 #[test]

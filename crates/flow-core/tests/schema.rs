@@ -70,7 +70,12 @@ fn representative_document_validates_and_round_trips_through_one_canonical_utf8_
     assert_eq!(decode_canonical(&bytes).expect("decode"), document);
 
     let exact_text = "Український текст: и\u{0306}, апостроф ’, emoji 😀, non-BMP 𝄞.";
-    assert!(document.content.iter().any(|node| node.text == exact_text));
+    assert!(
+        document
+            .content
+            .iter()
+            .any(|node| node.text() == exact_text)
+    );
     assert!(
         bytes
             .windows(exact_text.len())
@@ -82,7 +87,7 @@ fn representative_document_validates_and_round_trips_through_one_canonical_utf8_
 fn equal_and_adjacent_semantic_nodes_remain_distinct_and_ordered() {
     let mut document = FlowDocument::deterministic_sample("uk-UA").expect("valid sample");
     document.fields.clear();
-    document.content.retain(|node| node.asset_id.is_none());
+    document.content.retain(|node| node.asset_id().is_none());
     document.assets.clear();
     let mut duplicate_text = document.content[0].clone();
     duplicate_text.id = NodeId::new("00000000-0000-4000-8000-000000009901").expect("id");
@@ -90,7 +95,7 @@ fn equal_and_adjacent_semantic_nodes_remain_distinct_and_ordered() {
 
     let decoded = decode_canonical(&canonical_bytes(&document).expect("encode")).expect("decode");
     assert_eq!(decoded.content.len(), document.content.len());
-    assert_eq!(decoded.content[0].text, decoded.content[1].text);
+    assert_eq!(decoded.content[0].text(), decoded.content[1].text());
     assert_ne!(decoded.content[0].id, decoded.content[1].id);
     assert_eq!(decoded.content, document.content);
 }
@@ -179,10 +184,12 @@ fn schema_rejects_unknown_coordinates_floats_invalid_ids_duplicates_and_dangling
     let image = dangling_asset
         .content
         .iter_mut()
-        .find(|node| node.asset_id.is_some())
+        .find(|node| node.asset_id().is_some())
         .expect("image node");
-    image.asset_id =
-        Some(flow_core::model::AssetId::new("00000000-0000-4000-8000-000000009903").expect("id"));
+    if let flow_core::model::BlockKind::Image { asset_id, .. } = &mut image.body {
+        *asset_id =
+            flow_core::model::AssetId::new("00000000-0000-4000-8000-000000009903").expect("id");
+    }
     assert_eq!(
         code(validate_document(&dangling_asset).expect_err("dangling asset")),
         "FLOW_DANGLING_REFERENCE"
@@ -238,7 +245,9 @@ fn asset_descriptors_use_canonical_hashes_and_fit_the_encoded_recovery_budget() 
     );
 
     let mut record_heavy = FlowDocument::deterministic_sample("uk-UA").expect("sample");
-    record_heavy.content.retain(|node| node.asset_id.is_none());
+    record_heavy
+        .content
+        .retain(|node| node.asset_id().is_none());
     let template = record_heavy.assets[0].clone();
     record_heavy.assets.clear();
     for index in 0..(DocumentLimits::V1.recovery_records - 2) {
@@ -385,17 +394,22 @@ fn field_vocabulary_is_closed_and_kind_value_option_constraints_are_exhaustive()
 fn utf16_positions_accept_boundaries_and_reject_surrogate_interiors() {
     let mut document = FlowDocument::deterministic_sample("uk-UA").expect("sample");
     let node = &document.content[0];
-    let emoji_byte = node.text.find('😀').expect("emoji");
-    let before_emoji = u32::try_from(node.text[..emoji_byte].encode_utf16().count()).expect("size");
+    let emoji_byte = node.text().find('😀').expect("emoji");
+    let before_emoji =
+        u32::try_from(node.text()[..emoji_byte].encode_utf16().count()).expect("size");
 
-    document.fields[0].anchor = LogicalPosition {
-        node_id: node.id.clone(),
-        utf16_offset: Utf16Offset::new(before_emoji),
-        affinity: Affinity::Forward,
+    document.fields[0].anchor = flow_core::model::FieldAnchorState::GraphemeSafe {
+        original: LogicalPosition {
+            node_id: node.id.clone(),
+            utf16_offset: Utf16Offset::new(before_emoji),
+            affinity: Affinity::Forward,
+        },
     };
     validate_document(&document).expect("boundary before emoji");
 
-    document.fields[0].anchor.utf16_offset = Utf16Offset::new(before_emoji + 1);
+    let mut original = document.fields[0].anchor.original().clone();
+    original.utf16_offset = Utf16Offset::new(before_emoji + 1);
+    document.fields[0].anchor = flow_core::model::FieldAnchorState::GraphemeSafe { original };
     assert_eq!(
         code(validate_document(&document).expect_err("surrogate interior")),
         "FLOW_INVALID_UTF16_POSITION"

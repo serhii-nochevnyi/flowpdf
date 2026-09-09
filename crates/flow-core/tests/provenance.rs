@@ -47,7 +47,7 @@ fn canonical_validation_rejects_forged_or_discontinuous_lineage() {
     let mut document = FlowDocument::deterministic_sample("uk-UA").expect("sample");
     document.provenance = Provenance::Migrated {
         source_schema_version: 0,
-        current_schema_version: 1,
+        current_schema_version: 2,
         source_created_at: "2026-08-14T00:00:00Z".to_owned(),
         hops: vec![MigrationHop {
             from_version: 7,

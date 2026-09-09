@@ -21,18 +21,40 @@ fn older_fixture_migrates_one_pure_hop_to_the_checked_in_current_schema_boundary
         .migrate(payload(OLDER_FILE))
         .expect("repeat migration");
 
-    assert_eq!(first.canonical_bytes, payload(MIGRATED_FILE));
-    assert_eq!(first.canonical_hash, MIGRATED_HASH.trim());
+    // The historical v0->v1 boundary remains frozen, while the registry now
+    // continues through that exact boundary to the current schema.
+    #[path = "../src/schema/legacy.rs"]
+    mod legacy;
+    let frozen = legacy::decode(payload(OLDER_FILE), 0)
+        .unwrap()
+        .into_v1()
+        .canonical_bytes()
+        .unwrap();
+    assert_eq!(frozen, payload(MIGRATED_FILE));
+    assert_eq!(canonical_hash(&frozen), MIGRATED_HASH.trim());
+    assert_eq!(
+        MigrationRegistry::current()
+            .migrate(payload(MIGRATED_FILE))
+            .unwrap()
+            .canonical_bytes,
+        first.canonical_bytes
+    );
     assert_eq!(first.canonical_bytes, second.canonical_bytes);
     assert_eq!(first.canonical_hash, second.canonical_hash);
     assert_eq!(first.report.source_schema_version, 0);
-    assert_eq!(first.report.current_schema_version, 1);
+    assert_eq!(first.report.current_schema_version, 2);
     assert_eq!(
         first.report.hops,
-        vec![MigrationHop {
-            from_version: 0,
-            to_version: 1,
-        }]
+        vec![
+            MigrationHop {
+                from_version: 0,
+                to_version: 1,
+            },
+            MigrationHop {
+                from_version: 1,
+                to_version: 2
+            }
+        ]
     );
     assert!(first.report.requires_new_snapshot);
     assert!(first.report.preserve_source_records);
@@ -40,7 +62,7 @@ fn older_fixture_migrates_one_pure_hop_to_the_checked_in_current_schema_boundary
         first.document.provenance,
         Provenance::Migrated {
             source_schema_version: 0,
-            current_schema_version: 1,
+            current_schema_version: 2,
             ..
         }
     ));
@@ -48,7 +70,10 @@ fn older_fixture_migrates_one_pure_hop_to_the_checked_in_current_schema_boundary
 
 #[test]
 fn applying_the_registry_to_current_canonical_bytes_is_an_exact_no_op() {
-    let current = payload(CURRENT_FILE);
+    let migrated = MigrationRegistry::current()
+        .migrate(payload(CURRENT_FILE))
+        .unwrap();
+    let current = migrated.canonical_bytes.as_slice();
     let outcome = MigrationRegistry::current()
         .migrate(current)
         .expect("current no-op");
@@ -61,7 +86,7 @@ fn applying_the_registry_to_current_canonical_bytes_is_an_exact_no_op() {
 
 #[test]
 fn future_and_missing_hops_fail_with_stable_codes_and_no_partial_output() {
-    let future = br#"{"schemaVersion":2}"#;
+    let future = br#"{"schemaVersion":3}"#;
     assert_eq!(
         MigrationRegistry::current()
             .migrate(future)

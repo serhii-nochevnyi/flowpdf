@@ -52,7 +52,9 @@ fn repeated_create_is_idempotent_and_divergent_same_identity_never_replaces_trut
         AuditTimestamp::parse("2026-08-14T00:00:02Z").expect("timestamp"),
         AuditAction::Create,
         SourceModality::System,
-        vec![AuditMetadata::SchemaVersion { value: 1 }],
+        vec![AuditMetadata::SchemaVersion {
+            value: flow_core::model::SCHEMA_VERSION,
+        }],
     )
     .expect("safe divergent audit");
     assert_eq!(
@@ -682,7 +684,7 @@ fn migrated_documents_checkpoint_after_the_boundary_and_reject_lineage_tampering
     let latest_snapshot = records
         .snapshots
         .iter()
-        .filter(|snapshot| snapshot.schema_version == 1)
+        .filter(|snapshot| snapshot.schema_version == flow_core::model::SCHEMA_VERSION)
         .max_by_key(|snapshot| snapshot.revision)
         .expect("latest current-schema checkpoint")
         .clone();

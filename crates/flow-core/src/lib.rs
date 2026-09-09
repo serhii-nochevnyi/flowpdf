@@ -24,8 +24,8 @@ use audit::{
 pub use audit::{AuditEvent as AuditRecord, AuditOutcome};
 use canonical::{canonical_bytes, canonical_hash, decode_canonical};
 use model::{
-    Affinity, CommandId, ContentNodeKind, DocumentId, FlowDocument, LogicalPosition, MigrationHop,
-    Provenance, SCHEMA_VERSION,
+    Affinity, CommandId, DocumentId, FlowDocument, LogicalPosition, MigrationHop, Provenance,
+    SCHEMA_VERSION,
 };
 use provenance::{ProvenanceError, RevisionHash, RevisionProvenance};
 use schema::{DocumentLimits, LimitKind, MigrationRegistry, MigrationReport, SchemaError};
@@ -1536,9 +1536,9 @@ fn session_dto(
     let next_command_target = document
         .content
         .iter()
-        .find(|node| node.kind == ContentNodeKind::Paragraph)
+        .find(|node| node.legacy_text().is_some())
         .map(|node| {
-            let utf16_offset = u32::try_from(node.text.encode_utf16().count())
+            let utf16_offset = u32::try_from(node.text().encode_utf16().count())
                 .map(Utf16Offset::new)
                 .map_err(|_| CommandError::InvalidRange)?;
             Ok::<_, CommandError>(LogicalPosition {
@@ -1651,7 +1651,7 @@ mod tests {
             document.fields.clear();
             document
                 .content
-                .retain(|node| keep_image && node.kind == ContentNodeKind::Image);
+                .retain(|node| keep_image && node.asset_id().is_some());
             if !keep_image {
                 document.assets.clear();
             }
@@ -1731,9 +1731,11 @@ mod tests {
         let older = include_str!("../../../fixtures/flowdoc/older.json")
             .strip_suffix('\n')
             .unwrap_or(include_str!("../../../fixtures/flowdoc/older.json"));
-        let migrated = include_str!("../../../fixtures/flowdoc/migrated.json")
+        let migrated = include_str!("../../../fixtures/flowdoc/schema-v2-migrated.json")
             .strip_suffix('\n')
-            .unwrap_or(include_str!("../../../fixtures/flowdoc/migrated.json"));
+            .unwrap_or(include_str!(
+                "../../../fixtures/flowdoc/schema-v2-migrated.json"
+            ));
         let result = success(migrate_document(MigrateDocumentRequest {
             canonical_json: older.to_owned(),
             migration_id: CommandId::new("00000000-0000-4000-8000-000000000204")
@@ -1751,7 +1753,7 @@ mod tests {
         assert_eq!(result.canonical_json, migrated);
         assert_eq!(
             result.canonical_hash,
-            include_str!("../../../fixtures/flowdoc/migrated.hash").trim()
+            include_str!("../../../fixtures/flowdoc/schema-v2-migrated.hash").trim()
         );
         assert!(matches!(result.provenance, Provenance::Migrated { .. }));
         assert_eq!(result.report.source_schema_version, 0);

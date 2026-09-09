@@ -13,7 +13,7 @@ use crate::{
     },
     canonical::{canonical_bytes, canonical_hash},
     model::{
-        Affinity, CommandId, ContentNode, ContentNodeKind, FieldDescriptor, FieldId, FlowDocument,
+        Affinity, CommandId, ContentNode, FieldAnchorState, FieldDescriptor, FieldId, FlowDocument,
         LogicalPosition, NodeId, StyleId,
     },
     schema::{DocumentLimits, SchemaError, validate_document},
@@ -686,6 +686,11 @@ fn command_mutations(kind: &CommandKind) -> Result<Vec<Mutation>, CommandError> 
     }
 }
 
+fn contains_editable_text(node: &ContentNode) -> bool {
+    // derive_operation receives an already validated, depth-bounded document.
+    node.runs().is_some() || node.children().iter().any(contains_editable_text)
+}
+
 fn derive_operation(
     document: &FlowDocument,
     mutation: &Mutation,
@@ -726,6 +731,7 @@ fn derive_operation(
             ))
         }
         Mutation::InsertNode { index, node } => {
+            crate::schema::validate_new_node(document, node)?;
             let index_usize = usize::try_from(*index).map_err(|_| CommandError::InvalidRange)?;
             if index_usize > document.content.len()
                 || document.content.iter().any(|current| current.id == node.id)
@@ -750,6 +756,18 @@ fn derive_operation(
                 .enumerate()
                 .find(|(_, node)| node.id == *node_id)
                 .ok_or(CommandError::InvalidTarget)?;
+            if contains_editable_text(node)
+                && !document
+                    .content
+                    .iter()
+                    .filter(|other| other.id != *node_id)
+                    .any(contains_editable_text)
+            {
+                // The semantic delete command will create its replacement
+                // paragraph in a later plan. The legacy command must not erase
+                // the last editable block in the meantime.
+                return Err(CommandError::BrokenInvariant);
+            }
             let index = u32::try_from(index).map_err(|_| CommandError::InvalidRange)?;
             Ok((
                 Operation::DeleteNode {
@@ -763,6 +781,9 @@ fn derive_operation(
             ))
         }
         Mutation::SetField { field_id, field } => {
+            if !matches!(field.anchor, FieldAnchorState::GraphemeSafe { .. }) {
+                return Err(CommandError::InvalidTarget);
+            }
             let (index, current) = document
                 .fields
                 .iter()
@@ -795,7 +816,8 @@ fn derive_text_operation(
     replacement: String,
 ) -> Result<(Operation, Operation), CommandError> {
     let (node, start, end) = resolve_range(document, &range)?;
-    let expected_text = node.text[start.get()..end.get()].to_owned();
+    let expected_text =
+        node.legacy_text().ok_or(CommandError::InvalidTarget)?[start.get()..end.get()].to_owned();
     if expected_text == replacement || (expected_text.is_empty() && replacement.is_empty()) {
         return Err(CommandError::BrokenInvariant);
     }
@@ -843,10 +865,11 @@ fn resolve_range<'a>(
     let node = document
         .content
         .iter()
-        .find(|node| node.id == range.start.node_id && node.kind == ContentNodeKind::Paragraph)
+        .find(|node| node.id == range.start.node_id)
         .ok_or(CommandError::InvalidTarget)?;
-    let start = resolve_utf16_offset(&node.text, range.start.utf16_offset)?;
-    let end = resolve_utf16_offset(&node.text, range.end.utf16_offset)?;
+    let text = node.legacy_text().ok_or(CommandError::InvalidTarget)?;
+    let start = resolve_utf16_offset(text, range.start.utf16_offset)?;
+    let end = resolve_utf16_offset(text, range.end.utf16_offset)?;
     if start.get() > end.get() {
         return Err(CommandError::InvalidRange);
     }
@@ -948,7 +971,11 @@ fn apply_operation(
                 .iter()
                 .position(|node| node.id == range.start.node_id)
                 .ok_or(CommandError::InvalidTarget)?;
-            if document.content[node_index].text[start.get()..end.get()] != *expected_text {
+            let mut text = document.content[node_index]
+                .legacy_text()
+                .ok_or(CommandError::InvalidTarget)?
+                .to_owned();
+            if text[start.get()..end.get()] != *expected_text {
                 return Err(CommandError::HistoryConflict);
             }
             let removed_utf16_length = range
@@ -958,9 +985,8 @@ fn apply_operation(
                 .checked_sub(range.start.utf16_offset.get())
                 .ok_or(CommandError::InvalidRange)?;
             let inserted_utf16_length = utf16_length(replacement)?;
-            document.content[node_index]
-                .text
-                .replace_range(start.get()..end.get(), replacement);
+            text.replace_range(start.get()..end.get(), replacement);
+            document.content[node_index].set_plain_text(text)?;
             let transformation = AnchorTransformation::TextEdit {
                 node_id: range.start.node_id.clone(),
                 start: range.start.utf16_offset,
@@ -1031,10 +1057,19 @@ fn map_field_anchors(
         transformations: vec![transformation.clone()],
     };
     for field in &mut document.fields {
-        field.anchor = match mapping.map(&field.anchor) {
+        let mapped = match mapping.map(field.anchor.original()) {
             AnchorMapResult::Mapped(position) => position,
             AnchorMapResult::Invalid(_) => return Err(CommandError::AnchorInvalidated),
         };
+        match &mut field.anchor {
+            FieldAnchorState::GraphemeSafe { original } => *original = mapped,
+            FieldAnchorState::LegacyInvalid { original, .. }
+            | FieldAnchorState::TargetDeleted { original, .. } => {
+                if *original != mapped {
+                    return Err(CommandError::AnchorInvalidated);
+                }
+            }
+        }
     }
     Ok(())
 }

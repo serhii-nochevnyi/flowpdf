@@ -109,7 +109,7 @@ test('WASM command DTO preserves the native transaction, UTF-16, stale, and dupl
   expect(stale).toMatchObject({ ok: false, value: null, error: { code: 'FLOW_STALE_REVISION' } })
 
   const canonicalDocument = JSON.parse(created.session.canonicalJson) as {
-    readonly content: readonly { readonly id: string; readonly text: string }[]
+    readonly content: readonly { readonly id: string; readonly body: { readonly runs: readonly { readonly text: string }[] } }[]
   }
   const emojiNode = canonicalDocument.content[0]
   if (emojiNode === undefined) throw new Error('sample paragraph is required')
@@ -124,7 +124,7 @@ test('WASM command DTO preserves the native transaction, UTF-16, stale, and dupl
           type: 'insertText',
           target: {
             nodeId: emojiNode.id,
-            utf16Offset: emojiNode.text.indexOf('😀') + 1,
+            utf16Offset: emojiNode.body.runs.map((run) => run.text).join('').indexOf('😀') + 1,
             affinity: 'forward',
           },
           text: 'X',

@@ -2,16 +2,15 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use icu_segmenter::GraphemeClusterSegmenter;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
 
+mod legacy;
+
 use crate::anchor::{Utf16Offset, resolve_utf16_offset};
-use crate::model::{
-    AssetDescriptor, ContentNode, ContentNodeKind, DocumentId, FieldDescriptor, FieldKind,
-    FieldValue, FlowDocument, MigrationHop, PageSettings, Provenance, SCHEMA_VERSION,
-    StyleDefinition,
-};
+use crate::model::*;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LimitKind {
@@ -296,13 +295,12 @@ pub fn validate_document(document: &FlowDocument) -> Result<(), SchemaError> {
         style_ids.insert(style.id.as_str());
         if style.name.trim().is_empty()
             || style.name.len() > 256
-            || style.font_family.trim().is_empty()
-            || style.font_family.len() > 512
             || style.font_size_millipoints == 0
             || !style_names.insert(style.name.as_str())
         {
             return Err(SchemaError::invalid_document());
         }
+        validate_font(&style.font_family, false)?;
     }
 
     let mut asset_ids = BTreeSet::new();
@@ -350,40 +348,17 @@ pub fn validate_document(document: &FlowDocument) -> Result<(), SchemaError> {
         .ok_or_else(SchemaError::invalid_document)?;
     limits.check(LimitKind::RecoveryRecords, minimum_recovery_records)?;
 
-    let mut node_ids = BTreeSet::new();
-    let mut total_text_bytes = 0_usize;
-    for node in &document.content {
-        insert_id(&mut all_ids, node.id.as_str())?;
-        node_ids.insert(node.id.as_str());
-        limits.check(LimitKind::TextNodeBytes, node.text.len())?;
-        total_text_bytes = total_text_bytes
-            .checked_add(node.text.len())
-            .ok_or_else(SchemaError::invalid_document)?;
-        match node.kind {
-            ContentNodeKind::Paragraph => {
-                let style_id = node
-                    .style_id
-                    .as_ref()
-                    .ok_or_else(SchemaError::dangling_reference)?;
-                if !style_ids.contains(style_id.as_str()) || node.asset_id.is_some() {
-                    return Err(SchemaError::dangling_reference());
-                }
-            }
-            ContentNodeKind::Image => {
-                let asset_id = node
-                    .asset_id
-                    .as_ref()
-                    .ok_or_else(SchemaError::dangling_reference)?;
-                if !asset_ids.contains(asset_id.as_str())
-                    || node.style_id.is_some()
-                    || !node.text.is_empty()
-                {
-                    return Err(SchemaError::dangling_reference());
-                }
-            }
-        }
-    }
-    limits.check(LimitKind::TotalTextBytes, total_text_bytes)?;
+    let nodes = validate_tree(
+        &document.content,
+        &style_ids,
+        &asset_ids,
+        &mut all_ids,
+        false,
+    )?;
+    let boundaries = field_boundaries(
+        &nodes,
+        document.fields.iter().map(|field| field.anchor.original()),
+    );
 
     let mut field_names = BTreeSet::new();
     for field in &document.fields {
@@ -398,13 +373,24 @@ pub fn validate_document(document: &FlowDocument) -> Result<(), SchemaError> {
         {
             return Err(SchemaError::invalid_document());
         }
-        let node = document
-            .content
-            .iter()
-            .find(|node| node.id == field.anchor.node_id)
-            .ok_or_else(SchemaError::dangling_reference)?;
-        if resolve_utf16_offset(&node.text, field.anchor.utf16_offset).is_err() {
-            return Err(SchemaError::invalid_utf16_position());
+        match &field.anchor {
+            FieldAnchorState::GraphemeSafe { original } => {
+                if !nodes.contains_key(original.node_id.as_str()) {
+                    return Err(SchemaError::dangling_reference());
+                }
+                if !boundary_contains(&boundaries, original) {
+                    return Err(SchemaError::invalid_utf16_position());
+                }
+            }
+            FieldAnchorState::LegacyInvalid { .. } => {
+                // This is a durable review state, never an instruction to snap
+                // or promote an anchor after subsequent text edits.
+            }
+            FieldAnchorState::TargetDeleted { original, .. } => {
+                if nodes.contains_key(original.node_id.as_str()) {
+                    return Err(SchemaError::invalid_document());
+                }
+            }
         }
         validate_field(field, &mut all_ids)?;
     }
@@ -414,8 +400,327 @@ pub fn validate_document(document: &FlowDocument) -> Result<(), SchemaError> {
     Ok(())
 }
 
+pub const MAX_TABLE_ROWS: usize = 50;
+pub const MAX_TABLE_COLUMNS: usize = 20;
+pub const MAX_LIST_DEPTH: usize = 8;
+pub const MAX_INLINE_RUNS: usize = 4_096;
+pub const MAX_AUTHORED_ALT_BYTES: usize = 4_096;
+
+fn validate_font(font: &FontFamily, authoring: bool) -> Result<(), SchemaError> {
+    if let FontFamily::LegacyUnknown { original } = font
+        && (authoring || original.trim().is_empty() || original.len() > 512)
+    {
+        return Err(SchemaError::invalid_document());
+    }
+    Ok(())
+}
+
+/// Validate a newly authored document. Loading and replay deliberately retain
+/// migration-only states; command constructors must use this stricter boundary
+/// for newly supplied values rather than treating a valid stored value as consent.
+pub fn validate_new_document(document: &FlowDocument) -> Result<(), SchemaError> {
+    validate_document(document)?;
+    for style in &document.styles {
+        validate_font(&style.font_family, true)?;
+        if !(6_000..=288_000).contains(&style.font_size_millipoints) {
+            return Err(SchemaError::invalid_document());
+        }
+    }
+    if document
+        .fields
+        .iter()
+        .any(|field| !matches!(field.anchor, FieldAnchorState::GraphemeSafe { .. }))
+    {
+        return Err(SchemaError::invalid_document());
+    }
+    let styles = document
+        .styles
+        .iter()
+        .map(|style| style.id.as_str())
+        .collect();
+    let assets = document
+        .assets
+        .iter()
+        .map(|asset| asset.id.as_str())
+        .collect();
+    let nodes = validate_tree(
+        &document.content,
+        &styles,
+        &assets,
+        &mut BTreeSet::new(),
+        true,
+    )?;
+    if !nodes.values().any(|node| node.runs().is_some()) {
+        return Err(SchemaError::invalid_document());
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_new_node(
+    document: &FlowDocument,
+    node: &ContentNode,
+) -> Result<(), SchemaError> {
+    let styles = document
+        .styles
+        .iter()
+        .map(|style| style.id.as_str())
+        .collect();
+    let assets = document
+        .assets
+        .iter()
+        .map(|asset| asset.id.as_str())
+        .collect();
+    validate_tree(
+        std::slice::from_ref(node),
+        &styles,
+        &assets,
+        &mut BTreeSet::new(),
+        true,
+    )
+    .map(|_| ())
+}
+
+fn validate_tree<'a>(
+    content: &'a [ContentNode],
+    styles: &BTreeSet<&str>,
+    assets: &BTreeSet<&str>,
+    all_ids: &mut BTreeSet<String>,
+    authoring: bool,
+) -> Result<BTreeMap<&'a str, &'a ContentNode>, SchemaError> {
+    let limits = DocumentLimits::V1;
+    let mut stack = content
+        .iter()
+        .map(|node| (node, None::<&BlockKind>, 1_usize, 0_usize, false))
+        .collect::<Vec<_>>();
+    let mut nodes = BTreeMap::new();
+    let mut total_text = 0_usize;
+    while let Some((node, parent, depth, list_depth, in_table)) = stack.pop() {
+        limits.check(LimitKind::TreeDepth, depth)?;
+        limits.check(LimitKind::SemanticNodes, nodes.len() + 1)?;
+        insert_id(all_ids, node.id.as_str())?;
+        nodes.insert(node.id.as_str(), node);
+        if node
+            .style_id
+            .as_ref()
+            .is_some_and(|id| !styles.contains(id.as_str()))
+        {
+            return Err(SchemaError::dangling_reference());
+        }
+        let nesting_ok = match (&node.body, parent) {
+            (
+                BlockKind::ListItem { .. },
+                Some(BlockKind::OrderedList { .. } | BlockKind::UnorderedList { .. }),
+            )
+            | (BlockKind::TableRow { .. }, Some(BlockKind::Table { .. }))
+            | (BlockKind::TableCell { .. }, Some(BlockKind::TableRow { .. })) => true,
+            (
+                BlockKind::ListItem { .. }
+                | BlockKind::TableRow { .. }
+                | BlockKind::TableCell { .. },
+                _,
+            ) => false,
+            (
+                _,
+                Some(
+                    BlockKind::OrderedList { .. }
+                    | BlockKind::UnorderedList { .. }
+                    | BlockKind::Table { .. }
+                    | BlockKind::TableRow { .. },
+                ),
+            ) => false,
+            _ => true,
+        };
+        if !nesting_ok {
+            return Err(SchemaError::invalid_document());
+        }
+        let mut child_list_depth = list_depth;
+        let mut child_in_table = in_table;
+        match &node.body {
+            BlockKind::Paragraph { attrs, runs } | BlockKind::Heading { attrs, runs, .. } => {
+                if attrs.spacing_before_millipoints > 144_000
+                    || attrs.spacing_after_millipoints > 144_000
+                {
+                    return Err(SchemaError::invalid_document());
+                }
+                if matches!(node.body, BlockKind::Heading { level, .. } if !(1..=6).contains(&level))
+                {
+                    return Err(SchemaError::invalid_document());
+                }
+                if runs.len() > MAX_INLINE_RUNS {
+                    return Err(SchemaError::new(
+                        "FLOW_LIMIT_INLINE_RUNS",
+                        "Too many inline runs",
+                    ));
+                }
+                let mut previous = None;
+                let mut text_bytes = 0_usize;
+                for run in runs {
+                    if run.text.is_empty() || previous == Some(&run.marks) {
+                        return Err(SchemaError::invalid_document());
+                    }
+                    previous = Some(&run.marks);
+                    if let Some(font) = &run.marks.font_family {
+                        validate_font(font, authoring)?;
+                    }
+                    if run
+                        .marks
+                        .font_size_millipoints
+                        .is_some_and(|size| !(6_000..=288_000).contains(&size))
+                    {
+                        return Err(SchemaError::invalid_document());
+                    }
+                    text_bytes = text_bytes
+                        .checked_add(run.text.len())
+                        .ok_or_else(SchemaError::invalid_document)?;
+                    limits.check(LimitKind::TextNodeBytes, text_bytes)?;
+                }
+                total_text = total_text
+                    .checked_add(text_bytes)
+                    .ok_or_else(SchemaError::invalid_document)?;
+                limits.check(LimitKind::TotalTextBytes, total_text)?;
+            }
+            BlockKind::Image {
+                asset_id,
+                accessibility,
+            } => {
+                if !assets.contains(asset_id.as_str()) {
+                    return Err(SchemaError::dangling_reference());
+                }
+                match accessibility {
+                    ImageAccessibility::MissingLegacy if authoring => {
+                        return Err(SchemaError::invalid_document());
+                    }
+                    ImageAccessibility::Described { text }
+                        if text.is_empty()
+                            || text.len()
+                                > if authoring {
+                                    MAX_AUTHORED_ALT_BYTES
+                                } else {
+                                    16_384
+                                }
+                            || (authoring && text.trim().is_empty()) =>
+                    {
+                        return Err(SchemaError::invalid_document());
+                    }
+                    _ => {}
+                }
+            }
+            BlockKind::OrderedList { items } | BlockKind::UnorderedList { items } => {
+                child_list_depth += 1;
+                if child_list_depth > MAX_LIST_DEPTH {
+                    return Err(SchemaError::new(
+                        "FLOW_LIMIT_LIST_DEPTH",
+                        "List nesting limit exceeded",
+                    ));
+                }
+                if items.is_empty() {
+                    return Err(SchemaError::invalid_document());
+                }
+            }
+            BlockKind::ListItem { children } | BlockKind::TableCell { children } => {
+                if children.is_empty() || !children.iter().any(|child| child.runs().is_some()) {
+                    return Err(SchemaError::invalid_document());
+                }
+            }
+            BlockKind::Table { header_rows, rows } => {
+                if in_table || *header_rows > 1 || rows.is_empty() {
+                    return Err(SchemaError::invalid_document());
+                }
+                if rows.len() > MAX_TABLE_ROWS {
+                    return Err(SchemaError::new(
+                        "FLOW_LIMIT_TABLE",
+                        "Table dimensions exceeded",
+                    ));
+                }
+                let columns = rows[0].children().len();
+                if columns == 0 || columns > MAX_TABLE_COLUMNS {
+                    return Err(SchemaError::new(
+                        "FLOW_LIMIT_TABLE",
+                        "Table dimensions exceeded",
+                    ));
+                }
+                if rows.iter().any(|row| row.children().len() != columns) {
+                    return Err(SchemaError::invalid_document());
+                }
+                child_in_table = true;
+            }
+            BlockKind::TableRow { .. } | BlockKind::PageBreak => {}
+        }
+        limits.check(
+            LimitKind::SemanticNodes,
+            nodes
+                .len()
+                .saturating_add(stack.len())
+                .saturating_add(node.children().len()),
+        )?;
+        stack.extend(node.children().iter().map(|child| {
+            (
+                child,
+                Some(&node.body),
+                depth + 1,
+                child_list_depth,
+                child_in_table,
+            )
+        }));
+    }
+    Ok(nodes)
+}
+
+// Scan each referenced text block only through its last requested field offset
+// and retain only requested boundaries, never a full-document grapheme cache.
+fn field_boundaries<'a>(
+    nodes: &BTreeMap<&str, &ContentNode>,
+    positions: impl Iterator<Item = &'a LogicalPosition>,
+) -> BTreeMap<String, BTreeSet<u32>> {
+    let mut requested = BTreeMap::<String, BTreeSet<u32>>::new();
+    for position in positions {
+        requested
+            .entry(position.node_id.to_string())
+            .or_default()
+            .insert(position.utf16_offset.get());
+    }
+    for (id, offsets) in &mut requested {
+        let wanted = std::mem::take(offsets);
+        let Some(node) = nodes.get(id.as_str()).filter(|node| node.runs().is_some()) else {
+            continue;
+        };
+        let text = match node.runs().unwrap_or(&[]) {
+            [] => std::borrow::Cow::Borrowed(""),
+            [run] => std::borrow::Cow::Borrowed(run.text.as_str()),
+            _ => std::borrow::Cow::Owned(node.text()),
+        };
+        let last_requested = wanted.last().copied().unwrap_or(0);
+        let mut previous = 0;
+        let mut utf16 = 0;
+        for boundary in GraphemeClusterSegmenter::new().segment_str(&text) {
+            utf16 += text[previous..boundary].encode_utf16().count() as u32;
+            previous = boundary;
+            if wanted.contains(&utf16) {
+                offsets.insert(utf16);
+            }
+            if utf16 >= last_requested {
+                break;
+            }
+        }
+    }
+    requested
+}
+
+fn boundary_contains(
+    boundaries: &BTreeMap<String, BTreeSet<u32>>,
+    position: &LogicalPosition,
+) -> bool {
+    boundaries
+        .get(position.node_id.as_str())
+        .is_some_and(|offsets| offsets.contains(&position.utf16_offset.get()))
+}
+
 fn validate_provenance(document: &FlowDocument) -> Result<(), SchemaError> {
-    match &document.provenance {
+    validate_provenance_version(&document.provenance, document.schema_version)
+}
+
+fn validate_provenance_version(provenance: &Provenance, version: u32) -> Result<(), SchemaError> {
+    match provenance {
         Provenance::LocalSample { created_at } => {
             if !is_compact_utc_timestamp(created_at) {
                 return Err(SchemaError::invalid_document());
@@ -428,7 +733,7 @@ fn validate_provenance(document: &FlowDocument) -> Result<(), SchemaError> {
             hops,
         } => {
             if *source_schema_version >= *current_schema_version
-                || *current_schema_version != document.schema_version
+                || *current_schema_version != version
                 || !is_compact_utc_timestamp(source_created_at)
                 || hops.is_empty()
                 || hops.len() > 32
@@ -630,12 +935,10 @@ pub struct MigrationRegistry {
 impl MigrationRegistry {
     #[must_use]
     pub fn current() -> Self {
-        Self::new(vec![MigrationStep::new(
-            0,
-            1,
-            migrate_v0_to_v1,
-            validate_v1_migration_output,
-        )])
+        Self::new(vec![
+            MigrationStep::new(0, 1, migrate_v0_to_v1, validate_v1_migration_output),
+            MigrationStep::new(1, 2, migrate_v1_to_v2, validate_v2_migration_output),
+        ])
     }
 
     #[must_use]
@@ -678,6 +981,7 @@ impl MigrationRegistry {
                 .find(|step| step.from_version == version && step.to_version == expected_to)
                 .ok_or_else(SchemaError::migration_hop_missing)?;
             let candidate = (step.migrate)(&bytes)?;
+            crate::canonical::preflight_canonical_bytes(&candidate)?;
             let candidate_version = probe_schema_version(&candidate)
                 .map_err(|_| SchemaError::migration_intermediate_invalid())?;
             if candidate_version != expected_to {
@@ -711,6 +1015,10 @@ impl MigrationRegistry {
 }
 
 fn validate_v1_migration_output(input: &[u8]) -> Result<(), SchemaError> {
+    decode_legacy_validated(input, 1).map(|_| ())
+}
+
+fn validate_v2_migration_output(input: &[u8]) -> Result<(), SchemaError> {
     crate::canonical::decode_canonical(input).map(|_| ())
 }
 
@@ -744,54 +1052,195 @@ fn probe_schema_version(input: &[u8]) -> Result<u32, SchemaError> {
         .map_err(|_| SchemaError::decode())
 }
 
-#[derive(Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct LegacyDocumentV0 {
-    schema_version: u32,
-    document_id: DocumentId,
-    revision: u32,
-    locale: String,
-    page_settings: PageSettings,
-    styles: Vec<StyleDefinition>,
-    content: Vec<ContentNode>,
-    assets: Vec<AssetDescriptor>,
-    fields: Vec<FieldDescriptor>,
-    provenance: LegacyProvenanceV0,
-}
-
-#[derive(Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct LegacyProvenanceV0 {
-    created_at: String,
-}
-
 fn migrate_v0_to_v1(input: &[u8]) -> Result<Vec<u8>, SchemaError> {
-    let legacy: LegacyDocumentV0 =
-        serde_json::from_slice(input).map_err(|_| SchemaError::migration_input_invalid())?;
-    if legacy.schema_version != 0
-        || serde_json::to_vec(&legacy).map_err(|_| SchemaError::serialization())? != input
-    {
-        return Err(SchemaError::migration_input_invalid());
+    decode_legacy_validated(input, 0)?
+        .canonical_bytes()
+        .map_err(|_| SchemaError::serialization())
+}
+
+fn migrate_v1_to_v2(input: &[u8]) -> Result<Vec<u8>, SchemaError> {
+    crate::canonical::canonical_bytes(&convert_v1(&decode_legacy_validated(input, 1)?)?)
+}
+
+fn decode_legacy_validated(
+    input: &[u8],
+    version: u32,
+) -> Result<legacy::LegacyFlowDocumentV1, SchemaError> {
+    crate::canonical::preflight_canonical_bytes(input)?;
+    let source = legacy::decode(input, version)
+        .map_err(|_| SchemaError::migration_input_invalid())?
+        .into_v1();
+    // convert_v1 validates every retained semantic/noncontent invariant before
+    // even an intermediate v0->v1 result can leave this module.
+    convert_v1(&source)?;
+    Ok(source)
+}
+
+/// Unchanged closed wire records cross from frozen types into current types.
+/// This helper cannot invent members or accept unknown current-schema values.
+fn retained<T: Serialize, U: serde::de::DeserializeOwned>(value: &T) -> Result<U, SchemaError> {
+    let bytes = serde_json::to_vec(value).map_err(|_| SchemaError::serialization())?;
+    serde_json::from_slice(&bytes).map_err(|_| SchemaError::migration_input_invalid())
+}
+
+fn convert_v1(source: &legacy::LegacyFlowDocumentV1) -> Result<FlowDocument, SchemaError> {
+    let source_provenance: Provenance = retained(&source.provenance)?;
+    validate_provenance_version(&source_provenance, 1)?;
+    DocumentLimits::V1.check(LimitKind::SemanticNodes, source.content.len())?;
+    DocumentLimits::V1.check(LimitKind::Fields, source.fields.len())?;
+    DocumentLimits::V1.check(LimitKind::Assets, source.assets.len())?;
+    DocumentLimits::V1.check(LimitKind::Styles, source.styles.len())?;
+    let mut total_text_bytes = 0_usize;
+    for node in &source.content {
+        DocumentLimits::V1.check(LimitKind::TextNodeBytes, node.text.len())?;
+        total_text_bytes = total_text_bytes
+            .checked_add(node.text.len())
+            .ok_or_else(SchemaError::invalid_document)?;
+        DocumentLimits::V1.check(LimitKind::TotalTextBytes, total_text_bytes)?;
     }
+    let mut content = Vec::with_capacity(source.content.len());
+    let assets = source
+        .assets
+        .iter()
+        .map(|asset| (asset.id.as_str(), asset))
+        .collect::<BTreeMap<_, _>>();
+    for node in &source.content {
+        let id = NodeId::new(node.id.as_str())?;
+        let style_id = node
+            .style_id
+            .as_ref()
+            .map(|id| StyleId::new(id.as_str()))
+            .transpose()?;
+        let migrated = match node.kind {
+            legacy::ContentNodeKind::Paragraph => {
+                if style_id.is_none() || node.asset_id.is_some() {
+                    return Err(SchemaError::dangling_reference());
+                }
+                ContentNode::paragraph(id, style_id, node.text.clone())
+            }
+            legacy::ContentNodeKind::Image => {
+                if style_id.is_some() || !node.text.is_empty() {
+                    return Err(SchemaError::dangling_reference());
+                }
+                let asset_id = node
+                    .asset_id
+                    .as_ref()
+                    .ok_or_else(SchemaError::dangling_reference)?;
+                let asset = assets
+                    .get(asset_id.as_str())
+                    .ok_or_else(SchemaError::dangling_reference)?;
+                let accessibility = if asset.alt_text.is_empty() {
+                    ImageAccessibility::MissingLegacy
+                } else {
+                    ImageAccessibility::Described {
+                        text: asset.alt_text.clone(),
+                    }
+                };
+                ContentNode {
+                    id,
+                    style_id,
+                    body: BlockKind::Image {
+                        asset_id: AssetId::new(asset_id.as_str())?,
+                        accessibility,
+                    },
+                }
+            }
+        };
+        content.push(migrated);
+    }
+    let nodes = content
+        .iter()
+        .map(|node| (node.id.as_str(), node))
+        .collect::<BTreeMap<_, _>>();
+    let positions = source
+        .fields
+        .iter()
+        .map(|field| retained(&field.anchor))
+        .collect::<Result<Vec<LogicalPosition>, SchemaError>>()?;
+    let boundaries = field_boundaries(&nodes, positions.iter());
+    let mut fields = Vec::with_capacity(source.fields.len());
+    for (field, original) in source.fields.iter().zip(positions) {
+        let target = nodes.get(original.node_id.as_str());
+        let anchor = match target {
+            Some(_) if boundary_contains(&boundaries, &original) => {
+                FieldAnchorState::GraphemeSafe { original }
+            }
+            Some(_) => FieldAnchorState::LegacyInvalid {
+                original,
+                reason: LegacyAnchorReason::NonGraphemeBoundary,
+            },
+            None => FieldAnchorState::LegacyInvalid {
+                original,
+                reason: LegacyAnchorReason::MissingNode,
+            },
+        };
+        fields.push(FieldDescriptor {
+            id: FieldId::new(field.id.as_str())?,
+            name: field.name.clone(),
+            label: field.label.clone(),
+            anchor,
+            kind: retained(&field.kind)?,
+            required: field.required,
+            read_only: field.read_only,
+            default_value: retained(&field.default_value)?,
+            options: retained(&field.options)?,
+        });
+    }
+    let hop = MigrationHop {
+        from_version: 1,
+        to_version: 2,
+    };
+    let provenance = match source_provenance {
+        Provenance::LocalSample { created_at } => Provenance::Migrated {
+            source_schema_version: 1,
+            current_schema_version: 2,
+            source_created_at: created_at,
+            hops: vec![hop],
+        },
+        Provenance::Migrated {
+            source_schema_version,
+            source_created_at,
+            mut hops,
+            ..
+        } => {
+            hops.push(hop);
+            Provenance::Migrated {
+                source_schema_version,
+                current_schema_version: 2,
+                source_created_at,
+                hops,
+            }
+        }
+    };
     let document = FlowDocument {
         schema_version: SCHEMA_VERSION,
-        document_id: legacy.document_id,
-        revision: legacy.revision,
-        locale: legacy.locale,
-        page_settings: legacy.page_settings,
-        styles: legacy.styles,
-        content: legacy.content,
-        assets: legacy.assets,
-        fields: legacy.fields,
-        provenance: Provenance::Migrated {
-            source_schema_version: 0,
-            current_schema_version: SCHEMA_VERSION,
-            source_created_at: legacy.provenance.created_at,
-            hops: vec![MigrationHop {
-                from_version: 0,
-                to_version: 1,
-            }],
-        },
+        document_id: DocumentId::new(source.document_id.as_str())?,
+        revision: source.revision,
+        locale: source.locale.clone(),
+        page_settings: retained(&source.page_settings)?,
+        styles: source
+            .styles
+            .iter()
+            .map(|style| {
+                Ok(StyleDefinition {
+                    id: StyleId::new(style.id.as_str())?,
+                    name: style.name.clone(),
+                    font_family: if style.font_family == "Noto Sans" {
+                        FontFamily::noto_sans()
+                    } else {
+                        FontFamily::LegacyUnknown {
+                            original: style.font_family.clone(),
+                        }
+                    },
+                    font_size_millipoints: style.font_size_millipoints,
+                })
+            })
+            .collect::<Result<_, SchemaError>>()?,
+        content,
+        assets: retained(&source.assets)?,
+        fields,
+        provenance,
     };
-    crate::canonical::canonical_bytes(&document)
+    validate_document(&document)?;
+    Ok(document)
 }
