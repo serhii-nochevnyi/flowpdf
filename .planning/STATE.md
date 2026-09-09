@@ -4,16 +4,16 @@ milestone: v1.0
 current_phase: 2
 current_phase_name: Accessible Rich-Text Editing
 status: executing
-stopped_at: Completed 02-02-PLAN.md
-last_updated: "2026-09-07T11:27:19.270Z"
-last_activity: 2026-09-07
-last_activity_desc: Plan 02-02 completed with passing wave checks
-state_head: 7441537186710e4029b1de661545ad42fd41a638
+stopped_at: Completed 02-03-PLAN.md
+last_updated: "2026-09-09T12:58:16.702Z"
+last_activity: 2026-09-09
+last_activity_desc: Plan 02-03 schema v2 completed with passing full and wave checks
+state_head: bc5ab7145c4a5d26899e7164459daa81216ea415
 progress:
   total_phases: 9
   completed_phases: 1
   total_plans: 24
-  completed_plans: 8
+  completed_plans: 9
 milestone_name: milestone
 ---
 
@@ -29,17 +29,17 @@ See: .planning/PROJECT.md (updated 2026-08-25)
 ## Current Position
 
 Phase: 2 (Accessible Rich-Text Editing) — EXECUTING
-Plan: 3 of 18
+Plan: 4 of 18
 Status: Ready to execute
-Last activity: 2026-09-07 — Plan 02-02 completed; ready for the schema-v2 legacy freeze
+Last activity: 2026-09-09 — Plan 02-03 completed; ready for Rust grapheme and editor-session authority
 
-Progress: Phase 2 — 2/18 plans complete; milestone percentage unavailable while later phases remain unplanned.
+Progress: Phase 2 — 3/18 plans complete; milestone percentage unavailable while later phases remain unplanned.
 
 ## Performance Metrics
 
 **Velocity:**
 
-- Total plans completed: 8
+- Total plans completed: 9
 - Average duration: not comparable (Plan 05 was a multi-session closeout)
 - Total execution time: multi-session
 
@@ -48,9 +48,9 @@ Progress: Phase 2 — 2/18 plans complete; milestone percentage unavailable whil
 | Phase | Plans | Total | Avg/Plan |
 |-------|-------|-------|----------|
 | 1 | 6 | - | - |
-| 2 | 2 | multi-session | - |
+| 2 | 3 | multi-session | - |
 
-**Recent Trend:** Phase 2 dependency admission and Unicode/WASM boundaries are complete. Final Plan 02-02 full check and wave build/test gates pass; 16 editor plans remain.
+**Recent Trend:** Schema-v2 tree and lossless migration gates are complete. Full check and wave build/test pass; recovery p95 is 522.665458 ms under 2,000 ms. Fifteen editor plans remain.
 **Per-Plan Metrics:**
 
 | Plan | Duration | Tasks | Files |
@@ -63,6 +63,7 @@ Progress: Phase 2 — 2/18 plans complete; milestone percentage unavailable whil
 | Phase FLOWPDF-01 P06 | 46min | 3 tasks | 15 files |
 | Phase FLOWPDF-02 P01 | 17m 7s | 2 tasks | 11 files |
 | Phase FLOWPDF-02 P02 | multi-session | 2 tasks | 7 files |
+| Phase FLOWPDF-02 P03 | multi-session | 2 tasks | 28 files |
 
 ## Accumulated Context
 
@@ -79,6 +80,8 @@ Decisions are logged in `.planning/PROJECT.md`.
 - [Phase 2]: npm legitimacy uses exact-release age; crate legitimacy uses package inception age while retaining exact-release evidence.
 - [Phase 2]: ICU segmentation is locked to compiled_data and image decoding to PNG/JPEG with default Cargo features disabled.
 - [Phase 2]: WASM size evidence binds stable provenance identities and verified executable bytes; live observation timestamps do not affect determinism.
+- [Phase 2]: Frozen legacy decoders precede schema changes; v2 uses one canonical inline-run tree with retained block style defaults.
+- [Phase 2]: Stored migration-only review states remain explicit; new authoring rejects them and plain commands reject unsupported rich targets atomically.
 
 ### Pending Todos
 
@@ -87,6 +90,7 @@ Decisions are logged in `.planning/PROJECT.md`.
 ### Blockers/Concerns
 
 - The Rust text/font stack requires an early differential benchmark against HarfBuzz reference behavior.
+- Before the Phase 2 final gate, fix WASM size measurement semantics: both current-source variants now link ICU. Keep historical admission evidence unchanged; do not claim a fresh Phase-1-compatible delta from that harness. See 02-03-SUMMARY.md.
 
 ## Deferred Items
 
@@ -97,6 +101,6 @@ Decisions are logged in `.planning/PROJECT.md`.
 
 ## Session Continuity
 
-Last session: 2026-09-07T11:27:19.209Z
-Stopped at: Completed 02-02-PLAN.md
+Last session: 2026-09-09T12:58:16.621Z
+Stopped at: Completed 02-03-PLAN.md
 Resume file: None

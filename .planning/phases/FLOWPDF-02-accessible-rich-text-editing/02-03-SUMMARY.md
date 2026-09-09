@@ -99,6 +99,7 @@ FlowDocument now owns a closed semantic block tree with inline formatting, exact
 - `npm run check` exited 0 on 2026-09-09 in 46.97 s: live provenance, locks, boundary contracts, formatting, all-target Clippy with warnings denied, full Rust tests, recovery evidence, WASM target/build, TypeScript, 29 unit/inspector tests, focused accessibility 4/4, Chromium 14/14 and two canonical/migration replay rounds.
 - Recovery artifact was produced by the official benchmark on 2026-09-08; fresh source-bound validation passed on 2026-09-09. No threshold was relaxed.
 - Main-session review inspected migration validation, closed tree/mark types, field-boundary scanning and narrow transaction/browser adapters. `git diff --check` passed; no tracked files were deleted. Original frozen decoder and historical fixtures have no diff.
+- Post-wave pinned `cargo build --locked` passed and `npm test` passed 43/43 across 8 files. Schema-drift check did not block; codebase drift explicitly skipped because STRUCTURE.md is absent. Shared requirement readiness is 0/3, so no phase-level requirement was prematurely completed.
 
 ## Deviations from Plan
 
@@ -119,7 +120,7 @@ None.
 
 ## Next Phase Readiness
 
-Ready for Plan 02-04's v2 persistence/transaction compatibility work. Schema foundations do not imply rich editing UI, pagination, PDF export or voice completion. Shared EDIT/QUAL requirements remain pending until every declaring plan finishes. Windows/Edge and assistive-technology UAT are not claimed.
+Ready for Plan 02-04's Rust grapheme/atomic-position validation and revision-bound editor-session authority, followed by Plan 02-05's core/WASM/persistence/React tracer. Schema foundations do not imply rich editing UI, pagination, PDF export or voice completion. Shared EDIT/QUAL requirements remain pending until every declaring plan finishes. Windows/Edge and assistive-technology UAT are not claimed.
 
 ## Self-Check: PASSED
 
