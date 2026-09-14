@@ -26,6 +26,7 @@ import {
   type InlineMarkDto,
   type ListKindDto,
   type MarkSetDto,
+  type StructuralPlacementDto,
 } from './editor-store.js'
 
 export type { EditorLocale }
@@ -47,6 +48,47 @@ export type StructuralCommandDto =
   | {
       readonly type: 'deleteSubtree'
       readonly nodeId: string
+    }
+  | {
+      readonly type: 'insertPageBreak'
+      readonly placement: StructuralPlacementDto
+    }
+  | {
+      readonly type: 'removePageBreak'
+      readonly pageBreakId: string
+    }
+  | {
+      readonly type: 'insertTable'
+      readonly placement: StructuralPlacementDto
+      readonly rows: number
+      readonly columns: number
+      readonly headerRow: boolean
+    }
+  | {
+      readonly type: 'addTableRow'
+      readonly selection: DirectionalSelectionDto
+    }
+  | {
+      readonly type: 'removeTableRow'
+      readonly selection: DirectionalSelectionDto
+    }
+  | {
+      readonly type: 'addTableColumn'
+      readonly selection: DirectionalSelectionDto
+    }
+  | {
+      readonly type: 'removeTableColumn'
+      readonly selection: DirectionalSelectionDto
+    }
+  | {
+      readonly type: 'setTableHeaderRow'
+      readonly tableId: string
+      readonly enabled: boolean
+    }
+  | {
+      readonly type: 'removeTable'
+      readonly tableId: string
+      readonly confirmed: boolean
     }
 
 export type FormattingCommandDto =
@@ -117,6 +159,11 @@ export interface FormattingCommandTarget {
   ): Promise<void>
   indentListItem(itemId: string, modality?: SourceModality): Promise<void>
   outdentListItem(itemId: string, modality?: SourceModality): Promise<void>
+}
+
+export interface StructuralCommandTarget {
+  snapshot(): { readonly phase: string }
+  structuralCommand(command: StructuralCommandDto, modality?: SourceModality): Promise<void>
 }
 
 interface ErrorDto {

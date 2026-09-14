@@ -80,10 +80,40 @@ export interface EditorSessionStateDto {
   readonly capabilities: readonly EditorCapabilityDto[]
 }
 
+export interface ConfirmationMetadataDto {
+  readonly kind: 'destructive'
+  readonly headingKey: string
+  readonly bodyKey: string
+  readonly confirmKey: string
+  readonly cancelKey: string
+}
+
+export interface StructuralPlacementDto {
+  readonly parentId: string | null
+  readonly index: number
+}
+
+export interface TableLimitsDto {
+  readonly maxRows: number
+  readonly maxColumns: number
+  readonly maxCells: number
+}
+
+export interface TableCellFocusDto {
+  readonly cellId: string
+  readonly selection: DirectionalSelectionDto
+  readonly previousCellId: string | null
+  readonly nextCellId: string | null
+}
+
 export interface EditorCapabilityDto {
   readonly name: string
   readonly enabled: boolean
   readonly reasonKey?: string | null
+  readonly confirmation?: ConfirmationMetadataDto | null
+  readonly placement?: StructuralPlacementDto | null
+  readonly tableLimits?: TableLimitsDto | null
+  readonly targetNodeId?: string | null
 }
 
 export interface EditorTextSpanDto {
@@ -97,6 +127,8 @@ export interface EditorBlockViewDto {
   readonly text?: string
   readonly level?: number
   readonly nodeKind?: string
+  readonly tableHeaderRows?: number
+  readonly tableCellFocusOrder?: readonly TableCellFocusDto[]
   readonly spans?: readonly EditorTextSpanDto[]
   readonly children?: readonly EditorBlockViewDto[]
 }

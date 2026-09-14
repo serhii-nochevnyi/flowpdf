@@ -677,6 +677,47 @@ fn table_capabilities_project_shared_confirmation_metadata_and_header_state() {
 }
 
 #[test]
+fn table_projection_publishes_rust_owned_row_major_focus_order() {
+    let document = document_with_content(vec![table(100, 2, 2, true)]);
+    let first_cell_text = cell_text_id(table_at(&document, 0), 0, 0);
+    let session =
+        EditorSessionState::from_document_with_selection(&document, collapsed(first_cell_text))
+            .expect("table cell session");
+    let view = session.view_for_document(&document);
+    let flow_core::EditorBlockViewDto::Atomic {
+        table_cell_focus_order,
+        ..
+    } = view.document.blocks.first().expect("table projection")
+    else {
+        panic!("expected atomic table projection");
+    };
+    assert_eq!(table_cell_focus_order.len(), 4);
+    let cells = table_at(&document, 0)
+        .children()
+        .iter()
+        .flat_map(|row| row.children().iter())
+        .collect::<Vec<_>>();
+    for (index, focus) in table_cell_focus_order.iter().enumerate() {
+        let cell = cells[index];
+        assert_eq!(focus.cell_id, cell.id);
+        assert_eq!(focus.selection.anchor.node_id, cell.children()[0].id);
+        assert_eq!(focus.selection.anchor.utf16_offset.get(), 0);
+        assert_eq!(focus.selection.anchor.affinity, Affinity::Forward);
+        assert_eq!(
+            focus.previous_cell_id.as_ref(),
+            index
+                .checked_sub(1)
+                .and_then(|previous| cells.get(previous))
+                .map(|cell| &cell.id)
+        );
+        assert_eq!(
+            focus.next_cell_id.as_ref(),
+            cells.get(index + 1).map(|cell| &cell.id)
+        );
+    }
+}
+
+#[test]
 fn structural_transactions_replay_through_the_durable_store() {
     let created = success(create_sample(CreateSampleRequest {
         requested_locale: "uk-UA".to_owned(),

@@ -120,12 +120,42 @@ pub struct ConfirmationMetadataDto {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct StructuralPlacementDto {
+    pub parent_id: Option<NodeId>,
+    pub index: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TableLimitsDto {
+    pub max_rows: u32,
+    pub max_columns: u32,
+    pub max_cells: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TableCellFocusDto {
+    pub cell_id: NodeId,
+    pub selection: DirectionalSelection,
+    pub previous_cell_id: Option<NodeId>,
+    pub next_cell_id: Option<NodeId>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CapabilityDto {
     pub name: EditorCapability,
     pub enabled: bool,
     pub reason_key: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub confirmation: Option<ConfirmationMetadataDto>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placement: Option<StructuralPlacementDto>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub table_limits: Option<TableLimitsDto>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_node_id: Option<NodeId>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -277,6 +307,8 @@ pub enum EditorBlockViewDto {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         table_header_rows: Option<u8>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        table_cell_focus_order: Vec<TableCellFocusDto>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
         children: Vec<EditorBlockViewDto>,
     },
 }
@@ -302,10 +334,58 @@ impl EditorBlockViewDto {
                     crate::model::BlockKind::Table { header_rows, .. } => Some(*header_rows),
                     _ => None,
                 },
+                table_cell_focus_order: table_cell_focus_order(node),
                 children: node.children().iter().map(Self::from_node).collect(),
             },
         }
     }
+}
+
+fn table_cell_focus_order(node: &ContentNode) -> Vec<TableCellFocusDto> {
+    let crate::model::BlockKind::Table { rows, .. } = &node.body else {
+        return Vec::new();
+    };
+    let cells = rows
+        .iter()
+        .flat_map(|row| row.children().iter())
+        .collect::<Vec<_>>();
+    let selections = cells
+        .iter()
+        .map(|cell| first_text_selection_in_node(cell))
+        .collect::<Option<Vec<_>>>();
+    let Some(selections) = selections else {
+        return Vec::new();
+    };
+    cells
+        .iter()
+        .enumerate()
+        .map(|(index, cell)| TableCellFocusDto {
+            cell_id: cell.id.clone(),
+            selection: selections[index].clone(),
+            previous_cell_id: index
+                .checked_sub(1)
+                .and_then(|previous| cells.get(previous))
+                .map(|cell| cell.id.clone()),
+            next_cell_id: cells.get(index + 1).map(|cell| cell.id.clone()),
+        })
+        .collect()
+}
+
+fn first_text_selection_in_node(node: &ContentNode) -> Option<DirectionalSelection> {
+    if node.runs().is_some() {
+        let position = LogicalPosition {
+            node_id: node.id.clone(),
+            utf16_offset: 0.into(),
+            affinity: Affinity::Forward,
+        };
+        return Some(DirectionalSelection {
+            anchor: position.clone(),
+            focus: position,
+        });
+    }
+    node.children()
+        .iter()
+        .find_map(first_text_selection_in_node)
 }
 
 fn text_spans(text: &str) -> Vec<EditorTextSpanDto> {
@@ -528,7 +608,7 @@ fn capabilities_for(
     let only_table_column = table_context
         .as_ref()
         .is_some_and(|context| context.column_count == 1 && context.column_index.is_some());
-    vec![
+    let mut capabilities = vec![
         capability(EditorCapability::SetSelection, true, None, None),
         capability(EditorCapability::SetPendingMarks, true, None, None),
         capability(
@@ -668,9 +748,36 @@ fn capabilities_for(
             EditorCapability::RemoveTable,
             selected_table_id.is_some(),
             selected_table_id.is_none().then_some("tableRequired"),
-            selected_table_id.map(|_| table_confirmation),
+            selected_table_id.clone().map(|_| table_confirmation),
         ),
-    ]
+    ];
+    let insertion_placement = if selection.collapsed() && text_selection {
+        placement_for_node(&document.content, &selection.anchor.node_id)
+    } else {
+        None
+    };
+    let table_limits = table_limits();
+    for capability in &mut capabilities {
+        match &capability.name {
+            EditorCapability::InsertPageBreak => {
+                capability.placement = insertion_placement.clone();
+            }
+            EditorCapability::InsertTable => {
+                capability.placement = insertion_placement.clone();
+                capability.table_limits = Some(table_limits.clone());
+            }
+            EditorCapability::AddTableRow
+            | EditorCapability::RemoveTableRow
+            | EditorCapability::AddTableColumn
+            | EditorCapability::RemoveTableColumn
+            | EditorCapability::SetTableHeaderRow
+            | EditorCapability::RemoveTable => {
+                capability.target_node_id = selected_table_id.clone();
+            }
+            _ => {}
+        }
+    }
+    capabilities
 }
 
 fn capability(
@@ -684,7 +791,44 @@ fn capability(
         enabled,
         reason_key: reason_key.map(str::to_owned),
         confirmation,
+        placement: None,
+        table_limits: None,
+        target_node_id: None,
     }
+}
+
+fn table_limits() -> TableLimitsDto {
+    TableLimitsDto {
+        max_rows: MAX_TABLE_ROWS as u32,
+        max_columns: MAX_TABLE_COLUMNS as u32,
+        max_cells: crate::schema::MAX_TABLE_CELLS as u32,
+    }
+}
+
+fn placement_for_node(nodes: &[ContentNode], target: &NodeId) -> Option<StructuralPlacementDto> {
+    fn visit(
+        nodes: &[ContentNode],
+        target: &NodeId,
+        parent_id: Option<&NodeId>,
+    ) -> Option<StructuralPlacementDto> {
+        for (index, node) in nodes.iter().enumerate() {
+            if node.id == *target {
+                return Some(StructuralPlacementDto {
+                    parent_id: parent_id.cloned(),
+                    index: u32::try_from(index).ok()?,
+                });
+            }
+            if let Some(found) = visit(node.children(), target, Some(&node.id)) {
+                return Some(found);
+            }
+        }
+        None
+    }
+
+    visit(nodes, target, None).map(|mut placement| {
+        placement.index = placement.index.saturating_add(1);
+        placement
+    })
 }
 
 fn table_confirmation_metadata() -> ConfirmationMetadataDto {

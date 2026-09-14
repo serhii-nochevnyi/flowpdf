@@ -213,6 +213,151 @@
   outline-offset: 2px;
 }
 
+.editor-structure-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+
+.editor-structure-controls button,
+.editor-table-actions button,
+.editor-page-break button,
+.editor-dialog button,
+.editor-dialog input {
+  min-height: 44px;
+}
+
+.editor-table-wrapper[data-selected='true'] {
+  outline: 3px solid var(--accent);
+  outline-offset: 4px;
+}
+
+.editor-table-wrapper td[data-selected='true'],
+.editor-table-wrapper th[data-selected='true'] {
+  outline: 3px solid var(--accent);
+  outline-offset: -3px;
+}
+
+.editor-table-wrapper td:focus-visible,
+.editor-table-wrapper th:focus-visible,
+.editor-page-break:focus-visible {
+  outline: 3px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.editor-table-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+  padding: 8px;
+  border: 1px solid var(--border-default);
+  border-radius: 6px;
+  background: var(--surface-app);
+}
+
+.editor-table-actions .editor-control-reason {
+  flex: 1 1 100%;
+}
+
+.editor-destructive-action {
+  border-color: var(--status-error) !important;
+  color: var(--status-error) !important;
+}
+
+.editor-page-break {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  margin: 28px 0;
+  padding: 8px;
+  color: var(--text-secondary);
+}
+
+.editor-page-break hr {
+  width: 100%;
+  margin: 0;
+  border: 0;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.editor-page-break[data-selected='true'] {
+  outline: 3px solid var(--accent);
+  outline-offset: 4px;
+}
+
+.editor-page-break button {
+  padding: 8px 12px;
+}
+
+.editor-dialog {
+  width: min(calc(100% - 32px), 480px);
+  max-width: 100%;
+  padding: 24px;
+  border: 1px solid var(--border-default);
+  border-radius: 6px;
+  color: var(--text-primary);
+  background: var(--surface-card);
+}
+
+.editor-dialog::backdrop {
+  background: rgb(15 23 42 / 35%);
+}
+
+.editor-dialog h2 {
+  margin: 0 0 16px;
+  font-size: 20px;
+  line-height: 1.2;
+}
+
+.editor-dialog p {
+  margin: 0 0 16px;
+}
+
+.editor-dialog-field,
+.editor-dialog-checkbox {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-top: 16px;
+  font-weight: 600;
+}
+
+.editor-dialog-field input[type='number'] {
+  width: 112px;
+  padding: 8px;
+  border: 1px solid var(--border-control);
+  border-radius: 6px;
+  color: var(--text-primary);
+  background: var(--surface-card);
+  font: inherit;
+}
+
+.editor-dialog-checkbox {
+  justify-content: flex-start;
+}
+
+.editor-dialog-checkbox input {
+  width: 24px;
+  height: 24px;
+}
+
+.editor-dialog-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 24px;
+}
+
+.editor-dialog-error {
+  color: var(--status-error);
+}
+
 @media (min-width: 768px) {
   .editor-more-disclosure > summary {
     display: none;
@@ -265,6 +410,33 @@
   }
 
   .editor-more-controls > .editor-block-controls > .editor-control-group {
+    width: 100%;
+  }
+
+  .editor-page-break {
+    grid-template-columns: minmax(0, 1fr);
+    justify-items: stretch;
+    text-align: center;
+  }
+
+  .editor-page-break hr {
+    grid-row: 1;
+  }
+
+  .editor-page-break span {
+    grid-row: 2;
+  }
+
+  .editor-page-break button {
+    grid-row: 3;
+  }
+
+  .editor-dialog-field {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .editor-dialog-field input[type='number'] {
     width: 100%;
   }
 }

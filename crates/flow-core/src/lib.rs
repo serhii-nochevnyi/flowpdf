@@ -29,6 +29,7 @@ pub use editor_view::{
     EditorBlockViewDto, EditorCapability, EditorDocumentViewDto, EditorSessionAction,
     EditorSessionError, EditorSessionRequest, EditorSessionResponse, EditorSessionState,
     EditorTextSpanDto, EditorViewDto, EditorViewRequest, FormattingProjectionDto, FormattingState,
+    StructuralPlacementDto, TableCellFocusDto, TableLimitsDto,
 };
 use model::{
     Affinity, CommandId, DocumentId, FlowDocument, LogicalPosition, MigrationHop, Provenance,
