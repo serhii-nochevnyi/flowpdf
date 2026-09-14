@@ -4,16 +4,16 @@ milestone: v1.0
 current_phase: 2
 current_phase_name: Accessible Rich-Text Editing
 status: executing
-stopped_at: Completed 02-05-PLAN.md
-last_updated: "2026-09-14T16:03:30Z"
+stopped_at: Completed 02-06-PLAN.md
+last_updated: "2026-09-14T16:44:36Z"
 last_activity: 2026-09-14
-last_activity_desc: Plan 02-05 durable ReplaceSelection paragraph tracer completed with native, WASM, persistence, React, and Chromium checks
-state_head: 1078a668ad584cc39cbf8e7bed1fae159d73d1bf
+last_activity_desc: Plan 02-06 controlled input, directional selection, paste, and real Chromium IME completed with full repository quality gates
+state_head: 2a0fdb2
 progress:
   total_phases: 9
   completed_phases: 1
   total_plans: 24
-  completed_plans: 11
+  completed_plans: 12
 milestone_name: milestone
 ---
 
@@ -29,17 +29,17 @@ See: .planning/PROJECT.md (updated 2026-08-25)
 ## Current Position
 
 Phase: 2 (Accessible Rich-Text Editing) — EXECUTING
-Plan: 6 of 18
+Plan: 7 of 18
 Status: Ready to execute
-Last activity: 2026-09-14 — Plan 02-05 completed; ready for controlled input, DOM selection, paste, and IME tracing
+Last activity: 2026-09-14 — Plan 02-06 completed; ready for structural editing, deletion/preimage behavior, and recovery algebra
 
-Progress: Phase 2 — 5/18 plans complete; milestone percentage unavailable while later phases remain unplanned.
+Progress: Phase 2 — 6/18 plans complete; milestone percentage unavailable while later phases remain unplanned.
 
 ## Performance Metrics
 
 **Velocity:**
 
-- Total plans completed: 11
+- Total plans completed: 12
 - Average duration: not comparable (Plan 05 was a multi-session closeout)
 - Total execution time: multi-session
 
@@ -48,9 +48,9 @@ Progress: Phase 2 — 5/18 plans complete; milestone percentage unavailable whil
 | Phase | Plans | Total | Avg/Plan |
 |-------|-------|-------|----------|
 | 1 | 6 | - | - |
-| 2 | 5 | multi-session | - |
+| 2 | 6 | multi-session | - |
 
-**Recent Trend:** Schema-v2 tree and lossless migration gates remain green. Plan 02-05 now passes native ReplaceSelection/recovery checks, pinned WASM/web builds, the Phase 2 boundary gate, and real Chromium migration/edit/undo/redo/reload/remount/recovery tracing; thirteen editor plans remain.
+**Recent Trend:** Schema-v2 tree and lossless migration gates remain green. Plan 02-06 now passes Rust span projection, controlled input, directional DOM selection, exact input limits, full WASM/web gates, and real Chromium CDP IME atomicity; twelve editor plans remain.
 **Per-Plan Metrics:**
 
 | Plan | Duration | Tasks | Files |
@@ -66,6 +66,7 @@ Progress: Phase 2 — 5/18 plans complete; milestone percentage unavailable whil
 | Phase FLOWPDF-02 P03 | multi-session | 2 tasks | 28 files |
 | Phase FLOWPDF-02 P04 | resumed multi-session | 2 tasks | 7 files |
 | Phase FLOWPDF-02 P05 | resumed multi-session | 2 tasks | 16 files |
+| Phase FLOWPDF-02 P06 | resumed multi-session | 2 tasks | 14 files |
 
 ## Accumulated Context
 
@@ -105,6 +106,6 @@ Decisions are logged in `.planning/PROJECT.md`.
 
 ## Session Continuity
 
-Last session: 2026-09-14T16:03:30Z
-Stopped at: Completed 02-05-PLAN.md
+Last session: 2026-09-14T16:44:36Z
+Stopped at: Completed 02-06-PLAN.md
 Resume file: None
