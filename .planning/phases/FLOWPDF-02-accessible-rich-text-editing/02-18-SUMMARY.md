@@ -39,7 +39,7 @@ key-decisions:
   - The gate contains all 36 exact validation IDs/commands, executes 35 tasks in fixed order, keeps the terminal dual-run command orchestration-only, and fails on the first non-zero subprocess.
   - Direct Vitest Browser Mode tasks use the checked-in `work/playwright` cache; Vitest 4 filtering uses `--testNamePattern` rather than the obsolete `--grep` spelling.
   - GitHub repository fallback requests official HTML explicitly after API rate limiting; provenance remains fail-closed and the fallback has a regression test.
-  - Fresh WASM and dependency evidence is checked in and passes its current budgets; the historical Phase 1-compatible measurement semantics caveat remains documented and is not reinterpreted as a stronger claim.
+  - Fresh WASM and dependency evidence is checked in with explicit current-source probe semantics and passes its current budgets; it makes no new Phase 1-compatible delta claim.
 requirements-completed: [EDIT-01, EDIT-02, EDIT-03, EDIT-04, EDIT-05, QUAL-03, QUAL-04]
 coverage:
   - id: T1
@@ -95,6 +95,9 @@ verification:
   - command: npm run check:phase2:smoke && npm run check:phase2 && npm run check:phase2
     result: pass
     note: Exact terminal verification passed twice through the complete Phase 2 runner and every retained Phase 1 regression lane.
+  - command: node scripts/verify-wasm-size.mjs && npm run check:phase2
+    result: pass
+    note: Post-semantics-fix WASM report validation and one complete Phase 2 gate passed with the explicit current-source probe labels.
   - command: git diff --check
     result: pass
 completed: 2026-09-15
@@ -119,7 +122,8 @@ do not claim pagination, geometry, shaping, or PDF implementation.
 - Added a fixed-order, fail-fast runner for all 36 Phase 2 validation rows,
   including the full Phase 1 gate, exact coverage counts, sanitized subprocess
   diagnostics, and honest external AT status.
-- Refreshed current WASM/dependency evidence after the full gate and hardened
+- Refreshed current WASM/dependency evidence after the full gate, made the WASM
+  measurement semantics explicit for the current Phase 2 source, and hardened
   dependency provenance fallback for GitHub's HTML response mode.
 - Synchronized historical Vitest task commands with the installed Vitest 4 CLI
   and pinned direct Browser Mode steps to the checked-in Playwright cache.
@@ -139,11 +143,11 @@ do not claim pagination, geometry, shaping, or PDF implementation.
 
 The implementation plans for Phase 2 are complete and pushed. Phase 2 itself
 remains open for the explicitly required external Edge/Windows screen-reader
-checkpoint and for the historical WASM measurement-semantics follow-up; no
-completion claim is made until those conditions are addressed.
+checkpoint. Historical Phase 1 admission evidence remains historical; the
+current report makes no stronger cross-phase comparison claim.
 
 ## Self-check: PASSED
 
-Code commit `5f254eb` is pushed to `origin/main`. The remaining planning
+Code commits `5f254eb` and `c650588` are pushed to `origin/main`. The remaining
 closure commit records this summary and the updated roadmap/state. Preserved
 untracked backup, quick-plan, lock, and `.DS_Store` files remain untouched.
