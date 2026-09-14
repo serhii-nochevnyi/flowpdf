@@ -3,11 +3,11 @@
 #![forbid(unsafe_code)]
 
 use flow_core::{
-    ApiResponse, ApplyCommandRequest, AuditedRecoverRequest, AuditedRecoverResult, CommandKind,
-    CreateSampleRequest, EditorSessionRequest, EditorSessionResponse, EditorViewDto,
-    EditorViewRequest, MigrateDocumentRequest, MigrateDocumentResult, OperationResult,
-    PlanPersistenceCommitRequest, PlanStandaloneAuditRequest, RecoverRequest, RecoverResult,
-    store::PlannedPersistenceCommit,
+    ApiResponse, ApplyCommandRequest, AssetStageRequest, AssetStageResponse, AuditedRecoverRequest,
+    AuditedRecoverResult, CommandKind, CreateSampleRequest, EditorSessionRequest,
+    EditorSessionResponse, EditorViewDto, EditorViewRequest, MigrateDocumentRequest,
+    MigrateDocumentResult, OperationResult, PlanPersistenceCommitRequest,
+    PlanStandaloneAuditRequest, RecoverRequest, RecoverResult, store::PlannedPersistenceCommit,
 };
 use serde::Deserialize;
 use wasm_bindgen::prelude::*;
@@ -43,6 +43,17 @@ pub fn apply_command(request: JsValue) -> JsValue {
     let response = match serde_wasm_bindgen::from_value::<ApplyCommandRequest>(request) {
         Ok(request) => flow_core::apply_command(request),
         Err(_) => flow_core::decode_failure::<OperationResult>(),
+    };
+    serialize_response(&response)
+}
+
+/// Binary-only ingress for bounded PNG/JPEG staging. The semantic command
+/// path receives only the opaque receipt returned by this function.
+#[wasm_bindgen]
+pub fn stage_asset(bytes: &[u8], request: JsValue) -> JsValue {
+    let response = match serde_wasm_bindgen::from_value::<AssetStageRequest>(request) {
+        Ok(request) => flow_core::stage_asset(request, bytes.to_vec()),
+        Err(_) => flow_core::decode_failure::<AssetStageResponse>(),
     };
     serialize_response(&response)
 }

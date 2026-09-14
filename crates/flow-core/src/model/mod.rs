@@ -310,6 +310,21 @@ pub enum ImageAccessibility {
     MissingLegacy,
 }
 
+impl ImageAccessibility {
+    #[must_use]
+    pub fn alt_text(&self) -> &str {
+        match self {
+            Self::Described { text } => text,
+            Self::Decorative | Self::MissingLegacy => "",
+        }
+    }
+
+    #[must_use]
+    pub const fn is_explicit_authoring_decision(&self) -> bool {
+        matches!(self, Self::Described { .. } | Self::Decorative)
+    }
+}
+
 impl ContentNode {
     #[must_use]
     pub fn paragraph(id: NodeId, style_id: Option<StyleId>, text: String) -> Self {

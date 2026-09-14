@@ -9,7 +9,7 @@ use thiserror::Error;
 
 use crate::{
     AuditRecord, MigrationPersistenceCommit, PersistenceCommit, RecoverRequest, SnapshotRecord,
-    TransactionRecord,
+    TransactionRecord, asset,
     canonical::{asset_hash, canonical_hash, decode_canonical, verify_asset_bytes},
     model::FlowDocument,
     schema::SchemaError,
@@ -176,7 +176,16 @@ impl CommitPlanner {
         reason: SnapshotReason,
     ) -> Result<PlannedPersistenceCommit, StoreError> {
         attach_migration_boundary(records, &mut commit)?;
-        let document = validate_commit_set(&commit)?;
+        let document = if commit.transaction.base_revision == 0 {
+            validate_commit_set(&commit)?
+        } else {
+            // A follow-up semantic transaction carries only newly redeemed
+            // physical assets. Existing bytes are already durable and must
+            // participate in validation without being copied into every
+            // semantic response or browser request.
+            let proof = commit_with_durable_assets(records, &commit)?;
+            validate_commit_set(&proof)?
+        };
         let checkpoint_revision = validate_commit_against_records(records, &commit, &document)?;
         validate_snapshot_reason(&commit.transaction, reason)?;
 
@@ -242,6 +251,25 @@ impl CommitPlanner {
         let planned = self.plan(&records, commit, reason)?;
         store.commit_planned_atomic(planned)
     }
+}
+
+fn commit_with_durable_assets(
+    records: &RecoverRequest,
+    commit: &PersistenceCommit,
+) -> Result<PersistenceCommit, StoreError> {
+    let mut proof = commit.clone();
+    for durable in &records.assets {
+        match proof
+            .assets
+            .iter()
+            .find(|asset| asset.content_hash == durable.content_hash)
+        {
+            Some(incoming) if incoming == durable => {}
+            Some(_) => return Err(StoreError::IdentityConflict),
+            None => proof.assets.push(durable.clone()),
+        }
+    }
+    Ok(proof)
 }
 
 fn validate_snapshot_reason(
@@ -1121,6 +1149,16 @@ pub fn validate_asset_records(
             .get(descriptor.content_hash.as_str())
             .ok_or_else(SchemaError::asset_hash_mismatch)?;
         verify_asset_bytes(descriptor, &record.bytes)?;
+    }
+    // Reachability is computed from the candidate semantic document, never
+    // from a browser request. Physical records are deliberately retained when
+    // their current reference count reaches zero: undo/recovery history may
+    // still need them, and this validator never authorizes unsafe garbage
+    // collection as a side effect of an image mutation.
+    for content_hash in asset::reachable_asset_hashes(document) {
+        if !unique.contains_key(content_hash.as_str()) {
+            return Err(SchemaError::asset_hash_mismatch());
+        }
     }
     Ok(())
 }

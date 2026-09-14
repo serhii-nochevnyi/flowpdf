@@ -5,6 +5,7 @@
 use std::collections::BTreeMap;
 
 pub mod anchor;
+pub mod asset;
 pub mod audit;
 pub mod canonical;
 pub mod editor_view;
@@ -18,6 +19,11 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use anchor::Utf16Offset;
+pub use asset::{
+    AssetError, AssetStageRequest, AssetStageResponse, AssetStagingStore, MAX_AUTHORED_ALT_BYTES,
+    MAX_IMAGE_DECODED_BYTES, MAX_IMAGE_DIMENSION, MAX_IMAGE_ENCODED_BYTES, MAX_IMAGE_PIXELS,
+    MAX_STAGING_BYTES_PER_SESSION, MAX_STAGING_RECEIPTS_PER_SESSION, STAGING_RECEIPT_TTL_SECONDS,
+};
 use audit::{
     AuditAction, AuditCommandKind, AuditErrorCode, AuditMetadata, AuditTimestamp,
     AuditValidationError,
@@ -29,7 +35,7 @@ pub use editor_view::{
     EditorBlockViewDto, EditorCapability, EditorDocumentViewDto, EditorSessionAction,
     EditorSessionError, EditorSessionRequest, EditorSessionResponse, EditorSessionState,
     EditorTextSpanDto, EditorViewDto, EditorViewRequest, FormattingProjectionDto, FormattingState,
-    StructuralPlacementDto, TableCellFocusDto, TableLimitsDto,
+    ImageBlockViewDto, ImageLimitsDto, StructuralPlacementDto, TableCellFocusDto, TableLimitsDto,
 };
 use model::{
     Affinity, CommandId, DocumentId, FlowDocument, LogicalPosition, MigrationHop, Provenance,
@@ -345,6 +351,8 @@ pub enum CoreError {
     #[error(transparent)]
     Schema(#[from] SchemaError),
     #[error(transparent)]
+    Asset(#[from] asset::AssetError),
+    #[error(transparent)]
     Command(#[from] CommandError),
     #[error(transparent)]
     EditorSession(#[from] EditorSessionError),
@@ -368,6 +376,7 @@ impl CoreError {
         match self {
             Self::Decode => "FLOW_DECODE_ERROR",
             Self::Schema(error) => error.code(),
+            Self::Asset(error) => error.code(),
             Self::Command(error) => error.code(),
             Self::EditorSession(error) => error.code(),
             Self::RecoveryGap => "FLOW_RECOVERY_GAP",
@@ -439,6 +448,17 @@ pub fn create_sample(request: CreateSampleRequest) -> ApiResponse<OperationResul
     }
 }
 
+/// Validates and stages one bounded PNG/JPEG payload. The returned receipt is
+/// ephemeral and revision-bound; it is intentionally not a document or
+/// persistence record.
+#[must_use]
+pub fn stage_asset(request: AssetStageRequest, bytes: Vec<u8>) -> ApiResponse<AssetStageResponse> {
+    match asset::stage_asset(request, bytes) {
+        Ok(response) => ApiResponse::success(response),
+        Err(error) => ApiResponse::failure(error.into()),
+    }
+}
+
 fn create_sample_inner(request: CreateSampleRequest) -> Result<OperationResult, CoreError> {
     AuditTimestamp::parse(request.issued_at.clone())?;
     let document =
@@ -485,6 +505,7 @@ fn create_sample_inner(request: CreateSampleRequest) -> Result<OperationResult, 
         transaction,
         audit,
         None,
+        Vec::new(),
     )
 }
 
@@ -699,6 +720,7 @@ fn apply_command_inner(request: ApplyCommandRequest) -> Result<OperationResult, 
         applied.transaction,
         audit,
         applied.selection,
+        applied.asset_records,
     )
 }
 
@@ -755,6 +777,10 @@ const fn audit_command_kind(kind: &CommandKind) -> AuditCommandKind {
         CommandKind::InsertPageBreak { .. } => AuditCommandKind::InsertPageBreak,
         CommandKind::RemovePageBreak { .. } => AuditCommandKind::RemovePageBreak,
         CommandKind::InsertTable { .. } => AuditCommandKind::InsertTable,
+        CommandKind::InsertImage { .. } => AuditCommandKind::InsertImage,
+        CommandKind::ReplaceImage { .. } => AuditCommandKind::ReplaceImage,
+        CommandKind::SetImageAccessibility { .. } => AuditCommandKind::SetImageAccessibility,
+        CommandKind::RemoveImage { .. } => AuditCommandKind::RemoveImage,
         CommandKind::AddTableRow { .. } => AuditCommandKind::AddTableRow,
         CommandKind::RemoveTableRow { .. } => AuditCommandKind::RemoveTableRow,
         CommandKind::AddTableColumn { .. } => AuditCommandKind::AddTableColumn,
@@ -1519,6 +1545,10 @@ pub(crate) fn replay_history_effect(
                     "insertPageBreak",
                     "removePageBreak",
                     "insertTable",
+                    "insertImage",
+                    "replaceImage",
+                    "setImageAccessibility",
+                    "removeImage",
                     "addTableRow",
                     "removeTableRow",
                     "addTableColumn",
@@ -1588,6 +1618,7 @@ pub(crate) fn replay_history_effect(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn operation_result(
     document: FlowDocument,
     history: HistoryState,
@@ -1596,6 +1627,7 @@ fn operation_result(
     transaction: TransactionRecord,
     audit: AuditRecord,
     selection: Option<DirectionalSelection>,
+    mut asset_records: Vec<store::AssetRecord>,
 ) -> Result<OperationResult, CoreError> {
     let snapshot = SnapshotRecord {
         record_format_version: RECORD_FORMAT_VERSION,
@@ -1607,16 +1639,22 @@ fn operation_result(
         history: history.clone(),
         migration_boundary: None,
     };
-    let assets = document
+    for descriptor in document
         .assets
         .iter()
         .filter(|descriptor| descriptor.byte_length == 0)
-        .map(|descriptor| store::AssetRecord {
-            record_format_version: RECORD_FORMAT_VERSION,
-            content_hash: descriptor.content_hash.clone(),
-            bytes: Vec::new(),
-        })
-        .collect();
+    {
+        if !asset_records
+            .iter()
+            .any(|record| record.content_hash == descriptor.content_hash)
+        {
+            asset_records.push(store::AssetRecord {
+                record_format_version: RECORD_FORMAT_VERSION,
+                content_hash: descriptor.content_hash.clone(),
+                bytes: Vec::new(),
+            });
+        }
+    }
     let replace_existing = transaction.base_revision == 0;
     let session = session_dto(&document, history, canonical_json, canonical_hash.clone())?;
     let view = inspector_view(&document, canonical_hash, None, vec![audit.clone()])?;
@@ -1630,7 +1668,7 @@ fn operation_result(
             snapshot,
             transaction,
             audit,
-            assets,
+            assets: asset_records,
         },
     })
 }

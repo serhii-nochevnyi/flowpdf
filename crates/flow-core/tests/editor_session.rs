@@ -32,7 +32,7 @@ fn initial_session_is_rust_derived_and_noncanonical() {
     assert_eq!(state.formatting.bold, FormattingState::Off);
     assert_eq!(state.formatting.italic, FormattingState::Off);
     assert_eq!(state.formatting.underline, FormattingState::Off);
-    assert_eq!(state.capabilities.len(), 21);
+    assert_eq!(state.capabilities.len(), 25);
     assert!(
         state
             .capabilities

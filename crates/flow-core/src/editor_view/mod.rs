@@ -8,9 +8,14 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::anchor::{EditorPositionError, GraphemeBoundaryMap, NodePositionMap};
+use crate::asset::{
+    MAX_AUTHORED_ALT_BYTES, MAX_IMAGE_DECODED_BYTES, MAX_IMAGE_DIMENSION, MAX_IMAGE_ENCODED_BYTES,
+    MAX_IMAGE_PIXELS, MAX_STAGING_BYTES_PER_SESSION, MAX_STAGING_RECEIPTS_PER_SESSION,
+    STAGING_RECEIPT_TTL_SECONDS,
+};
 use crate::model::{
-    Affinity, Alignment, BlockStyle, ContentNode, DocumentId, FlowDocument, FontFamily, InlineMark,
-    ListKind, LogicalPosition, MarkSet, NodeId, RunLanguage,
+    Affinity, Alignment, BlockStyle, ContentNode, DocumentId, FlowDocument, FontFamily,
+    ImageAccessibility, InlineMark, ListKind, LogicalPosition, MarkSet, NodeId, RunLanguage,
 };
 use crate::schema::{MAX_TABLE_COLUMNS, MAX_TABLE_ROWS};
 
@@ -94,6 +99,10 @@ pub enum EditorCapability {
     InsertPageBreak,
     RemovePageBreak,
     InsertTable,
+    InsertImage,
+    ReplaceImage,
+    SetImageAccessibility,
+    RemoveImage,
     AddTableRow,
     RemoveTableRow,
     AddTableColumn,
@@ -135,6 +144,29 @@ pub struct TableLimitsDto {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ImageLimitsDto {
+    pub max_encoded_bytes: u32,
+    pub max_dimension: u32,
+    pub max_pixels: u64,
+    pub max_decoded_bytes: u64,
+    pub max_alt_text_bytes: u32,
+    pub max_staging_receipts_per_session: u32,
+    pub max_staging_bytes_per_session: u32,
+    pub receipt_ttl_seconds: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ImageBlockViewDto {
+    pub asset_id: crate::model::AssetId,
+    pub content_hash: String,
+    pub media_type: String,
+    pub byte_length: u32,
+    pub accessibility: ImageAccessibility,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct TableCellFocusDto {
     pub cell_id: NodeId,
     pub selection: DirectionalSelection,
@@ -154,6 +186,8 @@ pub struct CapabilityDto {
     pub placement: Option<StructuralPlacementDto>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub table_limits: Option<TableLimitsDto>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_limits: Option<ImageLimitsDto>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_node_id: Option<NodeId>,
 }
@@ -276,7 +310,7 @@ impl EditorDocumentViewDto {
             blocks: document
                 .content
                 .iter()
-                .map(EditorBlockViewDto::from_node)
+                .map(|node| EditorBlockViewDto::from_node(node, &document.assets))
                 .collect(),
         }
     }
@@ -305,6 +339,8 @@ pub enum EditorBlockViewDto {
         node_id: NodeId,
         node_kind: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        image: Option<ImageBlockViewDto>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         table_header_rows: Option<u8>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         table_cell_focus_order: Vec<TableCellFocusDto>,
@@ -314,7 +350,7 @@ pub enum EditorBlockViewDto {
 }
 
 impl EditorBlockViewDto {
-    fn from_node(node: &ContentNode) -> Self {
+    fn from_node(node: &ContentNode, assets: &[crate::model::AssetDescriptor]) -> Self {
         match &node.body {
             crate::model::BlockKind::Paragraph { .. } => Self::Paragraph {
                 node_id: node.id.clone(),
@@ -330,12 +366,32 @@ impl EditorBlockViewDto {
             body => Self::Atomic {
                 node_id: node.id.clone(),
                 node_kind: body_kind(body).to_owned(),
+                image: match body {
+                    crate::model::BlockKind::Image {
+                        asset_id,
+                        accessibility,
+                    } => assets
+                        .iter()
+                        .find(|asset| asset.id == *asset_id)
+                        .map(|asset| ImageBlockViewDto {
+                            asset_id: asset.id.clone(),
+                            content_hash: asset.content_hash.clone(),
+                            media_type: asset.media_type.clone(),
+                            byte_length: asset.byte_length,
+                            accessibility: accessibility.clone(),
+                        }),
+                    _ => None,
+                },
                 table_header_rows: match body {
                     crate::model::BlockKind::Table { header_rows, .. } => Some(*header_rows),
                     _ => None,
                 },
                 table_cell_focus_order: table_cell_focus_order(node),
-                children: node.children().iter().map(Self::from_node).collect(),
+                children: node
+                    .children()
+                    .iter()
+                    .map(|child| Self::from_node(child, assets))
+                    .collect(),
             },
         }
     }
@@ -595,7 +651,18 @@ fn capabilities_for(
         matches!(&node.body, crate::model::BlockKind::PageBreak)
             && (selection.collapsed() || whole_atomic_selection(selection))
     });
+    let selected_image_id = anchor_node
+        .filter(|node| {
+            matches!(&node.body, crate::model::BlockKind::Image { .. })
+                && selection.collapsed()
+                && selection.anchor.node_id == selection.focus.node_id
+        })
+        .map(|node| node.id.clone());
+    let image_selected = selected_image_id.is_some()
+        && focus_node
+            .is_some_and(|node| matches!(&node.body, crate::model::BlockKind::Image { .. }));
     let table_confirmation = table_confirmation_metadata();
+    let image_confirmation = image_confirmation_metadata();
     let row_limit_reached = table_context
         .as_ref()
         .is_some_and(|context| context.row_count >= MAX_TABLE_ROWS);
@@ -691,6 +758,30 @@ fn capabilities_for(
             None,
         ),
         capability(
+            EditorCapability::InsertImage,
+            selection.collapsed() && text_selection,
+            (!(selection.collapsed() && text_selection)).then_some("structuralSelectionRequired"),
+            None,
+        ),
+        capability(
+            EditorCapability::ReplaceImage,
+            image_selected,
+            (!image_selected).then_some("imageRequired"),
+            None,
+        ),
+        capability(
+            EditorCapability::SetImageAccessibility,
+            image_selected,
+            (!image_selected).then_some("imageRequired"),
+            None,
+        ),
+        capability(
+            EditorCapability::RemoveImage,
+            image_selected,
+            (!image_selected).then_some("imageRequired"),
+            image_selected.then(|| image_confirmation.clone()),
+        ),
+        capability(
             EditorCapability::AddTableRow,
             same_table_cell && !row_limit_reached,
             if !same_table_cell {
@@ -766,6 +857,18 @@ fn capabilities_for(
                 capability.placement = insertion_placement.clone();
                 capability.table_limits = Some(table_limits.clone());
             }
+            EditorCapability::InsertImage => {
+                capability.placement = insertion_placement.clone();
+                capability.image_limits = Some(image_limits());
+            }
+            EditorCapability::ReplaceImage
+            | EditorCapability::SetImageAccessibility
+            | EditorCapability::RemoveImage => {
+                capability.target_node_id = selected_image_id.clone();
+                if matches!(&capability.name, EditorCapability::ReplaceImage) {
+                    capability.image_limits = Some(image_limits());
+                }
+            }
             EditorCapability::AddTableRow
             | EditorCapability::RemoveTableRow
             | EditorCapability::AddTableColumn
@@ -793,6 +896,7 @@ fn capability(
         confirmation,
         placement: None,
         table_limits: None,
+        image_limits: None,
         target_node_id: None,
     }
 }
@@ -802,6 +906,21 @@ fn table_limits() -> TableLimitsDto {
         max_rows: MAX_TABLE_ROWS as u32,
         max_columns: MAX_TABLE_COLUMNS as u32,
         max_cells: crate::schema::MAX_TABLE_CELLS as u32,
+    }
+}
+
+fn image_limits() -> ImageLimitsDto {
+    ImageLimitsDto {
+        max_encoded_bytes: u32::try_from(MAX_IMAGE_ENCODED_BYTES).unwrap_or(u32::MAX),
+        max_dimension: MAX_IMAGE_DIMENSION,
+        max_pixels: MAX_IMAGE_PIXELS,
+        max_decoded_bytes: MAX_IMAGE_DECODED_BYTES,
+        max_alt_text_bytes: u32::try_from(MAX_AUTHORED_ALT_BYTES).unwrap_or(u32::MAX),
+        max_staging_receipts_per_session: u32::try_from(MAX_STAGING_RECEIPTS_PER_SESSION)
+            .unwrap_or(u32::MAX),
+        max_staging_bytes_per_session: u32::try_from(MAX_STAGING_BYTES_PER_SESSION)
+            .unwrap_or(u32::MAX),
+        receipt_ttl_seconds: u32::try_from(STAGING_RECEIPT_TTL_SECONDS).unwrap_or(u32::MAX),
     }
 }
 
@@ -838,6 +957,16 @@ fn table_confirmation_metadata() -> ConfirmationMetadataDto {
         body_key: "editor.table.remove.body".to_owned(),
         confirm_key: "editor.table.remove.confirm".to_owned(),
         cancel_key: "editor.table.remove.cancel".to_owned(),
+    }
+}
+
+fn image_confirmation_metadata() -> ConfirmationMetadataDto {
+    ConfirmationMetadataDto {
+        kind: ConfirmationKindDto::Destructive,
+        heading_key: "editor.image.remove.heading".to_owned(),
+        body_key: "editor.image.remove.body".to_owned(),
+        confirm_key: "editor.image.remove.confirm".to_owned(),
+        cancel_key: "editor.image.remove.cancel".to_owned(),
     }
 }
 

@@ -11,12 +11,14 @@ use crate::{
         AnchorError, AnchorMapResult, AnchorMapping, AnchorTransformation, EditorPositionError,
         NodePositionMap, ResolvedPosition, Utf16Offset, resolve_utf16_offset, utf16_length,
     },
+    asset::{self, RedeemedAsset},
     canonical::{canonical_bytes, canonical_hash},
     editor_view::DirectionalSelection,
     model::{
-        Affinity, BlockAttributes, BlockKind, BlockStyle, CommandId, ContentNode, FieldAnchorState,
-        FieldDescriptor, FieldId, FlowDocument, InlineMark, InlineRun, ListKind, LogicalPosition,
-        MarkSet, NodeId, ParagraphAttrs, StyleId, TombstoneToken,
+        Affinity, AssetDescriptor, BlockAttributes, BlockKind, BlockStyle, CommandId, ContentNode,
+        FieldAnchorState, FieldDescriptor, FieldId, FlowDocument, ImageAccessibility, InlineMark,
+        InlineRun, ListKind, LogicalPosition, MarkSet, NodeId, ParagraphAttrs, StyleId,
+        TombstoneToken,
     },
     schema::{
         DocumentLimits, MAX_TABLE_CELLS, MAX_TABLE_COLUMNS, MAX_TABLE_ROWS, SchemaError,
@@ -133,6 +135,26 @@ pub enum CommandKind {
         rows: u32,
         columns: u32,
         header_row: bool,
+    },
+    InsertImage {
+        placement: StructuralPlacement,
+        session_id: String,
+        receipt: String,
+        accessibility: ImageAccessibility,
+    },
+    ReplaceImage {
+        image_node_id: NodeId,
+        session_id: String,
+        receipt: String,
+        accessibility: ImageAccessibility,
+    },
+    SetImageAccessibility {
+        image_node_id: NodeId,
+        accessibility: ImageAccessibility,
+    },
+    RemoveImage {
+        image_node_id: NodeId,
+        confirmed: bool,
     },
     AddTableRow {
         selection: DirectionalSelection,
@@ -255,6 +277,26 @@ pub enum Mutation {
         columns: u32,
         header_row: bool,
     },
+    InsertImage {
+        placement: StructuralPlacement,
+        session_id: String,
+        receipt: String,
+        accessibility: ImageAccessibility,
+    },
+    ReplaceImage {
+        image_node_id: NodeId,
+        session_id: String,
+        receipt: String,
+        accessibility: ImageAccessibility,
+    },
+    SetImageAccessibility {
+        image_node_id: NodeId,
+        accessibility: ImageAccessibility,
+    },
+    RemoveImage {
+        image_node_id: NodeId,
+        confirmed: bool,
+    },
     AddTableRow {
         selection: DirectionalSelection,
     },
@@ -343,6 +385,10 @@ pub enum Operation {
         anchor_mapping: AnchorMapping,
         field_updates: Vec<FieldUpdate>,
         preimage: Option<AnchorPreimage>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        expected_assets: Vec<AssetDescriptor>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        replacement_assets: Vec<AssetDescriptor>,
     },
     SetField {
         index: u32,
@@ -543,6 +589,7 @@ pub struct AppliedCommand {
     pub state: EditorState,
     pub transaction: Transaction,
     pub selection: Option<DirectionalSelection>,
+    pub asset_records: Vec<crate::store::AssetRecord>,
 }
 
 pub struct TransactionService;
@@ -608,6 +655,8 @@ pub enum CommandError {
     InvalidTableStructure,
     #[error("The destructive structural action requires explicit confirmation")]
     ConfirmationRequired,
+    #[error(transparent)]
+    Asset(#[from] crate::asset::AssetError),
 }
 
 impl CommandError {
@@ -638,6 +687,7 @@ impl CommandError {
             Self::TableBoundsExceeded => "FLOW_LIMIT_TABLE",
             Self::InvalidTableStructure => "FLOW_INVALID_TABLE_STRUCTURE",
             Self::ConfirmationRequired => "FLOW_CONFIRMATION_REQUIRED",
+            Self::Asset(error) => error.code(),
         }
     }
 }
@@ -770,6 +820,7 @@ fn apply_mutation(state: &EditorState, command: Command) -> Result<AppliedComman
     let mut inverse = Vec::with_capacity(mutations.len());
     let mut mapping = AnchorMapping::identity();
     let mut selection_after = None;
+    let mut asset_records = Vec::new();
     for mutation in &mutations {
         let table_focus = table_focus_hint(&candidate, mutation)?;
         let removal_focus = removal_focus_hint(&candidate, mutation);
@@ -780,8 +831,30 @@ fn apply_mutation(state: &EditorState, command: Command) -> Result<AppliedComman
         } else {
             None
         };
-        let (operation, inverse_operation) =
-            derive_operation(&candidate, mutation, &command.command_id)?;
+        let redeemed_asset = match mutation {
+            Mutation::InsertImage {
+                session_id,
+                receipt,
+                ..
+            }
+            | Mutation::ReplaceImage {
+                session_id,
+                receipt,
+                ..
+            } => Some(asset::redeem_asset(
+                receipt,
+                session_id,
+                &candidate.document_id,
+                candidate.revision,
+            )?),
+            _ => None,
+        };
+        let (operation, inverse_operation) = derive_operation(
+            &candidate,
+            mutation,
+            &command.command_id,
+            redeemed_asset.as_ref(),
+        )?;
         let replacement_selection = if let Mutation::ReplaceSelection { selection, text } = mutation
         {
             Some(selection_after_replacement(&candidate, selection, text)?)
@@ -833,7 +906,17 @@ fn apply_mutation(state: &EditorState, command: Command) -> Result<AppliedComman
                     deterministic_node_id(&command.command_id, "page-break-paragraph")?;
                 first_text_selection_for_node(&candidate.content, &paragraph_id)
             }
-            Mutation::RemovePageBreak { .. } | Mutation::RemoveTable { .. } => removal_focus
+            Mutation::InsertImage { .. } => removal_focus
+                .as_ref()
+                .and_then(|hint| selection_near_container(&candidate, hint))
+                .or_else(|| first_text_selection(&candidate)),
+            Mutation::ReplaceImage { .. } => removal_focus
+                .as_ref()
+                .and_then(|hint| selection_near_container(&candidate, hint))
+                .or_else(|| first_text_selection(&candidate)),
+            Mutation::RemovePageBreak { .. }
+            | Mutation::RemoveTable { .. }
+            | Mutation::RemoveImage { .. } => removal_focus
                 .as_ref()
                 .and_then(|hint| selection_near_container(&candidate, hint))
                 .or_else(|| first_text_selection(&candidate)),
@@ -881,6 +964,9 @@ fn apply_mutation(state: &EditorState, command: Command) -> Result<AppliedComman
             }
             _ => selection_after,
         };
+        if let Some(asset) = redeemed_asset {
+            asset_records.push(asset.into_record());
+        }
         mapping.extend(operation_mapping);
         forward.push(operation);
         inverse.insert(0, inverse_operation);
@@ -925,6 +1011,7 @@ fn apply_mutation(state: &EditorState, command: Command) -> Result<AppliedComman
         },
         transaction,
         selection: selection_after,
+        asset_records,
     })
 }
 
@@ -971,6 +1058,7 @@ fn apply_undo(state: &EditorState, command: Command) -> Result<AppliedCommand, C
         },
         transaction,
         selection: None,
+        asset_records: Vec::new(),
     })
 }
 
@@ -1018,6 +1106,7 @@ fn apply_redo(state: &EditorState, command: Command) -> Result<AppliedCommand, C
         },
         transaction,
         selection: None,
+        asset_records: Vec::new(),
     })
 }
 
@@ -1121,6 +1210,42 @@ fn command_mutations(kind: &CommandKind) -> Result<Vec<Mutation>, CommandError> 
             columns: *columns,
             header_row: *header_row,
         }]),
+        CommandKind::InsertImage {
+            placement,
+            session_id,
+            receipt,
+            accessibility,
+        } => Ok(vec![Mutation::InsertImage {
+            placement: placement.clone(),
+            session_id: session_id.clone(),
+            receipt: receipt.clone(),
+            accessibility: accessibility.clone(),
+        }]),
+        CommandKind::ReplaceImage {
+            image_node_id,
+            session_id,
+            receipt,
+            accessibility,
+        } => Ok(vec![Mutation::ReplaceImage {
+            image_node_id: image_node_id.clone(),
+            session_id: session_id.clone(),
+            receipt: receipt.clone(),
+            accessibility: accessibility.clone(),
+        }]),
+        CommandKind::SetImageAccessibility {
+            image_node_id,
+            accessibility,
+        } => Ok(vec![Mutation::SetImageAccessibility {
+            image_node_id: image_node_id.clone(),
+            accessibility: accessibility.clone(),
+        }]),
+        CommandKind::RemoveImage {
+            image_node_id,
+            confirmed,
+        } => Ok(vec![Mutation::RemoveImage {
+            image_node_id: image_node_id.clone(),
+            confirmed: *confirmed,
+        }]),
         CommandKind::AddTableRow { selection } => Ok(vec![Mutation::AddTableRow {
             selection: selection.clone(),
         }]),
@@ -1163,6 +1288,7 @@ fn derive_operation(
     document: &FlowDocument,
     mutation: &Mutation,
     command_id: &CommandId,
+    redeemed_asset: Option<&RedeemedAsset>,
 ) -> Result<(Operation, Operation), CommandError> {
     match mutation {
         Mutation::InsertText { target, text } => {
@@ -1311,6 +1437,30 @@ fn derive_operation(
             *header_row,
             command_id,
         ),
+        Mutation::InsertImage {
+            placement,
+            accessibility,
+            ..
+        } => {
+            let asset = redeemed_asset.ok_or(CommandError::BrokenInvariant)?;
+            derive_insert_image_operation(document, placement, accessibility, asset, command_id)
+        }
+        Mutation::ReplaceImage {
+            image_node_id,
+            accessibility,
+            ..
+        } => {
+            let asset = redeemed_asset.ok_or(CommandError::BrokenInvariant)?;
+            derive_replace_image_operation(document, image_node_id, accessibility, asset)
+        }
+        Mutation::SetImageAccessibility {
+            image_node_id,
+            accessibility,
+        } => derive_set_image_accessibility_operation(document, image_node_id, accessibility),
+        Mutation::RemoveImage {
+            image_node_id,
+            confirmed,
+        } => derive_remove_image_operation(document, image_node_id, *confirmed, command_id),
         Mutation::AddTableRow { selection } => {
             derive_add_table_row_operation(document, selection, command_id)
         }
@@ -2793,6 +2943,8 @@ fn structural_pair(
         anchor_mapping: forward_mapping,
         field_updates,
         preimage: preimage.clone(),
+        expected_assets: Vec::new(),
+        replacement_assets: Vec::new(),
     };
     let inverse = Operation::ReplaceChildren {
         container_id,
@@ -2801,7 +2953,53 @@ fn structural_pair(
         anchor_mapping: inverse_mapping,
         field_updates: inverse_field_updates,
         preimage,
+        expected_assets: Vec::new(),
+        replacement_assets: Vec::new(),
     };
+    Ok((forward, inverse))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn structural_pair_with_assets(
+    document: &FlowDocument,
+    container_id: Option<NodeId>,
+    expected_children: Vec<ContentNode>,
+    replacement_children: Vec<ContentNode>,
+    forward_mapping: AnchorMapping,
+    inverse_mapping: AnchorMapping,
+    preimage: Option<AnchorPreimage>,
+    expected_assets: Vec<AssetDescriptor>,
+    replacement_assets: Vec<AssetDescriptor>,
+) -> Result<(Operation, Operation), CommandError> {
+    let (mut forward, mut inverse) = structural_pair(
+        document,
+        container_id,
+        expected_children,
+        replacement_children,
+        forward_mapping,
+        inverse_mapping,
+        preimage,
+    )?;
+    let Operation::ReplaceChildren {
+        expected_assets: forward_expected,
+        replacement_assets: forward_replacement,
+        ..
+    } = &mut forward
+    else {
+        return Err(CommandError::BrokenInvariant);
+    };
+    *forward_expected = expected_assets.clone();
+    *forward_replacement = replacement_assets.clone();
+    let Operation::ReplaceChildren {
+        expected_assets: inverse_expected,
+        replacement_assets: inverse_replacement,
+        ..
+    } = &mut inverse
+    else {
+        return Err(CommandError::BrokenInvariant);
+    };
+    *inverse_expected = replacement_assets;
+    *inverse_replacement = expected_assets;
     Ok((forward, inverse))
 }
 
@@ -3055,18 +3253,29 @@ fn find_table_focus(nodes: &[ContentNode], target: &NodeId) -> Option<TableFocus
 }
 
 fn removal_focus_hint(document: &FlowDocument, mutation: &Mutation) -> Option<RemovalFocusHint> {
-    let node_id = match mutation {
+    match mutation {
         Mutation::RemovePageBreak { page_break_id }
         | Mutation::RemoveTable {
             table_id: page_break_id,
             ..
-        } => page_break_id,
-        _ => return None,
-    };
-    locate_node(&document.content, node_id).map(|location| RemovalFocusHint {
-        parent_id: location.parent_id,
-        index: location.index,
-    })
+        }
+        | Mutation::RemoveImage {
+            image_node_id: page_break_id,
+            ..
+        }
+        | Mutation::ReplaceImage {
+            image_node_id: page_break_id,
+            ..
+        } => locate_node(&document.content, page_break_id).map(|location| RemovalFocusHint {
+            parent_id: location.parent_id,
+            index: location.index,
+        }),
+        Mutation::InsertImage { placement, .. } => Some(RemovalFocusHint {
+            parent_id: placement.parent_id.clone(),
+            index: usize::try_from(placement.index).ok()?,
+        }),
+        _ => None,
+    }
 }
 
 fn table_node<'a>(
@@ -3158,6 +3367,173 @@ fn ensure_generated_ids_available(
         }
     }
     Ok(())
+}
+
+fn image_asset_for_staging(
+    document: &FlowDocument,
+    staged: &RedeemedAsset,
+    accessibility: &ImageAccessibility,
+) -> Result<(crate::model::AssetId, Vec<AssetDescriptor>), CommandError> {
+    asset::validate_accessibility(accessibility)?;
+    let staged_descriptor = staged.descriptor();
+    if let Some(existing) = document
+        .assets
+        .iter()
+        .find(|asset| asset.content_hash == staged_descriptor.content_hash)
+    {
+        if existing.byte_length != staged_descriptor.byte_length
+            || existing.media_type != staged_descriptor.media_type
+        {
+            return Err(CommandError::BrokenInvariant);
+        }
+        return Ok((existing.id.clone(), document.assets.clone()));
+    }
+    DocumentLimits::V1.check(
+        crate::schema::LimitKind::Assets,
+        document.assets.len().saturating_add(1),
+    )?;
+    if document
+        .assets
+        .iter()
+        .any(|asset| asset.id == staged_descriptor.id)
+    {
+        return Err(CommandError::BrokenInvariant);
+    }
+    let mut descriptor = staged_descriptor.clone();
+    descriptor.alt_text = accessibility.alt_text().to_owned();
+    let asset_id = descriptor.id.clone();
+    let mut replacement = document.assets.clone();
+    replacement.push(descriptor);
+    Ok((asset_id, replacement))
+}
+
+fn derive_insert_image_operation(
+    document: &FlowDocument,
+    placement: &StructuralPlacement,
+    accessibility: &ImageAccessibility,
+    staged: &RedeemedAsset,
+    command_id: &CommandId,
+) -> Result<(Operation, Operation), CommandError> {
+    let expected = placement_children(document, placement)?;
+    let (asset_id, replacement_assets) = image_asset_for_staging(document, staged, accessibility)?;
+    let image_id = deterministic_node_id(command_id, "image")?;
+    ensure_generated_ids_available(document, std::slice::from_ref(&image_id))?;
+    let image = ContentNode {
+        id: image_id,
+        style_id: None,
+        body: BlockKind::Image {
+            asset_id,
+            accessibility: accessibility.clone(),
+        },
+    };
+    let index = usize::try_from(placement.index).map_err(|_| CommandError::InvalidRange)?;
+    let mut replacement = expected.clone();
+    replacement.insert(index, image);
+    structural_pair_with_assets(
+        document,
+        placement.parent_id.clone(),
+        expected,
+        replacement,
+        AnchorMapping::identity(),
+        AnchorMapping::identity(),
+        None,
+        document.assets.clone(),
+        replacement_assets,
+    )
+}
+
+fn derive_replace_image_operation(
+    document: &FlowDocument,
+    image_node_id: &NodeId,
+    accessibility: &ImageAccessibility,
+    staged: &RedeemedAsset,
+) -> Result<(Operation, Operation), CommandError> {
+    let location =
+        locate_node(&document.content, image_node_id).ok_or(CommandError::InvalidTarget)?;
+    let BlockKind::Image {
+        asset_id: current_asset_id,
+        accessibility: current_accessibility,
+    } = &location.node.body
+    else {
+        return Err(CommandError::InvalidTarget);
+    };
+    let (asset_id, replacement_assets) = image_asset_for_staging(document, staged, accessibility)?;
+    if *current_asset_id == asset_id && current_accessibility == accessibility {
+        return Err(CommandError::NoOp);
+    }
+    let expected = container_children(document, location.parent_id.as_ref())?;
+    let mut replacement = expected.clone();
+    let mut changed = location.node.clone();
+    changed.body = BlockKind::Image {
+        asset_id,
+        accessibility: accessibility.clone(),
+    };
+    replacement[location.index] = changed;
+    structural_pair_with_assets(
+        document,
+        location.parent_id,
+        expected,
+        replacement,
+        AnchorMapping::identity(),
+        AnchorMapping::identity(),
+        None,
+        document.assets.clone(),
+        replacement_assets,
+    )
+}
+
+fn derive_set_image_accessibility_operation(
+    document: &FlowDocument,
+    image_node_id: &NodeId,
+    accessibility: &ImageAccessibility,
+) -> Result<(Operation, Operation), CommandError> {
+    asset::validate_accessibility(accessibility)?;
+    let location =
+        locate_node(&document.content, image_node_id).ok_or(CommandError::InvalidTarget)?;
+    let BlockKind::Image {
+        asset_id,
+        accessibility: current,
+    } = &location.node.body
+    else {
+        return Err(CommandError::InvalidTarget);
+    };
+    if current == accessibility {
+        return Err(CommandError::NoOp);
+    }
+    let expected = container_children(document, location.parent_id.as_ref())?;
+    let mut replacement = expected.clone();
+    let mut changed = location.node.clone();
+    changed.body = BlockKind::Image {
+        asset_id: asset_id.clone(),
+        accessibility: accessibility.clone(),
+    };
+    replacement[location.index] = changed;
+    structural_pair(
+        document,
+        location.parent_id,
+        expected,
+        replacement,
+        AnchorMapping::identity(),
+        AnchorMapping::identity(),
+        None,
+    )
+}
+
+fn derive_remove_image_operation(
+    document: &FlowDocument,
+    image_node_id: &NodeId,
+    confirmed: bool,
+    command_id: &CommandId,
+) -> Result<(Operation, Operation), CommandError> {
+    if !confirmed {
+        return Err(CommandError::ConfirmationRequired);
+    }
+    let location =
+        locate_node(&document.content, image_node_id).ok_or(CommandError::InvalidTarget)?;
+    if !matches!(location.node.body, BlockKind::Image { .. }) {
+        return Err(CommandError::InvalidTarget);
+    }
+    derive_remove_atomic_operation(document, image_node_id, command_id, false)
 }
 
 fn table_cell_style_id(document: &FlowDocument, table: &ContentNode) -> Option<StyleId> {
@@ -4159,6 +4535,7 @@ pub(crate) fn replay_inverse(
     Ok(candidate)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn apply_replace_children(
     document: &mut FlowDocument,
     container_id: &Option<NodeId>,
@@ -4167,6 +4544,8 @@ fn apply_replace_children(
     anchor_mapping: &AnchorMapping,
     field_updates: &[FieldUpdate],
     preimage: Option<&AnchorPreimage>,
+    expected_assets: &[AssetDescriptor],
+    replacement_assets: &[AssetDescriptor],
 ) -> Result<(), CommandError> {
     if let Some(preimage) = preimage {
         validate_preimage(preimage, field_updates)?;
@@ -4184,6 +4563,12 @@ fn apply_replace_children(
         expected_children,
         replacement_children.to_vec(),
     )?;
+    if !expected_assets.is_empty() || !replacement_assets.is_empty() {
+        if document.assets != expected_assets {
+            return Err(CommandError::HistoryConflict);
+        }
+        document.assets = replacement_assets.to_vec();
+    }
 
     let mut indexes = BTreeSet::new();
     for update in field_updates {
@@ -4309,6 +4694,8 @@ fn apply_operation(
             anchor_mapping,
             field_updates,
             preimage,
+            expected_assets,
+            replacement_assets,
         } => {
             apply_replace_children(
                 document,
@@ -4318,6 +4705,8 @@ fn apply_operation(
                 anchor_mapping,
                 field_updates,
                 preimage.as_ref(),
+                expected_assets,
+                replacement_assets,
             )?;
             mapping.extend(anchor_mapping.clone());
         }
@@ -4449,6 +4838,10 @@ fn command_type(kind: &CommandKind) -> &'static str {
         CommandKind::InsertPageBreak { .. } => "insertPageBreak",
         CommandKind::RemovePageBreak { .. } => "removePageBreak",
         CommandKind::InsertTable { .. } => "insertTable",
+        CommandKind::InsertImage { .. } => "insertImage",
+        CommandKind::ReplaceImage { .. } => "replaceImage",
+        CommandKind::SetImageAccessibility { .. } => "setImageAccessibility",
+        CommandKind::RemoveImage { .. } => "removeImage",
         CommandKind::AddTableRow { .. } => "addTableRow",
         CommandKind::RemoveTableRow { .. } => "removeTableRow",
         CommandKind::AddTableColumn { .. } => "addTableColumn",

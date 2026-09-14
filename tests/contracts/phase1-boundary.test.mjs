@@ -30,6 +30,7 @@ const allowedWasmExports = new Set([
   'recover_document',
   'recover_document_audited',
   'redo',
+  'stage_asset',
   'undo',
 ])
 const forbiddenDirectPackages = new Set([
@@ -511,7 +512,11 @@ function validFixture() {
       ],
     ]),
     wasmSource: [...allowedWasmExports]
-      .map((name) => `#[wasm_bindgen]\npub fn ${name}(request: JsValue) -> JsValue { request }`)
+      .map((name) =>
+        name === 'stage_asset'
+          ? '#[wasm_bindgen]\npub fn stage_asset(bytes: &[u8], request: JsValue) -> JsValue { request }'
+          : `#[wasm_bindgen]\npub fn ${name}(request: JsValue) -> JsValue { request }`,
+      )
       .join('\n'),
   }
 }
@@ -1144,6 +1149,9 @@ function hasTypedWasmSignature(item) {
   const parametersEnd = matchingRustDelimiter(tokens, 3, '(', ')')
   if (parametersEnd === undefined) return false
   const parameters = tokens.slice(4, parametersEnd)
+  if (item.exportName === 'stage_asset') {
+    return parameters.join('') === 'bytes:&[u8],request:JsValue'
+  }
   if (
     parameters[0] !== 'request' ||
     parameters[1] !== ':' ||
