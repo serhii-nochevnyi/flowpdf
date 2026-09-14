@@ -7,7 +7,7 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::anchor::{EditorPositionError, NodePositionMap};
+use crate::anchor::{EditorPositionError, GraphemeBoundaryMap, NodePositionMap};
 use crate::model::{
     Affinity, ContentNode, DocumentId, FlowDocument, FontFamily, LogicalPosition, MarkSet, NodeId,
     RunLanguage,
@@ -171,6 +171,13 @@ pub struct EditorDocumentViewDto {
     pub blocks: Vec<EditorBlockViewDto>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EditorTextSpanDto {
+    pub start_utf16: u32,
+    pub end_utf16: u32,
+}
+
 impl EditorDocumentViewDto {
     fn empty(document_id: DocumentId, revision: u32) -> Self {
         Self {
@@ -204,11 +211,13 @@ pub enum EditorBlockViewDto {
     Paragraph {
         node_id: NodeId,
         text: String,
+        spans: Vec<EditorTextSpanDto>,
     },
     Heading {
         node_id: NodeId,
         level: u8,
         text: String,
+        spans: Vec<EditorTextSpanDto>,
     },
     Atomic {
         node_id: NodeId,
@@ -222,11 +231,13 @@ impl EditorBlockViewDto {
             crate::model::BlockKind::Paragraph { .. } => Self::Paragraph {
                 node_id: node.id.clone(),
                 text: node.text(),
+                spans: text_spans(&node.text()),
             },
             crate::model::BlockKind::Heading { level, .. } => Self::Heading {
                 node_id: node.id.clone(),
                 level: *level,
                 text: node.text(),
+                spans: text_spans(&node.text()),
             },
             body => Self::Atomic {
                 node_id: node.id.clone(),
@@ -234,6 +245,27 @@ impl EditorBlockViewDto {
             },
         }
     }
+}
+
+fn text_spans(text: &str) -> Vec<EditorTextSpanDto> {
+    let boundary_map = GraphemeBoundaryMap::new(text)
+        .expect("validated editor text must fit the grapheme projection budget");
+    let boundaries = boundary_map.boundaries();
+
+    if boundaries.len() < 2 {
+        return vec![EditorTextSpanDto {
+            start_utf16: 0,
+            end_utf16: 0,
+        }];
+    }
+
+    boundaries
+        .windows(2)
+        .map(|window| EditorTextSpanDto {
+            start_utf16: window[0].utf16_offset.get(),
+            end_utf16: window[1].utf16_offset.get(),
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

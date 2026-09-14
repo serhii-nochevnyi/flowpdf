@@ -27,7 +27,7 @@ use canonical::{canonical_bytes, canonical_hash, decode_canonical};
 pub use editor_view::{
     CapabilityDto, DirectionalSelection, EditorBlockViewDto, EditorCapability,
     EditorDocumentViewDto, EditorSessionAction, EditorSessionError, EditorSessionRequest,
-    EditorSessionResponse, EditorSessionState, EditorViewDto, EditorViewRequest,
+    EditorSessionResponse, EditorSessionState, EditorTextSpanDto, EditorViewDto, EditorViewRequest,
     FormattingProjectionDto, FormattingState,
 };
 use model::{

@@ -132,7 +132,7 @@ fn paragraph_tracer() {
         .blocks
         .iter()
         .find_map(|block| match block {
-            flow_core::EditorBlockViewDto::Paragraph { node_id, text } => {
+            flow_core::EditorBlockViewDto::Paragraph { node_id, text, .. } => {
                 Some((node_id.clone(), text.clone()))
             }
             _ => None,
