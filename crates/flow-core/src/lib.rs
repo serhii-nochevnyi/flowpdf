@@ -42,7 +42,7 @@ pub use transaction::{
 };
 use transaction::{
     CommandError, EditorState, HistoryEffect, HistoryEntry, TransactionService, replay_forward,
-    replay_inverse, semantic_hash,
+    replay_inverse, semantic_hash, validate_private_preimages,
 };
 
 const SAMPLE_CREATE_COMMAND_ID: &str = "00000000-0000-4000-8000-000000000201";
@@ -739,6 +739,9 @@ const fn audit_command_kind(kind: &CommandKind) -> AuditCommandKind {
         CommandKind::SetNodeStyle { .. } => AuditCommandKind::SetNodeStyle,
         CommandKind::InsertNode { .. } => AuditCommandKind::InsertNode,
         CommandKind::DeleteNode { .. } => AuditCommandKind::DeleteNode,
+        CommandKind::SplitTextBlock { .. } => AuditCommandKind::SplitTextBlock,
+        CommandKind::MergeTextBlocks { .. } => AuditCommandKind::MergeTextBlocks,
+        CommandKind::DeleteSubtree { .. } => AuditCommandKind::DeleteSubtree,
         CommandKind::SetField { .. } => AuditCommandKind::SetField,
         CommandKind::Batch { .. } => AuditCommandKind::Batch,
         CommandKind::Undo => AuditCommandKind::Undo,
@@ -938,6 +941,7 @@ pub(crate) fn preflight_recovery_records(request: &RecoverRequest) -> Result<(),
         replay_bytes = checked_record_bytes(replay_bytes, snapshot)?;
     }
     for transaction in &request.transactions {
+        validate_private_preimages(transaction).map_err(|_| CoreError::RecoveryGap)?;
         let bytes = serde_json::to_vec(transaction).map_err(|_| SchemaError::serialization())?;
         DocumentLimits::V1.check_transaction(
             transaction.forward_operations.len() + transaction.inverse_operations.len(),
@@ -1481,6 +1485,9 @@ pub(crate) fn replay_history_effect(
                     "setNodeStyle",
                     "insertNode",
                     "deleteNode",
+                    "splitTextBlock",
+                    "mergeTextBlocks",
+                    "deleteSubtree",
                     "setField",
                     "batch",
                 ]

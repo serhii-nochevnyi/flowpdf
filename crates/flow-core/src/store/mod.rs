@@ -13,7 +13,10 @@ use crate::{
     canonical::{asset_hash, canonical_hash, decode_canonical, verify_asset_bytes},
     model::FlowDocument,
     schema::SchemaError,
-    transaction::{EditorState, HistoryEffect, Operation, SourceModality, replay_forward},
+    transaction::{
+        EditorState, HistoryEffect, Operation, SourceModality, replay_forward,
+        validate_private_preimages,
+    },
 };
 
 const MIB: u64 = 1024 * 1024;
@@ -973,6 +976,7 @@ fn validate_transaction_audit(
     transaction: &TransactionRecord,
     audit: &AuditRecord,
 ) -> Result<(), StoreError> {
+    validate_private_preimages(transaction).map_err(|_| StoreError::InvalidCommit)?;
     audit.validate().map_err(|_| StoreError::InvalidCommit)?;
     if transaction.record_format_version != crate::RECORD_FORMAT_VERSION
         || audit.record_format_version() != crate::RECORD_FORMAT_VERSION

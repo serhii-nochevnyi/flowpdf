@@ -8,7 +8,7 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::model::{Affinity, LogicalPosition, NodeId};
+use crate::model::{Affinity, LogicalPosition, NodeId, TombstoneToken};
 use crate::model::{BlockKind, ContentNode};
 use crate::schema::{DocumentLimits, MAX_INLINE_RUNS};
 
@@ -358,6 +358,41 @@ pub enum AnchorTransformation {
     NodeInvalidated {
         node_id: NodeId,
     },
+    /// A text block was split without changing the retained block's identity.
+    /// The generated block is intentionally named in the mapping so an anchor
+    /// is never relocated by guessing which surviving node is nearby.
+    SplitTextBlock {
+        node_id: NodeId,
+        new_node_id: NodeId,
+        split_utf16: Utf16Offset,
+    },
+    /// The second adjacent text block was appended to the first and removed
+    /// from the container. Its original identity remains available to the
+    /// exact inverse operation.
+    MergeTextBlocks {
+        first_node_id: NodeId,
+        second_node_id: NodeId,
+        first_utf16_length: u32,
+    },
+    /// A compatible multi-block replacement retained the first block and
+    /// removed the selected suffix/intermediate blocks. The opaque token is
+    /// the only public result for anchors inside removed material.
+    CrossBlockReplace {
+        first_node_id: NodeId,
+        last_node_id: NodeId,
+        removed_node_ids: Vec<NodeId>,
+        first_start: Utf16Offset,
+        first_end: Utf16Offset,
+        last_end: Utf16Offset,
+        inserted_utf16_length: u32,
+        tombstone: TombstoneToken,
+    },
+    /// A whole subtree was explicitly removed. The token does not authorize
+    /// retargeting; it only records that the old position is deleted.
+    NodeDeleted {
+        node_id: NodeId,
+        tombstone: TombstoneToken,
+    },
 }
 
 impl AnchorTransformation {
@@ -367,6 +402,42 @@ impl AnchorTransformation {
                 AnchorMapResult::Invalid(AnchorInvalidation::DeletedNode)
             }
             Self::NodeInvalidated { .. } => AnchorMapResult::Mapped(position.clone()),
+            Self::NodeDeleted { node_id, tombstone } if position.node_id == *node_id => {
+                AnchorMapResult::Deleted {
+                    tombstone: tombstone.clone(),
+                }
+            }
+            Self::NodeDeleted { .. } => AnchorMapResult::Mapped(position.clone()),
+            Self::SplitTextBlock {
+                node_id,
+                new_node_id,
+                split_utf16,
+            } => map_split(position, node_id, new_node_id, *split_utf16),
+            Self::MergeTextBlocks {
+                first_node_id,
+                second_node_id,
+                first_utf16_length,
+            } => map_merge(position, first_node_id, second_node_id, *first_utf16_length),
+            Self::CrossBlockReplace {
+                first_node_id,
+                last_node_id,
+                removed_node_ids,
+                first_start,
+                first_end,
+                last_end,
+                inserted_utf16_length,
+                tombstone,
+            } => map_cross_block_replace(
+                position,
+                first_node_id,
+                last_node_id,
+                removed_node_ids,
+                *first_start,
+                *first_end,
+                *last_end,
+                *inserted_utf16_length,
+                tombstone,
+            ),
             Self::TextEdit {
                 node_id,
                 start,
@@ -392,6 +463,7 @@ impl AnchorTransformation {
 )]
 pub enum AnchorMapResult {
     Mapped(LogicalPosition),
+    Deleted { tombstone: TombstoneToken },
     Invalid(AnchorInvalidation),
 }
 
@@ -467,6 +539,120 @@ fn map_text_edit(
         utf16_offset: Utf16Offset::new(mapped),
         affinity,
     })
+}
+
+fn map_split(
+    position: &LogicalPosition,
+    node_id: &NodeId,
+    new_node_id: &NodeId,
+    split_utf16: Utf16Offset,
+) -> AnchorMapResult {
+    if position.node_id != *node_id {
+        return AnchorMapResult::Mapped(position.clone());
+    }
+    let offset = position.utf16_offset.get();
+    let split = split_utf16.get();
+    if offset < split || (offset == split && position.affinity == Affinity::Backward) {
+        return AnchorMapResult::Mapped(position.clone());
+    }
+    let mapped_offset = offset.saturating_sub(split);
+    AnchorMapResult::Mapped(LogicalPosition {
+        node_id: new_node_id.clone(),
+        utf16_offset: mapped_offset.into(),
+        affinity: position.affinity.clone(),
+    })
+}
+
+fn map_merge(
+    position: &LogicalPosition,
+    first_node_id: &NodeId,
+    second_node_id: &NodeId,
+    first_utf16_length: u32,
+) -> AnchorMapResult {
+    if position.node_id == *second_node_id {
+        return AnchorMapResult::Mapped(LogicalPosition {
+            node_id: first_node_id.clone(),
+            utf16_offset: first_utf16_length
+                .saturating_add(position.utf16_offset.get())
+                .into(),
+            affinity: position.affinity.clone(),
+        });
+    }
+    AnchorMapResult::Mapped(position.clone())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn map_cross_block_replace(
+    position: &LogicalPosition,
+    first_node_id: &NodeId,
+    last_node_id: &NodeId,
+    removed_node_ids: &[NodeId],
+    first_start: Utf16Offset,
+    first_end: Utf16Offset,
+    last_end: Utf16Offset,
+    inserted_utf16_length: u32,
+    tombstone: &TombstoneToken,
+) -> AnchorMapResult {
+    if removed_node_ids
+        .iter()
+        .any(|node_id| node_id == &position.node_id)
+    {
+        return AnchorMapResult::Deleted {
+            tombstone: tombstone.clone(),
+        };
+    }
+    if position.node_id == *first_node_id {
+        let point = position.utf16_offset.get();
+        let start = first_start.get();
+        let end = first_end.get();
+        if point < start {
+            return AnchorMapResult::Mapped(position.clone());
+        }
+        if point == start {
+            let offset = if position.affinity == Affinity::Backward {
+                start
+            } else {
+                start.saturating_add(inserted_utf16_length)
+            };
+            return AnchorMapResult::Mapped(LogicalPosition {
+                node_id: first_node_id.clone(),
+                utf16_offset: offset.into(),
+                affinity: position.affinity.clone(),
+            });
+        }
+        if point < end {
+            return AnchorMapResult::Deleted {
+                tombstone: tombstone.clone(),
+            };
+        }
+        return AnchorMapResult::Mapped(LogicalPosition {
+            node_id: first_node_id.clone(),
+            utf16_offset: start
+                .saturating_add(inserted_utf16_length)
+                .saturating_add(point.saturating_sub(end))
+                .into(),
+            affinity: position.affinity.clone(),
+        });
+    }
+    if position.node_id == *last_node_id {
+        let point = position.utf16_offset.get();
+        let end = last_end.get();
+        if point < end {
+            return AnchorMapResult::Deleted {
+                tombstone: tombstone.clone(),
+            };
+        }
+        return AnchorMapResult::Mapped(LogicalPosition {
+            node_id: first_node_id.clone(),
+            utf16_offset: first_start
+                .get()
+                .saturating_add(inserted_utf16_length)
+                .saturating_add(point.saturating_sub(end))
+                .into(),
+            affinity: position.affinity.clone(),
+        });
+    }
+    AnchorMapResult::Mapped(position.clone())
 }
 
 #[cfg(test)]

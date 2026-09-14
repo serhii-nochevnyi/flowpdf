@@ -291,6 +291,29 @@ impl ContentNode {
         }
     }
 
+    pub(crate) fn children_vec(&self) -> Option<&Vec<Self>> {
+        match &self.body {
+            BlockKind::OrderedList { items } | BlockKind::UnorderedList { items } => Some(items),
+            BlockKind::ListItem { children } | BlockKind::TableCell { children } => Some(children),
+            BlockKind::Table { rows, .. } => Some(rows),
+            BlockKind::TableRow { cells } => Some(cells),
+            _ => None,
+        }
+    }
+
+    /// Returns the owned child vector for structural editor operations. The
+    /// transaction layer uses this only after validating the parent kind and
+    /// never exposes mutable tree handles across the public boundary.
+    pub(crate) fn children_vec_mut(&mut self) -> Option<&mut Vec<Self>> {
+        match &mut self.body {
+            BlockKind::OrderedList { items } | BlockKind::UnorderedList { items } => Some(items),
+            BlockKind::ListItem { children } | BlockKind::TableCell { children } => Some(children),
+            BlockKind::Table { rows, .. } => Some(rows),
+            BlockKind::TableRow { cells } => Some(cells),
+            _ => None,
+        }
+    }
+
     /// Compatibility for the Phase 1 text command. Rich run algebra belongs to
     /// the subsequent editor-command plans; rejecting it preserves all marks.
     pub(crate) fn legacy_text(&self) -> Option<&str> {

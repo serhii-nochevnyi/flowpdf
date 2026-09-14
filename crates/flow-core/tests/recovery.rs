@@ -180,6 +180,52 @@ fn assert_store_recovers_exactly(store: &InMemoryDocumentStore, expected: &Opera
 }
 
 #[test]
+fn deletion_preimage_recovery_replays_exactly_and_rejects_tampering() {
+    let created = success(create_sample(CreateSampleRequest {
+        requested_locale: "uk-UA".to_owned(),
+        issued_at: "2026-09-14T17:10:00Z".to_owned(),
+    }));
+    let target_node_id = match &created.editor.view.document.blocks[0] {
+        flow_core::EditorBlockViewDto::Paragraph { node_id, .. }
+        | flow_core::EditorBlockViewDto::Heading { node_id, .. }
+        | flow_core::EditorBlockViewDto::Atomic { node_id, .. } => node_id.clone(),
+    };
+    let deleted = success(apply_command(ApplyCommandRequest {
+        canonical_json: created.session.canonical_json.clone(),
+        history: created.session.history.clone(),
+        command: CommandDto {
+            command_id: command_id(9301),
+            base_revision: created.session.revision,
+            modality: SourceModality::Keyboard,
+            issued_at: "2026-09-14T17:10:01Z".to_owned(),
+            kind: CommandKind::DeleteSubtree {
+                node_id: target_node_id,
+            },
+        },
+    }));
+    let chain = vec![created, deleted];
+    let store = persist_chain(&chain, SnapshotPolicy::EveryTransaction);
+    let recovered = success(recover(store.load_records().expect("records")));
+    assert_eq!(
+        recovered.session.canonical_json,
+        chain[1].session.canonical_json
+    );
+    assert_eq!(recovered.session.history, chain[1].session.history);
+
+    let mut corrupt = request(&chain, &[0, 1]);
+    if let flow_core::Operation::ReplaceChildren {
+        preimage: Some(preimage),
+        ..
+    } = &mut corrupt.transactions[1].forward_operations[0]
+    {
+        preimage.tombstone.slot = 1;
+    } else {
+        panic!("expected deletion preimage");
+    }
+    assert_failure(corrupt, "FLOW_RECOVERY_GAP");
+}
+
+#[test]
 fn checkpoint_policies_change_durable_work_only_and_never_recovered_truth() {
     let chain = chain();
     let expected = chain.last().expect("final revision");

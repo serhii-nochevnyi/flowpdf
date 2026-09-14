@@ -25,11 +25,11 @@
       },
       {
         "path": "crates/flow-core/src/anchor/mod.rs",
-        "sha256": "sha256:e5fce68059e06a47d5d75eccc3cc4bdad3c313eb5cb3de8514d42955653b3786"
+        "sha256": "sha256:137126bde71e57f2e35b87c85d97cfc9b49c2d0013b7f27c4b860e15a7be1f34"
       },
       {
         "path": "crates/flow-core/src/audit/mod.rs",
-        "sha256": "sha256:f7f4477059be8a23a8d1c5ed80eae3623c153a3a7eb70d56fe71fa2298e9d161"
+        "sha256": "sha256:df53b07f679cfb186c3a842d1bac50e8a82a9e36ed3958b04c6a04c999023e83"
       },
       {
         "path": "crates/flow-core/src/canonical/mod.rs",
@@ -41,11 +41,11 @@
       },
       {
         "path": "crates/flow-core/src/lib.rs",
-        "sha256": "sha256:0e4a084f8f238d623856169c27303ae4742c75d469ba6b42de77266ad6e03308"
+        "sha256": "sha256:59f3467b76d677456cee522c6ba7b37ff4b8d987aee9f212cd3f9ac3c768d11f"
       },
       {
         "path": "crates/flow-core/src/model/mod.rs",
-        "sha256": "sha256:64131a9d8602a1258bd1c8f74aba22dfb79ba32a56f202f983a21cc208c983fe"
+        "sha256": "sha256:3f262afc85d1a9a68ae5518a23561f75854119e4000bb9d1299cd8718ed64fd6"
       },
       {
         "path": "crates/flow-core/src/provenance/mod.rs",
@@ -61,11 +61,11 @@
       },
       {
         "path": "crates/flow-core/src/store/mod.rs",
-        "sha256": "sha256:d766d91695bbbf91260776afae76c1a5f824566953d767ae36ee1d7c09e528e4"
+        "sha256": "sha256:4a36f862905725cbde7d22b97ba60c3fe22dae5b58ef212aebf0995558cdddd4"
       },
       {
         "path": "crates/flow-core/src/transaction/mod.rs",
-        "sha256": "sha256:dfe66629ed37a40e4d6dda5f62375f6f89532a4e02905ad2a9e9b9c970ba4642"
+        "sha256": "sha256:153110e7e68376ca2fd94ac93a4f8c478061bf5c161245db3c9c1a29c507cf55"
       },
       {
         "path": "fixtures/recovery/benchmark-200-page.recipe.json",
@@ -80,7 +80,7 @@
         "sha256": "sha256:9d50a6f28923fc94c0d56dccc9038a12a8ff040f764a8ff048fa6d5a9eba722c"
       }
     ],
-    "digest": "sha256:378f9937dce82059f666d639e5d212adfdec371be71bbced61bde550ecca7247"
+    "digest": "sha256:95c78da77ff2bc5ad7d692560b836efafbda7257273fb8600e45682059aaefa3"
   },
   "toolchain": {
     "node": "v24.10.0",
@@ -125,37 +125,37 @@
         "plannedTransactionCount": 1000
       },
       "durationsMilliseconds": [
-        509.0780419999999,
-        510.71025000000003,
-        508.38508299999995,
-        509.44816599999996,
-        515.679833,
-        515.3032499999999,
-        513.403458,
-        515.518375,
-        509.03829199999996,
-        512.2822500000001,
-        512.3568750000001,
-        516.318375,
-        514.519,
-        511.777708,
-        509.30725,
-        515.552209,
-        511.87129200000004,
-        514.0565409999999,
-        519.2107500000001,
-        514.501834
+        503.41641699999997,
+        501.463334,
+        499.67525,
+        504.05116699999996,
+        502.283417,
+        504.395041,
+        502.53941700000007,
+        502.45975,
+        502.028084,
+        502.253417,
+        501.586792,
+        502.3765,
+        501.309334,
+        501.306625,
+        501.96429099999995,
+        501.41012500000005,
+        500.570583,
+        498.30308299999996,
+        499.96750000000003,
+        502.23091600000004
       ],
-      "p50Milliseconds": 512.3568750000001,
-      "p95Milliseconds": 516.318375
+      "p50Milliseconds": 501.96429099999995,
+      "p95Milliseconds": 504.05116699999996
     }
   ],
   "selectedPolicy": {
     "transactionInterval": 100,
     "byteInterval": 4194304
   },
-  "p50Milliseconds": 512.3568750000001,
-  "p95Milliseconds": 516.318375,
+  "p50Milliseconds": 501.96429099999995,
+  "p95Milliseconds": 504.05116699999996,
   "p95TargetMilliseconds": 2000,
   "passed": true,
   "blocked": false

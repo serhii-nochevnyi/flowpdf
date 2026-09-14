@@ -9,13 +9,14 @@ use uuid::Uuid;
 use crate::{
     anchor::{
         AnchorError, AnchorMapResult, AnchorMapping, AnchorTransformation, EditorPositionError,
-        NodePositionMap, ResolvedPosition, resolve_utf16_offset, utf16_length,
+        NodePositionMap, ResolvedPosition, Utf16Offset, resolve_utf16_offset, utf16_length,
     },
     canonical::{canonical_bytes, canonical_hash},
     editor_view::DirectionalSelection,
     model::{
-        Affinity, CommandId, ContentNode, FieldAnchorState, FieldDescriptor, FieldId, FlowDocument,
-        LogicalPosition, NodeId, StyleId,
+        Affinity, BlockKind, CommandId, ContentNode, FieldAnchorState, FieldDescriptor, FieldId,
+        FlowDocument, InlineRun, LogicalPosition, MarkSet, NodeId, ParagraphAttrs, StyleId,
+        TombstoneToken,
     },
     schema::{DocumentLimits, SchemaError, validate_document},
 };
@@ -74,6 +75,18 @@ pub enum CommandKind {
     DeleteNode {
         node_id: NodeId,
     },
+    SplitTextBlock {
+        node_id: NodeId,
+        utf16_offset: Utf16Offset,
+        new_node_id: NodeId,
+    },
+    MergeTextBlocks {
+        first_node_id: NodeId,
+        second_node_id: NodeId,
+    },
+    DeleteSubtree {
+        node_id: NodeId,
+    },
     SetField {
         field_id: FieldId,
         field: FieldDescriptor,
@@ -117,6 +130,18 @@ pub enum Mutation {
         node: ContentNode,
     },
     DeleteNode {
+        node_id: NodeId,
+    },
+    SplitTextBlock {
+        node_id: NodeId,
+        utf16_offset: Utf16Offset,
+        new_node_id: NodeId,
+    },
+    MergeTextBlocks {
+        first_node_id: NodeId,
+        second_node_id: NodeId,
+    },
+    DeleteSubtree {
         node_id: NodeId,
     },
     SetField {
@@ -170,11 +195,55 @@ pub enum Operation {
         index: u32,
         node: ContentNode,
     },
+    ReplaceChildren {
+        container_id: Option<NodeId>,
+        expected_children: Vec<ContentNode>,
+        replacement_children: Vec<ContentNode>,
+        anchor_mapping: AnchorMapping,
+        field_updates: Vec<FieldUpdate>,
+        preimage: Option<AnchorPreimage>,
+    },
     SetField {
         index: u32,
         expected_field: Box<FieldDescriptor>,
         field: Box<FieldDescriptor>,
     },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FieldUpdate {
+    pub index: u32,
+    pub expected: Box<FieldDescriptor>,
+    pub replacement: Box<FieldDescriptor>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub enum AnchorOwner {
+    Field(FieldId),
+    SelectionAnchor,
+    SelectionFocus,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AnchorPreimageEntry {
+    pub owner: AnchorOwner,
+    pub position: LogicalPosition,
+}
+
+/// Transaction-private deletion proof. It is carried by the executable
+/// transaction operation so replay can reject missing, duplicated, forged, or
+/// over-budget owner state before publishing a recovered document. The public
+/// editor view never projects this type.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AnchorPreimage {
+    pub root_node_id: NodeId,
+    pub deleted_node_ids: Vec<NodeId>,
+    pub tombstone: TombstoneToken,
+    pub owners: Vec<AnchorPreimageEntry>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -378,6 +447,14 @@ pub enum CommandError {
     RedoEmpty,
     #[error("The history cursor or stored operation set is inconsistent")]
     HistoryConflict,
+    #[error("The structural text targets are not adjacent or compatible")]
+    IncompatibleStructure,
+    #[error("The structural container is not valid for this operation")]
+    InvalidContainer,
+    #[error("The transaction-private anchor preimage is invalid")]
+    InvalidPreimage,
+    #[error("The operation would exceed the bounded anchor-preimage budget")]
+    PreimageLimit,
 }
 
 impl CommandError {
@@ -398,6 +475,10 @@ impl CommandError {
             Self::UndoEmpty => "FLOW_UNDO_EMPTY",
             Self::RedoEmpty => "FLOW_REDO_EMPTY",
             Self::HistoryConflict => "FLOW_HISTORY_CONFLICT",
+            Self::IncompatibleStructure => "FLOW_INCOMPATIBLE_STRUCTURE",
+            Self::InvalidContainer => "FLOW_INVALID_CONTAINER",
+            Self::InvalidPreimage => "FLOW_INVALID_PREIMAGE",
+            Self::PreimageLimit => "FLOW_LIMIT_ANCHOR_PREIMAGE",
         }
     }
 }
@@ -531,9 +612,10 @@ fn apply_mutation(state: &EditorState, command: Command) -> Result<AppliedComman
     let mut mapping = AnchorMapping::identity();
     let mut selection_after = None;
     for mutation in &mutations {
-        let (operation, inverse_operation) = derive_operation(&candidate, mutation)?;
+        let (operation, inverse_operation) =
+            derive_operation(&candidate, mutation, &command.command_id)?;
         if let Mutation::ReplaceSelection { selection, text } = mutation {
-            selection_after = Some(selection_after_replacement(selection, text)?);
+            selection_after = Some(selection_after_replacement(&candidate, selection, text)?);
         }
         let operation_mapping = apply_operation(&mut candidate, &operation)?;
         mapping.extend(operation_mapping);
@@ -705,6 +787,25 @@ fn command_mutations(kind: &CommandKind) -> Result<Vec<Mutation>, CommandError> 
         CommandKind::DeleteNode { node_id } => Ok(vec![Mutation::DeleteNode {
             node_id: node_id.clone(),
         }]),
+        CommandKind::SplitTextBlock {
+            node_id,
+            utf16_offset,
+            new_node_id,
+        } => Ok(vec![Mutation::SplitTextBlock {
+            node_id: node_id.clone(),
+            utf16_offset: *utf16_offset,
+            new_node_id: new_node_id.clone(),
+        }]),
+        CommandKind::MergeTextBlocks {
+            first_node_id,
+            second_node_id,
+        } => Ok(vec![Mutation::MergeTextBlocks {
+            first_node_id: first_node_id.clone(),
+            second_node_id: second_node_id.clone(),
+        }]),
+        CommandKind::DeleteSubtree { node_id } => Ok(vec![Mutation::DeleteSubtree {
+            node_id: node_id.clone(),
+        }]),
         CommandKind::SetField { field_id, field } => Ok(vec![Mutation::SetField {
             field_id: field_id.clone(),
             field: field.clone(),
@@ -721,6 +822,7 @@ fn contains_editable_text(node: &ContentNode) -> bool {
 fn derive_operation(
     document: &FlowDocument,
     mutation: &Mutation,
+    command_id: &CommandId,
 ) -> Result<(Operation, Operation), CommandError> {
     match mutation {
         Mutation::InsertText { target, text } => {
@@ -733,7 +835,7 @@ fn derive_operation(
             derive_text_operation(document, range.clone(), text.clone())
         }
         Mutation::ReplaceSelection { selection, text } => {
-            derive_selection_operation(document, selection, text.clone())
+            derive_selection_operation(document, selection, text.clone(), command_id)
         }
         Mutation::DeleteText { range } => {
             derive_text_operation(document, range.clone(), String::new())
@@ -810,6 +912,18 @@ fn derive_operation(
                 },
             ))
         }
+        Mutation::SplitTextBlock {
+            node_id,
+            utf16_offset,
+            new_node_id,
+        } => derive_split_operation(document, node_id, *utf16_offset, new_node_id, command_id),
+        Mutation::MergeTextBlocks {
+            first_node_id,
+            second_node_id,
+        } => derive_merge_operation(document, first_node_id, second_node_id),
+        Mutation::DeleteSubtree { node_id } => {
+            derive_delete_subtree_operation(document, node_id, command_id)
+        }
         Mutation::SetField { field_id, field } => {
             if !matches!(field.anchor, FieldAnchorState::GraphemeSafe { .. }) {
                 return Err(CommandError::InvalidTarget);
@@ -882,13 +996,21 @@ fn derive_selection_operation(
     document: &FlowDocument,
     selection: &DirectionalSelection,
     replacement: String,
+    command_id: &CommandId,
 ) -> Result<(Operation, Operation), CommandError> {
     if selection.anchor.node_id != selection.focus.node_id {
-        return Err(CommandError::InvalidRange);
+        return derive_cross_block_selection_operation(
+            document,
+            selection,
+            replacement,
+            command_id,
+        );
     }
     let node = find_node(&document.content, &selection.anchor.node_id)
         .ok_or(CommandError::InvalidTarget)?;
-    let text = node.legacy_text().ok_or(CommandError::InvalidTarget)?;
+    let Some(text) = node.legacy_text() else {
+        return derive_rich_selection_operation(document, selection, replacement);
+    };
     let map = NodePositionMap::new(node, document.revision)?;
     let start = map.validate(&selection.anchor, document.revision)?;
     let end = map.validate(&selection.focus, document.revision)?;
@@ -959,26 +1081,894 @@ fn derive_selection_operation(
     ))
 }
 
+fn derive_rich_selection_operation(
+    document: &FlowDocument,
+    selection: &DirectionalSelection,
+    replacement: String,
+) -> Result<(Operation, Operation), CommandError> {
+    let location = locate_node(&document.content, &selection.anchor.node_id)
+        .ok_or(CommandError::InvalidTarget)?;
+    let node = &location.node;
+    let runs = node_runs(node).ok_or(CommandError::InvalidTarget)?;
+    let map = NodePositionMap::new(node, document.revision)?;
+    let start = map.validate(&selection.anchor, document.revision)?;
+    let end = map.validate(&selection.focus, document.revision)?;
+    let (start_position, end_position, start_byte, end_byte) = match (start, end) {
+        (ResolvedPosition::Text(start_byte), ResolvedPosition::Text(end_byte)) => {
+            if selection.anchor.utf16_offset <= selection.focus.utf16_offset {
+                (
+                    selection.anchor.clone(),
+                    selection.focus.clone(),
+                    start_byte,
+                    end_byte,
+                )
+            } else {
+                (
+                    selection.focus.clone(),
+                    selection.anchor.clone(),
+                    end_byte,
+                    start_byte,
+                )
+            }
+        }
+        _ => return Err(CommandError::InvalidTarget),
+    };
+    if start_byte.get() > end_byte.get() {
+        return Err(CommandError::InvalidRange);
+    }
+    let text = node.text();
+    let expected_text = text[start_byte.get()..end_byte.get()].to_owned();
+    if expected_text == replacement {
+        return Err(CommandError::NoOp);
+    }
+    let (prefix, _) = split_runs_at(runs, start_position.utf16_offset.get())?;
+    let (_, suffix) = split_runs_at(runs, end_position.utf16_offset.get())?;
+    let mut result_runs = prefix;
+    if !replacement.is_empty() {
+        append_run(
+            &mut result_runs,
+            &replacement,
+            &marks_at_runs(runs, start_position.utf16_offset.get()),
+        );
+    }
+    for run in suffix {
+        append_run(&mut result_runs, &run.text, &run.marks);
+    }
+    if result_runs.iter().map(|run| run.text.len()).sum::<usize>()
+        > DocumentLimits::V1.text_node_bytes
+    {
+        return Err(EditorPositionError::TextLimit.into());
+    }
+    let mut changed = node.clone();
+    set_node_runs(&mut changed, result_runs)?;
+    let expected = container_children(document, location.parent_id.as_ref())?;
+    let mut replacement_children = expected.clone();
+    replacement_children[location.index] = changed;
+    let removed_utf16_length = end_position
+        .utf16_offset
+        .get()
+        .checked_sub(start_position.utf16_offset.get())
+        .ok_or(CommandError::InvalidRange)?;
+    let inserted_utf16_length = utf16_length(&replacement)?;
+    let forward_mapping = mapping_with(AnchorTransformation::TextEdit {
+        node_id: node.id.clone(),
+        start: start_position.utf16_offset,
+        removed_utf16_length,
+        inserted_utf16_length,
+    });
+    let inverse_mapping = mapping_with(AnchorTransformation::TextEdit {
+        node_id: node.id.clone(),
+        start: start_position.utf16_offset,
+        removed_utf16_length: inserted_utf16_length,
+        inserted_utf16_length: removed_utf16_length,
+    });
+    structural_pair(
+        document,
+        location.parent_id,
+        expected,
+        replacement_children,
+        forward_mapping,
+        inverse_mapping,
+        None,
+    )
+}
+
+#[derive(Debug, Clone)]
+struct NodeLocation {
+    parent_id: Option<NodeId>,
+    index: usize,
+    node: ContentNode,
+}
+
+fn locate_node(nodes: &[ContentNode], target: &NodeId) -> Option<NodeLocation> {
+    fn visit(
+        nodes: &[ContentNode],
+        target: &NodeId,
+        parent_id: Option<&NodeId>,
+    ) -> Option<NodeLocation> {
+        for (index, node) in nodes.iter().enumerate() {
+            if node.id == *target {
+                return Some(NodeLocation {
+                    parent_id: parent_id.cloned(),
+                    index,
+                    node: node.clone(),
+                });
+            }
+            if let Some(found) = visit(node.children(), target, Some(&node.id)) {
+                return Some(found);
+            }
+        }
+        None
+    }
+
+    visit(nodes, target, None)
+}
+
+fn container_children(
+    document: &FlowDocument,
+    container_id: Option<&NodeId>,
+) -> Result<Vec<ContentNode>, CommandError> {
+    match container_id {
+        None => Ok(document.content.clone()),
+        Some(container_id) => find_node(&document.content, container_id)
+            .and_then(|node| node.children_vec())
+            .map(ToOwned::to_owned)
+            .ok_or(CommandError::InvalidContainer),
+    }
+}
+
+fn replace_container_children(
+    document: &mut FlowDocument,
+    container_id: Option<&NodeId>,
+    expected: &[ContentNode],
+    replacement: Vec<ContentNode>,
+) -> Result<(), CommandError> {
+    match container_id {
+        None => {
+            if document.content != expected {
+                return Err(CommandError::HistoryConflict);
+            }
+            document.content = replacement;
+            Ok(())
+        }
+        Some(container_id) => {
+            let container = find_node_mut(&mut document.content, container_id)
+                .ok_or(CommandError::InvalidContainer)?;
+            let children = container
+                .children_vec_mut()
+                .ok_or(CommandError::InvalidContainer)?;
+            if children != expected {
+                return Err(CommandError::HistoryConflict);
+            }
+            *children = replacement;
+            Ok(())
+        }
+    }
+}
+
+fn node_runs(node: &ContentNode) -> Option<&[InlineRun]> {
+    match &node.body {
+        BlockKind::Paragraph { runs, .. } | BlockKind::Heading { runs, .. } => Some(runs),
+        _ => None,
+    }
+}
+
+fn node_runs_mut(node: &mut ContentNode) -> Option<&mut Vec<InlineRun>> {
+    match &mut node.body {
+        BlockKind::Paragraph { runs, .. } | BlockKind::Heading { runs, .. } => Some(runs),
+        _ => None,
+    }
+}
+
+fn set_node_runs(node: &mut ContentNode, runs: Vec<InlineRun>) -> Result<(), CommandError> {
+    let target = node_runs_mut(node).ok_or(CommandError::InvalidTarget)?;
+    *target = runs;
+    Ok(())
+}
+
+fn append_run(runs: &mut Vec<InlineRun>, text: &str, marks: &MarkSet) {
+    if text.is_empty() {
+        return;
+    }
+    if runs.last().is_some_and(|run| run.marks == *marks) {
+        if let Some(last) = runs.last_mut() {
+            last.text.push_str(text);
+        }
+        return;
+    }
+    runs.push(InlineRun {
+        text: text.to_owned(),
+        marks: marks.clone(),
+    });
+}
+
+fn split_runs_at(
+    runs: &[InlineRun],
+    offset: u32,
+) -> Result<(Vec<InlineRun>, Vec<InlineRun>), CommandError> {
+    let mut left = Vec::new();
+    let mut right = Vec::new();
+    let mut run_start = 0_u32;
+    for run in runs {
+        let run_length = utf16_length(&run.text)?;
+        let run_end = run_start
+            .checked_add(run_length)
+            .ok_or(CommandError::InvalidRange)?;
+        if offset >= run_end {
+            append_run(&mut left, &run.text, &run.marks);
+        } else if offset <= run_start {
+            append_run(&mut right, &run.text, &run.marks);
+        } else {
+            let relative = offset
+                .checked_sub(run_start)
+                .ok_or(CommandError::InvalidRange)?;
+            let byte = resolve_utf16_offset(&run.text, Utf16Offset::new(relative))?;
+            append_run(&mut left, &run.text[..byte.get()], &run.marks);
+            append_run(&mut right, &run.text[byte.get()..], &run.marks);
+        }
+        run_start = run_end;
+    }
+    if offset > run_start {
+        return Err(CommandError::InvalidRange);
+    }
+    Ok((left, right))
+}
+
+fn marks_at_runs(runs: &[InlineRun], offset: u32) -> MarkSet {
+    if runs.is_empty() {
+        return MarkSet::default();
+    }
+    let mut start = 0_u32;
+    for (index, run) in runs.iter().enumerate() {
+        let end = start.saturating_add(run.text.encode_utf16().count() as u32);
+        if offset < end || (offset == end && index + 1 == runs.len()) {
+            return run.marks.clone();
+        }
+        start = end;
+    }
+    runs.last()
+        .map_or_else(MarkSet::default, |run| run.marks.clone())
+}
+
+fn compatible_text_nodes(left: &ContentNode, right: &ContentNode) -> bool {
+    if left.style_id != right.style_id {
+        return false;
+    }
+    match (&left.body, &right.body) {
+        (
+            BlockKind::Paragraph {
+                attrs: left_attrs, ..
+            },
+            BlockKind::Paragraph {
+                attrs: right_attrs, ..
+            },
+        ) => left_attrs == right_attrs,
+        (
+            BlockKind::Heading {
+                level: left_level,
+                attrs: left_attrs,
+                ..
+            },
+            BlockKind::Heading {
+                level: right_level,
+                attrs: right_attrs,
+                ..
+            },
+        ) => left_level == right_level && left_attrs == right_attrs,
+        _ => false,
+    }
+}
+
+fn split_text_node(
+    node: &ContentNode,
+    split_utf16: u32,
+    new_node_id: NodeId,
+) -> Result<(ContentNode, ContentNode), CommandError> {
+    let runs = node_runs(node).ok_or(CommandError::InvalidTarget)?;
+    let (left, right) = split_runs_at(runs, split_utf16)?;
+    let mut retained = node.clone();
+    set_node_runs(&mut retained, left)?;
+    let mut generated = ContentNode {
+        id: new_node_id,
+        style_id: node.style_id.clone(),
+        body: BlockKind::Paragraph {
+            attrs: ParagraphAttrs::default(),
+            runs: right.clone(),
+        },
+    };
+    match &node.body {
+        BlockKind::Paragraph { attrs, .. } => {
+            generated.body = BlockKind::Paragraph {
+                attrs: attrs.clone(),
+                runs: right,
+            };
+        }
+        BlockKind::Heading { level, attrs, .. }
+            if split_utf16 < node.text().encode_utf16().count() as u32 =>
+        {
+            generated.body = BlockKind::Heading {
+                level: *level,
+                attrs: attrs.clone(),
+                runs: right,
+            };
+        }
+        BlockKind::Heading { .. } => {}
+        _ => return Err(CommandError::InvalidTarget),
+    }
+    Ok((retained, generated))
+}
+
+fn merge_text_nodes(
+    first: &ContentNode,
+    second: &ContentNode,
+) -> Result<ContentNode, CommandError> {
+    if !compatible_text_nodes(first, second) {
+        return Err(CommandError::IncompatibleStructure);
+    }
+    let mut merged = first.clone();
+    let mut runs = node_runs(first)
+        .ok_or(CommandError::InvalidTarget)?
+        .to_vec();
+    for run in node_runs(second).ok_or(CommandError::InvalidTarget)? {
+        append_run(&mut runs, &run.text, &run.marks);
+    }
+    set_node_runs(&mut merged, runs)?;
+    Ok(merged)
+}
+
+fn all_node_ids(node: &ContentNode, ids: &mut Vec<NodeId>) {
+    ids.push(node.id.clone());
+    for child in node.children() {
+        all_node_ids(child, ids);
+    }
+}
+
+fn deterministic_node_id(command_id: &CommandId, purpose: &str) -> Result<NodeId, CommandError> {
+    let digest = blake3::hash(format!("flowpdf:{purpose}:{}", command_id.as_str()).as_bytes());
+    let mut bytes = [0_u8; 16];
+    bytes.copy_from_slice(&digest.as_bytes()[..16]);
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    NodeId::new(uuid::Uuid::from_bytes(bytes).hyphenated().to_string())
+        .map_err(|_| CommandError::BrokenInvariant)
+}
+
+fn mapping_with(transformation: AnchorTransformation) -> AnchorMapping {
+    AnchorMapping {
+        transformations: vec![transformation],
+    }
+}
+
+fn structural_pair(
+    document: &FlowDocument,
+    container_id: Option<NodeId>,
+    expected_children: Vec<ContentNode>,
+    replacement_children: Vec<ContentNode>,
+    forward_mapping: AnchorMapping,
+    inverse_mapping: AnchorMapping,
+    preimage: Option<AnchorPreimage>,
+) -> Result<(Operation, Operation), CommandError> {
+    let field_updates = field_updates_for_mapping(document, &forward_mapping)?;
+    ensure_deleted_targets_are_removed(&field_updates, &replacement_children)?;
+    if let Some(preimage) = &preimage {
+        validate_preimage(preimage, &field_updates)?;
+    }
+    let inverse_field_updates = field_updates
+        .iter()
+        .map(|update| FieldUpdate {
+            index: update.index,
+            expected: update.replacement.clone(),
+            replacement: update.expected.clone(),
+        })
+        .collect();
+    let forward = Operation::ReplaceChildren {
+        container_id: container_id.clone(),
+        expected_children: expected_children.clone(),
+        replacement_children: replacement_children.clone(),
+        anchor_mapping: forward_mapping,
+        field_updates,
+        preimage: preimage.clone(),
+    };
+    let inverse = Operation::ReplaceChildren {
+        container_id,
+        expected_children: replacement_children,
+        replacement_children: expected_children,
+        anchor_mapping: inverse_mapping,
+        field_updates: inverse_field_updates,
+        preimage,
+    };
+    Ok((forward, inverse))
+}
+
+fn ensure_deleted_targets_are_removed(
+    field_updates: &[FieldUpdate],
+    replacement_children: &[ContentNode],
+) -> Result<(), CommandError> {
+    for update in field_updates {
+        if !matches!(
+            update.replacement.anchor,
+            FieldAnchorState::TargetDeleted { .. }
+        ) {
+            continue;
+        }
+        if replacement_children.iter().any(|node| {
+            find_node(
+                std::slice::from_ref(node),
+                &update.expected.anchor.original().node_id,
+            )
+            .is_some()
+        }) {
+            return Err(CommandError::AnchorInvalidated);
+        }
+    }
+    Ok(())
+}
+
+fn field_updates_for_mapping(
+    document: &FlowDocument,
+    mapping: &AnchorMapping,
+) -> Result<Vec<FieldUpdate>, CommandError> {
+    let mut updates = Vec::new();
+    for (index, field) in document.fields.iter().enumerate() {
+        let mut replacement = field.clone();
+        match mapping.map(field.anchor.original()) {
+            AnchorMapResult::Mapped(position) => match &mut replacement.anchor {
+                FieldAnchorState::GraphemeSafe { original }
+                | FieldAnchorState::LegacyInvalid { original, .. } => {
+                    *original = position;
+                }
+                FieldAnchorState::TargetDeleted { .. } => {}
+            },
+            AnchorMapResult::Deleted { tombstone } => {
+                replacement.anchor = FieldAnchorState::TargetDeleted {
+                    original: field.anchor.original().clone(),
+                    tombstone,
+                };
+            }
+            AnchorMapResult::Invalid(_) => return Err(CommandError::AnchorInvalidated),
+        }
+        if replacement != *field {
+            updates.push(FieldUpdate {
+                index: u32::try_from(index).map_err(|_| CommandError::InvalidRange)?,
+                expected: Box::new(field.clone()),
+                replacement: Box::new(replacement),
+            });
+        }
+    }
+    Ok(updates)
+}
+
+fn build_preimage(
+    root_node_id: NodeId,
+    affected_node_ids: Vec<NodeId>,
+    command_id: &CommandId,
+    field_updates: &[FieldUpdate],
+) -> Result<AnchorPreimage, CommandError> {
+    let tombstone = TombstoneToken {
+        command_id: command_id.clone(),
+        slot: 0,
+    };
+    let owners = field_updates
+        .iter()
+        .filter_map(|update| {
+            let replacement = update.replacement.as_ref();
+            matches!(replacement.anchor, FieldAnchorState::TargetDeleted { .. }).then(|| {
+                AnchorPreimageEntry {
+                    owner: AnchorOwner::Field(replacement.id.clone()),
+                    position: update.expected.anchor.original().clone(),
+                }
+            })
+        })
+        .collect::<Vec<_>>();
+    let preimage = AnchorPreimage {
+        root_node_id,
+        deleted_node_ids: affected_node_ids,
+        tombstone,
+        owners,
+    };
+    validate_preimage(&preimage, field_updates)?;
+    Ok(preimage)
+}
+
+fn validate_preimage(
+    preimage: &AnchorPreimage,
+    field_updates: &[FieldUpdate],
+) -> Result<(), CommandError> {
+    if Uuid::parse_str(preimage.tombstone.command_id.as_str()).is_err()
+        || preimage.deleted_node_ids.is_empty()
+        || !preimage
+            .deleted_node_ids
+            .iter()
+            .any(|node_id| node_id == &preimage.root_node_id)
+    {
+        return Err(CommandError::InvalidPreimage);
+    }
+    let mut node_ids = BTreeSet::new();
+    if preimage
+        .deleted_node_ids
+        .iter()
+        .any(|node_id| !node_ids.insert(node_id.as_str()))
+    {
+        return Err(CommandError::InvalidPreimage);
+    }
+    let mut owners = BTreeSet::new();
+    for owner in &preimage.owners {
+        let key = match &owner.owner {
+            AnchorOwner::Field(field_id) => format!("field:{field_id}"),
+            AnchorOwner::SelectionAnchor => "selection:anchor".to_owned(),
+            AnchorOwner::SelectionFocus => "selection:focus".to_owned(),
+        };
+        if !owners.insert(key) || !node_ids.contains(owner.position.node_id.as_str()) {
+            return Err(CommandError::InvalidPreimage);
+        }
+    }
+    let encoded = serde_json::to_vec(preimage).map_err(|_| CommandError::InvalidPreimage)?;
+    if preimage.owners.len() > DocumentLimits::V1.fields + 2
+        || encoded.len() > DocumentLimits::V1.transaction_bytes
+    {
+        return Err(CommandError::PreimageLimit);
+    }
+    for owner in &preimage.owners {
+        let AnchorOwner::Field(field_id) = &owner.owner else {
+            continue;
+        };
+        let Some(update) = field_updates
+            .iter()
+            .find(|update| update.replacement.id == *field_id || update.expected.id == *field_id)
+        else {
+            return Err(CommandError::InvalidPreimage);
+        };
+        if update.expected.anchor.original() != &owner.position
+            && update.replacement.anchor.original() != &owner.position
+        {
+            return Err(CommandError::InvalidPreimage);
+        }
+        let expected_deleted = matches!(
+            &update.expected.anchor,
+            FieldAnchorState::TargetDeleted { tombstone, .. }
+                if tombstone == &preimage.tombstone
+        );
+        let replacement_deleted = matches!(
+            &update.replacement.anchor,
+            FieldAnchorState::TargetDeleted { tombstone, .. }
+                if tombstone == &preimage.tombstone
+        );
+        if !expected_deleted && !replacement_deleted {
+            return Err(CommandError::InvalidPreimage);
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_private_preimages(transaction: &Transaction) -> Result<(), CommandError> {
+    for operation in transaction
+        .forward_operations
+        .iter()
+        .chain(transaction.inverse_operations.iter())
+    {
+        if let Operation::ReplaceChildren {
+            field_updates,
+            preimage,
+            ..
+        } = operation
+        {
+            if let Some(preimage) = preimage {
+                validate_preimage(preimage, field_updates)?;
+            } else if field_updates.iter().any(|update| {
+                matches!(
+                    update.replacement.anchor,
+                    FieldAnchorState::TargetDeleted { .. }
+                )
+            }) {
+                return Err(CommandError::InvalidPreimage);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn derive_split_operation(
+    document: &FlowDocument,
+    node_id: &NodeId,
+    split_utf16: Utf16Offset,
+    new_node_id: &NodeId,
+    _command_id: &CommandId,
+) -> Result<(Operation, Operation), CommandError> {
+    if find_node(&document.content, new_node_id).is_some() || node_id == new_node_id {
+        return Err(CommandError::InvalidRange);
+    }
+    let location = locate_node(&document.content, node_id).ok_or(CommandError::InvalidTarget)?;
+    let text = location.node.text();
+    let position = LogicalPosition {
+        node_id: node_id.clone(),
+        utf16_offset: split_utf16,
+        affinity: Affinity::Forward,
+    };
+    NodePositionMap::new(&location.node, document.revision)?
+        .validate(&position, document.revision)?;
+    let (retained, generated) =
+        split_text_node(&location.node, split_utf16.get(), new_node_id.clone())?;
+    let expected = container_children(document, location.parent_id.as_ref())?;
+    let mut replacement = expected.clone();
+    replacement.splice(location.index..=location.index, [retained, generated]);
+    let forward_mapping = mapping_with(AnchorTransformation::SplitTextBlock {
+        node_id: node_id.clone(),
+        new_node_id: new_node_id.clone(),
+        split_utf16,
+    });
+    let inverse_mapping = mapping_with(AnchorTransformation::MergeTextBlocks {
+        first_node_id: node_id.clone(),
+        second_node_id: new_node_id.clone(),
+        first_utf16_length: split_utf16.get(),
+    });
+    let _ = text;
+    structural_pair(
+        document,
+        location.parent_id,
+        expected,
+        replacement,
+        forward_mapping,
+        inverse_mapping,
+        None,
+    )
+}
+
+fn derive_merge_operation(
+    document: &FlowDocument,
+    first_node_id: &NodeId,
+    second_node_id: &NodeId,
+) -> Result<(Operation, Operation), CommandError> {
+    let first = locate_node(&document.content, first_node_id).ok_or(CommandError::InvalidTarget)?;
+    let second =
+        locate_node(&document.content, second_node_id).ok_or(CommandError::InvalidTarget)?;
+    if first.parent_id != second.parent_id || second.index != first.index + 1 {
+        return Err(CommandError::IncompatibleStructure);
+    }
+    if !compatible_text_nodes(&first.node, &second.node) {
+        return Err(CommandError::IncompatibleStructure);
+    }
+    let merged = merge_text_nodes(&first.node, &second.node)?;
+    let first_length = utf16_length(&first.node.text())?;
+    let expected = container_children(document, first.parent_id.as_ref())?;
+    let mut replacement = expected.clone();
+    replacement.splice(first.index..=second.index, [merged]);
+    structural_pair(
+        document,
+        first.parent_id.clone(),
+        expected,
+        replacement,
+        mapping_with(AnchorTransformation::MergeTextBlocks {
+            first_node_id: first_node_id.clone(),
+            second_node_id: second_node_id.clone(),
+            first_utf16_length: first_length,
+        }),
+        mapping_with(AnchorTransformation::SplitTextBlock {
+            node_id: first_node_id.clone(),
+            new_node_id: second_node_id.clone(),
+            split_utf16: first_length.into(),
+        }),
+        None,
+    )
+}
+
+fn derive_delete_subtree_operation(
+    document: &FlowDocument,
+    node_id: &NodeId,
+    command_id: &CommandId,
+) -> Result<(Operation, Operation), CommandError> {
+    let location = locate_node(&document.content, node_id).ok_or(CommandError::InvalidTarget)?;
+    let expected = container_children(document, location.parent_id.as_ref())?;
+    let mut replacement = expected.clone();
+    replacement.remove(location.index);
+    if replacement.is_empty() && location.parent_id.is_some() {
+        return Err(CommandError::InvalidContainer);
+    }
+    if !document_has_editable_after_removal(document, node_id) {
+        if location.parent_id.is_some() {
+            return Err(CommandError::BrokenInvariant);
+        }
+        let fallback_id = deterministic_node_id(command_id, "editable-fallback")?;
+        let style_id = document.styles.first().map(|style| style.id.clone());
+        replacement.insert(
+            0,
+            ContentNode::paragraph(fallback_id, style_id, String::new()),
+        );
+    }
+    let mut affected_ids = Vec::new();
+    all_node_ids(&location.node, &mut affected_ids);
+    let forward_mapping =
+        affected_ids
+            .iter()
+            .cloned()
+            .fold(AnchorMapping::identity(), |mut mapping, deleted_id| {
+                mapping.push(AnchorTransformation::NodeDeleted {
+                    node_id: deleted_id,
+                    tombstone: TombstoneToken {
+                        command_id: command_id.clone(),
+                        slot: 0,
+                    },
+                });
+                mapping
+            });
+    let updates = field_updates_for_mapping(document, &forward_mapping)?;
+    let preimage = build_preimage(node_id.clone(), affected_ids, command_id, &updates)?;
+    structural_pair(
+        document,
+        location.parent_id,
+        expected,
+        replacement,
+        forward_mapping,
+        AnchorMapping::identity(),
+        Some(preimage),
+    )
+}
+
+fn document_has_editable_after_removal(document: &FlowDocument, removed: &NodeId) -> bool {
+    fn visit(nodes: &[ContentNode], removed: &NodeId) -> bool {
+        nodes.iter().any(|node| {
+            if node.id == *removed {
+                return false;
+            }
+            node.runs().is_some() || visit(node.children(), removed)
+        })
+    }
+    visit(&document.content, removed)
+}
+
+fn derive_cross_block_selection_operation(
+    document: &FlowDocument,
+    selection: &DirectionalSelection,
+    replacement: String,
+    command_id: &CommandId,
+) -> Result<(Operation, Operation), CommandError> {
+    let anchor = locate_node(&document.content, &selection.anchor.node_id)
+        .ok_or(CommandError::InvalidTarget)?;
+    let focus = locate_node(&document.content, &selection.focus.node_id)
+        .ok_or(CommandError::InvalidTarget)?;
+    if anchor.parent_id != focus.parent_id {
+        return Err(CommandError::IncompatibleStructure);
+    }
+    let (first, first_position, last, last_position) = if anchor.index < focus.index {
+        (&anchor, &selection.anchor, &focus, &selection.focus)
+    } else {
+        (&focus, &selection.focus, &anchor, &selection.anchor)
+    };
+    let expected = container_children(document, first.parent_id.as_ref())?;
+    if first.index >= expected.len() || last.index >= expected.len() || first.index >= last.index {
+        return Err(CommandError::InvalidRange);
+    }
+    if !compatible_text_nodes(&first.node, &last.node)
+        || expected[first.index..=last.index]
+            .iter()
+            .any(|node| !compatible_text_nodes(&first.node, node))
+    {
+        return Err(CommandError::IncompatibleStructure);
+    }
+    let first_map = NodePositionMap::new(&first.node, document.revision)?;
+    let last_map = NodePositionMap::new(&last.node, document.revision)?;
+    let first_byte = match first_map.validate(first_position, document.revision)? {
+        ResolvedPosition::Text(byte) => byte,
+        _ => return Err(CommandError::InvalidTarget),
+    };
+    let last_byte = match last_map.validate(last_position, document.revision)? {
+        ResolvedPosition::Text(byte) => byte,
+        _ => return Err(CommandError::InvalidTarget),
+    };
+    let first_length = utf16_length(&first.node.text())?;
+    let last_length = utf16_length(&last.node.text())?;
+    if first_byte.get() > first.node.text().len() || last_byte.get() > last.node.text().len() {
+        return Err(CommandError::InvalidRange);
+    }
+    if replacement.len() > DocumentLimits::V1.text_node_bytes {
+        return Err(EditorPositionError::TextLimit.into());
+    }
+    let (prefix, _) = split_runs_at(
+        node_runs(&first.node).ok_or(CommandError::InvalidTarget)?,
+        first_position.utf16_offset.get(),
+    )?;
+    let (_, suffix) = split_runs_at(
+        node_runs(&last.node).ok_or(CommandError::InvalidTarget)?,
+        last_position.utf16_offset.get(),
+    )?;
+    let mut runs = prefix;
+    if !replacement.is_empty() {
+        append_run(
+            &mut runs,
+            &replacement,
+            &marks_at_runs(
+                node_runs(&first.node).ok_or(CommandError::InvalidTarget)?,
+                first_position.utf16_offset.get(),
+            ),
+        );
+    }
+    for run in suffix {
+        append_run(&mut runs, &run.text, &run.marks);
+    }
+    let mut retained = first.node.clone();
+    set_node_runs(&mut retained, runs)?;
+    let mut replacement_children = expected.clone();
+    replacement_children.splice(first.index..=last.index, [retained]);
+    let removed_node_ids = expected[first.index + 1..last.index]
+        .iter()
+        .map(|node| node.id.clone())
+        .collect::<Vec<_>>();
+    let mut mapped_removed_ids = removed_node_ids.clone();
+    let mut affected_ids = Vec::new();
+    for node in &expected[first.index..=last.index] {
+        all_node_ids(node, &mut affected_ids);
+    }
+    let forward_mapping = mapping_with(AnchorTransformation::CrossBlockReplace {
+        first_node_id: first.node.id.clone(),
+        last_node_id: last.node.id.clone(),
+        removed_node_ids: std::mem::take(&mut mapped_removed_ids),
+        first_start: first_position.utf16_offset,
+        first_end: first_length.into(),
+        last_end: last_position.utf16_offset,
+        inserted_utf16_length: utf16_length(&replacement)?,
+        tombstone: TombstoneToken {
+            command_id: command_id.clone(),
+            slot: 0,
+        },
+    });
+    let updates = field_updates_for_mapping(document, &forward_mapping)?;
+    let preimage = build_preimage(first.node.id.clone(), affected_ids, command_id, &updates)?;
+    let _ = last_length;
+    structural_pair(
+        document,
+        first.parent_id.clone(),
+        expected,
+        replacement_children,
+        forward_mapping,
+        AnchorMapping::identity(),
+        Some(preimage),
+    )
+}
+
 fn selection_after_replacement(
+    document: &FlowDocument,
     selection: &DirectionalSelection,
     replacement: &str,
 ) -> Result<DirectionalSelection, CommandError> {
-    let start = selection
-        .anchor
-        .utf16_offset
-        .get()
-        .min(selection.focus.utf16_offset.get());
+    let start_position = ordered_selection_start(document, selection)?;
+    let start = start_position.utf16_offset.get();
     let end = start
         .checked_add(utf16_length(replacement)?)
         .ok_or(AnchorError::OutOfRange)?;
     let position = LogicalPosition {
-        node_id: selection.anchor.node_id.clone(),
+        node_id: start_position.node_id,
         utf16_offset: end.into(),
         affinity: Affinity::Forward,
     };
     Ok(DirectionalSelection {
         anchor: position.clone(),
         focus: position,
+    })
+}
+
+fn ordered_selection_start(
+    document: &FlowDocument,
+    selection: &DirectionalSelection,
+) -> Result<LogicalPosition, CommandError> {
+    if selection.anchor.node_id == selection.focus.node_id {
+        return Ok(
+            if selection.anchor.utf16_offset <= selection.focus.utf16_offset {
+                selection.anchor.clone()
+            } else {
+                selection.focus.clone()
+            },
+        );
+    }
+    let anchor = locate_node(&document.content, &selection.anchor.node_id)
+        .ok_or(CommandError::InvalidTarget)?;
+    let focus = locate_node(&document.content, &selection.focus.node_id)
+        .ok_or(CommandError::InvalidTarget)?;
+    if anchor.parent_id != focus.parent_id {
+        return Err(CommandError::IncompatibleStructure);
+    }
+    Ok(if anchor.index <= focus.index {
+        selection.anchor.clone()
+    } else {
+        selection.focus.clone()
     })
 }
 
@@ -1106,6 +2096,71 @@ pub(crate) fn replay_inverse(
     Ok(candidate)
 }
 
+fn apply_replace_children(
+    document: &mut FlowDocument,
+    container_id: &Option<NodeId>,
+    expected_children: &[ContentNode],
+    replacement_children: &[ContentNode],
+    anchor_mapping: &AnchorMapping,
+    field_updates: &[FieldUpdate],
+    preimage: Option<&AnchorPreimage>,
+) -> Result<(), CommandError> {
+    if let Some(preimage) = preimage {
+        validate_preimage(preimage, field_updates)?;
+    } else if field_updates.iter().any(|update| {
+        matches!(
+            update.replacement.anchor,
+            FieldAnchorState::TargetDeleted { .. }
+        )
+    }) {
+        return Err(CommandError::InvalidPreimage);
+    }
+    replace_container_children(
+        document,
+        container_id.as_ref(),
+        expected_children,
+        replacement_children.to_vec(),
+    )?;
+
+    let mut indexes = BTreeSet::new();
+    for update in field_updates {
+        let index = usize::try_from(update.index).map_err(|_| CommandError::HistoryConflict)?;
+        if !indexes.insert(index) || document.fields.get(index) != Some(update.expected.as_ref()) {
+            return Err(CommandError::HistoryConflict);
+        }
+    }
+    for update in field_updates {
+        let index = usize::try_from(update.index).map_err(|_| CommandError::HistoryConflict)?;
+        document.fields[index] = update.replacement.as_ref().clone();
+    }
+
+    if let Some(preimage) = preimage {
+        for owner in &preimage.owners {
+            let AnchorOwner::Field(field_id) = &owner.owner else {
+                continue;
+            };
+            let Some(update) = field_updates
+                .iter()
+                .find(|update| update.expected.id == *field_id)
+                .or_else(|| {
+                    field_updates
+                        .iter()
+                        .find(|update| update.replacement.id == *field_id)
+                })
+            else {
+                return Err(CommandError::InvalidPreimage);
+            };
+            if update.expected.anchor.original() != &owner.position
+                && update.replacement.anchor.original() != &owner.position
+            {
+                return Err(CommandError::InvalidPreimage);
+            }
+        }
+    }
+    let _ = anchor_mapping;
+    Ok(())
+}
+
 fn apply_operation(
     document: &mut FlowDocument,
     operation: &Operation,
@@ -1184,6 +2239,25 @@ fn apply_operation(
             document.content.remove(index);
             mapping.push(transformation);
         }
+        Operation::ReplaceChildren {
+            container_id,
+            expected_children,
+            replacement_children,
+            anchor_mapping,
+            field_updates,
+            preimage,
+        } => {
+            apply_replace_children(
+                document,
+                container_id,
+                expected_children,
+                replacement_children,
+                anchor_mapping,
+                field_updates,
+                preimage.as_ref(),
+            )?;
+            mapping.extend(anchor_mapping.clone());
+        }
         Operation::SetField {
             index,
             expected_field,
@@ -1211,6 +2285,16 @@ fn map_field_anchors(
     for field in &mut document.fields {
         let mapped = match mapping.map(field.anchor.original()) {
             AnchorMapResult::Mapped(position) => position,
+            AnchorMapResult::Deleted { tombstone } => {
+                if !matches!(field.anchor, FieldAnchorState::TargetDeleted { .. }) {
+                    let original = field.anchor.original().clone();
+                    field.anchor = FieldAnchorState::TargetDeleted {
+                        original,
+                        tombstone,
+                    };
+                }
+                continue;
+            }
             AnchorMapResult::Invalid(_) => return Err(CommandError::AnchorInvalidated),
         };
         match &mut field.anchor {
@@ -1287,6 +2371,9 @@ fn command_type(kind: &CommandKind) -> &'static str {
         CommandKind::SetNodeStyle { .. } => "setNodeStyle",
         CommandKind::InsertNode { .. } => "insertNode",
         CommandKind::DeleteNode { .. } => "deleteNode",
+        CommandKind::SplitTextBlock { .. } => "splitTextBlock",
+        CommandKind::MergeTextBlocks { .. } => "mergeTextBlocks",
+        CommandKind::DeleteSubtree { .. } => "deleteSubtree",
         CommandKind::SetField { .. } => "setField",
         CommandKind::Batch { .. } => "batch",
         CommandKind::Undo => "undo",
