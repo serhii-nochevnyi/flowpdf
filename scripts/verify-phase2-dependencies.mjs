@@ -69,7 +69,7 @@ function stableDigest(value) {
   return createHash('sha256').update(JSON.stringify(value)).digest('hex')
 }
 
-async function fetchResponse(fetchImpl, url, { timeoutMs, retries }) {
+async function fetchResponse(fetchImpl, url, { timeoutMs, retries, accept = 'application/json' }) {
   let lastError
   for (let attempt = 0; attempt <= retries; attempt += 1) {
     const controller = new AbortController()
@@ -78,7 +78,7 @@ async function fetchResponse(fetchImpl, url, { timeoutMs, retries }) {
       const response = await fetchImpl(url, {
         signal: controller.signal,
         headers: {
-          accept: 'application/json',
+          accept,
           'user-agent': 'flowpdf-dependency-verifier/2',
         },
       })
@@ -118,7 +118,7 @@ async function verifyGithubRepository(fetchImpl, repository, options) {
 
   requireFact(response.status === 403 || response.status === 429, 'repository_unavailable', `${apiUrl} returned HTTP ${response.status}`)
   const pageUrl = `https://github.com/${slug}`
-  const page = await fetchResponse(fetchImpl, pageUrl, options)
+  const page = await fetchResponse(fetchImpl, pageUrl, { ...options, accept: 'text/html' })
   requireFact(page.ok, 'repository_unavailable', `${pageUrl} returned HTTP ${page.status}`)
   const body = await page.text()
   requireFact(!/This repository was archived by the owner/i.test(body), 'repository_archived', `${repository} is archived`)

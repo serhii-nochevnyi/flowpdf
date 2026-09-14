@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "status": "success",
   "phase": "FLOWPDF-02",
-  "observedAt": "2026-08-29T11:04:02.568Z",
+  "observedAt": "2026-09-14T23:17:46.465Z",
   "policy": {
     "minimumAgeDays": 30,
     "minimumWeeklyDownloads": 1000,
@@ -84,16 +84,16 @@
       },
       "numericSnapshot": {
         "metric": "weeklyDownloads",
-        "value": 173164181,
+        "value": 128119130,
         "period": "last-week",
-        "start": "2026-08-22",
-        "end": "2026-08-28",
+        "start": "2026-09-05",
+        "end": "2026-09-11",
         "source": "https://api.npmjs.org/downloads/point/last-week/react"
       },
       "sources": {
         "package": "https://registry.npmjs.org/react",
         "version": "https://registry.npmjs.org/react/19.2.8",
-        "repository": "https://api.github.com/repos/react/react"
+        "repository": "https://github.com/react/react"
       },
       "legitimacy": {
         "verdict": "OK",
@@ -121,16 +121,16 @@
       },
       "numericSnapshot": {
         "metric": "weeklyDownloads",
-        "value": 162029750,
+        "value": 120650097,
         "period": "last-week",
-        "start": "2026-08-22",
-        "end": "2026-08-28",
+        "start": "2026-09-05",
+        "end": "2026-09-11",
         "source": "https://api.npmjs.org/downloads/point/last-week/react-dom"
       },
       "sources": {
         "package": "https://registry.npmjs.org/react-dom",
         "version": "https://registry.npmjs.org/react-dom/19.2.8",
-        "repository": "https://api.github.com/repos/react/react"
+        "repository": "https://github.com/react/react"
       },
       "legitimacy": {
         "verdict": "OK",
@@ -158,16 +158,16 @@
       },
       "numericSnapshot": {
         "metric": "weeklyDownloads",
-        "value": 158684269,
+        "value": 117806483,
         "period": "last-week",
-        "start": "2026-08-22",
-        "end": "2026-08-28",
+        "start": "2026-09-05",
+        "end": "2026-09-11",
         "source": "https://api.npmjs.org/downloads/point/last-week/%40types%2Freact"
       },
       "sources": {
         "package": "https://registry.npmjs.org/%40types%2Freact",
         "version": "https://registry.npmjs.org/%40types%2Freact/19.2.17",
-        "repository": "https://api.github.com/repos/DefinitelyTyped/DefinitelyTyped"
+        "repository": "https://github.com/DefinitelyTyped/DefinitelyTyped"
       },
       "legitimacy": {
         "verdict": "OK",
@@ -195,16 +195,16 @@
       },
       "numericSnapshot": {
         "metric": "weeklyDownloads",
-        "value": 131628603,
+        "value": 98563754,
         "period": "last-week",
-        "start": "2026-08-22",
-        "end": "2026-08-28",
+        "start": "2026-09-05",
+        "end": "2026-09-11",
         "source": "https://api.npmjs.org/downloads/point/last-week/%40types%2Freact-dom"
       },
       "sources": {
         "package": "https://registry.npmjs.org/%40types%2Freact-dom",
         "version": "https://registry.npmjs.org/%40types%2Freact-dom/19.2.3",
-        "repository": "https://api.github.com/repos/DefinitelyTyped/DefinitelyTyped"
+        "repository": "https://github.com/DefinitelyTyped/DefinitelyTyped"
       },
       "legitimacy": {
         "verdict": "OK",
@@ -232,16 +232,16 @@
       },
       "numericSnapshot": {
         "metric": "weeklyDownloads",
-        "value": 176223418,
+        "value": 132485786,
         "period": "last-week",
-        "start": "2026-08-22",
-        "end": "2026-08-28",
+        "start": "2026-09-05",
+        "end": "2026-09-11",
         "source": "https://api.npmjs.org/downloads/point/last-week/vite"
       },
       "sources": {
         "package": "https://registry.npmjs.org/vite",
         "version": "https://registry.npmjs.org/vite/8.1.5",
-        "repository": "https://api.github.com/repos/vitejs/vite"
+        "repository": "https://github.com/vitejs/vite"
       },
       "legitimacy": {
         "verdict": "OK",
@@ -269,16 +269,16 @@
       },
       "numericSnapshot": {
         "metric": "weeklyDownloads",
-        "value": 84087839,
+        "value": 65129121,
         "period": "last-week",
-        "start": "2026-08-22",
-        "end": "2026-08-28",
+        "start": "2026-09-05",
+        "end": "2026-09-11",
         "source": "https://api.npmjs.org/downloads/point/last-week/%40vitejs%2Fplugin-react"
       },
       "sources": {
         "package": "https://registry.npmjs.org/%40vitejs%2Fplugin-react",
         "version": "https://registry.npmjs.org/%40vitejs%2Fplugin-react/6.0.5",
-        "repository": "https://api.github.com/repos/vitejs/vite-plugin-react"
+        "repository": "https://github.com/vitejs/vite-plugin-react"
       },
       "legitimacy": {
         "verdict": "OK",
@@ -302,13 +302,13 @@
       "yanked": false,
       "numericSnapshot": {
         "metric": "recentDownloads",
-        "value": 6153130,
+        "value": 6479053,
         "source": "https://crates.io/api/v1/crates/icu_segmenter"
       },
       "sources": {
         "package": "https://crates.io/api/v1/crates/icu_segmenter",
         "version": "https://crates.io/api/v1/crates/icu_segmenter/2.3.0",
-        "repository": "https://api.github.com/repos/unicode-org/icu4x"
+        "repository": "https://github.com/unicode-org/icu4x"
       },
       "legitimacy": {
         "verdict": "OK",
@@ -334,13 +334,13 @@
       "yanked": false,
       "numericSnapshot": {
         "metric": "recentDownloads",
-        "value": 45722670,
+        "value": 49304435,
         "source": "https://crates.io/api/v1/crates/image"
       },
       "sources": {
         "package": "https://crates.io/api/v1/crates/image",
         "version": "https://crates.io/api/v1/crates/image/0.25.10",
-        "repository": "https://api.github.com/repos/image-rs/image"
+        "repository": "https://github.com/image-rs/image"
       },
       "legitimacy": {
         "verdict": "OK",

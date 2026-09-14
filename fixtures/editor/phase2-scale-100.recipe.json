@@ -1,0 +1,72 @@
+{
+  "formatVersion": 1,
+  "name": "phase2-semantic-scale-100",
+  "shape": "semantic-flow",
+  "pages": 100,
+  "paragraphsPerPage": 5,
+  "semanticPayloadHash": "sha256:0570a915cdeaa8cbe1b6ea5cb1057d3bea02c2707c399dde011cf162d683754f",
+  "locales": ["uk-UA", "en-US"],
+  "unicode": {
+    "ukrainian": "Український текст",
+    "english": "English contract text",
+    "decomposed": "й",
+    "emojiZwj": "👩‍💻",
+    "regionalIndicators": "🇺🇦",
+    "apostrophe": "апостроф ’"
+  },
+  "formatting": {
+    "inlineMarks": ["bold", "italic", "underline"],
+    "fontFamilies": ["notoSans", "notoSerif", "notoSansMono"],
+    "fontSizesMillipoints": [10000, 12000, 14000, 16000, 18000, 24000, 32000, 48000],
+    "colors": ["#1D4ED8", "#334155"],
+    "languages": ["uk-UA", "en-US"],
+    "blockStyles": ["paragraph", "heading:1", "heading:2", "heading:6"],
+    "alignments": ["start", "center", "end", "justify"],
+    "spacingMillipoints": [0, 12000, 144000]
+  },
+  "lists": {
+    "kinds": ["ordered", "unordered"],
+    "itemsPerKind": 3,
+    "maximumDepth": 8,
+    "emptyItemExit": true
+  },
+  "tables": [
+    { "rows": 2, "columns": 2, "headerRows": 1 },
+    { "rows": 2, "columns": 3, "headerRows": 0 }
+  ],
+  "pageBreaks": 9,
+  "images": [
+    { "action": "insert", "mediaType": "image/png", "accessibility": "described" },
+    { "action": "replace", "mediaType": "image/jpeg", "accessibility": "decorative" },
+    { "action": "setAccessibility", "mediaType": "image/jpeg", "accessibility": "described" },
+    { "action": "remove", "mediaType": "image/jpeg", "accessibility": "described" }
+  ],
+  "fields": {
+    "existingDescriptors": 6,
+    "reviewStates": ["legacyInvalid", "targetDeleted"],
+    "authoring": false,
+    "filling": false
+  },
+  "transactions": 120,
+  "resourceBudget": {
+    "maxSemanticBlocks": 4096,
+    "maxTextUtf8Bytes": 2000000,
+    "maxTableCells": 1000,
+    "maxImageEncodedBytes": 8388608,
+    "maxListDepth": 8
+  },
+  "layout": {
+    "phase": "phase2-semantic-only",
+    "pagination": false,
+    "pdf": false,
+    "geometry": false
+  },
+  "expected": {
+    "paragraphs": 500,
+    "semanticBlocks": 521,
+    "tableCells": 10,
+    "finalRevision": 121,
+    "existingFields": 6,
+    "recovery": "same-semantic-hash"
+  }
+}

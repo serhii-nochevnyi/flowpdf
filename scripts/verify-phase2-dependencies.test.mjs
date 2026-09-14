@@ -150,6 +150,38 @@ test('rejects contradictory repository evidence', async () => {
   }, 'repository_mismatch')
 })
 
+test('falls back to the official HTML repository page after a GitHub API rate limit', async () => {
+  const seen = []
+  const fixtureFetch = makeFixtureFetch()
+  const report = await buildPhase2DependencyReport(fixtureConfig(), {
+    fetchImpl: async (url, options) => {
+      seen.push({ url: String(url), accept: options?.headers?.accept })
+      if (String(url) === 'https://api.github.com/repos/example/demo') {
+        return new Response('rate limited', { status: 403 })
+      }
+      if (String(url) === 'https://github.com/example/demo') {
+        return new Response('<!doctype html><title>GitHub - example/demo · GitHub</title>', { status: 200 })
+      }
+      return fixtureFetch(url, options)
+    },
+    now: NOW,
+  })
+
+  assert.equal(report.npm[0].sources.repository, 'https://github.com/example/demo')
+  assert.equal(
+    seen.find(({ url }) => url === 'https://api.github.com/repos/example/demo')?.accept,
+    'application/json',
+  )
+  assert.equal(
+    seen.filter(({ url }) => url === 'https://github.com/example/demo').length,
+    2,
+  )
+  assert.ok(
+    seen.filter(({ url }) => url === 'https://github.com/example/demo')
+      .every(({ accept }) => accept === 'text/html'),
+  )
+})
+
 test('rejects a non-canonical tarball', async () => {
   await rejectsCode(fixtureConfig(), (url, value) => {
     if (url === 'https://registry.npmjs.org/demo') value.versions['2.0.0'].dist.tarball = 'https://evil.invalid/demo.tgz'
