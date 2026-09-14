@@ -1,8 +1,13 @@
 import type {
   DirectionalSelectionDto,
   EditorAppSnapshot,
+  EditorBlockViewDto,
   EditorViewDto,
 } from './editor-store.js'
+import type {
+  SourceModality,
+  StructuralCommandDto,
+} from './editor-controller.js'
 import { restoreDomSelection, selectionFromDom } from './selection-bridge.js'
 
 export const MAX_COMPOSITION_UTF8_BYTES = 64 * 1024
@@ -27,8 +32,9 @@ export interface InputCommandTarget {
   replaceText(
     text: string,
     selection?: DirectionalSelectionDto,
-    modality?: 'ui' | 'keyboard' | 'voice' | 'api' | 'system',
+    modality?: SourceModality,
   ): Promise<void>
+  structuralCommand(command: StructuralCommandDto, modality?: SourceModality): Promise<void>
 }
 
 export interface InputAdapterOptions {
@@ -205,6 +211,21 @@ export class InputAdapter {
       return
     }
 
+    if (input.inputType === 'insertLineBreak') {
+      if (!event.cancelable) {
+        this.invalidate('FLOW_UNEXPECTED_INPUT')
+        return
+      }
+      event.preventDefault()
+      const command = this.structuralCommandFor('Enter', view)
+      if (command === null) {
+        this.onError('FLOW_STRUCTURAL_SELECTION_REQUIRED')
+        return
+      }
+      this.submitStructural(command, 'keyboard', view)
+      return
+    }
+
     if (
       input.inputType === 'deleteContentBackward' ||
       input.inputType === 'deleteContentForward'
@@ -321,10 +342,36 @@ export class InputAdapter {
   }
 
   private readonly onKeyDown = (event: KeyboardEvent): void => {
-    if (event.key !== 'Escape' || this.phaseValue !== 'composing') return
+    if (event.key === 'Escape' && this.phaseValue === 'composing') {
+      event.preventDefault()
+      this.cancelRequested = true
+      this.finishIdle(this.currentView())
+      return
+    }
+    if (
+      this.phaseValue !== 'idle' ||
+      this.commandTarget.snapshot().phase !== 'ready' ||
+      event.isComposing ||
+      !['Enter', 'Backspace', 'Delete'].includes(event.key)
+    ) {
+      return
+    }
+    const view = this.currentView()
+    if (view === null) return
+    const command = this.structuralCommandFor(event.key, view)
+    if (command === null) {
+      if (event.key === 'Enter') {
+        this.preventIfPossible(event)
+        this.onError('FLOW_STRUCTURAL_SELECTION_REQUIRED')
+      }
+      return
+    }
+    if (!event.cancelable) {
+      this.invalidate('FLOW_UNEXPECTED_INPUT')
+      return
+    }
     event.preventDefault()
-    this.cancelRequested = true
-    this.finishIdle(this.currentView())
+    this.submitStructural(command, 'keyboard', view)
   }
 
   private readonly onSelectionChange = (): void => {
@@ -360,9 +407,7 @@ export class InputAdapter {
     ) {
       return selection
     }
-    const block = view.document.blocks.find(
-      (candidate) => candidate.nodeId === selection.focus.nodeId,
-    )
+    const block = findBlock(view.document.blocks, selection.focus.nodeId)
     const spans = block?.spans
     if (spans === undefined) return selection
     const boundaries = uniqueBoundaries(spans)
@@ -380,10 +425,77 @@ export class InputAdapter {
       : { anchor: selection.focus, focus: edge }
   }
 
+  dispatchSplit(modality: SourceModality = 'ui'): void {
+    const view = this.currentView()
+    const command = view === null ? null : this.structuralCommandFor('Enter', view)
+    if (view === null || command === null) {
+      this.onError('FLOW_STRUCTURAL_SELECTION_REQUIRED')
+      return
+    }
+    this.submitStructural(command, modality, view)
+  }
+
+  dispatchMerge(
+    direction: 'previous' | 'next',
+    modality: SourceModality = 'ui',
+  ): void {
+    const view = this.currentView()
+    const command =
+      view === null
+        ? null
+        : this.structuralCommandFor(direction === 'previous' ? 'Backspace' : 'Delete', view)
+    if (view === null || command === null) {
+      this.onError('FLOW_INCOMPATIBLE_STRUCTURE')
+      return
+    }
+    this.submitStructural(command, modality, view)
+  }
+
+  private structuralCommandFor(
+    key: string,
+    view: EditorViewDto,
+  ): StructuralCommandDto | null {
+    const selection = this.currentSelection(view)
+    if (
+      selection.anchor.nodeId !== selection.focus.nodeId ||
+      selection.anchor.utf16Offset !== selection.focus.utf16Offset
+    ) {
+      return null
+    }
+    const block = findBlock(view.document.blocks, selection.focus.nodeId)
+    if (block === undefined || !isTextBlock(block)) return null
+    if (key === 'Enter') {
+      return {
+        type: 'splitTextBlock',
+        nodeId: block.nodeId,
+        utf16Offset: selection.focus.utf16Offset,
+        newNodeId: deterministicSplitNodeId(view, block.nodeId, selection.focus.utf16Offset),
+      }
+    }
+    const backward = key === 'Backspace'
+    const atBoundary = backward
+      ? selection.focus.utf16Offset === 0
+      : selection.focus.utf16Offset === block.text.length
+    if (!atBoundary) return null
+    const neighbor = adjacentTextBlock(view.document.blocks, block.nodeId, backward ? -1 : 1)
+    if (neighbor === undefined) return null
+    return backward
+      ? {
+          type: 'mergeTextBlocks',
+          firstNodeId: neighbor.nodeId,
+          secondNodeId: block.nodeId,
+        }
+      : {
+          type: 'mergeTextBlocks',
+          firstNodeId: block.nodeId,
+          secondNodeId: neighbor.nodeId,
+        }
+  }
+
   private submit(
     text: string,
     selection: DirectionalSelectionDto,
-    modality: 'ui' | 'keyboard' | 'voice' | 'api' | 'system',
+    modality: SourceModality,
     maxUtf8Bytes: number,
   ): void {
     if (this.submitting || this.phaseValue === 'committing') {
@@ -416,13 +528,77 @@ export class InputAdapter {
     )
   }
 
+  private submitStructural(
+    command: StructuralCommandDto,
+    modality: SourceModality,
+    view: EditorViewDto,
+  ): void {
+    if (this.submitting || this.phaseValue === 'committing') {
+      this.invalidate('FLOW_INPUT_BUSY')
+      return
+    }
+    const capabilityName =
+      command.type === 'splitTextBlock'
+        ? 'splitTextBlock'
+        : command.type === 'mergeTextBlocks'
+          ? 'mergeTextBlocks'
+          : 'deleteSubtree'
+    if (!capabilityEnabled(view, capabilityName)) {
+      this.onError(
+        command.type === 'mergeTextBlocks'
+          ? 'FLOW_INCOMPATIBLE_STRUCTURE'
+          : 'FLOW_STRUCTURAL_SELECTION_REQUIRED',
+      )
+      return
+    }
+    const envelopeBytes = new TextEncoder().encode(JSON.stringify(command)).byteLength
+    if (envelopeBytes > MAX_COMMAND_ENVELOPE_BYTES) {
+      this.onError('FLOW_COMMAND_ENVELOPE_LIMIT')
+      return
+    }
+    this.submitting = true
+    this.phaseValue = 'committing'
+    this.commandAttemptsValue += 1
+    this.onError(null)
+    const task = this.commitStructural(command, modality)
+    this.pending = task.then(
+      () => undefined,
+      () => undefined,
+    )
+  }
+
   private async commit(
     text: string,
     selection: DirectionalSelectionDto,
-    modality: 'ui' | 'keyboard' | 'voice' | 'api' | 'system',
+    modality: SourceModality,
   ): Promise<void> {
     try {
       await this.commandTarget.replaceText(text, selection, modality)
+      const snapshot = this.commandTarget.snapshot()
+      if (snapshot.phase === 'error' && snapshot.errorCode !== null) {
+        this.onError(snapshot.errorCode)
+      }
+      const acceptedView = snapshot.accepted?.editor.view ?? this.currentView()
+      if (acceptedView !== null) {
+        this.lastView = acceptedView
+        queueMicrotask(() => {
+          restoreDomSelection(this.root, acceptedView, acceptedView.selection)
+        })
+      }
+    } catch (error: unknown) {
+      this.onError(inputErrorCode(error))
+    } finally {
+      this.submitting = false
+      this.finishIdle(this.currentView())
+    }
+  }
+
+  private async commitStructural(
+    command: StructuralCommandDto,
+    modality: SourceModality,
+  ): Promise<void> {
+    try {
+      await this.commandTarget.structuralCommand(command, modality)
       const snapshot = this.commandTarget.snapshot()
       if (snapshot.phase === 'error' && snapshot.errorCode !== null) {
         this.onError(snapshot.errorCode)
@@ -487,6 +663,81 @@ function uniqueBoundaries(
   return Array.from(
     new Set(spans.flatMap((span) => [span.startUtf16, span.endUtf16])),
   ).sort((left, right) => left - right)
+}
+
+function isTextBlock(
+  block: EditorBlockViewDto,
+): block is EditorBlockViewDto & {
+  readonly text: string
+  readonly spans: readonly { readonly startUtf16: number; readonly endUtf16: number }[]
+} {
+  return (
+    (block.kind === 'paragraph' || block.kind === 'heading') &&
+    typeof block.text === 'string' &&
+    Array.isArray(block.spans)
+  )
+}
+
+function findBlock(
+  blocks: readonly EditorBlockViewDto[],
+  nodeId: string,
+): EditorBlockViewDto | undefined {
+  for (const block of blocks) {
+    if (block.nodeId === nodeId) return block
+    const nested = findBlock(block.children ?? [], nodeId)
+    if (nested !== undefined) return nested
+  }
+  return undefined
+}
+
+function textBlocksInPreorder(
+  blocks: readonly EditorBlockViewDto[],
+): Array<EditorBlockViewDto & { readonly text: string }> {
+  const result: Array<EditorBlockViewDto & { readonly text: string }> = []
+  for (const block of blocks) {
+    if (isTextBlock(block)) result.push(block)
+    result.push(...textBlocksInPreorder(block.children ?? []))
+  }
+  return result
+}
+
+function adjacentTextBlock(
+  blocks: readonly EditorBlockViewDto[],
+  nodeId: string,
+  direction: -1 | 1,
+): (EditorBlockViewDto & { readonly text: string }) | undefined {
+  const textBlocks = textBlocksInPreorder(blocks)
+  const index = textBlocks.findIndex((block) => block.nodeId === nodeId)
+  if (index < 0) return undefined
+  return textBlocks[index + direction]
+}
+
+function capabilityEnabled(view: EditorViewDto, name: string): boolean {
+  const capability = view.capabilities.find((candidate) => candidate.name === name)
+  return capability?.enabled ?? true
+}
+
+function deterministicSplitNodeId(
+  view: EditorViewDto,
+  nodeId: string,
+  utf16Offset: number,
+): string {
+  const source = `${view.documentId}:${view.revision}:${nodeId}:${utf16Offset}`
+  let first = 0x811c9dc5
+  let second = 0x9e3779b9
+  let third = 0x85ebca6b
+  let fourth = 0xc2b2ae35
+  for (let index = 0; index < source.length; index += 1) {
+    const code = source.charCodeAt(index)
+    first = Math.imul(first ^ code, 0x01000193)
+    second = Math.imul(second ^ (code + index), 0x01000193)
+    third = Math.imul(third ^ (code * 31 + index), 0x01000193)
+    fourth = Math.imul(fourth ^ (code * 131 + index), 0x01000193)
+  }
+  const hex = [first, second, third, fourth]
+    .map((value) => (value >>> 0).toString(16).padStart(8, '0'))
+    .join('')
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-4${hex.slice(13, 16)}-8${hex.slice(17, 20)}-${hex.slice(20, 32)}`
 }
 
 function validateText(value: string, maxUtf8Bytes: number): string | null {

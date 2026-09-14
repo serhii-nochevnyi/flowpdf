@@ -18,7 +18,13 @@ export interface EditorSessionStateDto {
   readonly selection: DirectionalSelectionDto
   readonly pendingMarks: unknown
   readonly formatting: unknown
-  readonly capabilities: readonly unknown[]
+  readonly capabilities: readonly EditorCapabilityDto[]
+}
+
+export interface EditorCapabilityDto {
+  readonly name: string
+  readonly enabled: boolean
+  readonly reasonKey?: string | null
 }
 
 export interface EditorTextSpanDto {
@@ -33,6 +39,7 @@ export interface EditorBlockViewDto {
   readonly level?: number
   readonly nodeKind?: string
   readonly spans?: readonly EditorTextSpanDto[]
+  readonly children?: readonly EditorBlockViewDto[]
 }
 
 export interface EditorDocumentViewDto {
@@ -48,7 +55,7 @@ export interface EditorViewDto {
   readonly selection: DirectionalSelectionDto
   readonly pendingMarks: unknown
   readonly formatting: unknown
-  readonly capabilities: readonly unknown[]
+  readonly capabilities: readonly EditorCapabilityDto[]
   readonly document: EditorDocumentViewDto
 }
 

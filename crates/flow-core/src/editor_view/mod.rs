@@ -68,6 +68,9 @@ impl Default for FormattingProjectionDto {
 pub enum EditorCapability {
     SetSelection,
     SetPendingMarks,
+    SplitTextBlock,
+    MergeTextBlocks,
+    DeleteSubtree,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -94,6 +97,7 @@ impl EditorSessionState {
     pub fn from_document(document: &FlowDocument) -> Result<Self, EditorSessionError> {
         let (selection, pending_marks) = first_position(document)?;
         let formatting = formatting_for_selection(document, &selection)?;
+        let capabilities = capabilities_for(document, &selection);
         Ok(Self {
             document_id: document.document_id.clone(),
             revision: document.revision,
@@ -101,7 +105,7 @@ impl EditorSessionState {
             selection,
             pending_marks,
             formatting,
-            capabilities: default_capabilities(),
+            capabilities,
         })
     }
 
@@ -114,6 +118,7 @@ impl EditorSessionState {
         state.pending_marks = pending_marks_for_selection(document, &selection)?;
         state.selection = selection;
         state.formatting = formatting_for_selection(document, &state.selection)?;
+        state.capabilities = capabilities_for(document, &state.selection);
         Ok(state)
     }
 
@@ -130,7 +135,7 @@ impl EditorSessionState {
         if self.formatting != expected_formatting {
             return Err(EditorSessionError::ProjectionMismatch);
         }
-        if self.capabilities != default_capabilities() {
+        if self.capabilities != capabilities_for(document, &self.selection) {
             return Err(EditorSessionError::ProjectionMismatch);
         }
         Ok(())
@@ -222,6 +227,8 @@ pub enum EditorBlockViewDto {
     Atomic {
         node_id: NodeId,
         node_kind: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        children: Vec<EditorBlockViewDto>,
     },
 }
 
@@ -242,6 +249,7 @@ impl EditorBlockViewDto {
             body => Self::Atomic {
                 node_id: node.id.clone(),
                 node_kind: body_kind(body).to_owned(),
+                children: node.children().iter().map(Self::from_node).collect(),
             },
         }
     }
@@ -364,7 +372,18 @@ impl EditorSessionError {
     }
 }
 
-fn default_capabilities() -> Vec<CapabilityDto> {
+fn capabilities_for(
+    document: &FlowDocument,
+    selection: &DirectionalSelection,
+) -> Vec<CapabilityDto> {
+    let split_enabled = selection.collapsed()
+        && find_node(&document.content, &selection.anchor.node_id)
+            .is_some_and(|node| node.runs().is_some());
+    let merge_enabled = selection.collapsed()
+        && find_node(&document.content, &selection.anchor.node_id).is_some_and(|node| {
+            has_compatible_text_neighbor(document, node, selection.anchor.utf16_offset.get())
+        });
+    let delete_enabled = find_node(&document.content, &selection.focus.node_id).is_some();
     vec![
         CapabilityDto {
             name: EditorCapability::SetSelection,
@@ -376,7 +395,107 @@ fn default_capabilities() -> Vec<CapabilityDto> {
             enabled: true,
             reason_key: None,
         },
+        CapabilityDto {
+            name: EditorCapability::SplitTextBlock,
+            enabled: split_enabled,
+            reason_key: (!split_enabled).then_some("structuralSelectionRequired".to_owned()),
+        },
+        CapabilityDto {
+            name: EditorCapability::MergeTextBlocks,
+            enabled: merge_enabled,
+            reason_key: (!merge_enabled).then_some("incompatibleStructure".to_owned()),
+        },
+        CapabilityDto {
+            name: EditorCapability::DeleteSubtree,
+            enabled: delete_enabled,
+            reason_key: (!delete_enabled).then_some("unknownNode".to_owned()),
+        },
     ]
+}
+
+fn has_compatible_text_neighbor(document: &FlowDocument, node: &ContentNode, offset: u32) -> bool {
+    let Some(location) = locate_node(&document.content, &node.id) else {
+        return false;
+    };
+    let siblings = match location.parent_id.as_ref() {
+        None => &document.content,
+        Some(parent_id) => find_node(&document.content, parent_id)
+            .map(ContentNode::children)
+            .unwrap_or(&[]),
+    };
+    let text_length = node.text().encode_utf16().count() as u32;
+    let candidate_indices = if offset == 0 && offset == text_length {
+        vec![location.index.checked_sub(1), Some(location.index + 1)]
+    } else if offset == 0 {
+        vec![location.index.checked_sub(1)]
+    } else if offset == text_length {
+        vec![Some(location.index + 1)]
+    } else {
+        Vec::new()
+    };
+    candidate_indices
+        .into_iter()
+        .flatten()
+        .filter_map(|index| siblings.get(index))
+        .any(|neighbor| compatible_text_nodes(node, neighbor))
+}
+
+#[derive(Debug, Clone)]
+struct NodeLocation {
+    parent_id: Option<NodeId>,
+    index: usize,
+}
+
+fn locate_node(nodes: &[ContentNode], target: &NodeId) -> Option<NodeLocation> {
+    fn visit(
+        nodes: &[ContentNode],
+        target: &NodeId,
+        parent_id: Option<&NodeId>,
+    ) -> Option<NodeLocation> {
+        for (index, node) in nodes.iter().enumerate() {
+            if node.id == *target {
+                return Some(NodeLocation {
+                    parent_id: parent_id.cloned(),
+                    index,
+                });
+            }
+            if let Some(found) = visit(node.children(), target, Some(&node.id)) {
+                return Some(found);
+            }
+        }
+        None
+    }
+
+    visit(nodes, target, None)
+}
+
+fn compatible_text_nodes(left: &ContentNode, right: &ContentNode) -> bool {
+    if left.style_id != right.style_id {
+        return false;
+    }
+    match (&left.body, &right.body) {
+        (
+            crate::model::BlockKind::Paragraph {
+                attrs: left_attrs, ..
+            },
+            crate::model::BlockKind::Paragraph {
+                attrs: right_attrs, ..
+            },
+        ) => left_attrs == right_attrs,
+        (
+            crate::model::BlockKind::Heading {
+                level: left_level,
+                attrs: left_attrs,
+                ..
+            },
+            crate::model::BlockKind::Heading {
+                level: right_level,
+                attrs: right_attrs,
+                ..
+            },
+        ) => left_level == right_level && left_attrs == right_attrs,
+        _ => false,
+    }
 }
 
 fn first_position(
@@ -627,6 +746,7 @@ pub(crate) fn apply_action(
     }
 
     state.formatting = formatting_for_selection(document, &state.selection)?;
+    state.capabilities = capabilities_for(document, &state.selection);
     state.session_generation = state
         .session_generation
         .checked_add(1)

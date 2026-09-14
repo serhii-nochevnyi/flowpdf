@@ -612,12 +612,34 @@ fn apply_mutation(state: &EditorState, command: Command) -> Result<AppliedComman
     let mut mapping = AnchorMapping::identity();
     let mut selection_after = None;
     for mutation in &mutations {
+        let merge_offset = if let Mutation::MergeTextBlocks { first_node_id, .. } = mutation {
+            let first =
+                find_node(&candidate.content, first_node_id).ok_or(CommandError::InvalidTarget)?;
+            Some(utf16_length(&first.text())?)
+        } else {
+            None
+        };
         let (operation, inverse_operation) =
             derive_operation(&candidate, mutation, &command.command_id)?;
-        if let Mutation::ReplaceSelection { selection, text } = mutation {
-            selection_after = Some(selection_after_replacement(&candidate, selection, text)?);
-        }
+        let replacement_selection = if let Mutation::ReplaceSelection { selection, text } = mutation
+        {
+            Some(selection_after_replacement(&candidate, selection, text)?)
+        } else {
+            None
+        };
         let operation_mapping = apply_operation(&mut candidate, &operation)?;
+        selection_after = match mutation {
+            Mutation::ReplaceSelection { .. } => replacement_selection,
+            Mutation::SplitTextBlock { new_node_id, .. } => {
+                Some(collapsed_selection(new_node_id.clone(), 0))
+            }
+            Mutation::MergeTextBlocks { first_node_id, .. } => Some(collapsed_selection(
+                first_node_id.clone(),
+                merge_offset.ok_or(CommandError::BrokenInvariant)?,
+            )),
+            Mutation::DeleteSubtree { .. } => first_text_selection(&candidate),
+            _ => selection_after,
+        };
         mapping.extend(operation_mapping);
         forward.push(operation);
         inverse.insert(0, inverse_operation);
@@ -1943,6 +1965,34 @@ fn selection_after_replacement(
         anchor: position.clone(),
         focus: position,
     })
+}
+
+fn collapsed_selection(node_id: NodeId, utf16_offset: u32) -> DirectionalSelection {
+    let position = LogicalPosition {
+        node_id,
+        utf16_offset: utf16_offset.into(),
+        affinity: Affinity::Forward,
+    };
+    DirectionalSelection {
+        anchor: position.clone(),
+        focus: position,
+    }
+}
+
+fn first_text_selection(document: &FlowDocument) -> Option<DirectionalSelection> {
+    fn visit(nodes: &[ContentNode]) -> Option<DirectionalSelection> {
+        for node in nodes {
+            if node.runs().is_some() {
+                return Some(collapsed_selection(node.id.clone(), 0));
+            }
+            if let Some(selection) = visit(node.children()) {
+                return Some(selection);
+            }
+        }
+        None
+    }
+
+    visit(&document.content)
 }
 
 fn ordered_selection_start(

@@ -25,7 +25,24 @@ import {
 
 export type { EditorLocale }
 
-type SourceModality = 'ui' | 'keyboard' | 'voice' | 'api' | 'system'
+export type SourceModality = 'ui' | 'keyboard' | 'voice' | 'api' | 'system'
+
+export type StructuralCommandDto =
+  | {
+      readonly type: 'splitTextBlock'
+      readonly nodeId: string
+      readonly utf16Offset: number
+      readonly newNodeId: string
+    }
+  | {
+      readonly type: 'mergeTextBlocks'
+      readonly firstNodeId: string
+      readonly secondNodeId: string
+    }
+  | {
+      readonly type: 'deleteSubtree'
+      readonly nodeId: string
+    }
 
 interface ErrorDto {
   readonly code: string
@@ -92,6 +109,7 @@ interface ApplyCommandRequestDto {
           readonly selection: DirectionalSelectionDto
           readonly text: string
         }
+      | StructuralCommandDto
       | { readonly type: 'undo' }
       | { readonly type: 'redo' }
   }
@@ -167,6 +185,7 @@ export const editorCopy = {
     pending: 'Зміна виконується…',
     created: 'Документ створено і перевірено зі сховища.',
     edited: 'Абзац змінено і перевірено зі сховища.',
+    structural: 'Структуру документа змінено і перевірено зі сховища.',
     undone: 'Зміну скасовано і перевірено зі сховища.',
     redone: 'Зміну повторено і перевірено зі сховища.',
     reloaded: 'Локальний стан перезавантажено.',
@@ -200,6 +219,7 @@ export const editorCopy = {
     pending: 'Applying change…',
     created: 'Document created and verified from storage.',
     edited: 'Paragraph changed and verified from storage.',
+    structural: 'Document structure changed and verified from storage.',
     undone: 'Change undone and verified from storage.',
     redone: 'Change redone and verified from storage.',
     reloaded: 'Local state reloaded.',
@@ -357,6 +377,61 @@ export class EditorController {
         result.editor.session,
       )
     })
+  }
+
+  structuralCommand(
+    kind: StructuralCommandDto,
+    modality: SourceModality = 'keyboard',
+  ): Promise<void> {
+    return this.enqueue(async () => {
+      const accepted = this.requireAccepted()
+      const request: ApplyCommandRequestDto = {
+        canonicalJson: accepted.session.canonicalJson,
+        history: accepted.session.history,
+        command: {
+          commandId: newCommandId(),
+          baseRevision: accepted.session.revision,
+          modality,
+          issuedAt: this.currentTimestamp(),
+          kind,
+        },
+      }
+      const wasm = await this.wasm
+      const result = unwrap(wasm.apply_command(request))
+      await this.persistPlanned(result.commit, 'committedTransaction')
+      await this.publishVerified(
+        result.session,
+        copy(this.locale).structural,
+        result.editor.session,
+      )
+    })
+  }
+
+  splitTextBlock(
+    nodeId: string,
+    utf16Offset: number,
+    newNodeId: string,
+    modality: SourceModality = 'ui',
+  ): Promise<void> {
+    return this.structuralCommand(
+      { type: 'splitTextBlock', nodeId, utf16Offset, newNodeId },
+      modality,
+    )
+  }
+
+  mergeTextBlocks(
+    firstNodeId: string,
+    secondNodeId: string,
+    modality: SourceModality = 'ui',
+  ): Promise<void> {
+    return this.structuralCommand(
+      { type: 'mergeTextBlocks', firstNodeId, secondNodeId },
+      modality,
+    )
+  }
+
+  deleteSubtree(nodeId: string, modality: SourceModality = 'ui'): Promise<void> {
+    return this.structuralCommand({ type: 'deleteSubtree', nodeId }, modality)
   }
 
   undo(): Promise<void> {

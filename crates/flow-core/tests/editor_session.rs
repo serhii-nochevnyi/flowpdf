@@ -32,12 +32,19 @@ fn initial_session_is_rust_derived_and_noncanonical() {
     assert_eq!(state.formatting.bold, FormattingState::Off);
     assert_eq!(state.formatting.italic, FormattingState::Off);
     assert_eq!(state.formatting.underline, FormattingState::Off);
-    assert_eq!(state.capabilities.len(), 2);
+    assert_eq!(state.capabilities.len(), 5);
     assert!(
         state
             .capabilities
             .iter()
+            .take(2)
             .all(|capability| capability.enabled)
+    );
+    assert!(
+        state
+            .capabilities
+            .iter()
+            .any(|capability| capability.name == flow_core::EditorCapability::SplitTextBlock)
     );
 }
 

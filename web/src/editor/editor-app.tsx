@@ -9,6 +9,8 @@ import {
   copy,
   EditorController,
   type EditorAppOptions,
+  type SourceModality,
+  type StructuralCommandDto,
 } from './editor-controller.js'
 import { SemanticDocument } from './semantic-document.js'
 import type {
@@ -17,6 +19,7 @@ import type {
   EditorAppPhase,
   EditorAppSnapshot,
   EditorBlockViewDto,
+  EditorCapabilityDto,
   EditorDocumentViewDto,
   EditorLocale,
   EditorSessionResponseDto,
@@ -29,6 +32,7 @@ import type {
 
 export { EditorController }
 export { copy as editorCopy }
+export type { SourceModality, StructuralCommandDto }
 export type {
   DirectionalSelectionDto,
   EditorAcceptedSnapshot,
@@ -36,6 +40,7 @@ export type {
   EditorAppPhase,
   EditorAppSnapshot,
   EditorBlockViewDto,
+  EditorCapabilityDto,
   EditorDocumentViewDto,
   EditorLocale,
   EditorSessionResponseDto,
@@ -194,6 +199,7 @@ export function EditorApp({ controller: suppliedController, options = {} }: Edit
                 <SemanticDocument
                   view={accepted.editor.view}
                   controller={controller}
+                  locale={locale}
                   onInputError={setInputError}
                 />
               </section>

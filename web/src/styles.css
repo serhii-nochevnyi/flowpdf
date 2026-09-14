@@ -474,6 +474,17 @@ a:focus-visible {
   box-shadow: 0 12px 32px rgb(15 23 42 / 8%);
 }
 
+.editor-structure-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 24px;
+}
+
+.editor-structure-controls button {
+  min-height: 44px;
+}
+
 .editor-input-host {
   position: absolute;
   inset: auto auto 8px 8px;
@@ -507,6 +518,36 @@ a:focus-visible {
 .semantic-document h5:last-child,
 .semantic-document h6:last-child {
   margin-bottom: 0;
+}
+
+.semantic-document ol,
+.semantic-document ul {
+  max-width: 65ch;
+  margin: 0 0 20px;
+  padding-inline-start: 28px;
+}
+
+.semantic-document li {
+  margin-bottom: 12px;
+}
+
+.editor-table-wrapper {
+  max-width: 100%;
+  margin: 28px 0;
+  overflow-x: auto;
+}
+
+.editor-table-wrapper table {
+  min-width: 100%;
+  border-collapse: collapse;
+}
+
+.editor-table-wrapper td,
+.editor-table-wrapper th {
+  min-width: 120px;
+  padding: 8px;
+  border: 1px solid var(--border-default);
+  vertical-align: top;
 }
 
 .semantic-document figure {

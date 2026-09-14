@@ -62,9 +62,7 @@ function endpointFromDom(
 ) {
   const blockElement = blockElementForNode(root, endpoint.node)
   if (blockElement === null) return null
-  const block = view.document.blocks.find(
-    (candidate) => candidate.nodeId === blockElement.dataset.nodeId,
-  )
+  const block = findBlock(view.document.blocks, blockElement.dataset.nodeId)
   if (block === undefined || !isTextBlock(block)) return null
 
   if (endpoint.node.nodeType === Node.TEXT_NODE) {
@@ -91,9 +89,7 @@ function endpointToDom(
   view: EditorViewDto,
   position: DirectionalSelectionDto['anchor'],
 ): DomEndpoint | null {
-  const block = view.document.blocks.find(
-    (candidate) => candidate.nodeId === position.nodeId,
-  )
+  const block = findBlock(view.document.blocks, position.nodeId)
   if (block === undefined || !isTextBlock(block) || !isRustBoundary(block, position.utf16Offset)) {
     return null
   }
@@ -120,6 +116,19 @@ function blockElementForNode(root: HTMLElement, node: Node): HTMLElement | null 
   const blockElement = candidate?.closest<HTMLElement>('[data-node-id]') ?? null
   if (blockElement === null || !root.contains(blockElement)) return null
   return blockElement
+}
+
+function findBlock(
+  blocks: readonly EditorBlockViewDto[],
+  nodeId: string | undefined,
+): EditorBlockViewDto | undefined {
+  if (nodeId === undefined) return undefined
+  for (const block of blocks) {
+    if (block.nodeId === nodeId) return block
+    const nested = findBlock(block.children ?? [], nodeId)
+    if (nested !== undefined) return nested
+  }
+  return undefined
 }
 
 function firstTextNode(element: HTMLElement): Text | null {
