@@ -130,7 +130,10 @@ export function validateWasmSizeReport(report, expectedContext) {
     !Array.isArray(report.buildConfiguration.baselineFeatures) ||
     !Array.isArray(report.buildConfiguration.candidateFeatures) ||
     report.buildConfiguration.rustFlags !== rustFlags ||
-    report.buildConfiguration.bindgenTarget !== 'web'
+    report.buildConfiguration.bindgenTarget !== 'web' ||
+    report.buildConfiguration.measurementMode !== 'current-source-probe-delta' ||
+    report.buildConfiguration.onlyVariant !==
+      'measurement-only ICU probe activation against current Phase 2 source'
   ) {
     throw new Error('WASM size report build configuration is malformed')
   }
@@ -145,8 +148,8 @@ export function validateWasmSizeReport(report, expectedContext) {
     throw new Error('WASM size report budgets do not match the Phase 2 limits')
   }
 
-  validateMeasurement(report.baseline, 'phase1-compatible')
-  validateMeasurement(report.candidate, 'icu-compiled-data')
+  validateMeasurement(report.baseline, 'phase2-production')
+  validateMeasurement(report.candidate, 'phase2-production-with-icu-probe')
   if (
     !Number.isSafeInteger(report.delta?.rawBytes) ||
     !Number.isSafeInteger(report.delta?.gzipBytes) ||
@@ -236,6 +239,7 @@ function runSizeGate(record, verifiedWasmBindgen, icuIdentity) {
     candidateFeatures: ['icu-segmenter'],
     rustFlags,
     bindgenTarget: 'web',
+    measurementMode: 'current-source-probe-delta',
     commonCargoArguments: [
       'build',
       '--package',
@@ -247,7 +251,7 @@ function runSizeGate(record, verifiedWasmBindgen, icuIdentity) {
     ],
     commonBindgenArguments: ['--target', 'web', '--out-name', 'flow_wasm'],
     measuredOutput: 'flow_wasm_bg.wasm',
-    onlyVariant: 'icu-segmenter feature activation',
+    onlyVariant: 'measurement-only ICU probe activation against current Phase 2 source',
   }
   const { baseline, candidate } = measureIsolatedBuilds(runtimeToolchain)
   if (
@@ -288,7 +292,7 @@ function runSizeGate(record, verifiedWasmBindgen, icuIdentity) {
     }
   }
   process.stdout.write(
-    `WASM size gate passed: raw ${signed(report.delta.rawBytes)} bytes, gzip ${signed(report.delta.gzipBytes)} bytes.\n`,
+    `WASM size gate passed: current-source probe delta raw ${signed(report.delta.rawBytes)} bytes, gzip ${signed(report.delta.gzipBytes)} bytes.\n`,
   )
 }
 
@@ -310,17 +314,20 @@ function measureIsolatedBuilds(toolchain) {
     copyMeasurementWorkspace(workspace)
     appendProbe(workspace)
     prepareMeasurementLock(workspace, toolchain)
+    // Phase 2 production flow-core already links ICU in both variants. The
+    // measured delta is therefore the isolated probe's current-source cost,
+    // not a new Phase 1-compatible ICU admission delta.
     const baseline = buildVariant({
       workspace,
       temporaryRoot,
-      label: 'phase1-compatible',
+      label: 'phase2-production',
       features: [],
       toolchain,
     })
     const candidate = buildVariant({
       workspace,
       temporaryRoot,
-      label: 'icu-compiled-data',
+      label: 'phase2-production-with-icu-probe',
       features: ['icu-segmenter'],
       toolchain,
     })
@@ -380,7 +387,7 @@ function appendProbe(workspace) {
 }
 
 function buildVariant({ workspace, temporaryRoot, label, features, toolchain }) {
-  const variant = label === 'phase1-compatible' ? 'baseline' : 'candidate'
+  const variant = label === 'phase2-production' ? 'baseline' : 'candidate'
   const targetDirectory = resolve(temporaryRoot, `${variant}-target`)
   const bindgenDirectory = resolve(temporaryRoot, `${variant}-bindgen`)
   const cargoArguments = [

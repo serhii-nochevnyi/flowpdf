@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "status": "success",
   "phase": "FLOWPDF-02",
-  "observedAt": "2026-09-14T23:17:46.465Z",
+  "observedAt": "2026-09-14T23:32:57.049Z",
   "policy": {
     "minimumAgeDays": 30,
     "minimumWeeklyDownloads": 1000,

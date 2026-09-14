@@ -111,10 +111,10 @@
       },
       {
         "path": "scripts/verify-wasm-size.mjs",
-        "sha256": "sha256:8c0bb4385894b38107c65bce4fe1b750e3ba8ad8a5624b68b5eb6e2d3b31009b"
+        "sha256": "sha256:b463785a7146dfcc598ceac280c04febf6f90677369253acbc50ea44f18440d3"
       }
     ],
-    "digest": "sha256:759f14fda3f6051cf2da0156bb36528fac58d7a17cf5cc49f2a93e8b181664be"
+    "digest": "sha256:7ba47541e20e293240fb8c44b694c143e677a5b5020077911d9f59910fe0273b"
   },
   "toolchain": {
     "cargoVersion": "cargo 1.97.1 (c980f4866 2026-06-30)",
@@ -143,6 +143,7 @@
     ],
     "rustFlags": "-C debuginfo=0",
     "bindgenTarget": "web",
+    "measurementMode": "current-source-probe-delta",
     "commonCargoArguments": [
       "build",
       "--package",
@@ -159,7 +160,7 @@
       "flow_wasm"
     ],
     "measuredOutput": "flow_wasm_bg.wasm",
-    "onlyVariant": "icu-segmenter feature activation"
+    "onlyVariant": "measurement-only ICU probe activation against current Phase 2 source"
   },
   "compression": {
     "algorithm": "gzip",
@@ -180,14 +181,14 @@
     "gzipDeltaBytes": 163840
   },
   "baseline": {
-    "label": "phase1-compatible",
+    "label": "phase2-production",
     "rawBytes": 3481941,
     "gzipBytes": 751611,
     "sha256": "sha256:30238dab4db1152966805ded3a9ad9aafd61f34ac138fae30a9dabe01a3deedb",
     "gzipSha256": "sha256:4b1810b2fc2ffe28fe6517ae3fb2ca33f4aa12726440d60fce3427b873fc686d"
   },
   "candidate": {
-    "label": "icu-compiled-data",
+    "label": "phase2-production-with-icu-probe",
     "rawBytes": 3495965,
     "gzipBytes": 756740,
     "sha256": "sha256:be7c5fb43b14951ab45dd4847edaa63a69e16f2f56e155a09dec3b2dee837119",
