@@ -18,6 +18,7 @@ import ts from 'typescript'
 const projectRoot = resolve(import.meta.dirname, '../..')
 const allowedWasmExports = new Set([
   'apply_command',
+  'apply_editor_session',
   'commit_record',
   'create_sample',
   'migrate_document',
@@ -25,6 +26,7 @@ const allowedWasmExports = new Set([
   'plan_persistence_commit',
   'plan_standalone_audit',
   'query_document',
+  'query_editor_view',
   'recover_document',
   'recover_document_audited',
   'redo',

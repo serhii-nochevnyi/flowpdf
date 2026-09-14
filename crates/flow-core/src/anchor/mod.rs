@@ -9,6 +9,8 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::model::{Affinity, LogicalPosition, NodeId};
+use crate::model::{BlockKind, ContentNode};
+use crate::schema::{DocumentLimits, MAX_INLINE_RUNS};
 
 #[derive(
     Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash,
@@ -41,7 +43,7 @@ impl From<u32> for Utf16Offset {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct NativeByteOffset(usize);
 
 impl NativeByteOffset {
@@ -54,6 +56,12 @@ impl NativeByteOffset {
     pub const fn get(self) -> usize {
         self.0
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct GraphemeBoundary {
+    pub byte_offset: NativeByteOffset,
+    pub utf16_offset: Utf16Offset,
 }
 
 #[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
@@ -70,6 +78,183 @@ impl AnchorError {
         match self {
             Self::OutOfRange => "FLOW_INVALID_RANGE",
             Self::InvalidUtf16Boundary => "FLOW_INVALID_UTF16_BOUNDARY",
+        }
+    }
+}
+
+#[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
+pub enum EditorPositionError {
+    #[error(transparent)]
+    Scalar(#[from] AnchorError),
+    #[error("The UTF-16 position is inside an extended grapheme cluster")]
+    InvalidGraphemeBoundary,
+    #[error("The atomic node position must be an exact directional edge")]
+    InvalidAtomicPosition,
+    #[error("The node kind cannot carry a public logical position")]
+    UnsupportedNodeKind,
+    #[error("The logical position targets a different node")]
+    WrongNode,
+    #[error("The logical position is bound to a stale document revision")]
+    StaleRevision,
+    #[error("The text block exceeds the editor boundary budget")]
+    TextLimit,
+}
+
+impl EditorPositionError {
+    #[must_use]
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::Scalar(error) => error.code(),
+            Self::InvalidGraphemeBoundary => "FLOW_INVALID_GRAPHEME_BOUNDARY",
+            Self::InvalidAtomicPosition => "FLOW_INVALID_ATOMIC_POSITION",
+            Self::UnsupportedNodeKind => "FLOW_INVALID_POSITION_NODE_KIND",
+            Self::WrongNode => "FLOW_POSITION_NODE_MISMATCH",
+            Self::StaleRevision => "FLOW_STALE_REVISION",
+            Self::TextLimit => "FLOW_POSITION_TEXT_LIMIT",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GraphemeBoundaryMap {
+    text: String,
+    boundaries: Vec<GraphemeBoundary>,
+}
+
+impl GraphemeBoundaryMap {
+    pub fn new(value: &str) -> Result<Self, EditorPositionError> {
+        if value.len() > DocumentLimits::V1.text_node_bytes {
+            return Err(EditorPositionError::TextLimit);
+        }
+
+        let segmenter = icu_segmenter::GraphemeClusterSegmenter::new();
+        let mut chars = value.char_indices().peekable();
+        let mut utf16_offset = 0_u32;
+        let mut boundaries = Vec::new();
+        for byte_offset in segmenter.segment_str(value) {
+            while chars.peek().is_some_and(|(index, _)| *index < byte_offset) {
+                let (_, character) = chars.next().expect("peeked character exists");
+                let width = u32::try_from(character.len_utf16())
+                    .map_err(|_| EditorPositionError::Scalar(AnchorError::OutOfRange))?;
+                utf16_offset = utf16_offset
+                    .checked_add(width)
+                    .ok_or(EditorPositionError::Scalar(AnchorError::OutOfRange))?;
+            }
+            let byte_offset = NativeByteOffset::new(byte_offset);
+            boundaries.push(GraphemeBoundary {
+                byte_offset,
+                utf16_offset: Utf16Offset::new(utf16_offset),
+            });
+        }
+
+        Ok(Self {
+            text: value.to_owned(),
+            boundaries,
+        })
+    }
+
+    #[must_use]
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+
+    #[must_use]
+    pub fn boundaries(&self) -> &[GraphemeBoundary] {
+        &self.boundaries
+    }
+
+    #[must_use]
+    pub fn contains(&self, offset: Utf16Offset) -> bool {
+        self.boundaries
+            .binary_search_by_key(&offset, |boundary| boundary.utf16_offset)
+            .is_ok()
+    }
+
+    pub fn resolve(&self, offset: Utf16Offset) -> Result<NativeByteOffset, EditorPositionError> {
+        resolve_utf16_offset(&self.text, offset).map_err(EditorPositionError::Scalar)?;
+        self.boundaries
+            .binary_search_by_key(&offset, |boundary| boundary.utf16_offset)
+            .map(|index| self.boundaries[index].byte_offset)
+            .map_err(|_| EditorPositionError::InvalidGraphemeBoundary)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResolvedPosition {
+    Text(NativeByteOffset),
+    BeforeAtom,
+    AfterAtom,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NodePositionMap {
+    node_id: NodeId,
+    revision: u32,
+    graphemes: Option<GraphemeBoundaryMap>,
+}
+
+impl NodePositionMap {
+    pub fn new(node: &ContentNode, revision: u32) -> Result<Self, EditorPositionError> {
+        let graphemes = match &node.body {
+            BlockKind::Paragraph { runs, .. } | BlockKind::Heading { runs, .. } => {
+                if runs.len() > MAX_INLINE_RUNS {
+                    return Err(EditorPositionError::TextLimit);
+                }
+                Some(GraphemeBoundaryMap::new(&node.text())?)
+            }
+            BlockKind::Image { .. } | BlockKind::Table { .. } | BlockKind::PageBreak => None,
+            BlockKind::OrderedList { .. }
+            | BlockKind::UnorderedList { .. }
+            | BlockKind::ListItem { .. }
+            | BlockKind::TableRow { .. }
+            | BlockKind::TableCell { .. } => {
+                return Err(EditorPositionError::UnsupportedNodeKind);
+            }
+        };
+
+        Ok(Self {
+            node_id: node.id.clone(),
+            revision,
+            graphemes,
+        })
+    }
+
+    #[must_use]
+    pub fn node_id(&self) -> &NodeId {
+        &self.node_id
+    }
+
+    #[must_use]
+    pub const fn revision(&self) -> u32 {
+        self.revision
+    }
+
+    #[must_use]
+    pub fn graphemes(&self) -> Option<&GraphemeBoundaryMap> {
+        self.graphemes.as_ref()
+    }
+
+    pub fn validate(
+        &self,
+        position: &LogicalPosition,
+        revision: u32,
+    ) -> Result<ResolvedPosition, EditorPositionError> {
+        if position.node_id != self.node_id {
+            return Err(EditorPositionError::WrongNode);
+        }
+        if revision != self.revision {
+            return Err(EditorPositionError::StaleRevision);
+        }
+
+        match &self.graphemes {
+            Some(graphemes) => graphemes
+                .resolve(position.utf16_offset)
+                .map(ResolvedPosition::Text),
+            None => match (position.utf16_offset.get(), &position.affinity) {
+                (0, Affinity::Forward) => Ok(ResolvedPosition::BeforeAtom),
+                (1, Affinity::Backward) => Ok(ResolvedPosition::AfterAtom),
+                _ => Err(EditorPositionError::InvalidAtomicPosition),
+            },
         }
     }
 }

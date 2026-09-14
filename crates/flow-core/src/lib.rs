@@ -7,6 +7,7 @@ use std::collections::BTreeMap;
 pub mod anchor;
 pub mod audit;
 pub mod canonical;
+pub mod editor_view;
 pub mod model;
 pub mod provenance;
 pub mod schema;
@@ -23,6 +24,11 @@ use audit::{
 };
 pub use audit::{AuditEvent as AuditRecord, AuditOutcome};
 use canonical::{canonical_bytes, canonical_hash, decode_canonical};
+pub use editor_view::{
+    CapabilityDto, DirectionalSelection, EditorCapability, EditorSessionAction, EditorSessionError,
+    EditorSessionRequest, EditorSessionResponse, EditorSessionState, EditorViewDto,
+    EditorViewRequest, FormattingProjectionDto, FormattingState,
+};
 use model::{
     Affinity, CommandId, DocumentId, FlowDocument, LogicalPosition, MigrationHop, Provenance,
     SCHEMA_VERSION,
@@ -335,6 +341,8 @@ pub enum CoreError {
     Schema(#[from] SchemaError),
     #[error(transparent)]
     Command(#[from] CommandError),
+    #[error(transparent)]
+    EditorSession(#[from] EditorSessionError),
     #[error("The persisted record set is incomplete or discontinuous")]
     RecoveryGap,
     #[error("The persisted record hash does not match canonical content")]
@@ -356,6 +364,7 @@ impl CoreError {
             Self::Decode => "FLOW_DECODE_ERROR",
             Self::Schema(error) => error.code(),
             Self::Command(error) => error.code(),
+            Self::EditorSession(error) => error.code(),
             Self::RecoveryGap => "FLOW_RECOVERY_GAP",
             Self::HashMismatch => "FLOW_HASH_MISMATCH",
             Self::UnsafeAuditRecord | Self::Audit(_) => "FLOW_UNSAFE_AUDIT_RECORD",
@@ -378,6 +387,43 @@ impl From<CoreError> for ErrorDto {
 #[must_use]
 pub fn decode_failure<T>() -> ApiResponse<T> {
     ApiResponse::failure(CoreError::Decode)
+}
+
+/// Applies a noncanonical, Rust-owned editor-session action. This function
+/// never creates a document revision, transaction, audit entry, or persistence
+/// plan; it returns a new immutable session/view projection instead.
+#[must_use]
+pub fn apply_editor_session(request: EditorSessionRequest) -> ApiResponse<EditorSessionResponse> {
+    match apply_editor_session_inner(request) {
+        Ok(result) => ApiResponse::success(result),
+        Err(error) => ApiResponse::failure(error),
+    }
+}
+
+fn apply_editor_session_inner(
+    request: EditorSessionRequest,
+) -> Result<EditorSessionResponse, CoreError> {
+    let document = decode_canonical(request.canonical_json.as_bytes())?;
+    Ok(editor_view::apply_action(
+        request.session,
+        &document,
+        request.action,
+    )?)
+}
+
+/// Revalidates and projects an immutable Rust-owned editor session without
+/// mutating the canonical document or session generation.
+#[must_use]
+pub fn query_editor_view(request: EditorViewRequest) -> ApiResponse<EditorViewDto> {
+    match query_editor_view_inner(request) {
+        Ok(result) => ApiResponse::success(result),
+        Err(error) => ApiResponse::failure(error),
+    }
+}
+
+fn query_editor_view_inner(request: EditorViewRequest) -> Result<EditorViewDto, CoreError> {
+    let document = decode_canonical(request.canonical_json.as_bytes())?;
+    Ok(editor_view::project_view(&document, &request.session)?)
 }
 
 #[must_use]

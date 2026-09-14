@@ -4,7 +4,8 @@
 
 use flow_core::{
     ApiResponse, ApplyCommandRequest, AuditedRecoverRequest, AuditedRecoverResult, CommandKind,
-    CreateSampleRequest, MigrateDocumentRequest, MigrateDocumentResult, OperationResult,
+    CreateSampleRequest, EditorSessionRequest, EditorSessionResponse, EditorViewDto,
+    EditorViewRequest, MigrateDocumentRequest, MigrateDocumentResult, OperationResult,
     PlanPersistenceCommitRequest, PlanStandaloneAuditRequest, RecoverRequest, RecoverResult,
     store::PlannedPersistenceCommit,
 };
@@ -42,6 +43,27 @@ pub fn apply_command(request: JsValue) -> JsValue {
     let response = match serde_wasm_bindgen::from_value::<ApplyCommandRequest>(request) {
         Ok(request) => flow_core::apply_command(request),
         Err(_) => flow_core::decode_failure::<OperationResult>(),
+    };
+    serialize_response(&response)
+}
+
+/// Applies one immutable, revision-bound editor-session action. The response
+/// contains no persistence commit and never exposes a mutable Rust handle.
+#[wasm_bindgen]
+pub fn apply_editor_session(request: JsValue) -> JsValue {
+    let response = match serde_wasm_bindgen::from_value::<EditorSessionRequest>(request) {
+        Ok(request) => flow_core::apply_editor_session(request),
+        Err(_) => flow_core::decode_failure::<EditorSessionResponse>(),
+    };
+    serialize_response(&response)
+}
+
+/// Revalidates and returns the immutable Rust-owned editor view projection.
+#[wasm_bindgen]
+pub fn query_editor_view(request: JsValue) -> JsValue {
+    let response = match serde_wasm_bindgen::from_value::<EditorViewRequest>(request) {
+        Ok(request) => flow_core::query_editor_view(request),
+        Err(_) => flow_core::decode_failure::<EditorViewDto>(),
     };
     serialize_response(&response)
 }
