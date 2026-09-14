@@ -14,6 +14,7 @@ import type {
   StructuralCommandTarget,
 } from './editor-controller.js'
 import { capabilityReason, editorMessages } from './editor-messages.js'
+import { ImageInsertDialog } from './embedded-blocks.js'
 
 export interface StructuralControlsProps {
   readonly view: EditorViewDto
@@ -47,6 +48,7 @@ export function StructuralControls({
   const labels = editorMessages[locale]
   const tableCapability = capabilityFor(view, 'insertTable')
   const pageBreakCapability = capabilityFor(view, 'insertPageBreak')
+  const imageCapability = capabilityFor(view, 'insertImage')
   const busy = controller.snapshot().phase === 'pending'
   const execute = (command: StructuralCommandDto): void => {
     void controller.structuralCommand(command, 'ui').finally(focusEditorInput)
@@ -78,8 +80,17 @@ export function StructuralControls({
         >
           {labels.insertPageBreak}
         </button>
+        {imageCapability.placement == null ? null : (
+          <ImageInsertDialog
+            controller={controller}
+            locale={locale}
+            placement={imageCapability.placement}
+            disabled={busy || !imageCapability.enabled}
+          />
+        )}
         {reasonText(locale, 'insert-table', tableCapability.reasonKey)}
         {reasonText(locale, 'insert-page-break', pageBreakCapability.reasonKey)}
+        {reasonText(locale, 'insert-image', imageCapability.reasonKey)}
       </div>
       {tableCapability.placement == null ? null : (
         <TableInsertDialog
@@ -447,6 +458,14 @@ function confirmationText(
       body: labels.tableRemoveBody,
       confirm: labels.tableRemoveConfirm,
       cancel: labels.tableRemoveCancel,
+    }
+  }
+  if (confirmation.headingKey === 'editor.image.remove.heading') {
+    return {
+      heading: labels.imageRemoveHeading,
+      body: labels.imageRemoveBody,
+      confirm: labels.imageRemoveConfirm,
+      cancel: labels.imageRemoveCancel,
     }
   }
   return {

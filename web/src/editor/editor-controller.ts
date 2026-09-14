@@ -2,6 +2,7 @@ import {
   IndexedDbDocumentStore,
   StorageError,
   type AuditRecordDto,
+  type AssetRecordDto,
   type DocumentHeadDto,
   type HistoryStateDto,
   type LogicalPositionDto,
@@ -15,6 +16,7 @@ import {
   EditorStore,
   type DirectionalSelectionDto,
   type EditorAcceptedSnapshot,
+  type EditorBlockViewDto,
   type EditorLocale,
   type EditorSessionResponseDto,
   type EditorSessionStateDto,
@@ -27,6 +29,8 @@ import {
   type ListKindDto,
   type MarkSetDto,
   type StructuralPlacementDto,
+  type ImageAccessibilityDto,
+  type ImageBlockViewDto,
 } from './editor-store.js'
 
 export type { EditorLocale }
@@ -88,6 +92,30 @@ export type StructuralCommandDto =
   | {
       readonly type: 'removeTable'
       readonly tableId: string
+      readonly confirmed: boolean
+    }
+  | {
+      readonly type: 'insertImage'
+      readonly placement: StructuralPlacementDto
+      readonly sessionId: string
+      readonly receipt: string
+      readonly accessibility: ImageAccessibilityDto
+    }
+  | {
+      readonly type: 'replaceImage'
+      readonly imageNodeId: string
+      readonly sessionId: string
+      readonly receipt: string
+      readonly accessibility: ImageAccessibilityDto
+    }
+  | {
+      readonly type: 'setImageAccessibility'
+      readonly imageNodeId: string
+      readonly accessibility: Exclude<ImageAccessibilityDto, { readonly kind: 'missingLegacy' }>
+    }
+  | {
+      readonly type: 'removeImage'
+      readonly imageNodeId: string
       readonly confirmed: boolean
     }
 
@@ -164,6 +192,24 @@ export interface FormattingCommandTarget {
 export interface StructuralCommandTarget {
   snapshot(): { readonly phase: string }
   structuralCommand(command: StructuralCommandDto, modality?: SourceModality): Promise<void>
+  insertImage?(
+    bytes: Uint8Array,
+    placement: StructuralPlacementDto,
+    accessibility: Exclude<ImageAccessibilityDto, { readonly kind: 'missingLegacy' }>,
+    modality?: SourceModality,
+  ): Promise<void>
+  replaceImage?(
+    imageNodeId: string,
+    bytes: Uint8Array,
+    accessibility: Exclude<ImageAccessibilityDto, { readonly kind: 'missingLegacy' }>,
+    modality?: SourceModality,
+  ): Promise<void>
+  setImageAccessibility?(
+    imageNodeId: string,
+    accessibility: Exclude<ImageAccessibilityDto, { readonly kind: 'missingLegacy' }>,
+    modality?: SourceModality,
+  ): Promise<void>
+  imageSource?(contentHash: string): string | null
 }
 
 interface ErrorDto {
@@ -194,6 +240,16 @@ interface RecoverResultDto {
 interface AuditedRecoverResultDto {
   readonly recovered: RecoverResultDto
   readonly audit: AuditRecordDto
+}
+
+export interface AssetStageResponseDto {
+  readonly receipt: string
+  readonly contentHash: string
+  readonly mediaType: string
+  readonly byteLength: number
+  readonly width: number
+  readonly height: number
+  readonly expiresAtUnixSeconds: number
 }
 
 interface MigrateDocumentResultDto {
@@ -268,6 +324,10 @@ export interface WasmBoundary {
   readonly default: () => Promise<unknown>
   readonly create_sample: (request: unknown) => ApiResponse<OperationResultDto>
   readonly apply_command: (request: unknown) => ApiResponse<OperationResultDto>
+  readonly stage_asset?: (
+    bytes: Uint8Array,
+    request: unknown,
+  ) => ApiResponse<AssetStageResponseDto>
   readonly apply_editor_session?: (request: unknown) => ApiResponse<EditorSessionResponseDto>
   readonly open_document: (request: unknown) => ApiResponse<MigrateDocumentResultDto>
   readonly commit_record: (request: unknown) => ApiResponse<PlannedPersistenceCommitDto>
@@ -409,6 +469,8 @@ export class EditorController {
   private initialized: Promise<void> | undefined
   private pending: Promise<void> = Promise.resolve()
   private sessionPending: Promise<void> = Promise.resolve()
+  private readonly assetSessionId = newCommandId()
+  private readonly imageObjectUrls = new Map<string, string>()
 
   constructor(
     options: EditorAppOptions = {},
@@ -548,6 +610,108 @@ export class EditorController {
         result.editor.session,
       )
     })
+  }
+
+  insertImage(
+    bytes: Uint8Array,
+    placement: StructuralPlacementDto,
+    accessibility: Exclude<ImageAccessibilityDto, { readonly kind: 'missingLegacy' }>,
+    modality: SourceModality = 'ui',
+  ): Promise<void> {
+    return this.enqueue(async () => {
+      const accepted = this.requireAccepted()
+      const wasm = await this.wasm
+      const staged = this.stageAsset(wasm, bytes, accepted)
+      const result = unwrap(
+        wasm.apply_command({
+          canonicalJson: accepted.session.canonicalJson,
+          history: accepted.session.history,
+          command: {
+            commandId: newCommandId(),
+            baseRevision: accepted.session.revision,
+            modality,
+            issuedAt: this.currentTimestamp(),
+            kind: {
+              type: 'insertImage',
+              placement,
+              sessionId: this.assetSessionId,
+              receipt: staged.receipt,
+              accessibility,
+            },
+          },
+        }),
+      )
+      await this.persistPlanned(result.commit, 'committedTransaction')
+      await this.publishVerified(
+        result.session,
+        copy(this.locale).structural,
+        result.editor.session,
+      )
+    })
+  }
+
+  replaceImage(
+    imageNodeId: string,
+    bytes: Uint8Array,
+    accessibility: Exclude<ImageAccessibilityDto, { readonly kind: 'missingLegacy' }>,
+    modality: SourceModality = 'ui',
+  ): Promise<void> {
+    return this.enqueue(async () => {
+      const accepted = this.requireAccepted()
+      const wasm = await this.wasm
+      const staged = this.stageAsset(wasm, bytes, accepted)
+      const result = unwrap(
+        wasm.apply_command({
+          canonicalJson: accepted.session.canonicalJson,
+          history: accepted.session.history,
+          command: {
+            commandId: newCommandId(),
+            baseRevision: accepted.session.revision,
+            modality,
+            issuedAt: this.currentTimestamp(),
+            kind: {
+              type: 'replaceImage',
+              imageNodeId,
+              sessionId: this.assetSessionId,
+              receipt: staged.receipt,
+              accessibility,
+            },
+          },
+        }),
+      )
+      await this.persistPlanned(result.commit, 'committedTransaction')
+      await this.publishVerified(
+        result.session,
+        copy(this.locale).structural,
+        result.editor.session,
+      )
+    })
+  }
+
+  setImageAccessibility(
+    imageNodeId: string,
+    accessibility: Exclude<ImageAccessibilityDto, { readonly kind: 'missingLegacy' }>,
+    modality: SourceModality = 'ui',
+  ): Promise<void> {
+    return this.structuralCommand(
+      { type: 'setImageAccessibility', imageNodeId, accessibility },
+      modality,
+    )
+  }
+
+  removeImage(
+    imageNodeId: string,
+    confirmed: boolean,
+    modality: SourceModality = 'ui',
+  ): Promise<void> {
+    return this.structuralCommand(
+      { type: 'removeImage', imageNodeId, confirmed },
+      modality,
+    )
+  }
+
+  imageSource(contentHash: string): string | null {
+    return this.imageObjectUrls.get(contentHash) ?? null
   }
 
   splitTextBlock(
@@ -751,6 +915,12 @@ export class EditorController {
   }
 
   dispose(): void {
+    if (typeof globalThis.URL?.revokeObjectURL === 'function') {
+      for (const objectUrl of this.imageObjectUrls.values()) {
+        globalThis.URL.revokeObjectURL(objectUrl)
+      }
+    }
+    this.imageObjectUrls.clear()
     this.stateStore.dispose()
   }
 
@@ -763,6 +933,7 @@ export class EditorController {
       }
       const wasm = await this.wasm
       const recovered = unwrap(wasm.query_document(records))
+      this.syncImagePreviews(records.assets, recovered.editor.view)
       this.publishAccepted(recovered, copy(this.locale).reloaded)
     } catch (error: unknown) {
       this.publishError(error)
@@ -875,16 +1046,20 @@ export class EditorController {
     ) {
       throw new EditorError('FLOW_RESULT_REVISION_MISMATCH')
     }
+    const editorView =
+      preferredSession === undefined
+        ? recovered.editor.view
+        : unwrap(
+            wasm.query_editor_view({
+              canonicalJson: recovered.session.canonicalJson,
+              session: preferredSession,
+            }),
+          )
+    this.syncImagePreviews(records.assets, editorView)
     if (preferredSession === undefined) {
       this.publishAccepted(recovered, status)
       return
     }
-    const editorView = unwrap(
-      wasm.query_editor_view({
-        canonicalJson: recovered.session.canonicalJson,
-        session: preferredSession,
-      }),
-    )
     this.publishAccepted(
       {
         ...recovered,
@@ -917,6 +1092,52 @@ export class EditorController {
     const accepted = this.stateStore.accepted()
     if (accepted === null) throw new EditorError('FLOW_NO_ACTIVE_DOCUMENT')
     return accepted
+  }
+
+  private stageAsset(
+    wasm: WasmBoundary,
+    bytes: Uint8Array,
+    accepted: EditorAcceptedSnapshot,
+  ): AssetStageResponseDto {
+    if (wasm.stage_asset === undefined) {
+      throw new EditorError('FLOW_ASSET_STAGING_UNAVAILABLE')
+    }
+    return unwrap(
+      wasm.stage_asset(bytes, {
+        sessionId: this.assetSessionId,
+        documentId: accepted.session.documentId,
+        revision: accepted.session.revision,
+      }),
+    )
+  }
+
+  private syncImagePreviews(
+    assets: readonly AssetRecordDto[],
+    view: EditorViewDto,
+  ): void {
+    if (typeof globalThis.URL?.createObjectURL !== 'function') return
+    if (typeof Blob === 'undefined') return
+    const images = collectImageBlocks(view.document.blocks)
+    const reachable = new Set(images.map((image) => image.contentHash))
+    const records = new Map(assets.map((asset) => [asset.contentHash, asset]))
+    for (const image of images) {
+      if (this.imageObjectUrls.has(image.contentHash)) continue
+      const asset = records.get(image.contentHash)
+      if (asset === undefined || asset.bytes.length === 0) continue
+      try {
+        const objectUrl = globalThis.URL.createObjectURL(
+          new Blob([Uint8Array.from(asset.bytes)], { type: image.mediaType }),
+        )
+        this.imageObjectUrls.set(image.contentHash, objectUrl)
+      } catch {
+        // A preview failure must not reject an already durable Rust state.
+      }
+    }
+    for (const [contentHash, objectUrl] of this.imageObjectUrls) {
+      if (reachable.has(contentHash)) continue
+      globalThis.URL.revokeObjectURL(objectUrl)
+      this.imageObjectUrls.delete(contentHash)
+    }
   }
 
   private currentTimestamp(): string {
@@ -986,4 +1207,15 @@ function sameSelection(
     left.focus.utf16Offset === right.focus.utf16Offset &&
     left.focus.affinity === right.focus.affinity
   )
+}
+
+function collectImageBlocks(
+  blocks: readonly EditorBlockViewDto[],
+): ImageBlockViewDto[] {
+  const images: ImageBlockViewDto[] = []
+  for (const block of blocks) {
+    if (block.image !== undefined) images.push(block.image)
+    images.push(...collectImageBlocks(block.children ?? []))
+  }
+  return images
 }

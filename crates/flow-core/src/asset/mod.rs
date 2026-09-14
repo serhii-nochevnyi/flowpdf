@@ -9,8 +9,10 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     io::{BufReader, Cursor},
     sync::{Mutex, OnceLock},
-    time::{SystemTime, UNIX_EPOCH},
 };
+
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use image::{ImageFormat, ImageReader, Limits};
 use serde::{Deserialize, Serialize};
@@ -385,10 +387,22 @@ fn deterministic_asset_uuid(content_hash: &str, counter: u64) -> String {
     uuid::Uuid::from_bytes(bytes).hyphenated().to_string()
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn unix_seconds() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |duration| duration.as_secs())
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen::prelude::wasm_bindgen(js_namespace = Date)]
+extern "C" {
+    fn now() -> f64;
+}
+
+#[cfg(target_arch = "wasm32")]
+fn unix_seconds() -> u64 {
+    (now() / 1_000.0).floor() as u64
 }
 
 static GLOBAL_STAGING: OnceLock<Mutex<AssetStagingStore>> = OnceLock::new();

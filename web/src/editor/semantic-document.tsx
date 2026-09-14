@@ -17,6 +17,12 @@ import {
   capabilityFor,
   focusEditorInput,
 } from './structural-controls.js'
+import {
+  ImageActionBar,
+  imageAccessibilityLabel,
+  imageSelection,
+  imageSource,
+} from './embedded-blocks.js'
 
 export interface SemanticDocumentProps {
   readonly view: EditorViewDto
@@ -34,10 +40,15 @@ interface RenderContext {
     tableId: string,
     confirmation: ConfirmationMetadataDto,
   ) => void
+  readonly onRequestRemoveImage: (
+    imageNodeId: string,
+    confirmation: ConfirmationMetadataDto,
+  ) => void
 }
 
-interface PendingTableRemoval {
-  readonly tableId: string
+interface PendingRemoval {
+  readonly kind: 'table' | 'image'
+  readonly nodeId: string
   readonly confirmation: ConfirmationMetadataDto
 }
 
@@ -52,8 +63,7 @@ export function SemanticDocument({
   const viewRef = useRef(view)
   const adapterRef = useRef<InputAdapter | null>(null)
   const [candidate, setCandidate] = useState('')
-  const [pendingTableRemoval, setPendingTableRemoval] =
-    useState<PendingTableRemoval | null>(null)
+  const [pendingRemoval, setPendingRemoval] = useState<PendingRemoval | null>(null)
   viewRef.current = view
 
   useLayoutEffect(() => {
@@ -86,23 +96,23 @@ export function SemanticDocument({
     locale,
     rootRef,
     onRequestRemoveTable: (tableId, confirmation) =>
-      setPendingTableRemoval({ tableId, confirmation }),
+      setPendingRemoval({ kind: 'table', nodeId: tableId, confirmation }),
+    onRequestRemoveImage: (imageNodeId, confirmation) =>
+      setPendingRemoval({ kind: 'image', nodeId: imageNodeId, confirmation }),
   }
   const closeRemoval = (): void => {
-    setPendingTableRemoval(null)
+    setPendingRemoval(null)
     focusEditorInput()
   }
   const confirmRemoval = (): void => {
-    const removal = pendingTableRemoval
-    setPendingTableRemoval(null)
+    const removal = pendingRemoval
+    setPendingRemoval(null)
     if (removal === null) return
     void controller
       .structuralCommand(
-        {
-          type: 'removeTable',
-          tableId: removal.tableId,
-          confirmed: true,
-        },
+        removal.kind === 'table'
+          ? { type: 'removeTable', tableId: removal.nodeId, confirmed: true }
+          : { type: 'removeImage', imageNodeId: removal.nodeId, confirmed: true },
         'ui',
       )
       .finally(focusEditorInput)
@@ -170,10 +180,10 @@ export function SemanticDocument({
         autoCapitalize="off"
         autoCorrect="off"
       />
-      {pendingTableRemoval === null ? null : (
+      {pendingRemoval === null ? null : (
         <DestructiveConfirmDialog
           locale={locale}
-          confirmation={pendingTableRemoval.confirmation}
+          confirmation={pendingRemoval.confirmation}
           onCancel={closeRemoval}
           onConfirm={confirmRemoval}
         />
@@ -234,6 +244,8 @@ function renderAtomic(block: EditorBlockViewDto, context: RenderContext) {
       )
     case 'pageBreak':
       return renderPageBreak(block, context)
+    case 'image':
+      return renderImage(block, context)
     default:
       return (
         <figure key={block.nodeId} data-node-id={block.nodeId} data-block-kind={block.nodeKind}>
@@ -241,6 +253,77 @@ function renderAtomic(block: EditorBlockViewDto, context: RenderContext) {
         </figure>
       )
   }
+}
+
+function renderImage(block: EditorBlockViewDto, context: RenderContext) {
+  const image = block.image
+  if (image === undefined) {
+    return (
+      <figure key={block.nodeId} data-node-id={block.nodeId} data-block-kind="image">
+        <figcaption>{context.locale === 'uk' ? 'Зображення' : 'Image'}</figcaption>
+      </figure>
+    )
+  }
+  const selected = capabilityFor(context.view, 'removeImage').targetNodeId === block.nodeId
+  const source = imageSource(context.controller, image.contentHash)
+  const labels = context.locale === 'uk'
+    ? { image: 'Зображення документа', missing: 'Попередній перегляд недоступний' }
+    : { image: 'Document image', missing: 'Preview unavailable' }
+  const focusImage = (): void => {
+    void context.controller
+      .setEditorSelection(imageSelection(block.nodeId))
+      .then(() => focusAtomicElement(context.rootRef, block.nodeId))
+  }
+  const remove = capabilityFor(context.view, 'removeImage')
+  return (
+    <figure
+      key={block.nodeId}
+      data-node-id={block.nodeId}
+      data-block-kind="image"
+      data-selected={selected ? 'true' : 'false'}
+      className="editor-image-block"
+      tabIndex={0}
+      aria-label={labels.image}
+      onFocus={focusImage}
+      onClick={(event) => {
+        if ((event.target as HTMLElement).closest('button, input, dialog') === null) focusImage()
+      }}
+      onKeyDown={(event) => {
+        if (!['Backspace', 'Delete'].includes(event.key) || !remove.enabled) return
+        event.preventDefault()
+        if (remove.confirmation !== null && remove.confirmation !== undefined) {
+          context.onRequestRemoveImage(block.nodeId, remove.confirmation)
+        }
+      }}
+    >
+      {source === null ? (
+        <div className="editor-image-missing" data-image-missing="">
+          {labels.missing}
+        </div>
+      ) : (
+        <img
+          src={source}
+          alt={imageAccessibilityLabel(image.accessibility)}
+          data-image-preview=""
+        />
+      )}
+      {image.accessibility.kind === 'missingLegacy' ? (
+        <p className="editor-image-review" data-image-review="">
+          {context.locale === 'uk'
+            ? 'Перегляньте опис доступності цього старого зображення.'
+            : 'Review the accessibility description for this legacy image.'}
+        </p>
+      ) : null}
+      <figcaption>{image.mediaType} · {image.byteLength} B</figcaption>
+      <ImageActionBar
+        block={block}
+        view={context.view}
+        controller={context.controller}
+        locale={context.locale}
+        onRequestRemoveImage={context.onRequestRemoveImage}
+      />
+    </figure>
+  )
 }
 
 function renderTable(block: EditorBlockViewDto, context: RenderContext) {

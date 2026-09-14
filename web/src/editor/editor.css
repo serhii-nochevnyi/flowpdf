@@ -234,6 +234,75 @@
   outline-offset: 4px;
 }
 
+.editor-image-block {
+  display: grid;
+  justify-items: center;
+  gap: 8px;
+  max-width: 100%;
+  margin: 24px 0;
+  padding: 12px;
+  border: 1px solid var(--border-default);
+  border-radius: 6px;
+  background: var(--surface-card);
+}
+
+.editor-image-block[data-selected='true'] {
+  outline: 3px solid var(--accent);
+  outline-offset: 4px;
+}
+
+.editor-image-block:focus-visible {
+  outline: 3px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.editor-image-block img,
+.editor-image-dialog-preview {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  max-height: 480px;
+  object-fit: contain;
+}
+
+.editor-image-block figcaption {
+  max-width: 100%;
+  color: var(--text-secondary);
+  overflow-wrap: anywhere;
+  font-size: 14px;
+}
+
+.editor-image-missing,
+.editor-image-review {
+  max-width: 100%;
+  padding: 16px;
+  color: var(--text-secondary);
+  background: var(--surface-app);
+  overflow-wrap: anywhere;
+}
+
+.editor-image-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px;
+  width: 100%;
+  padding-top: 8px;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.editor-image-actions button,
+.editor-image-dialog button,
+.editor-image-dialog input,
+.editor-image-dialog textarea {
+  min-height: 44px;
+}
+
+.editor-image-actions .editor-control-reason {
+  flex: 1 1 100%;
+  text-align: center;
+}
+
 .editor-table-wrapper td[data-selected='true'],
 .editor-table-wrapper th[data-selected='true'] {
   outline: 3px solid var(--accent);
@@ -335,6 +404,44 @@
   color: var(--text-primary);
   background: var(--surface-card);
   font: inherit;
+}
+
+.editor-dialog-field input[type='file'] {
+  max-width: 100%;
+  padding: 8px;
+  border: 1px solid var(--border-control);
+  border-radius: 6px;
+  color: var(--text-primary);
+  background: var(--surface-card);
+  font: inherit;
+}
+
+.editor-dialog-textarea {
+  align-items: stretch;
+  flex-direction: column;
+}
+
+.editor-dialog-textarea textarea {
+  width: 100%;
+  min-height: 96px;
+  padding: 8px;
+  border: 1px solid var(--border-control);
+  border-radius: 6px;
+  color: var(--text-primary);
+  background: var(--surface-card);
+  font: inherit;
+  resize: vertical;
+}
+
+.editor-dialog-textarea small {
+  color: var(--text-secondary);
+  font-weight: 400;
+}
+
+.editor-image-dialog-preview {
+  width: min(100%, 320px);
+  max-height: 240px;
+  margin: 16px auto 0;
 }
 
 .editor-dialog-checkbox {

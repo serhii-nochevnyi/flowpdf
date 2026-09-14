@@ -1,10 +1,11 @@
 use flow_core::{
-    ApiResponse, ApplyCommandRequest, AuditRecord, CommandDto, CommandKind, CreateSampleRequest,
-    OperationResult, PersistenceCommit, RecoverRequest, SourceModality, TransactionRecord,
-    apply_command, create_sample,
-    model::{CommandId, DocumentId},
+    ApiResponse, ApplyCommandRequest, AssetStageRequest, AuditRecord, CommandDto, CommandKind,
+    CreateSampleRequest, OperationResult, PersistenceCommit, RecoverRequest, SourceModality,
+    StructuralPlacement, TransactionRecord, apply_command, create_sample,
+    model::{CommandId, DocumentId, ImageAccessibility},
     recover,
     schema::DocumentLimits,
+    stage_asset,
     store::{
         CommitDisposition, CommitPlanner, DocumentStore, InMemoryDocumentStore, SnapshotPolicy,
         SnapshotReason,
@@ -19,6 +20,16 @@ fn success<T>(response: ApiResponse<T>) -> T {
 
 fn command_id(value: u32) -> CommandId {
     CommandId::new(format!("00000000-0000-4000-8000-{value:012}")).expect("command ID")
+}
+
+fn one_pixel_png() -> Vec<u8> {
+    use image::{ExtendedColorType, ImageEncoder, codecs::png::PngEncoder};
+
+    let mut bytes = Vec::new();
+    PngEncoder::new(&mut bytes)
+        .write_image(&[0, 0, 0, 255], 1, 1, ExtendedColorType::Rgba8)
+        .expect("encode one-pixel PNG");
+    bytes
 }
 
 fn chain_with_commands(command_count: u32) -> Vec<OperationResult> {
@@ -518,6 +529,79 @@ fn recovery_work_hard_stops_at_n_plus_one_before_deduplication() {
         DocumentLimits::V1.recovery_records + 1 - current_count
     ]);
     assert_failure(raw_record_overflow, "FLOW_LIMIT_RECOVERY_RECORDS");
+}
+
+#[test]
+fn image_asset_records_survive_durable_recovery() {
+    let created = success(create_sample(CreateSampleRequest {
+        requested_locale: "uk-UA".to_owned(),
+        issued_at: "2026-09-15T00:00:00Z".to_owned(),
+    }));
+    let bytes = one_pixel_png();
+    let session_id = "recovery-image-session";
+    let staged = success(stage_asset(
+        AssetStageRequest {
+            session_id: session_id.to_owned(),
+            document_id: created.session.document_id.clone(),
+            revision: created.session.revision,
+        },
+        bytes.clone(),
+    ));
+    let inserted = success(apply_command(ApplyCommandRequest {
+        canonical_json: created.session.canonical_json.clone(),
+        history: created.session.history.clone(),
+        command: CommandDto {
+            command_id: command_id(9401),
+            base_revision: created.session.revision,
+            modality: SourceModality::Ui,
+            issued_at: "2026-09-15T00:00:01Z".to_owned(),
+            kind: CommandKind::InsertImage {
+                placement: StructuralPlacement {
+                    parent_id: None,
+                    index: 1,
+                },
+                session_id: session_id.to_owned(),
+                receipt: staged.receipt,
+                accessibility: ImageAccessibility::Described {
+                    text: "Зображення для recovery".to_owned(),
+                },
+            },
+        },
+    }));
+
+    let planner = CommitPlanner::new(SnapshotPolicy::EveryTransaction);
+    let mut store = InMemoryDocumentStore::default();
+    commit(
+        &planner,
+        &mut store,
+        &created.commit,
+        SnapshotReason::Creation,
+    );
+    commit(
+        &planner,
+        &mut store,
+        &inserted.commit,
+        SnapshotReason::CommittedTransaction,
+    );
+
+    let records = store.load_records().expect("durable image records");
+    assert!(
+        records
+            .assets
+            .iter()
+            .any(|asset| asset.bytes == bytes && asset.content_hash == staged.content_hash)
+    );
+    let recovered = success(recover(records));
+    assert_eq!(
+        recovered.session.canonical_json,
+        inserted.session.canonical_json
+    );
+    assert_eq!(
+        recovered.session.canonical_hash,
+        inserted.session.canonical_hash
+    );
+    assert_eq!(recovered.session.history, inserted.session.history);
+    assert_eq!(recovered.view.asset_count, inserted.view.asset_count);
 }
 
 #[derive(Debug, Deserialize)]

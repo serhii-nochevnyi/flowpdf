@@ -99,6 +99,30 @@ export interface TableLimitsDto {
   readonly maxCells: number
 }
 
+export type ImageAccessibilityDto =
+  | { readonly kind: 'described'; readonly text: string }
+  | { readonly kind: 'decorative' }
+  | { readonly kind: 'missingLegacy' }
+
+export interface ImageLimitsDto {
+  readonly maxEncodedBytes: number
+  readonly maxDimension: number
+  readonly maxPixels: number
+  readonly maxDecodedBytes: number
+  readonly maxAltTextBytes: number
+  readonly maxStagingReceiptsPerSession: number
+  readonly maxStagingBytesPerSession: number
+  readonly receiptTtlSeconds: number
+}
+
+export interface ImageBlockViewDto {
+  readonly assetId: string
+  readonly contentHash: string
+  readonly mediaType: string
+  readonly byteLength: number
+  readonly accessibility: ImageAccessibilityDto
+}
+
 export interface TableCellFocusDto {
   readonly cellId: string
   readonly selection: DirectionalSelectionDto
@@ -113,6 +137,7 @@ export interface EditorCapabilityDto {
   readonly confirmation?: ConfirmationMetadataDto | null
   readonly placement?: StructuralPlacementDto | null
   readonly tableLimits?: TableLimitsDto | null
+  readonly imageLimits?: ImageLimitsDto | null
   readonly targetNodeId?: string | null
 }
 
@@ -129,6 +154,7 @@ export interface EditorBlockViewDto {
   readonly nodeKind?: string
   readonly tableHeaderRows?: number
   readonly tableCellFocusOrder?: readonly TableCellFocusDto[]
+  readonly image?: ImageBlockViewDto
   readonly spans?: readonly EditorTextSpanDto[]
   readonly children?: readonly EditorBlockViewDto[]
 }
