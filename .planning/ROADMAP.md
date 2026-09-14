@@ -60,7 +60,7 @@ FlowPDF progresses through nine dependency-ordered vertical capabilities. The ro
   3. Keyboard, visible controls and synchronized semantic accessibility content expose every implemented mutation.
   4. Screen-reader users can navigate semantic content, fields, statuses and errors without relying on the page canvas alone.
 
-**Plans**: 16/18 plans executed
+**Plans**: 17/18 plans executed
 
 Plans:
 
@@ -80,7 +80,7 @@ Plans:
 - [x] 02-14-PLAN.md — Carry image lifecycle through WASM, atomic storage, and accessible controls.
 - [x] 02-15-PLAN.md — Generate exhaustive command parity and retained boundary contracts.
 - [x] 02-16-PLAN.md — Keep existing fields and the editor shell semantically accessible.
-- [ ] 02-17-PLAN.md — Close the exact 108-pair UI contract and honest AT evidence.
+- [x] 02-17-PLAN.md — Close the exact 108-pair UI contract and honest AT evidence.
 - [ ] 02-18-PLAN.md — Add fast scale feedback and the deterministic dual-run release gate.
 
 **UI hint**: yes

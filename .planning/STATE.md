@@ -4,16 +4,16 @@ milestone: v1.0
 current_phase: 2
 current_phase_name: Accessible Rich-Text Editing
 status: executing
-stopped_at: Completed 02-16-PLAN.md
-last_updated: "2026-09-14T22:36:16Z"
+stopped_at: Completed 02-17-PLAN.md
+last_updated: "2026-09-15T01:50:00Z"
 last_activity: 2026-09-15
-last_activity_desc: Plan 02-16 closed existing-field projection and localized semantic editor-shell accessibility
-state_head: 64b9cb8
+last_activity_desc: Plan 02-17 closed the exact 108-pair UI contract and recorded honest local/external AT evidence states
+state_head: 04e7d05
 progress:
   total_phases: 9
   completed_phases: 1
   total_plans: 24
-  completed_plans: 22
+  completed_plans: 23
 milestone_name: milestone
 ---
 
@@ -29,17 +29,17 @@ See: .planning/PROJECT.md (updated 2026-08-25)
 ## Current Position
 
 Phase: 2 (Accessible Rich-Text Editing) — EXECUTING
-Plan: 17 of 18
+Plan: 18 of 18
 Status: Ready to execute
-Last activity: 2026-09-15 — Plan 02-16 completed; ready for exact UI command-pair and assistive-technology evidence
+Last activity: 2026-09-15 — Plan 02-17 completed; ready for the deterministic scale and release gate
 
-Progress: Phase 2 — 16/18 plans complete; milestone percentage unavailable while later phases remain unplanned.
+Progress: Phase 2 — 17/18 plans complete; milestone percentage unavailable while later phases remain unplanned.
 
 ## Performance Metrics
 
 **Velocity:**
 
-- Total plans completed: 22
+- Total plans completed: 23
 - Average duration: not comparable (Plan 05 was a multi-session closeout)
 - Total execution time: multi-session
 
@@ -48,9 +48,9 @@ Progress: Phase 2 — 16/18 plans complete; milestone percentage unavailable whi
 | Phase | Plans | Total | Avg/Plan |
 |-------|-------|-------|----------|
 | 1 | 6 | - | - |
-| 2 | 16 | multi-session | - |
+| 2 | 17 | multi-session | - |
 
-**Recent Trend:** Schema-v2 tree and lossless migration gates remain green. Plan 02-14 now passes binary IndexedDB envelopes with legacy reads, receipt-only WASM image routing, accessible image controls, real Chromium persistence/recovery, and the full Rust/WASM/web gate; four editor plans remain.
+**Recent Trend:** Schema-v2 tree, lossless migration, editor accessibility, exact UI coverage, and honest AT evidence gates remain green. Plan 02-17 adds deterministic 108-pair ownership with no fallback buckets plus responsive/state Chromium evidence; Edge/Windows screen-reader UAT remains explicitly outstanding before the final release gate.
 **Per-Plan Metrics:**
 
 | Plan | Duration | Tasks | Files |
@@ -77,6 +77,7 @@ Progress: Phase 2 — 16/18 plans complete; milestone percentage unavailable whi
 | Phase FLOWPDF-02 P14 | resumed multi-session | 2 tasks | 13 files |
 | Phase FLOWPDF-02 P15 | resumed multi-session | 2 tasks | 8 files |
 | Phase FLOWPDF-02 P16 | resumed multi-session | 2 tasks | 14 files |
+| Phase FLOWPDF-02 P17 | resumed multi-session | 2 tasks | 9 files |
 
 ## Accumulated Context
 
