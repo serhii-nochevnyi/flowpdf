@@ -4,16 +4,16 @@ milestone: v1.0
 current_phase: 2
 current_phase_name: Accessible Rich-Text Editing
 status: executing
-stopped_at: Completed 02-09-PLAN.md
-last_updated: "2026-09-14T18:19:01Z"
+stopped_at: Completed 02-10-PLAN.md
+last_updated: "2026-09-14T19:07:34Z"
 last_activity: 2026-09-14
-last_activity_desc: Plan 02-09 closed formatting, pending state, and list semantics completed with exact Rust transactions, edge tests, recovery evidence, and full repository quality gates
-state_head: 3cb6270
+last_activity_desc: Plan 02-10 closed accessible formatting/list controls, directional selection synchronization, browser parity, recovery replay, and full repository quality gates
+state_head: 38bd5de
 progress:
   total_phases: 9
   completed_phases: 1
   total_plans: 24
-  completed_plans: 15
+  completed_plans: 16
 milestone_name: milestone
 ---
 
@@ -29,17 +29,17 @@ See: .planning/PROJECT.md (updated 2026-08-25)
 ## Current Position
 
 Phase: 2 (Accessible Rich-Text Editing) — EXECUTING
-Plan: 10 of 18
+Plan: 11 of 18
 Status: Ready to execute
-Last activity: 2026-09-14 — Plan 02-09 completed; ready for accessible formatting and list controls
+Last activity: 2026-09-14 — Plan 02-10 completed; ready for Rust table headers/removal and page-break semantics
 
-Progress: Phase 2 — 9/18 plans complete; milestone percentage unavailable while later phases remain unplanned.
+Progress: Phase 2 — 10/18 plans complete; milestone percentage unavailable while later phases remain unplanned.
 
 ## Performance Metrics
 
 **Velocity:**
 
-- Total plans completed: 15
+- Total plans completed: 16
 - Average duration: not comparable (Plan 05 was a multi-session closeout)
 - Total execution time: multi-session
 
@@ -48,9 +48,9 @@ Progress: Phase 2 — 9/18 plans complete; milestone percentage unavailable whil
 | Phase | Plans | Total | Avg/Plan |
 |-------|-------|-------|----------|
 | 1 | 6 | - | - |
-| 2 | 9 | multi-session | - |
+| 2 | 10 | multi-session | - |
 
-**Recent Trend:** Schema-v2 tree and lossless migration gates remain green. Plan 02-07 now passes exact split/merge/cross-block algebra, bounded deletion preimages, field-safe tombstones, recovery tamper rejection, and the full Rust/WASM/web gate; eleven editor plans remain.
+**Recent Trend:** Schema-v2 tree and lossless migration gates remain green. Plan 02-10 now passes Rust-owned formatting/list projection, directional selection parity, durable replay, and the full Rust/WASM/web gate; ten editor plans remain.
 **Per-Plan Metrics:**
 
 | Plan | Duration | Tasks | Files |
@@ -70,6 +70,7 @@ Progress: Phase 2 — 9/18 plans complete; milestone percentage unavailable whil
 | Phase FLOWPDF-02 P07 | resumed multi-session | 2 tasks | 9 files |
 | Phase FLOWPDF-02 P08 | resumed multi-session | 2 tasks | 12 files |
 | Phase FLOWPDF-02 P09 | resumed multi-session | 2 tasks | 8 files |
+| Phase FLOWPDF-02 P10 | resumed multi-session | 2 tasks | 19 files |
 
 ## Accumulated Context
 
@@ -96,6 +97,9 @@ Decisions are logged in `.planning/PROJECT.md`.
 - [Phase 2]: Formatting and list mutations are closed Rust commands with exact identity-mapped inverse children; collapsed inline attributes remain revision-bound session state.
 - [Phase 2]: Authoring accepts only bounded heading/font/spacing values and uppercase #RRGGBB colors; legacy unknown fonts are retained only for migration/read compatibility.
 - [Phase 2]: List nesting is capped at depth eight, with continuation, empty-item exit, indent, and outdent validated in Rust before publication.
+- [Phase 2]: Native formatting/list controls project accepted Rust state and share the typed controller command bus; React owns only physical disclosure and focus state.
+- [Phase 2]: DOM selection restoration uses `Selection.setBaseAndExtent` so directional anchor/focus order remains intact across accepted React renders.
+- [Phase 2]: Durable replay validates the complete closed formatting/list command vocabulary before acknowledging a transaction.
 
 ### Pending Todos
 
