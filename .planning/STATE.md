@@ -4,16 +4,16 @@ milestone: v1.0
 current_phase: 2
 current_phase_name: Accessible Rich-Text Editing
 status: executing
-stopped_at: Completed 02-04-PLAN.md
-last_updated: "2026-09-14T13:48:22Z"
+stopped_at: Completed 02-05-PLAN.md
+last_updated: "2026-09-14T16:03:30Z"
 last_activity: 2026-09-14
-last_activity_desc: Plan 02-04 grapheme and Rust editor-session authority completed with focused native, WASM, and web checks
-state_head: 0cb8b0cdca81cc0d4d93bef1a3340b987f78f246
+last_activity_desc: Plan 02-05 durable ReplaceSelection paragraph tracer completed with native, WASM, persistence, React, and Chromium checks
+state_head: 1078a668ad584cc39cbf8e7bed1fae159d73d1bf
 progress:
   total_phases: 9
   completed_phases: 1
   total_plans: 24
-  completed_plans: 10
+  completed_plans: 11
 milestone_name: milestone
 ---
 
@@ -29,17 +29,17 @@ See: .planning/PROJECT.md (updated 2026-08-25)
 ## Current Position
 
 Phase: 2 (Accessible Rich-Text Editing) — EXECUTING
-Plan: 5 of 18
+Plan: 6 of 18
 Status: Ready to execute
-Last activity: 2026-09-14 — Plan 02-04 completed; ready for the core/WASM/persistence/minimal-React paragraph tracer
+Last activity: 2026-09-14 — Plan 02-05 completed; ready for controlled input, DOM selection, paste, and IME tracing
 
-Progress: Phase 2 — 4/18 plans complete; milestone percentage unavailable while later phases remain unplanned.
+Progress: Phase 2 — 5/18 plans complete; milestone percentage unavailable while later phases remain unplanned.
 
 ## Performance Metrics
 
 **Velocity:**
 
-- Total plans completed: 10
+- Total plans completed: 11
 - Average duration: not comparable (Plan 05 was a multi-session closeout)
 - Total execution time: multi-session
 
@@ -48,9 +48,9 @@ Progress: Phase 2 — 4/18 plans complete; milestone percentage unavailable whil
 | Phase | Plans | Total | Avg/Plan |
 |-------|-------|-------|----------|
 | 1 | 6 | - | - |
-| 2 | 4 | multi-session | - |
+| 2 | 5 | multi-session | - |
 
-**Recent Trend:** Schema-v2 tree and lossless migration gates remain green. Plan 02-04 now passes the full Unicode 17 grapheme corpus, bounded 4 MiB text vectors, Rust session tests, pinned WASM build, and web build; fourteen editor plans remain.
+**Recent Trend:** Schema-v2 tree and lossless migration gates remain green. Plan 02-05 now passes native ReplaceSelection/recovery checks, pinned WASM/web builds, the Phase 2 boundary gate, and real Chromium migration/edit/undo/redo/reload/remount/recovery tracing; thirteen editor plans remain.
 **Per-Plan Metrics:**
 
 | Plan | Duration | Tasks | Files |
@@ -65,6 +65,7 @@ Progress: Phase 2 — 4/18 plans complete; milestone percentage unavailable whil
 | Phase FLOWPDF-02 P02 | multi-session | 2 tasks | 7 files |
 | Phase FLOWPDF-02 P03 | multi-session | 2 tasks | 28 files |
 | Phase FLOWPDF-02 P04 | resumed multi-session | 2 tasks | 7 files |
+| Phase FLOWPDF-02 P05 | resumed multi-session | 2 tasks | 16 files |
 
 ## Accumulated Context
 
@@ -84,6 +85,7 @@ Decisions are logged in `.planning/PROJECT.md`.
 - [Phase 2]: Frozen legacy decoders precede schema changes; v2 uses one canonical inline-run tree with retained block style defaults.
 - [Phase 2]: Stored migration-only review states remain explicit; new authoring rejects them and plain commands reject unsupported rich targets atomically.
 - [Phase 2]: ICU byte boundaries are translated to UTF-16 in one bounded linear pass; editor sessions remain noncanonical, revision-bound, and immutable at the WASM boundary.
+- [Phase 2]: ReplaceSelection validates directional grapheme endpoints in Rust, persists only through the existing guarded planner, and publishes React text only after durable commit plus Rust re-query.
 
 ### Pending Todos
 
@@ -103,6 +105,6 @@ Decisions are logged in `.planning/PROJECT.md`.
 
 ## Session Continuity
 
-Last session: 2026-09-14T13:48:22Z
-Stopped at: Completed 02-04-PLAN.md
+Last session: 2026-09-14T16:03:30Z
+Stopped at: Completed 02-05-PLAN.md
 Resume file: None
