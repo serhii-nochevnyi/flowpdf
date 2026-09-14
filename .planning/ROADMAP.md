@@ -60,7 +60,7 @@ FlowPDF progresses through nine dependency-ordered vertical capabilities. The ro
   3. Keyboard, visible controls and synchronized semantic accessibility content expose every implemented mutation.
   4. Screen-reader users can navigate semantic content, fields, statuses and errors without relying on the page canvas alone.
 
-**Plans**: 7/18 plans executed
+**Plans**: 8/18 plans executed
 
 Plans:
 
@@ -71,7 +71,7 @@ Plans:
 - [x] 02-05-PLAN.md — Prove the core/WASM/persistence/minimal-React paragraph tracer.
 - [x] 02-06-PLAN.md — Add controlled input, directional selection, paste, and real Chromium IME.
 - [x] 02-07-PLAN.md — Implement exact structural and deletion/preimage/recovery algebra.
-- [ ] 02-08-PLAN.md — Attach durable visible and keyboard structural product paths.
+- [x] 02-08-PLAN.md — Attach durable visible and keyboard structural product paths.
 - [ ] 02-09-PLAN.md — Implement closed formatting, pending state, and list semantics in Rust.
 - [ ] 02-10-PLAN.md — Expose accessible formatting/list controls and parity.
 - [ ] 02-11-PLAN.md — Implement complete table headers/removal and page-break semantics in Rust.
@@ -209,7 +209,7 @@ Plans:
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Durable Flow Foundation | 6/6 | Complete    | 2026-08-25 |
-| 2. Accessible Rich-Text Editing | 7/18 | In Progress|  |
+| 2. Accessible Rich-Text Editing | 8/18 | In Progress|  |
 | 3. Deterministic Reflow and Pagination | 0/TBD | Not started | - |
 | 4. Owned PDF Preview and Export | 0/TBD | Not started | - |
 | 5. Semantic Fillable Forms | 0/TBD | Not started | - |
