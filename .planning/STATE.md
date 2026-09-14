@@ -4,16 +4,16 @@ milestone: v1.0
 current_phase: 2
 current_phase_name: Accessible Rich-Text Editing
 status: executing
-stopped_at: Completed 02-10-PLAN.md
-last_updated: "2026-09-14T19:07:34Z"
+stopped_at: Completed 02-11-PLAN.md
+last_updated: "2026-09-14T19:36:07Z"
 last_activity: 2026-09-14
-last_activity_desc: Plan 02-10 closed accessible formatting/list controls, directional selection synchronization, browser parity, recovery replay, and full repository quality gates
-state_head: 38bd5de
+last_activity_desc: Plan 02-11 closed Rust-owned bounded page-break and table semantics, header/removal confirmation, exact inverse tests, and durable replay
+state_head: 0d8a592
 progress:
   total_phases: 9
   completed_phases: 1
   total_plans: 24
-  completed_plans: 16
+  completed_plans: 17
 milestone_name: milestone
 ---
 
@@ -29,17 +29,17 @@ See: .planning/PROJECT.md (updated 2026-08-25)
 ## Current Position
 
 Phase: 2 (Accessible Rich-Text Editing) — EXECUTING
-Plan: 11 of 18
+Plan: 12 of 18
 Status: Ready to execute
-Last activity: 2026-09-14 — Plan 02-10 completed; ready for Rust table headers/removal and page-break semantics
+Last activity: 2026-09-14 — Plan 02-11 completed; ready for browser table/page-break controls and native semantics
 
-Progress: Phase 2 — 10/18 plans complete; milestone percentage unavailable while later phases remain unplanned.
+Progress: Phase 2 — 11/18 plans complete; milestone percentage unavailable while later phases remain unplanned.
 
 ## Performance Metrics
 
 **Velocity:**
 
-- Total plans completed: 16
+- Total plans completed: 17
 - Average duration: not comparable (Plan 05 was a multi-session closeout)
 - Total execution time: multi-session
 
@@ -48,7 +48,7 @@ Progress: Phase 2 — 10/18 plans complete; milestone percentage unavailable whi
 | Phase | Plans | Total | Avg/Plan |
 |-------|-------|-------|----------|
 | 1 | 6 | - | - |
-| 2 | 10 | multi-session | - |
+| 2 | 11 | multi-session | - |
 
 **Recent Trend:** Schema-v2 tree and lossless migration gates remain green. Plan 02-10 now passes Rust-owned formatting/list projection, directional selection parity, durable replay, and the full Rust/WASM/web gate; ten editor plans remain.
 **Per-Plan Metrics:**
@@ -71,6 +71,7 @@ Progress: Phase 2 — 10/18 plans complete; milestone percentage unavailable whi
 | Phase FLOWPDF-02 P08 | resumed multi-session | 2 tasks | 12 files |
 | Phase FLOWPDF-02 P09 | resumed multi-session | 2 tasks | 8 files |
 | Phase FLOWPDF-02 P10 | resumed multi-session | 2 tasks | 19 files |
+| Phase FLOWPDF-02 P11 | resumed multi-session | 2 tasks | 8 files |
 
 ## Accumulated Context
 
@@ -100,6 +101,9 @@ Decisions are logged in `.planning/PROJECT.md`.
 - [Phase 2]: Native formatting/list controls project accepted Rust state and share the typed controller command bus; React owns only physical disclosure and focus state.
 - [Phase 2]: DOM selection restoration uses `Selection.setBaseAndExtent` so directional anchor/focus order remains intact across accepted React renders.
 - [Phase 2]: Durable replay validates the complete closed formatting/list command vocabulary before acknowledging a transaction.
+- [Phase 2]: Structural insertion uses explicit Rust parent/index placement; page breaks are atomic separators followed by an editable paragraph, and ordinary text deletion/merge cannot consume them.
+- [Phase 2]: Simple tables remain bounded to 50 rows, 20 columns, and 1,000 cells, with an optional first header row, Rust-owned row-major focus, and confirmation-gated whole-table/last-dimension removal.
+- [Phase 2]: Structural table/page-break commands are audit/replay-closed and use exact subtree preimages so durable recovery restores canonical content and header state.
 
 ### Pending Todos
 
