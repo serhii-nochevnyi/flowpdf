@@ -60,7 +60,7 @@ FlowPDF progresses through nine dependency-ordered vertical capabilities. The ro
   3. Keyboard, visible controls and synchronized semantic accessibility content expose every implemented mutation.
   4. Screen-reader users can navigate semantic content, fields, statuses and errors without relying on the page canvas alone.
 
-**Plans**: 17/18 plans executed
+**Plans**: 18/18 plans executed
 
 Plans:
 
@@ -81,7 +81,12 @@ Plans:
 - [x] 02-15-PLAN.md — Generate exhaustive command parity and retained boundary contracts.
 - [x] 02-16-PLAN.md — Keep existing fields and the editor shell semantically accessible.
 - [x] 02-17-PLAN.md — Close the exact 108-pair UI contract and honest AT evidence.
-- [ ] 02-18-PLAN.md — Add fast scale feedback and the deterministic dual-run release gate.
+- [x] 02-18-PLAN.md — Add fast scale feedback and the deterministic dual-run release gate.
+
+Phase 2 implementation plans are complete and the deterministic release gate is
+green. Final Phase 2 closure remains open until the explicitly required
+Edge/Windows screen-reader evidence is observed on that platform; local
+Chromium/macOS evidence is not a substitute.
 
 **UI hint**: yes
 

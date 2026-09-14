@@ -4,16 +4,16 @@ milestone: v1.0
 current_phase: 2
 current_phase_name: Accessible Rich-Text Editing
 status: executing
-stopped_at: Completed 02-17-PLAN.md
-last_updated: "2026-09-15T01:50:00Z"
+stopped_at: Completed 02-18-PLAN.md
+last_updated: "2026-09-14T23:21:26Z"
 last_activity: 2026-09-15
-last_activity_desc: Plan 02-17 closed the exact 108-pair UI contract and recorded honest local/external AT evidence states
-state_head: 04e7d05
+last_activity_desc: Plan 02-18 closed bounded semantic scale feedback and the deterministic dual-run Phase 2 release gate; external Edge/Windows AT remains outstanding
+state_head: 5f254eb
 progress:
   total_phases: 9
   completed_phases: 1
   total_plans: 24
-  completed_plans: 23
+  completed_plans: 24
 milestone_name: milestone
 ---
 
@@ -30,16 +30,16 @@ See: .planning/PROJECT.md (updated 2026-08-25)
 
 Phase: 2 (Accessible Rich-Text Editing) — EXECUTING
 Plan: 18 of 18
-Status: Ready to execute
-Last activity: 2026-09-15 — Plan 02-17 completed; ready for the deterministic scale and release gate
+Status: Ready for external AT evidence and Phase 2 closure
+Last activity: 2026-09-15 — Plan 02-18 completed; deterministic scale and dual-run release gate are green
 
-Progress: Phase 2 — 17/18 plans complete; milestone percentage unavailable while later phases remain unplanned.
+Progress: Phase 2 — 18/18 plans complete; milestone percentage unavailable while later phases remain unplanned.
 
 ## Performance Metrics
 
 **Velocity:**
 
-- Total plans completed: 23
+- Total plans completed: 24
 - Average duration: not comparable (Plan 05 was a multi-session closeout)
 - Total execution time: multi-session
 
@@ -48,9 +48,9 @@ Progress: Phase 2 — 17/18 plans complete; milestone percentage unavailable whi
 | Phase | Plans | Total | Avg/Plan |
 |-------|-------|-------|----------|
 | 1 | 6 | - | - |
-| 2 | 17 | multi-session | - |
+| 2 | 18 | multi-session | - |
 
-**Recent Trend:** Schema-v2 tree, lossless migration, editor accessibility, exact UI coverage, and honest AT evidence gates remain green. Plan 02-17 adds deterministic 108-pair ownership with no fallback buckets plus responsive/state Chromium evidence; Edge/Windows screen-reader UAT remains explicitly outstanding before the final release gate.
+**Recent Trend:** Schema-v2 tree, lossless migration, editor accessibility, exact UI coverage, deterministic semantic scale, and the dual-run release gate remain green. Plan 02-18 closes all implementation plans with 7/7 requirements, 33/33 edges, 108/108 UI owners, and 3/3 flagged prohibitions; Edge/Windows screen-reader UAT remains explicitly outstanding before Phase 2 closure.
 **Per-Plan Metrics:**
 
 | Plan | Duration | Tasks | Files |
@@ -78,6 +78,7 @@ Progress: Phase 2 — 17/18 plans complete; milestone percentage unavailable whi
 | Phase FLOWPDF-02 P15 | resumed multi-session | 2 tasks | 8 files |
 | Phase FLOWPDF-02 P16 | resumed multi-session | 2 tasks | 14 files |
 | Phase FLOWPDF-02 P17 | resumed multi-session | 2 tasks | 9 files |
+| Phase FLOWPDF-02 P18 | resumed multi-session | 2 tasks | 14 files |
 
 ## Accumulated Context
 
@@ -117,6 +118,8 @@ Decisions are logged in `.planning/PROJECT.md`.
 - [Phase 2]: Physical image bytes and hashes remain outside semantic command DTOs, while phase-aware contracts retain immutable WASM, safe native DOM, and deferred layout/PDF/voice/backend exclusions.
 - [Phase 2]: Existing fields remain Rust-owned, read-only editor projections; valid fields are ordered by logical anchors and invalid/deleted targets remain in an explicit review region with exact descriptor state.
 - [Phase 2]: The editor shell exposes one semantic document copy, one polite status, a separate atomic alert, and native keyboard-reachable field groups; local browser evidence does not substitute for external Windows/Edge/screen-reader evidence.
+- [Phase 2]: Semantic scale recipes remain bounded and layout/PDF-free; the release runner derives all 36 validation tasks, fails fast with safe diagnostics, and pins direct Browser Mode steps to the checked-in Playwright cache.
+- [Phase 2]: Vitest 4 filters use `--testNamePattern`; GitHub repository fallback explicitly requests HTML after API rate limiting while provenance remains fail-closed.
 
 ### Pending Todos
 
@@ -125,7 +128,8 @@ Decisions are logged in `.planning/PROJECT.md`.
 ### Blockers/Concerns
 
 - The Rust text/font stack requires an early differential benchmark against HarfBuzz reference behavior.
-- Before the Phase 2 final gate, fix WASM size measurement semantics: both current-source variants now link ICU. Keep historical admission evidence unchanged; do not claim a fresh Phase-1-compatible delta from that harness. See 02-03-SUMMARY.md.
+- The refreshed WASM size artifact is source-current and passes the numeric Phase 2 budget, but both current-source variants now link ICU. Keep the historical admission evidence unchanged; do not claim a fresh Phase-1-compatible delta from that harness. See 02-03-SUMMARY.md.
+- External Microsoft Edge on Windows plus a Windows screen-reader run remains unavailable/outstanding; Phase 2 is not marked complete by local evidence.
 
 ## Deferred Items
 
@@ -136,6 +140,6 @@ Decisions are logged in `.planning/PROJECT.md`.
 
 ## Session Continuity
 
-Last session: 2026-09-14T22:36:16Z
-Stopped at: Completed 02-16-PLAN.md
+Last session: 2026-09-14T23:21:26Z
+Stopped at: Completed 02-18-PLAN.md
 Resume file: None
