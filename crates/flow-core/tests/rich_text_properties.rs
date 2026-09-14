@@ -42,7 +42,7 @@ fn equal_semantics(left: &FlowDocument, right: &FlowDocument) {
 }
 
 #[test]
-fn structural_split_merge_preserves_ids_marks_and_directional_affinity() {
+fn structural_algebra_split_merge_preserves_ids_marks_and_directional_affinity() {
     let document = FlowDocument::deterministic_sample("uk-UA").expect("sample");
     let original_hash = semantic_hash(&document).expect("original hash");
     let first_id = document.content[0].id.clone();
@@ -126,7 +126,7 @@ fn structural_split_merge_preserves_ids_marks_and_directional_affinity() {
 }
 
 #[test]
-fn incompatible_or_nonadjacent_structural_targets_reject_atomically() {
+fn structural_algebra_incompatible_or_nonadjacent_targets_reject_atomically() {
     let document = FlowDocument::deterministic_sample("uk-UA").expect("sample");
     let state = EditorState::new(document.clone()).expect("state");
     let selection = DirectionalSelection {
@@ -165,7 +165,7 @@ fn incompatible_or_nonadjacent_structural_targets_reject_atomically() {
 }
 
 #[test]
-fn compatible_cross_block_replace_preserves_exact_unicode_and_restores_inverse() {
+fn structural_algebra_cross_block_replace_preserves_exact_unicode_and_restores_inverse() {
     let mut document = FlowDocument::deterministic_sample("uk-UA").expect("sample");
     let second_id = node_id(9020);
     document.content.insert(
@@ -230,7 +230,8 @@ fn compatible_cross_block_replace_preserves_exact_unicode_and_restores_inverse()
 }
 
 #[test]
-fn rich_run_replacement_preserves_unselected_marks_and_normalizes_only_adjacent_equal_runs() {
+fn structural_algebra_rich_run_replacement_preserves_unselected_marks_and_normalizes_only_adjacent_equal_runs()
+ {
     let mut document = FlowDocument::deterministic_sample("uk-UA").expect("sample");
     let node = &mut document.content[0];
     let first_marks = MarkSet {
@@ -285,7 +286,7 @@ fn rich_run_replacement_preserves_unselected_marks_and_normalizes_only_adjacent_
 }
 
 #[test]
-fn split_and_merge_use_the_same_grapheme_contract_inside_a_list_item() {
+fn structural_algebra_split_and_merge_use_the_same_grapheme_contract_inside_a_list_item() {
     let mut document = FlowDocument::deterministic_sample("uk-UA").expect("sample");
     document.fields.clear();
     let paragraph_id = node_id(9061);
@@ -379,7 +380,7 @@ fn deleting_the_last_editable_root_node_retains_a_new_empty_paragraph() {
 }
 
 #[test]
-fn deletion_tombstones_are_deterministic_and_private_preimage_is_bounded() {
+fn structural_algebra_deletion_tombstones_are_deterministic_and_private_preimage_is_bounded() {
     let document = FlowDocument::deterministic_sample("uk-UA").expect("sample");
     let state = EditorState::new(document.clone()).expect("state");
     let target = document.content[0].id.clone();
@@ -411,7 +412,7 @@ fn deletion_tombstones_are_deterministic_and_private_preimage_is_bounded() {
 }
 
 #[test]
-fn delete_undo_redo_undo_restores_document_fields_ids_and_history_exactly() {
+fn structural_algebra_delete_undo_redo_undo_restores_document_fields_ids_and_history_exactly() {
     let document = FlowDocument::deterministic_sample("uk-UA").expect("sample");
     let original_hash = semantic_hash(&document).expect("original hash");
     let original_fields = document.fields.clone();
