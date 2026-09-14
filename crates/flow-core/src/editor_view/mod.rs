@@ -12,6 +12,7 @@ use crate::model::{
     Affinity, Alignment, BlockStyle, ContentNode, DocumentId, FlowDocument, FontFamily, InlineMark,
     ListKind, LogicalPosition, MarkSet, NodeId, RunLanguage,
 };
+use crate::schema::{MAX_TABLE_COLUMNS, MAX_TABLE_ROWS};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -90,6 +91,31 @@ pub enum EditorCapability {
     SplitTextBlock,
     MergeTextBlocks,
     DeleteSubtree,
+    InsertPageBreak,
+    RemovePageBreak,
+    InsertTable,
+    AddTableRow,
+    RemoveTableRow,
+    AddTableColumn,
+    RemoveTableColumn,
+    SetTableHeaderRow,
+    RemoveTable,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum ConfirmationKindDto {
+    Destructive,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ConfirmationMetadataDto {
+    pub kind: ConfirmationKindDto,
+    pub heading_key: String,
+    pub body_key: String,
+    pub confirm_key: String,
+    pub cancel_key: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -98,6 +124,8 @@ pub struct CapabilityDto {
     pub name: EditorCapability,
     pub enabled: bool,
     pub reason_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confirmation: Option<ConfirmationMetadataDto>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -246,6 +274,8 @@ pub enum EditorBlockViewDto {
     Atomic {
         node_id: NodeId,
         node_kind: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        table_header_rows: Option<u8>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         children: Vec<EditorBlockViewDto>,
     },
@@ -268,6 +298,10 @@ impl EditorBlockViewDto {
             body => Self::Atomic {
                 node_id: node.id.clone(),
                 node_kind: body_kind(body).to_owned(),
+                table_header_rows: match body {
+                    crate::model::BlockKind::Table { header_rows, .. } => Some(*header_rows),
+                    _ => None,
+                },
                 children: node.children().iter().map(Self::from_node).collect(),
             },
         }
@@ -394,6 +428,61 @@ impl EditorSessionError {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TableContext {
+    table_id: NodeId,
+    row_index: Option<usize>,
+    column_index: Option<usize>,
+    row_count: usize,
+    column_count: usize,
+    header_rows: u8,
+}
+
+fn table_context_for_node(nodes: &[ContentNode], target: &NodeId) -> Option<TableContext> {
+    for node in nodes {
+        if let crate::model::BlockKind::Table { header_rows, rows } = &node.body {
+            let row_count = rows.len();
+            let column_count = rows.first().map_or(0, |row| row.children().len());
+            if node.id == *target {
+                return Some(TableContext {
+                    table_id: node.id.clone(),
+                    row_index: None,
+                    column_index: None,
+                    row_count,
+                    column_count,
+                    header_rows: *header_rows,
+                });
+            }
+            for (row_index, row) in rows.iter().enumerate() {
+                for (column_index, cell) in row.children().iter().enumerate() {
+                    if contains_node_id(cell, target) {
+                        return Some(TableContext {
+                            table_id: node.id.clone(),
+                            row_index: Some(row_index),
+                            column_index: Some(column_index),
+                            row_count,
+                            column_count,
+                            header_rows: *header_rows,
+                        });
+                    }
+                }
+            }
+        }
+        if let Some(found) = table_context_for_node(node.children(), target) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+fn contains_node_id(node: &ContentNode, target: &NodeId) -> bool {
+    node.id == *target
+        || node
+            .children()
+            .iter()
+            .any(|child| contains_node_id(child, target))
+}
+
 fn capabilities_for(
     document: &FlowDocument,
     selection: &DirectionalSelection,
@@ -413,70 +502,224 @@ fn capabilities_for(
             has_compatible_text_neighbor(document, node, selection.anchor.utf16_offset.get())
         });
     let delete_enabled = find_node(&document.content, &selection.focus.node_id).is_some();
+    let table_context = table_context_for_node(&document.content, &selection.anchor.node_id);
+    let same_table_cell = selection.collapsed()
+        && table_context
+            .as_ref()
+            .is_some_and(|context| context.row_index.is_some() && context.column_index.is_some())
+        && table_context_for_node(&document.content, &selection.focus.node_id) == table_context;
+    let selected_table_id = table_context
+        .as_ref()
+        .map(|context| context.table_id.clone());
+    let page_break_selected = anchor_node.is_some_and(|node| {
+        matches!(&node.body, crate::model::BlockKind::PageBreak)
+            && (selection.collapsed() || whole_atomic_selection(selection))
+    });
+    let table_confirmation = table_confirmation_metadata();
+    let row_limit_reached = table_context
+        .as_ref()
+        .is_some_and(|context| context.row_count >= MAX_TABLE_ROWS);
+    let column_limit_reached = table_context
+        .as_ref()
+        .is_some_and(|context| context.column_count >= MAX_TABLE_COLUMNS);
+    let only_table_row = table_context
+        .as_ref()
+        .is_some_and(|context| context.row_count == 1 && context.row_index.is_some());
+    let only_table_column = table_context
+        .as_ref()
+        .is_some_and(|context| context.column_count == 1 && context.column_index.is_some());
     vec![
-        CapabilityDto {
-            name: EditorCapability::SetSelection,
-            enabled: true,
-            reason_key: None,
-        },
-        CapabilityDto {
-            name: EditorCapability::SetPendingMarks,
-            enabled: true,
-            reason_key: None,
-        },
-        CapabilityDto {
-            name: EditorCapability::SetBlockAttributes,
-            enabled: text_selection,
-            reason_key: (!text_selection).then_some("textBlockRequired".to_owned()),
-        },
-        CapabilityDto {
-            name: EditorCapability::SetListKind,
-            enabled: text_selection,
-            reason_key: (!text_selection).then_some("textBlockRequired".to_owned()),
-        },
-        CapabilityDto {
-            name: EditorCapability::ContinueListItem,
-            enabled: same_list_item,
-            reason_key: (!same_list_item).then_some("listItemRequired".to_owned()),
-        },
-        CapabilityDto {
-            name: EditorCapability::ExitListItem,
-            enabled: same_list_item,
-            reason_key: (!same_list_item).then_some("emptyListItemRequired".to_owned()),
-        },
-        CapabilityDto {
-            name: EditorCapability::IndentListItem,
-            enabled: same_list_item && list_item_index.is_some_and(|index| index > 0),
-            reason_key: (!(same_list_item && list_item_index.is_some_and(|index| index > 0)))
-                .then_some("listSiblingRequired".to_owned()),
-        },
-        CapabilityDto {
-            name: EditorCapability::OutdentListItem,
-            enabled: same_list_item,
-            reason_key: (!same_list_item).then_some("nestedListItemRequired".to_owned()),
-        },
-        CapabilityDto {
-            name: EditorCapability::SetInlineMarks,
-            enabled: text_selection && !selection.collapsed(),
-            reason_key: (!text_selection || selection.collapsed())
-                .then_some("formattingRangeRequired".to_owned()),
-        },
-        CapabilityDto {
-            name: EditorCapability::SplitTextBlock,
-            enabled: split_enabled,
-            reason_key: (!split_enabled).then_some("structuralSelectionRequired".to_owned()),
-        },
-        CapabilityDto {
-            name: EditorCapability::MergeTextBlocks,
-            enabled: merge_enabled,
-            reason_key: (!merge_enabled).then_some("incompatibleStructure".to_owned()),
-        },
-        CapabilityDto {
-            name: EditorCapability::DeleteSubtree,
-            enabled: delete_enabled,
-            reason_key: (!delete_enabled).then_some("unknownNode".to_owned()),
-        },
+        capability(EditorCapability::SetSelection, true, None, None),
+        capability(EditorCapability::SetPendingMarks, true, None, None),
+        capability(
+            EditorCapability::SetBlockAttributes,
+            text_selection,
+            (!text_selection).then_some("textBlockRequired"),
+            None,
+        ),
+        capability(
+            EditorCapability::SetListKind,
+            text_selection,
+            (!text_selection).then_some("textBlockRequired"),
+            None,
+        ),
+        capability(
+            EditorCapability::ContinueListItem,
+            same_list_item,
+            (!same_list_item).then_some("listItemRequired"),
+            None,
+        ),
+        capability(
+            EditorCapability::ExitListItem,
+            same_list_item,
+            (!same_list_item).then_some("emptyListItemRequired"),
+            None,
+        ),
+        capability(
+            EditorCapability::IndentListItem,
+            same_list_item && list_item_index.is_some_and(|index| index > 0),
+            (!(same_list_item && list_item_index.is_some_and(|index| index > 0)))
+                .then_some("listSiblingRequired"),
+            None,
+        ),
+        capability(
+            EditorCapability::OutdentListItem,
+            same_list_item,
+            (!same_list_item).then_some("nestedListItemRequired"),
+            None,
+        ),
+        capability(
+            EditorCapability::SetInlineMarks,
+            text_selection && !selection.collapsed(),
+            (!text_selection || selection.collapsed()).then_some("formattingRangeRequired"),
+            None,
+        ),
+        capability(
+            EditorCapability::SplitTextBlock,
+            split_enabled,
+            (!split_enabled).then_some("structuralSelectionRequired"),
+            None,
+        ),
+        capability(
+            EditorCapability::MergeTextBlocks,
+            merge_enabled,
+            (!merge_enabled).then_some("incompatibleStructure"),
+            None,
+        ),
+        capability(
+            EditorCapability::DeleteSubtree,
+            delete_enabled,
+            (!delete_enabled).then_some("unknownNode"),
+            None,
+        ),
+        capability(
+            EditorCapability::InsertPageBreak,
+            selection.collapsed() && text_selection,
+            (!(selection.collapsed() && text_selection)).then_some("structuralSelectionRequired"),
+            None,
+        ),
+        capability(
+            EditorCapability::RemovePageBreak,
+            page_break_selected,
+            (!page_break_selected).then_some("pageBreakRequired"),
+            None,
+        ),
+        capability(
+            EditorCapability::InsertTable,
+            selection.collapsed() && text_selection,
+            (!(selection.collapsed() && text_selection)).then_some("structuralSelectionRequired"),
+            None,
+        ),
+        capability(
+            EditorCapability::AddTableRow,
+            same_table_cell && !row_limit_reached,
+            if !same_table_cell {
+                Some("tableCellRequired")
+            } else if row_limit_reached {
+                Some("tableRowLimit")
+            } else {
+                None
+            },
+            None,
+        ),
+        capability(
+            EditorCapability::RemoveTableRow,
+            same_table_cell && !only_table_row,
+            if !same_table_cell {
+                Some("tableCellRequired")
+            } else if only_table_row {
+                Some("tableRemovalConfirmationRequired")
+            } else {
+                None
+            },
+            only_table_row.then(|| table_confirmation.clone()),
+        ),
+        capability(
+            EditorCapability::AddTableColumn,
+            same_table_cell && !column_limit_reached,
+            if !same_table_cell {
+                Some("tableCellRequired")
+            } else if column_limit_reached {
+                Some("tableColumnLimit")
+            } else {
+                None
+            },
+            None,
+        ),
+        capability(
+            EditorCapability::RemoveTableColumn,
+            same_table_cell && !only_table_column,
+            if !same_table_cell {
+                Some("tableCellRequired")
+            } else if only_table_column {
+                Some("tableRemovalConfirmationRequired")
+            } else {
+                None
+            },
+            only_table_column.then(|| table_confirmation.clone()),
+        ),
+        capability(
+            EditorCapability::SetTableHeaderRow,
+            selected_table_id.is_some(),
+            selected_table_id.is_none().then_some("tableRequired"),
+            None,
+        ),
+        capability(
+            EditorCapability::RemoveTable,
+            selected_table_id.is_some(),
+            selected_table_id.is_none().then_some("tableRequired"),
+            selected_table_id.map(|_| table_confirmation),
+        ),
     ]
+}
+
+fn capability(
+    name: EditorCapability,
+    enabled: bool,
+    reason_key: Option<&str>,
+    confirmation: Option<ConfirmationMetadataDto>,
+) -> CapabilityDto {
+    CapabilityDto {
+        name,
+        enabled,
+        reason_key: reason_key.map(str::to_owned),
+        confirmation,
+    }
+}
+
+fn table_confirmation_metadata() -> ConfirmationMetadataDto {
+    ConfirmationMetadataDto {
+        kind: ConfirmationKindDto::Destructive,
+        heading_key: "editor.table.remove.heading".to_owned(),
+        body_key: "editor.table.remove.body".to_owned(),
+        confirm_key: "editor.table.remove.confirm".to_owned(),
+        cancel_key: "editor.table.remove.cancel".to_owned(),
+    }
+}
+
+fn whole_atomic_selection(selection: &DirectionalSelection) -> bool {
+    if selection.anchor.node_id != selection.focus.node_id {
+        return false;
+    }
+    matches!(
+        (
+            selection.anchor.utf16_offset.get(),
+            &selection.anchor.affinity,
+            selection.focus.utf16_offset.get(),
+            &selection.focus.affinity,
+        ),
+        (
+            0,
+            crate::model::Affinity::Forward,
+            1,
+            crate::model::Affinity::Backward
+        ) | (
+            1,
+            crate::model::Affinity::Backward,
+            0,
+            crate::model::Affinity::Forward
+        )
+    )
 }
 
 fn list_context_for_node(

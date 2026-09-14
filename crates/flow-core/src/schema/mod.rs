@@ -402,6 +402,7 @@ pub fn validate_document(document: &FlowDocument) -> Result<(), SchemaError> {
 
 pub const MAX_TABLE_ROWS: usize = 50;
 pub const MAX_TABLE_COLUMNS: usize = 20;
+pub const MAX_TABLE_CELLS: usize = 1_000;
 pub const MAX_LIST_DEPTH: usize = 8;
 pub const MAX_INLINE_RUNS: usize = 4_096;
 pub const MAX_AUTHORED_ALT_BYTES: usize = 4_096;
@@ -641,6 +642,16 @@ fn validate_tree<'a>(
                 }
                 if rows.iter().any(|row| row.children().len() != columns) {
                     return Err(SchemaError::invalid_document());
+                }
+                if rows
+                    .len()
+                    .checked_mul(columns)
+                    .is_none_or(|cells| cells > MAX_TABLE_CELLS)
+                {
+                    return Err(SchemaError::new(
+                        "FLOW_LIMIT_TABLE",
+                        "Table dimensions exceeded",
+                    ));
                 }
                 child_in_table = true;
             }

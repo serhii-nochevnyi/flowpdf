@@ -151,6 +151,8 @@ pub enum BlockKind {
         accessibility: ImageAccessibility,
     },
     Table {
+        /// The simple-table header state is a bounded 0/1 row sentinel. A
+        /// value of one marks the first row as the optional column-header row.
         header_rows: u8,
         rows: Vec<ContentNode>,
     },

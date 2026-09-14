@@ -18,7 +18,10 @@ use crate::{
         FieldDescriptor, FieldId, FlowDocument, InlineMark, InlineRun, ListKind, LogicalPosition,
         MarkSet, NodeId, ParagraphAttrs, StyleId, TombstoneToken,
     },
-    schema::{DocumentLimits, SchemaError, validate_document},
+    schema::{
+        DocumentLimits, MAX_TABLE_CELLS, MAX_TABLE_COLUMNS, MAX_TABLE_ROWS, SchemaError,
+        validate_document,
+    },
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -119,6 +122,38 @@ pub enum CommandKind {
     OutdentListItem {
         item_id: NodeId,
     },
+    InsertPageBreak {
+        placement: StructuralPlacement,
+    },
+    RemovePageBreak {
+        page_break_id: NodeId,
+    },
+    InsertTable {
+        placement: StructuralPlacement,
+        rows: u32,
+        columns: u32,
+        header_row: bool,
+    },
+    AddTableRow {
+        selection: DirectionalSelection,
+    },
+    RemoveTableRow {
+        selection: DirectionalSelection,
+    },
+    AddTableColumn {
+        selection: DirectionalSelection,
+    },
+    RemoveTableColumn {
+        selection: DirectionalSelection,
+    },
+    SetTableHeaderRow {
+        table_id: NodeId,
+        enabled: bool,
+    },
+    RemoveTable {
+        table_id: NodeId,
+        confirmed: bool,
+    },
     SetField {
         field_id: FieldId,
         field: FieldDescriptor,
@@ -208,6 +243,38 @@ pub enum Mutation {
     OutdentListItem {
         item_id: NodeId,
     },
+    InsertPageBreak {
+        placement: StructuralPlacement,
+    },
+    RemovePageBreak {
+        page_break_id: NodeId,
+    },
+    InsertTable {
+        placement: StructuralPlacement,
+        rows: u32,
+        columns: u32,
+        header_row: bool,
+    },
+    AddTableRow {
+        selection: DirectionalSelection,
+    },
+    RemoveTableRow {
+        selection: DirectionalSelection,
+    },
+    AddTableColumn {
+        selection: DirectionalSelection,
+    },
+    RemoveTableColumn {
+        selection: DirectionalSelection,
+    },
+    SetTableHeaderRow {
+        table_id: NodeId,
+        enabled: bool,
+    },
+    RemoveTable {
+        table_id: NodeId,
+        confirmed: bool,
+    },
     SetField {
         field_id: FieldId,
         field: FieldDescriptor,
@@ -219,6 +286,16 @@ pub enum Mutation {
 pub struct TextRange {
     pub start: LogicalPosition,
     pub end: LogicalPosition,
+}
+
+/// A structural insertion boundary. The parent is `None` for the document
+/// root; otherwise it names the semantic container whose child vector is
+/// being addressed. The index is an insertion point, not a DOM position.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct StructuralPlacement {
+    pub parent_id: Option<NodeId>,
+    pub index: u32,
 }
 
 impl TextRange {
@@ -525,6 +602,12 @@ pub enum CommandError {
     InvalidListStructure,
     #[error("The list nesting depth would exceed the authoring limit")]
     ListDepthExceeded,
+    #[error("The table dimensions are outside the bounded authoring limits")]
+    TableBoundsExceeded,
+    #[error("The structural container is not a table cell or table")]
+    InvalidTableStructure,
+    #[error("The destructive structural action requires explicit confirmation")]
+    ConfirmationRequired,
 }
 
 impl CommandError {
@@ -552,6 +635,9 @@ impl CommandError {
             Self::InvalidFormatting => "FLOW_INVALID_FORMATTING",
             Self::InvalidListStructure => "FLOW_INVALID_LIST_STRUCTURE",
             Self::ListDepthExceeded => "FLOW_LIMIT_LIST_DEPTH",
+            Self::TableBoundsExceeded => "FLOW_LIMIT_TABLE",
+            Self::InvalidTableStructure => "FLOW_INVALID_TABLE_STRUCTURE",
+            Self::ConfirmationRequired => "FLOW_CONFIRMATION_REQUIRED",
         }
     }
 }
@@ -685,6 +771,8 @@ fn apply_mutation(state: &EditorState, command: Command) -> Result<AppliedComman
     let mut mapping = AnchorMapping::identity();
     let mut selection_after = None;
     for mutation in &mutations {
+        let table_focus = table_focus_hint(&candidate, mutation)?;
+        let removal_focus = removal_focus_hint(&candidate, mutation);
         let merge_offset = if let Mutation::MergeTextBlocks { first_node_id, .. } = mutation {
             let first =
                 find_node(&candidate.content, first_node_id).ok_or(CommandError::InvalidTarget)?;
@@ -739,6 +827,57 @@ fn apply_mutation(state: &EditorState, command: Command) -> Result<AppliedComman
             Mutation::ContinueListItem { .. } | Mutation::ExitListItem { .. } => list_selection,
             Mutation::IndentListItem { item_id } | Mutation::OutdentListItem { item_id } => {
                 first_text_selection_for_node(&candidate.content, item_id)
+            }
+            Mutation::InsertPageBreak { .. } => {
+                let paragraph_id =
+                    deterministic_node_id(&command.command_id, "page-break-paragraph")?;
+                first_text_selection_for_node(&candidate.content, &paragraph_id)
+            }
+            Mutation::RemovePageBreak { .. } | Mutation::RemoveTable { .. } => removal_focus
+                .as_ref()
+                .and_then(|hint| selection_near_container(&candidate, hint))
+                .or_else(|| first_text_selection(&candidate)),
+            Mutation::InsertTable { .. } => {
+                let table_id = deterministic_node_id(&command.command_id, "table")?;
+                first_text_selection_for_node(&candidate.content, &table_id)
+            }
+            Mutation::AddTableRow { .. } => table_focus.as_ref().and_then(|hint| {
+                table_selection_at(
+                    &candidate,
+                    &hint.table_id,
+                    hint.row_index.saturating_add(1),
+                    hint.column_index,
+                )
+            }),
+            Mutation::RemoveTableRow { .. } => table_focus.as_ref().and_then(|hint| {
+                table_selection_at(
+                    &candidate,
+                    &hint.table_id,
+                    hint.row_index
+                        .min(table_row_count(&candidate, &hint.table_id).saturating_sub(1)),
+                    hint.column_index,
+                )
+            }),
+            Mutation::AddTableColumn { .. } => table_focus.as_ref().and_then(|hint| {
+                table_selection_at(
+                    &candidate,
+                    &hint.table_id,
+                    hint.row_index,
+                    hint.column_index.saturating_add(1),
+                )
+            }),
+            Mutation::RemoveTableColumn { .. } => table_focus.as_ref().and_then(|hint| {
+                table_selection_at(
+                    &candidate,
+                    &hint.table_id,
+                    hint.row_index,
+                    hint.column_index
+                        .min(table_column_count(&candidate, &hint.table_id).saturating_sub(1)),
+                )
+            }),
+            Mutation::SetTableHeaderRow { table_id, .. } => {
+                first_text_selection_for_node(&candidate.content, table_id)
+                    .or_else(|| selection_after.clone())
             }
             _ => selection_after,
         };
@@ -965,6 +1104,48 @@ fn command_mutations(kind: &CommandKind) -> Result<Vec<Mutation>, CommandError> 
         CommandKind::OutdentListItem { item_id } => Ok(vec![Mutation::OutdentListItem {
             item_id: item_id.clone(),
         }]),
+        CommandKind::InsertPageBreak { placement } => Ok(vec![Mutation::InsertPageBreak {
+            placement: placement.clone(),
+        }]),
+        CommandKind::RemovePageBreak { page_break_id } => Ok(vec![Mutation::RemovePageBreak {
+            page_break_id: page_break_id.clone(),
+        }]),
+        CommandKind::InsertTable {
+            placement,
+            rows,
+            columns,
+            header_row,
+        } => Ok(vec![Mutation::InsertTable {
+            placement: placement.clone(),
+            rows: *rows,
+            columns: *columns,
+            header_row: *header_row,
+        }]),
+        CommandKind::AddTableRow { selection } => Ok(vec![Mutation::AddTableRow {
+            selection: selection.clone(),
+        }]),
+        CommandKind::RemoveTableRow { selection } => Ok(vec![Mutation::RemoveTableRow {
+            selection: selection.clone(),
+        }]),
+        CommandKind::AddTableColumn { selection } => Ok(vec![Mutation::AddTableColumn {
+            selection: selection.clone(),
+        }]),
+        CommandKind::RemoveTableColumn { selection } => Ok(vec![Mutation::RemoveTableColumn {
+            selection: selection.clone(),
+        }]),
+        CommandKind::SetTableHeaderRow { table_id, enabled } => {
+            Ok(vec![Mutation::SetTableHeaderRow {
+                table_id: table_id.clone(),
+                enabled: *enabled,
+            }])
+        }
+        CommandKind::RemoveTable {
+            table_id,
+            confirmed,
+        } => Ok(vec![Mutation::RemoveTable {
+            table_id: table_id.clone(),
+            confirmed: *confirmed,
+        }]),
         CommandKind::SetField { field_id, field } => Ok(vec![Mutation::SetField {
             field_id: field_id.clone(),
             field: field.clone(),
@@ -1111,6 +1292,44 @@ fn derive_operation(
         Mutation::OutdentListItem { item_id } => {
             derive_outdent_list_item_operation(document, item_id)
         }
+        Mutation::InsertPageBreak { placement } => {
+            derive_insert_page_break_operation(document, placement, command_id)
+        }
+        Mutation::RemovePageBreak { page_break_id } => {
+            derive_remove_page_break_operation(document, page_break_id, command_id)
+        }
+        Mutation::InsertTable {
+            placement,
+            rows,
+            columns,
+            header_row,
+        } => derive_insert_table_operation(
+            document,
+            placement,
+            *rows,
+            *columns,
+            *header_row,
+            command_id,
+        ),
+        Mutation::AddTableRow { selection } => {
+            derive_add_table_row_operation(document, selection, command_id)
+        }
+        Mutation::RemoveTableRow { selection } => {
+            derive_remove_table_row_operation(document, selection, command_id)
+        }
+        Mutation::AddTableColumn { selection } => {
+            derive_add_table_column_operation(document, selection, command_id)
+        }
+        Mutation::RemoveTableColumn { selection } => {
+            derive_remove_table_column_operation(document, selection, command_id)
+        }
+        Mutation::SetTableHeaderRow { table_id, enabled } => {
+            derive_set_table_header_operation(document, table_id, *enabled)
+        }
+        Mutation::RemoveTable {
+            table_id,
+            confirmed,
+        } => derive_remove_table_operation(document, table_id, *confirmed, command_id),
         Mutation::SetField { field_id, field } => {
             if !matches!(field.anchor, FieldAnchorState::GraphemeSafe { .. }) {
                 return Err(CommandError::InvalidTarget);
@@ -2773,6 +2992,685 @@ pub(crate) fn validate_private_preimages(transaction: &Transaction) -> Result<()
     Ok(())
 }
 
+#[derive(Debug, Clone)]
+struct TableFocusHint {
+    table_id: NodeId,
+    row_index: usize,
+    column_index: usize,
+}
+
+#[derive(Debug, Clone)]
+struct RemovalFocusHint {
+    parent_id: Option<NodeId>,
+    index: usize,
+}
+
+fn table_focus_hint(
+    document: &FlowDocument,
+    mutation: &Mutation,
+) -> Result<Option<TableFocusHint>, CommandError> {
+    let selection = match mutation {
+        Mutation::AddTableRow { selection }
+        | Mutation::RemoveTableRow { selection }
+        | Mutation::AddTableColumn { selection }
+        | Mutation::RemoveTableColumn { selection } => selection,
+        _ => return Ok(None),
+    };
+    if !selection.collapsed() {
+        return Err(CommandError::InvalidRange);
+    }
+    for position in [&selection.anchor, &selection.focus] {
+        let node =
+            find_node(&document.content, &position.node_id).ok_or(CommandError::InvalidTarget)?;
+        NodePositionMap::new(node, document.revision)?.validate(position, document.revision)?;
+    }
+    find_table_focus(&document.content, &selection.anchor.node_id)
+        .map(Some)
+        .ok_or(CommandError::InvalidTableStructure)
+}
+
+fn find_table_focus(nodes: &[ContentNode], target: &NodeId) -> Option<TableFocusHint> {
+    for node in nodes {
+        if let BlockKind::Table { rows, .. } = &node.body {
+            for (row_index, row) in rows.iter().enumerate() {
+                let BlockKind::TableRow { cells } = &row.body else {
+                    continue;
+                };
+                for (column_index, cell) in cells.iter().enumerate() {
+                    if find_node(std::slice::from_ref(cell), target).is_some() {
+                        return Some(TableFocusHint {
+                            table_id: node.id.clone(),
+                            row_index,
+                            column_index,
+                        });
+                    }
+                }
+            }
+        }
+        if let Some(found) = find_table_focus(node.children(), target) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+fn removal_focus_hint(document: &FlowDocument, mutation: &Mutation) -> Option<RemovalFocusHint> {
+    let node_id = match mutation {
+        Mutation::RemovePageBreak { page_break_id }
+        | Mutation::RemoveTable {
+            table_id: page_break_id,
+            ..
+        } => page_break_id,
+        _ => return None,
+    };
+    locate_node(&document.content, node_id).map(|location| RemovalFocusHint {
+        parent_id: location.parent_id,
+        index: location.index,
+    })
+}
+
+fn table_node<'a>(
+    document: &'a FlowDocument,
+    table_id: &NodeId,
+) -> Result<&'a ContentNode, CommandError> {
+    let table = find_node(&document.content, table_id).ok_or(CommandError::InvalidTarget)?;
+    if !matches!(&table.body, BlockKind::Table { .. }) {
+        return Err(CommandError::InvalidTableStructure);
+    }
+    Ok(table)
+}
+
+fn table_dimensions(table: &ContentNode) -> Result<(usize, usize), CommandError> {
+    let BlockKind::Table { rows, .. } = &table.body else {
+        return Err(CommandError::InvalidTableStructure);
+    };
+    if rows.is_empty() || rows.len() > MAX_TABLE_ROWS {
+        return Err(CommandError::TableBoundsExceeded);
+    }
+    let columns = rows
+        .first()
+        .and_then(|row| match &row.body {
+            BlockKind::TableRow { cells } => Some(cells.len()),
+            _ => None,
+        })
+        .filter(|columns| (1..=MAX_TABLE_COLUMNS).contains(columns))
+        .ok_or(CommandError::InvalidTableStructure)?;
+    if rows
+        .iter()
+        .any(|row| !matches!(&row.body, BlockKind::TableRow { cells } if cells.len() == columns))
+    {
+        return Err(CommandError::InvalidTableStructure);
+    }
+    if rows
+        .len()
+        .checked_mul(columns)
+        .is_none_or(|cells| cells > MAX_TABLE_CELLS)
+    {
+        return Err(CommandError::TableBoundsExceeded);
+    }
+    Ok((rows.len(), columns))
+}
+
+fn requested_table_dimensions(rows: u32, columns: u32) -> Result<(usize, usize), CommandError> {
+    let rows = usize::try_from(rows).map_err(|_| CommandError::TableBoundsExceeded)?;
+    let columns = usize::try_from(columns).map_err(|_| CommandError::TableBoundsExceeded)?;
+    if !(1..=MAX_TABLE_ROWS).contains(&rows) || !(1..=MAX_TABLE_COLUMNS).contains(&columns) {
+        return Err(CommandError::TableBoundsExceeded);
+    }
+    if rows
+        .checked_mul(columns)
+        .is_none_or(|cells| cells > MAX_TABLE_CELLS)
+    {
+        return Err(CommandError::TableBoundsExceeded);
+    }
+    Ok((rows, columns))
+}
+
+fn placement_children(
+    document: &FlowDocument,
+    placement: &StructuralPlacement,
+) -> Result<Vec<ContentNode>, CommandError> {
+    if let Some(parent_id) = &placement.parent_id {
+        let parent = find_node(&document.content, parent_id).ok_or(CommandError::InvalidTarget)?;
+        if !matches!(
+            &parent.body,
+            BlockKind::ListItem { .. } | BlockKind::TableCell { .. }
+        ) {
+            return Err(CommandError::InvalidContainer);
+        }
+    }
+    let expected = container_children(document, placement.parent_id.as_ref())?;
+    let index = usize::try_from(placement.index).map_err(|_| CommandError::InvalidRange)?;
+    if index > expected.len() {
+        return Err(CommandError::InvalidRange);
+    }
+    Ok(expected)
+}
+
+fn ensure_generated_ids_available(
+    document: &FlowDocument,
+    generated: &[NodeId],
+) -> Result<(), CommandError> {
+    let mut seen = BTreeSet::new();
+    for id in generated {
+        if find_node(&document.content, id).is_some() || !seen.insert(id.as_str()) {
+            return Err(CommandError::InvalidRange);
+        }
+    }
+    Ok(())
+}
+
+fn table_cell_style_id(document: &FlowDocument, table: &ContentNode) -> Option<StyleId> {
+    fn first_text_style(node: &ContentNode) -> Option<StyleId> {
+        if node.runs().is_some() {
+            return node.style_id.clone();
+        }
+        node.children().iter().find_map(first_text_style)
+    }
+    first_text_style(table).or_else(|| document.styles.first().map(|style| style.id.clone()))
+}
+
+fn generated_table_row(
+    command_id: &CommandId,
+    purpose: &str,
+    row_index: usize,
+    columns: usize,
+    style_id: Option<StyleId>,
+) -> Result<(ContentNode, Vec<NodeId>), CommandError> {
+    let row_id = deterministic_node_id(command_id, &format!("{purpose}-row-{row_index}"))?;
+    let mut generated_ids = vec![row_id.clone()];
+    let mut cells = Vec::with_capacity(columns);
+    for column_index in 0..columns {
+        let cell_id = deterministic_node_id(
+            command_id,
+            &format!("{purpose}-row-{row_index}-cell-{column_index}"),
+        )?;
+        let paragraph_id = deterministic_node_id(
+            command_id,
+            &format!("{purpose}-row-{row_index}-cell-{column_index}-paragraph"),
+        )?;
+        generated_ids.push(cell_id.clone());
+        generated_ids.push(paragraph_id.clone());
+        cells.push(ContentNode {
+            id: cell_id,
+            style_id: None,
+            body: BlockKind::TableCell {
+                children: vec![ContentNode::paragraph(
+                    paragraph_id,
+                    style_id.clone(),
+                    String::new(),
+                )],
+            },
+        });
+    }
+    Ok((
+        ContentNode {
+            id: row_id,
+            style_id: None,
+            body: BlockKind::TableRow { cells },
+        },
+        generated_ids,
+    ))
+}
+
+fn generated_table_cell(
+    command_id: &CommandId,
+    purpose: &str,
+    row_index: usize,
+    column_index: usize,
+    style_id: Option<StyleId>,
+) -> Result<(ContentNode, Vec<NodeId>), CommandError> {
+    let cell_id = deterministic_node_id(
+        command_id,
+        &format!("{purpose}-row-{row_index}-cell-{column_index}"),
+    )?;
+    let paragraph_id = deterministic_node_id(
+        command_id,
+        &format!("{purpose}-row-{row_index}-cell-{column_index}-paragraph"),
+    )?;
+    Ok((
+        ContentNode {
+            id: cell_id.clone(),
+            style_id: None,
+            body: BlockKind::TableCell {
+                children: vec![ContentNode::paragraph(
+                    paragraph_id.clone(),
+                    style_id,
+                    String::new(),
+                )],
+            },
+        },
+        vec![cell_id, paragraph_id],
+    ))
+}
+
+fn deleted_mapping(
+    nodes: &[ContentNode],
+    command_id: &CommandId,
+) -> Result<(AnchorMapping, Vec<NodeId>), CommandError> {
+    let tombstone = TombstoneToken {
+        command_id: command_id.clone(),
+        slot: 0,
+    };
+    let mut ids = Vec::new();
+    for node in nodes {
+        all_node_ids(node, &mut ids);
+    }
+    let mapping = ids
+        .iter()
+        .cloned()
+        .fold(AnchorMapping::identity(), |mut mapping, node_id| {
+            mapping.push(AnchorTransformation::NodeDeleted {
+                node_id,
+                tombstone: tombstone.clone(),
+            });
+            mapping
+        });
+    Ok((mapping, ids))
+}
+
+fn table_selection_at(
+    document: &FlowDocument,
+    table_id: &NodeId,
+    row_index: usize,
+    column_index: usize,
+) -> Option<DirectionalSelection> {
+    let table = find_node(&document.content, table_id)?;
+    let BlockKind::Table { rows, .. } = &table.body else {
+        return None;
+    };
+    let row = rows.get(row_index)?;
+    let cell = row.children().get(column_index)?;
+    first_text_selection_in_node(cell)
+}
+
+fn table_row_count(document: &FlowDocument, table_id: &NodeId) -> usize {
+    find_node(&document.content, table_id)
+        .and_then(|table| match &table.body {
+            BlockKind::Table { rows, .. } => Some(rows.len()),
+            _ => None,
+        })
+        .unwrap_or(0)
+}
+
+fn table_column_count(document: &FlowDocument, table_id: &NodeId) -> usize {
+    find_node(&document.content, table_id)
+        .and_then(|table| match &table.body {
+            BlockKind::Table { rows, .. } => rows.first().map(|row| row.children().len()),
+            _ => None,
+        })
+        .unwrap_or(0)
+}
+
+fn selection_near_container(
+    document: &FlowDocument,
+    hint: &RemovalFocusHint,
+) -> Option<DirectionalSelection> {
+    let children = container_children(document, hint.parent_id.as_ref()).ok()?;
+    let index = hint.index.min(children.len());
+    for distance in 0..=children.len() {
+        if let Some(node) = children.get(index.saturating_add(distance))
+            && let Some(selection) = first_text_selection_in_node(node)
+        {
+            return Some(selection);
+        }
+        if distance > 0
+            && let Some(node) = index
+                .checked_sub(distance)
+                .and_then(|index| children.get(index))
+            && let Some(selection) = first_text_selection_in_node(node)
+        {
+            return Some(selection);
+        }
+    }
+    first_text_selection(document)
+}
+
+fn derive_insert_page_break_operation(
+    document: &FlowDocument,
+    placement: &StructuralPlacement,
+    command_id: &CommandId,
+) -> Result<(Operation, Operation), CommandError> {
+    let expected = placement_children(document, placement)?;
+    let page_break_id = deterministic_node_id(command_id, "page-break")?;
+    let paragraph_id = deterministic_node_id(command_id, "page-break-paragraph")?;
+    ensure_generated_ids_available(document, &[page_break_id.clone(), paragraph_id.clone()])?;
+    let style_id = document.styles.first().map(|style| style.id.clone());
+    let page_break = ContentNode {
+        id: page_break_id,
+        style_id: None,
+        body: BlockKind::PageBreak,
+    };
+    let paragraph = ContentNode::paragraph(paragraph_id, style_id, String::new());
+    let index = usize::try_from(placement.index).map_err(|_| CommandError::InvalidRange)?;
+    let mut replacement = expected.clone();
+    replacement.splice(index..index, [page_break, paragraph]);
+    structural_pair(
+        document,
+        placement.parent_id.clone(),
+        expected,
+        replacement,
+        AnchorMapping::identity(),
+        AnchorMapping::identity(),
+        None,
+    )
+}
+
+fn derive_remove_page_break_operation(
+    document: &FlowDocument,
+    page_break_id: &NodeId,
+    command_id: &CommandId,
+) -> Result<(Operation, Operation), CommandError> {
+    let location =
+        locate_node(&document.content, page_break_id).ok_or(CommandError::InvalidTarget)?;
+    if !matches!(location.node.body, BlockKind::PageBreak) {
+        return Err(CommandError::InvalidTarget);
+    }
+    derive_remove_atomic_operation(document, page_break_id, command_id, false)
+}
+
+fn derive_insert_table_operation(
+    document: &FlowDocument,
+    placement: &StructuralPlacement,
+    rows: u32,
+    columns: u32,
+    header_row: bool,
+    command_id: &CommandId,
+) -> Result<(Operation, Operation), CommandError> {
+    let (rows_count, columns_count) = requested_table_dimensions(rows, columns)?;
+    let expected = placement_children(document, placement)?;
+    let table_id = deterministic_node_id(command_id, "table")?;
+    let mut generated_ids = vec![table_id.clone()];
+    let style_id = document.styles.first().map(|style| style.id.clone());
+    let mut table_rows = Vec::with_capacity(rows_count);
+    for row_index in 0..rows_count {
+        let (row, ids) = generated_table_row(
+            command_id,
+            "table",
+            row_index,
+            columns_count,
+            style_id.clone(),
+        )?;
+        generated_ids.extend(ids);
+        table_rows.push(row);
+    }
+    ensure_generated_ids_available(document, &generated_ids)?;
+    let table = ContentNode {
+        id: table_id,
+        style_id: None,
+        body: BlockKind::Table {
+            header_rows: u8::from(header_row),
+            rows: table_rows,
+        },
+    };
+    crate::schema::validate_new_node(document, &table)?;
+    let index = usize::try_from(placement.index).map_err(|_| CommandError::InvalidRange)?;
+    let mut replacement = expected.clone();
+    replacement.insert(index, table);
+    structural_pair(
+        document,
+        placement.parent_id.clone(),
+        expected,
+        replacement,
+        AnchorMapping::identity(),
+        AnchorMapping::identity(),
+        None,
+    )
+}
+
+fn derive_add_table_row_operation(
+    document: &FlowDocument,
+    selection: &DirectionalSelection,
+    command_id: &CommandId,
+) -> Result<(Operation, Operation), CommandError> {
+    let focus = table_cell_focus(document, selection)?;
+    let table = table_node(document, &focus.table_id)?;
+    let (row_count, column_count) = table_dimensions(table)?;
+    if row_count >= MAX_TABLE_ROWS {
+        return Err(CommandError::TableBoundsExceeded);
+    }
+    let expected = container_children(document, Some(&focus.table_id))?;
+    let style_id = table_cell_style_id(document, table);
+    let (row, generated_ids) =
+        generated_table_row(command_id, "table-row", row_count, column_count, style_id)?;
+    ensure_generated_ids_available(document, &generated_ids)?;
+    let mut replacement = expected.clone();
+    replacement.insert(focus.row_index + 1, row);
+    structural_pair(
+        document,
+        Some(focus.table_id),
+        expected,
+        replacement,
+        AnchorMapping::identity(),
+        AnchorMapping::identity(),
+        None,
+    )
+}
+
+fn derive_remove_table_row_operation(
+    document: &FlowDocument,
+    selection: &DirectionalSelection,
+    command_id: &CommandId,
+) -> Result<(Operation, Operation), CommandError> {
+    let focus = table_cell_focus(document, selection)?;
+    let table = table_node(document, &focus.table_id)?;
+    let (row_count, _) = table_dimensions(table)?;
+    if row_count == 1 {
+        return Err(CommandError::ConfirmationRequired);
+    }
+    let expected = container_children(document, Some(&focus.table_id))?;
+    let removed = expected
+        .get(focus.row_index)
+        .ok_or(CommandError::InvalidTableStructure)?
+        .clone();
+    let mut replacement = expected.clone();
+    replacement.remove(focus.row_index);
+    let (mapping, affected_ids) = deleted_mapping(std::slice::from_ref(&removed), command_id)?;
+    let field_updates = field_updates_for_mapping(document, &mapping)?;
+    let preimage = build_preimage(removed.id.clone(), affected_ids, command_id, &field_updates)?;
+    structural_pair(
+        document,
+        Some(focus.table_id),
+        expected,
+        replacement,
+        mapping,
+        AnchorMapping::identity(),
+        Some(preimage),
+    )
+}
+
+fn derive_add_table_column_operation(
+    document: &FlowDocument,
+    selection: &DirectionalSelection,
+    command_id: &CommandId,
+) -> Result<(Operation, Operation), CommandError> {
+    let focus = table_cell_focus(document, selection)?;
+    let table = table_node(document, &focus.table_id)?;
+    let (_row_count, column_count) = table_dimensions(table)?;
+    if column_count >= MAX_TABLE_COLUMNS {
+        return Err(CommandError::TableBoundsExceeded);
+    }
+    let expected = container_children(document, Some(&focus.table_id))?;
+    let style_id = table_cell_style_id(document, table);
+    let mut replacement = expected.clone();
+    let mut generated_ids = Vec::new();
+    for (row_index, row) in expected.iter().enumerate() {
+        let mut changed = row.clone();
+        let cells = match &mut changed.body {
+            BlockKind::TableRow { cells } => cells,
+            _ => return Err(CommandError::InvalidTableStructure),
+        };
+        let (cell, ids) = generated_table_cell(
+            command_id,
+            "table-column",
+            row_index,
+            column_count,
+            style_id.clone(),
+        )?;
+        generated_ids.extend(ids);
+        cells.insert(focus.column_index + 1, cell);
+        replacement[row_index] = changed;
+    }
+    ensure_generated_ids_available(document, &generated_ids)?;
+    structural_pair(
+        document,
+        Some(focus.table_id),
+        expected,
+        replacement,
+        AnchorMapping::identity(),
+        AnchorMapping::identity(),
+        None,
+    )
+}
+
+fn derive_remove_table_column_operation(
+    document: &FlowDocument,
+    selection: &DirectionalSelection,
+    command_id: &CommandId,
+) -> Result<(Operation, Operation), CommandError> {
+    let focus = table_cell_focus(document, selection)?;
+    let table = table_node(document, &focus.table_id)?;
+    let (_, column_count) = table_dimensions(table)?;
+    if column_count == 1 {
+        return Err(CommandError::ConfirmationRequired);
+    }
+    let expected = container_children(document, Some(&focus.table_id))?;
+    let mut replacement = expected.clone();
+    let mut removed = Vec::with_capacity(expected.len());
+    for (row_index, row) in expected.iter().enumerate() {
+        let mut changed = row.clone();
+        let cells = match &mut changed.body {
+            BlockKind::TableRow { cells } => cells,
+            _ => return Err(CommandError::InvalidTableStructure),
+        };
+        let cell = cells
+            .get(focus.column_index)
+            .ok_or(CommandError::InvalidTableStructure)?
+            .clone();
+        removed.push(cell);
+        cells.remove(focus.column_index);
+        replacement[row_index] = changed;
+    }
+    let (mapping, affected_ids) = deleted_mapping(&removed, command_id)?;
+    let root = removed
+        .first()
+        .map(|node| node.id.clone())
+        .ok_or(CommandError::InvalidTableStructure)?;
+    let field_updates = field_updates_for_mapping(document, &mapping)?;
+    let preimage = build_preimage(root, affected_ids, command_id, &field_updates)?;
+    structural_pair(
+        document,
+        Some(focus.table_id),
+        expected,
+        replacement,
+        mapping,
+        AnchorMapping::identity(),
+        Some(preimage),
+    )
+}
+
+fn derive_set_table_header_operation(
+    document: &FlowDocument,
+    table_id: &NodeId,
+    enabled: bool,
+) -> Result<(Operation, Operation), CommandError> {
+    let location = locate_node(&document.content, table_id).ok_or(CommandError::InvalidTarget)?;
+    let BlockKind::Table { header_rows, .. } = &location.node.body else {
+        return Err(CommandError::InvalidTableStructure);
+    };
+    let next = u8::from(enabled);
+    if *header_rows == next {
+        return Err(CommandError::NoOp);
+    }
+    let expected = container_children(document, location.parent_id.as_ref())?;
+    let mut changed = location.node.clone();
+    if let BlockKind::Table { header_rows, .. } = &mut changed.body {
+        *header_rows = next;
+    }
+    let mut replacement = expected.clone();
+    replacement[location.index] = changed;
+    structural_pair(
+        document,
+        location.parent_id,
+        expected,
+        replacement,
+        AnchorMapping::identity(),
+        AnchorMapping::identity(),
+        None,
+    )
+}
+
+fn derive_remove_table_operation(
+    document: &FlowDocument,
+    table_id: &NodeId,
+    confirmed: bool,
+    command_id: &CommandId,
+) -> Result<(Operation, Operation), CommandError> {
+    if !confirmed {
+        return Err(CommandError::ConfirmationRequired);
+    }
+    let table = table_node(document, table_id)?;
+    let _ = table_dimensions(table)?;
+    derive_remove_atomic_operation(document, table_id, command_id, true)
+}
+
+fn derive_remove_atomic_operation(
+    document: &FlowDocument,
+    node_id: &NodeId,
+    command_id: &CommandId,
+    table: bool,
+) -> Result<(Operation, Operation), CommandError> {
+    let location = locate_node(&document.content, node_id).ok_or(CommandError::InvalidTarget)?;
+    if table && !matches!(location.node.body, BlockKind::Table { .. }) {
+        return Err(CommandError::InvalidTableStructure);
+    }
+    let expected = container_children(document, location.parent_id.as_ref())?;
+    let mut replacement = expected.clone();
+    replacement.remove(location.index);
+    if location.parent_id.is_some() && !replacement.iter().any(contains_editable_text) {
+        let fallback_id = deterministic_node_id(command_id, "structural-remove-fallback")?;
+        ensure_generated_ids_available(document, std::slice::from_ref(&fallback_id))?;
+        let style_id = document.styles.first().map(|style| style.id.clone());
+        replacement.push(ContentNode::paragraph(fallback_id, style_id, String::new()));
+    } else if location.parent_id.is_none()
+        && !document_has_editable_after_removal(document, node_id)
+    {
+        let fallback_id = deterministic_node_id(command_id, "structural-remove-fallback")?;
+        ensure_generated_ids_available(document, std::slice::from_ref(&fallback_id))?;
+        let style_id = document.styles.first().map(|style| style.id.clone());
+        replacement.insert(
+            0,
+            ContentNode::paragraph(fallback_id, style_id, String::new()),
+        );
+    }
+    let (mapping, affected_ids) =
+        deleted_mapping(std::slice::from_ref(&location.node), command_id)?;
+    let field_updates = field_updates_for_mapping(document, &mapping)?;
+    let preimage = build_preimage(node_id.clone(), affected_ids, command_id, &field_updates)?;
+    structural_pair(
+        document,
+        location.parent_id,
+        expected,
+        replacement,
+        mapping,
+        AnchorMapping::identity(),
+        Some(preimage),
+    )
+}
+
+fn table_cell_focus(
+    document: &FlowDocument,
+    selection: &DirectionalSelection,
+) -> Result<TableFocusHint, CommandError> {
+    table_focus_hint(
+        document,
+        &Mutation::AddTableRow {
+            selection: selection.clone(),
+        },
+    )?
+    .ok_or(CommandError::InvalidTableStructure)
+}
+
 fn derive_split_operation(
     document: &FlowDocument,
     node_id: &NodeId,
@@ -3548,6 +4446,15 @@ fn command_type(kind: &CommandKind) -> &'static str {
         CommandKind::ExitListItem { .. } => "exitListItem",
         CommandKind::IndentListItem { .. } => "indentListItem",
         CommandKind::OutdentListItem { .. } => "outdentListItem",
+        CommandKind::InsertPageBreak { .. } => "insertPageBreak",
+        CommandKind::RemovePageBreak { .. } => "removePageBreak",
+        CommandKind::InsertTable { .. } => "insertTable",
+        CommandKind::AddTableRow { .. } => "addTableRow",
+        CommandKind::RemoveTableRow { .. } => "removeTableRow",
+        CommandKind::AddTableColumn { .. } => "addTableColumn",
+        CommandKind::RemoveTableColumn { .. } => "removeTableColumn",
+        CommandKind::SetTableHeaderRow { .. } => "setTableHeaderRow",
+        CommandKind::RemoveTable { .. } => "removeTable",
         CommandKind::SetField { .. } => "setField",
         CommandKind::Batch { .. } => "batch",
         CommandKind::Undo => "undo",

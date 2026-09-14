@@ -25,10 +25,10 @@ use audit::{
 pub use audit::{AuditEvent as AuditRecord, AuditOutcome};
 use canonical::{canonical_bytes, canonical_hash, decode_canonical};
 pub use editor_view::{
-    CapabilityDto, DirectionalSelection, EditorBlockViewDto, EditorCapability,
-    EditorDocumentViewDto, EditorSessionAction, EditorSessionError, EditorSessionRequest,
-    EditorSessionResponse, EditorSessionState, EditorTextSpanDto, EditorViewDto, EditorViewRequest,
-    FormattingProjectionDto, FormattingState,
+    CapabilityDto, ConfirmationKindDto, ConfirmationMetadataDto, DirectionalSelection,
+    EditorBlockViewDto, EditorCapability, EditorDocumentViewDto, EditorSessionAction,
+    EditorSessionError, EditorSessionRequest, EditorSessionResponse, EditorSessionState,
+    EditorTextSpanDto, EditorViewDto, EditorViewRequest, FormattingProjectionDto, FormattingState,
 };
 use model::{
     Affinity, CommandId, DocumentId, FlowDocument, LogicalPosition, MigrationHop, Provenance,
@@ -38,7 +38,7 @@ use provenance::{ProvenanceError, RevisionHash, RevisionProvenance};
 use schema::{DocumentLimits, LimitKind, MigrationRegistry, MigrationReport, SchemaError};
 pub use transaction::{
     Command as CommandDto, CommandKind, HistoryState, Operation, SourceModality,
-    Transaction as TransactionRecord,
+    StructuralPlacement, Transaction as TransactionRecord,
 };
 use transaction::{
     CommandError, EditorState, HistoryEffect, HistoryEntry, TransactionService, replay_forward,
@@ -751,6 +751,15 @@ const fn audit_command_kind(kind: &CommandKind) -> AuditCommandKind {
         CommandKind::ExitListItem { .. } => AuditCommandKind::ExitListItem,
         CommandKind::IndentListItem { .. } => AuditCommandKind::IndentListItem,
         CommandKind::OutdentListItem { .. } => AuditCommandKind::OutdentListItem,
+        CommandKind::InsertPageBreak { .. } => AuditCommandKind::InsertPageBreak,
+        CommandKind::RemovePageBreak { .. } => AuditCommandKind::RemovePageBreak,
+        CommandKind::InsertTable { .. } => AuditCommandKind::InsertTable,
+        CommandKind::AddTableRow { .. } => AuditCommandKind::AddTableRow,
+        CommandKind::RemoveTableRow { .. } => AuditCommandKind::RemoveTableRow,
+        CommandKind::AddTableColumn { .. } => AuditCommandKind::AddTableColumn,
+        CommandKind::RemoveTableColumn { .. } => AuditCommandKind::RemoveTableColumn,
+        CommandKind::SetTableHeaderRow { .. } => AuditCommandKind::SetTableHeaderRow,
+        CommandKind::RemoveTable { .. } => AuditCommandKind::RemoveTable,
         CommandKind::SetField { .. } => AuditCommandKind::SetField,
         CommandKind::Batch { .. } => AuditCommandKind::Batch,
         CommandKind::Undo => AuditCommandKind::Undo,
@@ -1506,6 +1515,15 @@ pub(crate) fn replay_history_effect(
                     "exitListItem",
                     "indentListItem",
                     "outdentListItem",
+                    "insertPageBreak",
+                    "removePageBreak",
+                    "insertTable",
+                    "addTableRow",
+                    "removeTableRow",
+                    "addTableColumn",
+                    "removeTableColumn",
+                    "setTableHeaderRow",
+                    "removeTable",
                     "setField",
                     "batch",
                 ]
