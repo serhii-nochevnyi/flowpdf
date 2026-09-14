@@ -557,6 +557,14 @@
   color: var(--status-error);
 }
 
+.diagnostics-panel > summary {
+  display: flex;
+  align-items: center;
+  min-height: 44px;
+  padding: 8px;
+  border-radius: 6px;
+}
+
 @media (min-width: 768px) {
   .editor-more-disclosure > summary {
     display: none;

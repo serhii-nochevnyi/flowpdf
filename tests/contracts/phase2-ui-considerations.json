@@ -1,0 +1,1761 @@
+{
+  "formatVersion": 1,
+  "phase": "FLOWPDF-02-accessible-rich-text-editing",
+  "contract": "UI-COVERAGE-108",
+  "source": {
+    "path": ".planning/phases/FLOWPDF-02-accessible-rich-text-editing/02-UI-SPEC.md",
+    "digest": "sha256:ba0c5e03362cc8ca9af98ec07dfc45581bb25dd2352990c6a0c36456bf084c3c",
+    "inventoryDigest": "sha256:63c75e3b11b096ed2abf0dfdf24a59b59cbe9f79de2bfeb6c1f5e6aff42a4324",
+    "taxonomyDigest": "sha256:3ce2967396d963b819d17bfaf3a70ad81082283004553ba33e561cfaea06222d"
+  },
+  "taxonomy": [
+    "empty",
+    "loading",
+    "error",
+    "populated",
+    "partial",
+    "overflow",
+    "zero-one-many",
+    "long-text"
+  ],
+  "counts": {
+    "sourceExplicit": 108,
+    "coveredExplicit": 108,
+    "backstop": 0,
+    "unresolved": 0,
+    "unclassified": 0
+  },
+  "backstop": [],
+  "unresolved": [],
+  "unclassified": [],
+  "entries": [
+    {
+      "id": "empty:editor-app-shell",
+      "category": "empty",
+      "surface": "EditorAppShell",
+      "classification": "explicit",
+      "source": {
+        "section": "UI Considerations",
+        "categoryLine": 324,
+        "surfaceLine": 85
+      },
+      "owner": {
+        "kind": "browser-assertion",
+        "file": "web/tests/editor-ui-states.browser.test.ts",
+        "symbol": "assertEmptyState"
+      }
+    },
+    {
+      "id": "empty:formatting-toolbar",
+      "category": "empty",
+      "surface": "FormattingToolbar",
+      "classification": "explicit",
+      "source": {
+        "section": "UI Considerations",
+        "categoryLine": 324,
+        "surfaceLine": 87
+      },
+      "owner": {
+        "kind": "browser-assertion",
+        "file": "web/tests/editor-ui-states.browser.test.ts",
+        "symbol": "assertEmptyState"
+      }
+    },
+    {
+      "id": "empty:block-style-select",
+      "category": "empty",
+      "surface": "BlockStyleSelect",
+      "classification": "explicit",
+      "source": {
+        "section": "UI Considerations",
+        "categoryLine": 324,
+        "surfaceLine": 88
+      },
+      "owner": {
+        "kind": "browser-assertion",
+        "file": "web/tests/editor-ui-states.browser.test.ts",
+        "symbol": "assertEmptyState"
+      }
+    },
+    {
+      "id": "empty:inline-mark-group",
+      "category": "empty",
+      "surface": "InlineMarkGroup",
+      "classification": "explicit",
+      "source": {
+        "section": "UI Considerations",
+        "categoryLine": 324,
+        "surfaceLine": 89
+      },
+      "owner": {
+        "kind": "browser-assertion",
+        "file": "web/tests/editor-ui-states.browser.test.ts",
+        "symbol": "assertEmptyState"
+      }
+    },
+    {
+      "id": "empty:insert-menu",
+      "category": "empty",
+      "surface": "InsertMenu",
+      "classification": "explicit",
+      "source": {
+        "section": "UI Considerations",
+        "categoryLine": 324,
+        "surfaceLine": 97
+      },
+      "owner": {
+        "kind": "browser-assertion",
+        "file": "web/tests/editor-ui-states.browser.test.ts",
+        "symbol": "assertEmptyState"
+      }
+    },
+    {
+      "id": "empty:document-editor-region",
+      "category": "empty",
+      "surface": "DocumentEditorRegion",
+      "classification": "explicit",
+      "source": {
+        "section": "UI Considerations",
+        "categoryLine": 324,
+        "surfaceLine": 98
+      },
+      "owner": {
+        "kind": "browser-assertion",
+        "file": "web/tests/editor-ui-states.browser.test.ts",
+        "symbol": "assertEmptyState"
+      }
+    },
+    {
+      "id": "empty:image-insert-dialog",
+      "category": "empty",
+      "surface": "ImageInsertDialog",
+      "classification": "explicit",
+      "source": {
+        "section": "UI Considerations",
+        "categoryLine": 324,
+        "surfaceLine": 101
+      },
+      "owner": {
+        "kind": "browser-assertion",
+        "file": "web/tests/editor-ui-states.browser.test.ts",
+        "symbol": "assertEmptyState"
+      }
+    },
+    {
+      "id": "empty:table-insert-dialog",
+      "category": "empty",
+      "surface": "TableInsertDialog",
+      "classification": "explicit",
+      "source": {
+        "section": "UI Considerations",
+        "categoryLine": 324,
+        "surfaceLine": 103
+      },
+      "owner": {
+        "kind": "browser-assertion",
+        "file": "web/tests/editor-ui-states.browser.test.ts",
+        "symbol": "assertEmptyState"
+      }
+    },
+    {
+      "id": "empty:simple-table-block",
+      "category": "empty",
+      "surface": "SimpleTableBlock",
+      "classification": "explicit",
+      "source": {
+        "section": "UI Considerations",
+        "categoryLine": 324,
+        "surfaceLine": 104
+      },
+      "owner": {
+        "kind": "browser-assertion",
+        "file": "web/tests/editor-ui-states.browser.test.ts",
+        "symbol": "assertEmptyState"
+      }
+    },
+    {
+      "id": "empty:status-region",
+      "category": "empty",
+      "surface": "StatusRegion",
+      "classification": "explicit",
+      "source": {
+        "section": "UI Considerations",
+        "categoryLine": 324,
+        "surfaceLine": 107
+      },
+      "owner": {
+        "kind": "browser-assertion",
+        "file": "web/tests/editor-ui-states.browser.test.ts",
+        "symbol": "assertEmptyState"
+      }
+    },
+    {
+      "id": "empty:error-region",
+      "category": "empty",
+      "surface": "ErrorRegion",
+      "classification": "explicit",
+      "source": {
+        "section": "UI Considerations",
+        "categoryLine": 324,
+        "surfaceLine": 108
+      },
+      "owner": {
+        "kind": "browser-assertion",
+        "file": "web/tests/editor-ui-states.browser.test.ts",
+        "symbol": "assertEmptyState"
+      }
+    },
+    {
+      "id": "empty:destructive-confirm-dialog",
+      "category": "empty",
+      "surface": "DestructiveConfirmDialog",
+      "classification": "explicit",
+      "source": {
+        "section": "UI Considerations",
+        "categoryLine": 324,
+        "surfaceLine": 109
+      },
+      "owner": {
+        "kind": "browser-assertion",
+        "file": "web/tests/editor-ui-states.browser.test.ts",
+        "symbol": "assertEmptyState"
+      }
+    },
+    {
+      "id": "empty:font-family-select",
+      "category": "empty",
+      "surface": "FontFamilySelect",
+      "classification": "explicit",
+      "source": {
+        "section": "UI Considerations",
+        "categoryLine": 324,
+        "surfaceLine": 90
+      },
+      "owner": {
+        "kind": "browser-assertion",
+        "file": "web/tests/editor-ui-states.browser.test.ts",
+        "symbol": "assertEmptyState"
+      }
+    },
+    {
+      "id": "empty:diagnostics-entry",
+      "category": "empty",
+      "surface": "DiagnosticsEntry",
+      "classification": "explicit",
+      "source": {
+        "section": "UI Considerations",
+        "categoryLine": 324,
+        "surfaceLine": 110
+      },
+      "owner": {
+        "kind": "browser-assertion",
+        "file": "web/tests/editor-ui-states.browser.test.ts",
+        "symbol": "assertEmptyState"
+      }
+    },
+    {
+      "id": "loading:editor-app-shell",
+      "category": "loading",
+      "surface": "EditorAppShell",
+      "classification": "explicit",
+      "source": {
+        "section": "UI Considerations",
+        "categoryLine": 325,
+        "surfaceLine": 85
+      },
+      "owner": {
+        "kind": "browser-assertion",
+        "file": "web/tests/editor-ui-states.browser.test.ts",
+        "symbol": "assertLoadingState"
+      }
+    },
+    {
+      "id": "loading:application-bar",
+      "category": "loading",
+      "surface": "ApplicationBar",
+      "classification": "explicit",
+      "source": {
+        "section": "UI Considerations",
+        "categoryLine": 325,
+        "surfaceLine": 86
+      },
+      "owner": {
+        "kind": "browser-assertion",
+        "file": "web/tests/editor-ui-states.browser.test.ts",
+        "symbol": "assertLoadingState"
+      }
+    },
+    {
+      "id": "loading:formatting-toolbar",
+      "category": "loading",
+      "surface": "FormattingToolbar",
+      "classification": "explicit",
+      "source": {
+        "section": "UI Considerations",
+        "categoryLine": 325,
+        "surfaceLine": 87
+      },
+      "owner": {
+        "kind": "browser-assertion",
+        "file": "web/tests/editor-ui-states.browser.test.ts",
+        "symbol": "assertLoadingState"
+      }
+    },
+    {
+      "id": "loading:insert-menu",
+      "category": "loading",
+      "surface": "InsertMenu",
+      "classification": "explicit",
+      "source": {
+        "section": "UI Considerations",
+        "categoryLine": 325,
+        "surfaceLine": 97
+      },
+      "owner": {
+        "kind": "browser-assertion",
+        "file": "web/tests/editor-ui-states.browser.test.ts",
+        "symbol": "assertLoadingState"
+      }
+    },
+    {
+      "id": "loading:document-editor-region",
+      "category": "loading",
+      "surface": "DocumentEditorRegion",
+      "classification": "explicit",
+      "source": {
+        "section": "UI Considerations",
+        "categoryLine": 325,
+        "surfaceLine": 98
+      },
+      "owner": {
+        "kind": "browser-assertion",
+        "file": "web/tests/editor-ui-states.browser.test.ts",
+        "symbol": "assertLoadingState"
+      }
+    },
+    {
+      "id": "loading:image-insert-dialog",
+      "category": "loading",
+      "surface": "ImageInsertDialog",
+      "classification": "explicit",
+      "source": {
+        "section": "UI Considerations",
+        "categoryLine": 325,
+        "surfaceLine": 101
+      },
+      "owner": {
+        "kind": "browser-assertion",
+        "file": "web/tests/editor-ui-states.browser.test.ts",
+        "symbol": "assertLoadingState"
+      }
+    },
+    {
+      "id": "loading:image-block",
+      "category": "loading",
+      "surface": "ImageBlock",
+      "classification": "explicit",
+      "source": {
+        "section": "UI Considerations",
+        "categoryLine": 325,
+        "surfaceLine": 102
+      },
+      "owner": {
+        "kind": "browser-assertion",
+        "file": "web/tests/editor-ui-states.browser.test.ts",
+        "symbol": "assertLoadingState"
+      }
+    },
+    {
+      "id": "loading:table-insert-dialog",
+      "category": "loading",
+      "surface": "TableInsertDialog",
+      "classification": "explicit",
+      "source": {
+        "section": "UI Considerations",
+        "categoryLine": 325,
+        "surfaceLine": 103
+      },
+      "owner": {
+        "kind": "browser-assertion",
+        "file": "web/tests/editor-ui-states.browser.test.ts",
+        "symbol": "assertLoadingState"
+      }
+    },
+    {
+      "id": "loading:block-action-bar",
+      "category": "loading",
+      "surface": "BlockActionBar",
+      "classification": "explicit",
+      "source": {
+        "section": "UI Considerations",
+        "categoryLine": 325,
+        "surfaceLine": 100
+      },
+      "owner": {
+        "kind": "browser-assertion",
+        "file": "web/tests/editor-ui-states.browser.test.ts",
+        "symbol": "assertLoadingState"
+      }
+    },
+    {
+      "id": "loading:status-region",
+      "category": "loading",
+      "surface": "StatusRegion",
+      "classification": "explicit",
+      "source": {
+        "section": "UI Considerations",
+        "categoryLine": 325,
+        "surfaceLine": 107
+      },
+      "owner": {
+        "kind": "browser-assertion",
+        "file": "web/tests/editor-ui-states.browser.test.ts",
+        "symbol": "assertLoadingState"
+      }
+    },
+    {
+      "id": "loading:error-region",
+      "category": "loading",
+      "surface": "ErrorRegion",
+      "classification": "explicit",
+      "source": {
+        "section": "UI Considerations",
+        "categoryLine": 325,
+        "surfaceLine": 108
+      },
+      "owner": {
+        "kind": "browser-assertion",
+        "file": "web/tests/editor-ui-states.browser.test.ts",
+        "symbol": "assertLoadingState"
+      }
+    },
+    {
+      "id": "loading:destructive-confirm-dialog",
+      "category": "loading",
+      "surface": "DestructiveConfirmDialog",
+      "classification": "explicit",
+      "source": {
+        "section": "UI Considerations",
+        "categoryLine": 325,
+        "surfaceLine": 109
+      },
+      "owner": {
+        "kind": "browser-assertion",
+        "file": "web/tests/editor-ui-states.browser.test.ts",
+        "symbol": "assertLoadingState"
+      }
+    },
+    {
+      "id": "error:editor-app-shell",
+      "category": "error",
+      "surface": "EditorAppShell",
+      "classification": "explicit",
+      "source": {
+        "section": "UI Considerations",
+        "categoryLine": 326,
+        "surfaceLine": 85
+      },
+      "owner": {
+        "kind": "browser-assertion",
+        "file": "web/tests/editor-ui-states.browser.test.ts",
+        "symbol": "assertErrorState"
+      }
+    },
+    {
+      "id": "error:formatting-toolbar",
+      "category": "error",
+      "surface": "FormattingToolbar",
+      "classification": "explicit",
+      "source": {
+        "section": "UI Considerations",
+        "categoryLine": 326,
+        "surfaceLine": 87
+      },
+      "owner": {
+        "kind": "browser-assertion",
+        "file": "web/tests/editor-ui-states.browser.test.ts",
+        "symbol": "assertErrorState"
+      }
+    },
+    {
+      "id": "error:block-style-select",
+      "category": "error",
+      "surface": "BlockStyleSelect",
+      "classification": "explicit",
+      "source": {
+        "section": "UI Considerations",
+        "categoryLine": 326,
+        "surfaceLine": 88
+      },
+      "owner": {
+        "kind": "browser-assertion",
+        "file": "web/tests/editor-ui-states.browser.test.ts",
+        "symbol": "assertErrorState"
+      }
+    },
+    {
+      "id": "error:inline-mark-group",
+      "category": "error",
+      "surface": "InlineMarkGroup",
+      "classification": "explicit",
+      "source": {
+        "section": "UI Considerations",
+        "categoryLine": 326,
+        "surfaceLine": 89
+      },
+      "owner": {
+        "kind": "browser-assertion",
+        "file": "web/tests/editor-ui-states.browser.test.ts",
+        "symbol": "assertErrorState"
+      }
+    },
+    {
+      "id": "error:insert-menu",
+      "category": "error",
+      "surface": "InsertMenu",
+      "classification": "explicit",
+      "source": {
+        "section": "UI Considerations",
+        "categoryLine": 326,
+        "surfaceLine": 97
+      },
+      "owner": {
+        "kind": "browser-assertion",
+        "file": "web/tests/editor-ui-states.browser.test.ts",
+        "symbol": "assertErrorState"
+      }
+    },
+    {
+      "id": "error:document-editor-region",
+      "category": "error",
+      "surface": "DocumentEditorRegion",
+      "classification": "explicit",
+      "source": {
+        "section": "UI Considerations",
+        "categoryLine": 326,
+        "surfaceLine": 98
+      },
+      "owner": {
+        "kind": "browser-assertion",
+        "file": "web/tests/editor-ui-states.browser.test.ts",
+        "symbol": "assertErrorState"
+      }
+    },
+    {
+      "id": "error:controlled-input-projection",
+      "category": "error",
+      "surface": "ControlledInputProjection",
+      "classification": "explicit",
+      "source": {
+        "section": "UI Considerations",
+        "categoryLine": 326,
+        "surfaceLine": 99
+      },
+      "owner": {
+        "kind": "browser-assertion",
+        "file": "web/tests/editor-ui-states.browser.test.ts",
+        "symbol": "assertErrorState"
+      }
+    },
+    {
+      "id": "error:image-insert-dialog",
+      "category": "error",
+      "surface": "ImageInsertDialog",
+      "classification": "explicit",
+      "source": {
+        "section": "UI Considerations",
+        "categoryLine": 326,
+        "surfaceLine": 101
+      },
+      "owner": {
+        "kind": "browser-assertion",
+        "file": "web/tests/editor-ui-states.browser.test.ts",
+        "symbol": "assertErrorState"
+      }
+    },
+    {
+      "id": "error:image-block",
+      "category": "error",
+      "surface": "ImageBlock",
+      "classification": "explicit",
+      "source": {
+        "section": "UI Considerations",
+        "categoryLine": 326,
+        "surfaceLine": 102
+      },
+      "owner": {
+        "kind": "browser-assertion",
+        "file": "web/tests/editor-ui-states.browser.test.ts",
+        "symbol": "assertErrorState"
+      }
+    },
+    {
+      "id": "error:table-insert-dialog",
+      "category": "error",
+      "surface": "TableInsertDialog",
+      "classification": "explicit",
+      "source": {
+        "section": "UI Considerations",
+        "categoryLine": 326,
+        "surfaceLine": 103
+      },
+      "owner": {
+        "kind": "browser-assertion",
+        "file": "web/tests/editor-ui-states.browser.test.ts",
+        "symbol": "assertErrorState"
+      }
+    },
+    {
+      "id": "error:simple-table-block",
+      "category": "error",
+      "surface": "SimpleTableBlock",
+      "classification": "explicit",
+      "source": {
+        "section": "UI Considerations",
+        "categoryLine": 326,
+        "surfaceLine": 104
+      },
+      "owner": {
+        "kind": "browser-assertion",
+        "file": "web/tests/editor-ui-states.browser.test.ts",
+        "symbol": "assertErrorState"
+      }
+    },
+    {
+      "id": "error:block-action-bar",
+      "category": "error",
+      "surface": "BlockActionBar",
+      "classification": "explicit",
+      "source": {
+        "section": "UI Considerations",
+        "categoryLine": 326,
+        "surfaceLine": 100
+      },
+      "owner": {
+        "kind": "browser-assertion",
+        "file": "web/tests/editor-ui-states.browser.test.ts",
+        "symbol": "assertErrorState"
+      }
+    },
+    {
+      "id": "error:status-region",
+      "category": "error",
+      "surface": "StatusRegion",
+      "classification": "explicit",
+      "source": {
+        "section": "UI Considerations",
+        "categoryLine": 326,
+        "surfaceLine": 107
+      },
+      "owner": {
+        "kind": "browser-assertion",
+        "file": "web/tests/editor-ui-states.browser.test.ts",
+        "symbol": "assertErrorState"
+      }
+    },
+    {
+      "id": "error:error-region",
+      "category": "error",
+      "surface": "ErrorRegion",
+      "classification": "explicit",
+      "source": {
+        "section": "UI Considerations",
+        "categoryLine": 326,
+        "surfaceLine": 108
+      },
+      "owner": {
+        "kind": "browser-assertion",
+        "file": "web/tests/editor-ui-states.browser.test.ts",
+        "symbol": "assertErrorState"
+      }
+    },
+    {
+      "id": "error:destructive-confirm-dialog",
+      "category": "error",
+      "surface": "DestructiveConfirmDialog",
+      "classification": "explicit",
+      "source": {
+        "section": "UI Considerations",
+        "categoryLine": 326,
+        "surfaceLine": 109
+      },
+      "owner": {
+        "kind": "browser-assertion",
+        "file": "web/tests/editor-ui-states.browser.test.ts",
+        "symbol": "assertErrorState"
+      }
+    },
+    {
+      "id": "populated:application-bar",
+      "category": "populated",
+      "surface": "ApplicationBar",
+      "classification": "explicit",
+      "source": {
+        "section": "UI Considerations",
+        "categoryLine": 327,
+        "surfaceLine": 86
+      },
+      "owner": {
+        "kind": "browser-assertion",
+        "file": "web/tests/editor-ui-states.browser.test.ts",
+        "symbol": "assertPopulatedState"
+      }
+    },
+    {
+      "id": "populated:formatting-toolbar",
+      "category": "populated",
+      "surface": "FormattingToolbar",
+      "classification": "explicit",
+      "source": {
+        "section": "UI Considerations",
+        "categoryLine": 327,
+        "surfaceLine": 87
+      },
+      "owner": {
+        "kind": "browser-assertion",
+        "file": "web/tests/editor-ui-states.browser.test.ts",
+        "symbol": "assertPopulatedState"
+      }
+    },
+    {
+      "id": "populated:block-style-select",
+      "category": "populated",
+      "surface": "BlockStyleSelect",
+      "classification": "explicit",
+      "source": {
+        "section": "UI Considerations",
+        "categoryLine": 327,
+        "surfaceLine": 88
+      },
+      "owner": {
+        "kind": "browser-assertion",
+        "file": "web/tests/editor-ui-states.browser.test.ts",
+        "symbol": "assertPopulatedState"
+      }
+    },
+    {
+      "id": "populated:inline-mark-group",
+      "category": "populated",
+      "surface": "InlineMarkGroup",
+      "classification": "explicit",
+      "source": {
+        "section": "UI Considerations",
+        "categoryLine": 327,
+        "surfaceLine": 89
+      },
+      "owner": {
+        "kind": "browser-assertion",
+        "file": "web/tests/editor-ui-states.browser.test.ts",
+        "symbol": "assertPopulatedState"
+      }
+    },
+    {
+      "id": "populated:font-family-select",
+      "category": "populated",
+      "surface": "FontFamilySelect",
+      "classification": "explicit",
+      "source": {
+        "section": "UI Considerations",
+        "categoryLine": 327,
+        "surfaceLine": 90
+      },
+      "owner": {
+        "kind": "browser-assertion",
+        "file": "web/tests/editor-ui-states.browser.test.ts",
+        "symbol": "assertPopulatedState"
+      }
+    },
+    {
+      "id": "populated:insert-menu",
+      "category": "populated",
+      "surface": "InsertMenu",
+      "classification": "explicit",
+      "source": {
+        "section": "UI Considerations",
+        "categoryLine": 327,
+        "surfaceLine": 97
+      },
+      "owner": {
+        "kind": "browser-assertion",
+        "file": "web/tests/editor-ui-states.browser.test.ts",
+        "symbol": "assertPopulatedState"
+      }
+    },
+    {
+      "id": "populated:document-editor-region",
+      "category": "populated",
+      "surface": "DocumentEditorRegion",
+      "classification": "explicit",
+      "source": {
+        "section": "UI Considerations",
+        "categoryLine": 327,
+        "surfaceLine": 98
+      },
+      "owner": {
+        "kind": "browser-assertion",
+        "file": "web/tests/editor-ui-states.browser.test.ts",
+        "symbol": "assertPopulatedState"
+      }
+    },
+    {
+      "id": "populated:controlled-input-projection",
+      "category": "populated",
+      "surface": "ControlledInputProjection",
+      "classification": "explicit",
+      "source": {
+        "section": "UI Considerations",
+        "categoryLine": 327,
+        "surfaceLine": 99
+      },
+      "owner": {
+        "kind": "browser-assertion",
+        "file": "web/tests/editor-ui-states.browser.test.ts",
+        "symbol": "assertPopulatedState"
+      }
+    },
+    {
+      "id": "populated:block-action-bar",
+      "category": "populated",
+      "surface": "BlockActionBar",
+      "classification": "explicit",
+      "source": {
+        "section": "UI Considerations",
+        "categoryLine": 327,
+        "surfaceLine": 100
+      },
+      "owner": {
+        "kind": "browser-assertion",
+        "file": "web/tests/editor-ui-states.browser.test.ts",
+        "symbol": "assertPopulatedState"
+      }
+    },
+    {
+      "id": "populated:image-block",
+      "category": "populated",
+      "surface": "ImageBlock",
+      "classification": "explicit",
+      "source": {
+        "section": "UI Considerations",
+        "categoryLine": 327,
+        "surfaceLine": 102
+      },
+      "owner": {
+        "kind": "browser-assertion",
+        "file": "web/tests/editor-ui-states.browser.test.ts",
+        "symbol": "assertPopulatedState"
+      }
+    },
+    {
+      "id": "populated:simple-table-block",
+      "category": "populated",
+      "surface": "SimpleTableBlock",
+      "classification": "explicit",
+      "source": {
+        "section": "UI Considerations",
+        "categoryLine": 327,
+        "surfaceLine": 104
+      },
+      "owner": {
+        "kind": "browser-assertion",
+        "file": "web/tests/editor-ui-states.browser.test.ts",
+        "symbol": "assertPopulatedState"
+      }
+    },
+    {
+      "id": "populated:table-action-bar",
+      "category": "populated",
+      "surface": "TableActionBar",
+      "classification": "explicit",
+      "source": {
+        "section": "UI Considerations",
+        "categoryLine": 327,
+        "surfaceLine": 105
+      },
+      "owner": {
+        "kind": "browser-assertion",
+        "file": "web/tests/editor-ui-states.browser.test.ts",
+        "symbol": "assertPopulatedState"
+      }
+    },
+    {
+      "id": "populated:page-break-block",
+      "category": "populated",
+      "surface": "PageBreakBlock",
+      "classification": "explicit",
+      "source": {
+        "section": "UI Considerations",
+        "categoryLine": 327,
+        "surfaceLine": 106
+      },
+      "owner": {
+        "kind": "browser-assertion",
+        "file": "web/tests/editor-ui-states.browser.test.ts",
+        "symbol": "assertPopulatedState"
+      }
+    },
+    {
+      "id": "populated:status-region",
+      "category": "populated",
+      "surface": "StatusRegion",
+      "classification": "explicit",
+      "source": {
+        "section": "UI Considerations",
+        "categoryLine": 327,
+        "surfaceLine": 107
+      },
+      "owner": {
+        "kind": "browser-assertion",
+        "file": "web/tests/editor-ui-states.browser.test.ts",
+        "symbol": "assertPopulatedState"
+      }
+    },
+    {
+      "id": "populated:diagnostics-entry",
+      "category": "populated",
+      "surface": "DiagnosticsEntry",
+      "classification": "explicit",
+      "source": {
+        "section": "UI Considerations",
+        "categoryLine": 327,
+        "surfaceLine": 110
+      },
+      "owner": {
+        "kind": "browser-assertion",
+        "file": "web/tests/editor-ui-states.browser.test.ts",
+        "symbol": "assertPopulatedState"
+      }
+    },
+    {
+      "id": "partial:formatting-toolbar",
+      "category": "partial",
+      "surface": "FormattingToolbar",
+      "classification": "explicit",
+      "source": {
+        "section": "UI Considerations",
+        "categoryLine": 328,
+        "surfaceLine": 87
+      },
+      "owner": {
+        "kind": "browser-assertion",
+        "file": "web/tests/editor-ui-states.browser.test.ts",
+        "symbol": "assertPartialState"
+      }
+    },
+    {
+      "id": "partial:inline-mark-group",
+      "category": "partial",
+      "surface": "InlineMarkGroup",
+      "classification": "explicit",
+      "source": {
+        "section": "UI Considerations",
+        "categoryLine": 328,
+        "surfaceLine": 89
+      },
+      "owner": {
+        "kind": "browser-assertion",
+        "file": "web/tests/editor-ui-states.browser.test.ts",
+        "symbol": "assertPartialState"
+      }
+    },
+    {
+      "id": "partial:font-family-select",
+      "category": "partial",
+      "surface": "FontFamilySelect",
+      "classification": "explicit",
+      "source": {
+        "section": "UI Considerations",
+        "categoryLine": 328,
+        "surfaceLine": 90
+      },
+      "owner": {
+        "kind": "browser-assertion",
+        "file": "web/tests/editor-ui-states.browser.test.ts",
+        "symbol": "assertPartialState"
+      }
+    },
+    {
+      "id": "partial:image-insert-dialog",
+      "category": "partial",
+      "surface": "ImageInsertDialog",
+      "classification": "explicit",
+      "source": {
+        "section": "UI Considerations",
+        "categoryLine": 328,
+        "surfaceLine": 101
+      },
+      "owner": {
+        "kind": "browser-assertion",
+        "file": "web/tests/editor-ui-states.browser.test.ts",
+        "symbol": "assertPartialState"
+      }
+    },
+    {
+      "id": "partial:image-block",
+      "category": "partial",
+      "surface": "ImageBlock",
+      "classification": "explicit",
+      "source": {
+        "section": "UI Considerations",
+        "categoryLine": 328,
+        "surfaceLine": 102
+      },
+      "owner": {
+        "kind": "browser-assertion",
+        "file": "web/tests/editor-ui-states.browser.test.ts",
+        "symbol": "assertPartialState"
+      }
+    },
+    {
+      "id": "partial:table-insert-dialog",
+      "category": "partial",
+      "surface": "TableInsertDialog",
+      "classification": "explicit",
+      "source": {
+        "section": "UI Considerations",
+        "categoryLine": 328,
+        "surfaceLine": 103
+      },
+      "owner": {
+        "kind": "browser-assertion",
+        "file": "web/tests/editor-ui-states.browser.test.ts",
+        "symbol": "assertPartialState"
+      }
+    },
+    {
+      "id": "partial:simple-table-block",
+      "category": "partial",
+      "surface": "SimpleTableBlock",
+      "classification": "explicit",
+      "source": {
+        "section": "UI Considerations",
+        "categoryLine": 328,
+        "surfaceLine": 104
+      },
+      "owner": {
+        "kind": "browser-assertion",
+        "file": "web/tests/editor-ui-states.browser.test.ts",
+        "symbol": "assertPartialState"
+      }
+    },
+    {
+      "id": "partial:status-region",
+      "category": "partial",
+      "surface": "StatusRegion",
+      "classification": "explicit",
+      "source": {
+        "section": "UI Considerations",
+        "categoryLine": 328,
+        "surfaceLine": 107
+      },
+      "owner": {
+        "kind": "browser-assertion",
+        "file": "web/tests/editor-ui-states.browser.test.ts",
+        "symbol": "assertPartialState"
+      }
+    },
+    {
+      "id": "partial:error-region",
+      "category": "partial",
+      "surface": "ErrorRegion",
+      "classification": "explicit",
+      "source": {
+        "section": "UI Considerations",
+        "categoryLine": 328,
+        "surfaceLine": 108
+      },
+      "owner": {
+        "kind": "browser-assertion",
+        "file": "web/tests/editor-ui-states.browser.test.ts",
+        "symbol": "assertPartialState"
+      }
+    },
+    {
+      "id": "partial:document-editor-region",
+      "category": "partial",
+      "surface": "DocumentEditorRegion",
+      "classification": "explicit",
+      "source": {
+        "section": "UI Considerations",
+        "categoryLine": 328,
+        "surfaceLine": 98
+      },
+      "owner": {
+        "kind": "browser-assertion",
+        "file": "web/tests/editor-ui-states.browser.test.ts",
+        "symbol": "assertPartialState"
+      }
+    },
+    {
+      "id": "partial:block-style-select",
+      "category": "partial",
+      "surface": "BlockStyleSelect",
+      "classification": "explicit",
+      "source": {
+        "section": "UI Considerations",
+        "categoryLine": 328,
+        "surfaceLine": 88
+      },
+      "owner": {
+        "kind": "browser-assertion",
+        "file": "web/tests/editor-ui-states.browser.test.ts",
+        "symbol": "assertPartialState"
+      }
+    },
+    {
+      "id": "partial:table-action-bar",
+      "category": "partial",
+      "surface": "TableActionBar",
+      "classification": "explicit",
+      "source": {
+        "section": "UI Considerations",
+        "categoryLine": 328,
+        "surfaceLine": 105
+      },
+      "owner": {
+        "kind": "browser-assertion",
+        "file": "web/tests/editor-ui-states.browser.test.ts",
+        "symbol": "assertPartialState"
+      }
+    },
+    {
+      "id": "overflow:editor-app-shell",
+      "category": "overflow",
+      "surface": "EditorAppShell",
+      "classification": "explicit",
+      "source": {
+        "section": "UI Considerations",
+        "categoryLine": 329,
+        "surfaceLine": 85
+      },
+      "owner": {
+        "kind": "browser-assertion",
+        "file": "web/tests/editor-responsive.browser.test.ts",
+        "symbol": "assertResponsiveOverflow"
+      }
+    },
+    {
+      "id": "overflow:application-bar",
+      "category": "overflow",
+      "surface": "ApplicationBar",
+      "classification": "explicit",
+      "source": {
+        "section": "UI Considerations",
+        "categoryLine": 329,
+        "surfaceLine": 86
+      },
+      "owner": {
+        "kind": "browser-assertion",
+        "file": "web/tests/editor-responsive.browser.test.ts",
+        "symbol": "assertResponsiveOverflow"
+      }
+    },
+    {
+      "id": "overflow:formatting-toolbar",
+      "category": "overflow",
+      "surface": "FormattingToolbar",
+      "classification": "explicit",
+      "source": {
+        "section": "UI Considerations",
+        "categoryLine": 329,
+        "surfaceLine": 87
+      },
+      "owner": {
+        "kind": "browser-assertion",
+        "file": "web/tests/editor-responsive.browser.test.ts",
+        "symbol": "assertResponsiveOverflow"
+      }
+    },
+    {
+      "id": "overflow:insert-menu",
+      "category": "overflow",
+      "surface": "InsertMenu",
+      "classification": "explicit",
+      "source": {
+        "section": "UI Considerations",
+        "categoryLine": 329,
+        "surfaceLine": 97
+      },
+      "owner": {
+        "kind": "browser-assertion",
+        "file": "web/tests/editor-responsive.browser.test.ts",
+        "symbol": "assertResponsiveOverflow"
+      }
+    },
+    {
+      "id": "overflow:document-editor-region",
+      "category": "overflow",
+      "surface": "DocumentEditorRegion",
+      "classification": "explicit",
+      "source": {
+        "section": "UI Considerations",
+        "categoryLine": 329,
+        "surfaceLine": 98
+      },
+      "owner": {
+        "kind": "browser-assertion",
+        "file": "web/tests/editor-responsive.browser.test.ts",
+        "symbol": "assertResponsiveOverflow"
+      }
+    },
+    {
+      "id": "overflow:image-insert-dialog",
+      "category": "overflow",
+      "surface": "ImageInsertDialog",
+      "classification": "explicit",
+      "source": {
+        "section": "UI Considerations",
+        "categoryLine": 329,
+        "surfaceLine": 101
+      },
+      "owner": {
+        "kind": "browser-assertion",
+        "file": "web/tests/editor-responsive.browser.test.ts",
+        "symbol": "assertResponsiveOverflow"
+      }
+    },
+    {
+      "id": "overflow:image-block",
+      "category": "overflow",
+      "surface": "ImageBlock",
+      "classification": "explicit",
+      "source": {
+        "section": "UI Considerations",
+        "categoryLine": 329,
+        "surfaceLine": 102
+      },
+      "owner": {
+        "kind": "browser-assertion",
+        "file": "web/tests/editor-responsive.browser.test.ts",
+        "symbol": "assertResponsiveOverflow"
+      }
+    },
+    {
+      "id": "overflow:simple-table-block",
+      "category": "overflow",
+      "surface": "SimpleTableBlock",
+      "classification": "explicit",
+      "source": {
+        "section": "UI Considerations",
+        "categoryLine": 329,
+        "surfaceLine": 104
+      },
+      "owner": {
+        "kind": "browser-assertion",
+        "file": "web/tests/editor-responsive.browser.test.ts",
+        "symbol": "assertResponsiveOverflow"
+      }
+    },
+    {
+      "id": "overflow:table-action-bar",
+      "category": "overflow",
+      "surface": "TableActionBar",
+      "classification": "explicit",
+      "source": {
+        "section": "UI Considerations",
+        "categoryLine": 329,
+        "surfaceLine": 105
+      },
+      "owner": {
+        "kind": "browser-assertion",
+        "file": "web/tests/editor-responsive.browser.test.ts",
+        "symbol": "assertResponsiveOverflow"
+      }
+    },
+    {
+      "id": "overflow:page-break-block",
+      "category": "overflow",
+      "surface": "PageBreakBlock",
+      "classification": "explicit",
+      "source": {
+        "section": "UI Considerations",
+        "categoryLine": 329,
+        "surfaceLine": 106
+      },
+      "owner": {
+        "kind": "browser-assertion",
+        "file": "web/tests/editor-responsive.browser.test.ts",
+        "symbol": "assertResponsiveOverflow"
+      }
+    },
+    {
+      "id": "overflow:status-region",
+      "category": "overflow",
+      "surface": "StatusRegion",
+      "classification": "explicit",
+      "source": {
+        "section": "UI Considerations",
+        "categoryLine": 329,
+        "surfaceLine": 107
+      },
+      "owner": {
+        "kind": "browser-assertion",
+        "file": "web/tests/editor-responsive.browser.test.ts",
+        "symbol": "assertResponsiveOverflow"
+      }
+    },
+    {
+      "id": "overflow:error-region",
+      "category": "overflow",
+      "surface": "ErrorRegion",
+      "classification": "explicit",
+      "source": {
+        "section": "UI Considerations",
+        "categoryLine": 329,
+        "surfaceLine": 108
+      },
+      "owner": {
+        "kind": "browser-assertion",
+        "file": "web/tests/editor-responsive.browser.test.ts",
+        "symbol": "assertResponsiveOverflow"
+      }
+    },
+    {
+      "id": "overflow:destructive-confirm-dialog",
+      "category": "overflow",
+      "surface": "DestructiveConfirmDialog",
+      "classification": "explicit",
+      "source": {
+        "section": "UI Considerations",
+        "categoryLine": 329,
+        "surfaceLine": 109
+      },
+      "owner": {
+        "kind": "browser-assertion",
+        "file": "web/tests/editor-responsive.browser.test.ts",
+        "symbol": "assertResponsiveOverflow"
+      }
+    },
+    {
+      "id": "overflow:font-family-select",
+      "category": "overflow",
+      "surface": "FontFamilySelect",
+      "classification": "explicit",
+      "source": {
+        "section": "UI Considerations",
+        "categoryLine": 329,
+        "surfaceLine": 90
+      },
+      "owner": {
+        "kind": "browser-assertion",
+        "file": "web/tests/editor-responsive.browser.test.ts",
+        "symbol": "assertResponsiveOverflow"
+      }
+    },
+    {
+      "id": "zero-one-many:document-editor-region",
+      "category": "zero-one-many",
+      "surface": "DocumentEditorRegion",
+      "classification": "explicit",
+      "source": {
+        "section": "UI Considerations",
+        "categoryLine": 330,
+        "surfaceLine": 98
+      },
+      "owner": {
+        "kind": "browser-assertion",
+        "file": "web/tests/editor-ui-states.browser.test.ts",
+        "symbol": "assertZeroOneManyState"
+      }
+    },
+    {
+      "id": "zero-one-many:controlled-input-projection",
+      "category": "zero-one-many",
+      "surface": "ControlledInputProjection",
+      "classification": "explicit",
+      "source": {
+        "section": "UI Considerations",
+        "categoryLine": 330,
+        "surfaceLine": 99
+      },
+      "owner": {
+        "kind": "browser-assertion",
+        "file": "web/tests/editor-ui-states.browser.test.ts",
+        "symbol": "assertZeroOneManyState"
+      }
+    },
+    {
+      "id": "zero-one-many:insert-menu",
+      "category": "zero-one-many",
+      "surface": "InsertMenu",
+      "classification": "explicit",
+      "source": {
+        "section": "UI Considerations",
+        "categoryLine": 330,
+        "surfaceLine": 97
+      },
+      "owner": {
+        "kind": "browser-assertion",
+        "file": "web/tests/editor-ui-states.browser.test.ts",
+        "symbol": "assertZeroOneManyState"
+      }
+    },
+    {
+      "id": "zero-one-many:image-block",
+      "category": "zero-one-many",
+      "surface": "ImageBlock",
+      "classification": "explicit",
+      "source": {
+        "section": "UI Considerations",
+        "categoryLine": 330,
+        "surfaceLine": 102
+      },
+      "owner": {
+        "kind": "browser-assertion",
+        "file": "web/tests/editor-ui-states.browser.test.ts",
+        "symbol": "assertZeroOneManyState"
+      }
+    },
+    {
+      "id": "zero-one-many:simple-table-block",
+      "category": "zero-one-many",
+      "surface": "SimpleTableBlock",
+      "classification": "explicit",
+      "source": {
+        "section": "UI Considerations",
+        "categoryLine": 330,
+        "surfaceLine": 104
+      },
+      "owner": {
+        "kind": "browser-assertion",
+        "file": "web/tests/editor-ui-states.browser.test.ts",
+        "symbol": "assertZeroOneManyState"
+      }
+    },
+    {
+      "id": "zero-one-many:table-action-bar",
+      "category": "zero-one-many",
+      "surface": "TableActionBar",
+      "classification": "explicit",
+      "source": {
+        "section": "UI Considerations",
+        "categoryLine": 330,
+        "surfaceLine": 105
+      },
+      "owner": {
+        "kind": "browser-assertion",
+        "file": "web/tests/editor-ui-states.browser.test.ts",
+        "symbol": "assertZeroOneManyState"
+      }
+    },
+    {
+      "id": "zero-one-many:block-action-bar",
+      "category": "zero-one-many",
+      "surface": "BlockActionBar",
+      "classification": "explicit",
+      "source": {
+        "section": "UI Considerations",
+        "categoryLine": 330,
+        "surfaceLine": 100
+      },
+      "owner": {
+        "kind": "browser-assertion",
+        "file": "web/tests/editor-ui-states.browser.test.ts",
+        "symbol": "assertZeroOneManyState"
+      }
+    },
+    {
+      "id": "zero-one-many:status-region",
+      "category": "zero-one-many",
+      "surface": "StatusRegion",
+      "classification": "explicit",
+      "source": {
+        "section": "UI Considerations",
+        "categoryLine": 330,
+        "surfaceLine": 107
+      },
+      "owner": {
+        "kind": "browser-assertion",
+        "file": "web/tests/editor-ui-states.browser.test.ts",
+        "symbol": "assertZeroOneManyState"
+      }
+    },
+    {
+      "id": "zero-one-many:formatting-toolbar",
+      "category": "zero-one-many",
+      "surface": "FormattingToolbar",
+      "classification": "explicit",
+      "source": {
+        "section": "UI Considerations",
+        "categoryLine": 330,
+        "surfaceLine": 87
+      },
+      "owner": {
+        "kind": "browser-assertion",
+        "file": "web/tests/editor-ui-states.browser.test.ts",
+        "symbol": "assertZeroOneManyState"
+      }
+    },
+    {
+      "id": "zero-one-many:application-bar",
+      "category": "zero-one-many",
+      "surface": "ApplicationBar",
+      "classification": "explicit",
+      "source": {
+        "section": "UI Considerations",
+        "categoryLine": 330,
+        "surfaceLine": 86
+      },
+      "owner": {
+        "kind": "browser-assertion",
+        "file": "web/tests/editor-ui-states.browser.test.ts",
+        "symbol": "assertZeroOneManyState"
+      }
+    },
+    {
+      "id": "zero-one-many:image-insert-dialog",
+      "category": "zero-one-many",
+      "surface": "ImageInsertDialog",
+      "classification": "explicit",
+      "source": {
+        "section": "UI Considerations",
+        "categoryLine": 330,
+        "surfaceLine": 101
+      },
+      "owner": {
+        "kind": "browser-assertion",
+        "file": "web/tests/editor-ui-states.browser.test.ts",
+        "symbol": "assertZeroOneManyState"
+      }
+    },
+    {
+      "id": "zero-one-many:table-insert-dialog",
+      "category": "zero-one-many",
+      "surface": "TableInsertDialog",
+      "classification": "explicit",
+      "source": {
+        "section": "UI Considerations",
+        "categoryLine": 330,
+        "surfaceLine": 103
+      },
+      "owner": {
+        "kind": "browser-assertion",
+        "file": "web/tests/editor-ui-states.browser.test.ts",
+        "symbol": "assertZeroOneManyState"
+      }
+    },
+    {
+      "id": "zero-one-many:diagnostics-entry",
+      "category": "zero-one-many",
+      "surface": "DiagnosticsEntry",
+      "classification": "explicit",
+      "source": {
+        "section": "UI Considerations",
+        "categoryLine": 330,
+        "surfaceLine": 110
+      },
+      "owner": {
+        "kind": "browser-assertion",
+        "file": "web/tests/editor-ui-states.browser.test.ts",
+        "symbol": "assertZeroOneManyState"
+      }
+    },
+    {
+      "id": "long-text:editor-app-shell",
+      "category": "long-text",
+      "surface": "EditorAppShell",
+      "classification": "explicit",
+      "source": {
+        "section": "UI Considerations",
+        "categoryLine": 331,
+        "surfaceLine": 85
+      },
+      "owner": {
+        "kind": "browser-assertion",
+        "file": "web/tests/editor-ui-states.browser.test.ts",
+        "symbol": "assertLongTextState"
+      }
+    },
+    {
+      "id": "long-text:application-bar",
+      "category": "long-text",
+      "surface": "ApplicationBar",
+      "classification": "explicit",
+      "source": {
+        "section": "UI Considerations",
+        "categoryLine": 331,
+        "surfaceLine": 86
+      },
+      "owner": {
+        "kind": "browser-assertion",
+        "file": "web/tests/editor-ui-states.browser.test.ts",
+        "symbol": "assertLongTextState"
+      }
+    },
+    {
+      "id": "long-text:formatting-toolbar",
+      "category": "long-text",
+      "surface": "FormattingToolbar",
+      "classification": "explicit",
+      "source": {
+        "section": "UI Considerations",
+        "categoryLine": 331,
+        "surfaceLine": 87
+      },
+      "owner": {
+        "kind": "browser-assertion",
+        "file": "web/tests/editor-ui-states.browser.test.ts",
+        "symbol": "assertLongTextState"
+      }
+    },
+    {
+      "id": "long-text:block-style-select",
+      "category": "long-text",
+      "surface": "BlockStyleSelect",
+      "classification": "explicit",
+      "source": {
+        "section": "UI Considerations",
+        "categoryLine": 331,
+        "surfaceLine": 88
+      },
+      "owner": {
+        "kind": "browser-assertion",
+        "file": "web/tests/editor-ui-states.browser.test.ts",
+        "symbol": "assertLongTextState"
+      }
+    },
+    {
+      "id": "long-text:inline-mark-group",
+      "category": "long-text",
+      "surface": "InlineMarkGroup",
+      "classification": "explicit",
+      "source": {
+        "section": "UI Considerations",
+        "categoryLine": 331,
+        "surfaceLine": 89
+      },
+      "owner": {
+        "kind": "browser-assertion",
+        "file": "web/tests/editor-ui-states.browser.test.ts",
+        "symbol": "assertLongTextState"
+      }
+    },
+    {
+      "id": "long-text:font-family-select",
+      "category": "long-text",
+      "surface": "FontFamilySelect",
+      "classification": "explicit",
+      "source": {
+        "section": "UI Considerations",
+        "categoryLine": 331,
+        "surfaceLine": 90
+      },
+      "owner": {
+        "kind": "browser-assertion",
+        "file": "web/tests/editor-ui-states.browser.test.ts",
+        "symbol": "assertLongTextState"
+      }
+    },
+    {
+      "id": "long-text:insert-menu",
+      "category": "long-text",
+      "surface": "InsertMenu",
+      "classification": "explicit",
+      "source": {
+        "section": "UI Considerations",
+        "categoryLine": 331,
+        "surfaceLine": 97
+      },
+      "owner": {
+        "kind": "browser-assertion",
+        "file": "web/tests/editor-ui-states.browser.test.ts",
+        "symbol": "assertLongTextState"
+      }
+    },
+    {
+      "id": "long-text:document-editor-region",
+      "category": "long-text",
+      "surface": "DocumentEditorRegion",
+      "classification": "explicit",
+      "source": {
+        "section": "UI Considerations",
+        "categoryLine": 331,
+        "surfaceLine": 98
+      },
+      "owner": {
+        "kind": "browser-assertion",
+        "file": "web/tests/editor-ui-states.browser.test.ts",
+        "symbol": "assertLongTextState"
+      }
+    },
+    {
+      "id": "long-text:controlled-input-projection",
+      "category": "long-text",
+      "surface": "ControlledInputProjection",
+      "classification": "explicit",
+      "source": {
+        "section": "UI Considerations",
+        "categoryLine": 331,
+        "surfaceLine": 99
+      },
+      "owner": {
+        "kind": "browser-assertion",
+        "file": "web/tests/editor-ui-states.browser.test.ts",
+        "symbol": "assertLongTextState"
+      }
+    },
+    {
+      "id": "long-text:image-insert-dialog",
+      "category": "long-text",
+      "surface": "ImageInsertDialog",
+      "classification": "explicit",
+      "source": {
+        "section": "UI Considerations",
+        "categoryLine": 331,
+        "surfaceLine": 101
+      },
+      "owner": {
+        "kind": "browser-assertion",
+        "file": "web/tests/editor-ui-states.browser.test.ts",
+        "symbol": "assertLongTextState"
+      }
+    },
+    {
+      "id": "long-text:table-insert-dialog",
+      "category": "long-text",
+      "surface": "TableInsertDialog",
+      "classification": "explicit",
+      "source": {
+        "section": "UI Considerations",
+        "categoryLine": 331,
+        "surfaceLine": 103
+      },
+      "owner": {
+        "kind": "browser-assertion",
+        "file": "web/tests/editor-ui-states.browser.test.ts",
+        "symbol": "assertLongTextState"
+      }
+    },
+    {
+      "id": "long-text:status-region",
+      "category": "long-text",
+      "surface": "StatusRegion",
+      "classification": "explicit",
+      "source": {
+        "section": "UI Considerations",
+        "categoryLine": 331,
+        "surfaceLine": 107
+      },
+      "owner": {
+        "kind": "browser-assertion",
+        "file": "web/tests/editor-ui-states.browser.test.ts",
+        "symbol": "assertLongTextState"
+      }
+    },
+    {
+      "id": "long-text:error-region",
+      "category": "long-text",
+      "surface": "ErrorRegion",
+      "classification": "explicit",
+      "source": {
+        "section": "UI Considerations",
+        "categoryLine": 331,
+        "surfaceLine": 108
+      },
+      "owner": {
+        "kind": "browser-assertion",
+        "file": "web/tests/editor-ui-states.browser.test.ts",
+        "symbol": "assertLongTextState"
+      }
+    }
+  ]
+}
