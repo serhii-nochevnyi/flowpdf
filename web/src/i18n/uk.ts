@@ -89,6 +89,7 @@ export const foundationInspectorUk = {
   'foundationInspector.audit.action.recovery': 'Відновлення',
   'foundationInspector.audit.action.insertText': 'Вставлення тексту',
   'foundationInspector.audit.action.replaceText': 'Заміна тексту',
+  'foundationInspector.audit.action.replaceSelection': 'Заміна виділення',
   'foundationInspector.audit.action.deleteText': 'Видалення тексту',
   'foundationInspector.audit.action.setNodeStyle': 'Зміна стилю',
   'foundationInspector.audit.action.insertNode': 'Додавання вузла',

@@ -91,6 +91,7 @@ export const foundationInspectorEn = {
   'foundationInspector.audit.action.recovery': 'Recovery',
   'foundationInspector.audit.action.insertText': 'Insert text',
   'foundationInspector.audit.action.replaceText': 'Replace text',
+  'foundationInspector.audit.action.replaceSelection': 'Replace selection',
   'foundationInspector.audit.action.deleteText': 'Delete text',
   'foundationInspector.audit.action.setNodeStyle': 'Set style',
   'foundationInspector.audit.action.insertNode': 'Insert node',

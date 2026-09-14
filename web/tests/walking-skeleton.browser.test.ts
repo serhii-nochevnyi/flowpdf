@@ -12,6 +12,11 @@ import {
   mountFoundationInspector,
   type FoundationInspectorController,
 } from '../src/foundation-inspector'
+import {
+  mountEditorApp,
+  type EditorAppSnapshot,
+  type EditorController,
+} from '../src/editor/editor-app'
 
 const NON_EMPTY_ASSET_BYTES = [97, 98, 99] as const
 const NON_EMPTY_ASSET_HASH =
@@ -282,4 +287,92 @@ test('walking-skeleton: preserves a validated non-empty asset through atomic mig
   expect((JSON.parse(queried.session.canonicalJson) as CanonicalFixture).assets).toEqual(
     migratedDocument.assets,
   )
+})
+
+function editorAction(root: HTMLElement, name: string): HTMLButtonElement {
+  const control = root.querySelector<HTMLButtonElement>(`[data-action="editor-${name}"]`)
+  if (control === null) throw new Error(`missing editor-${name} control`)
+  return control
+}
+
+async function settleEditor(controller: EditorController): Promise<void> {
+  await controller.whenIdle()
+  await new Promise<void>((resolve) => setTimeout(resolve, 0))
+}
+
+function durableEditorState(snapshot: EditorAppSnapshot) {
+  if (snapshot.accepted === null) throw new Error('accepted editor state is required')
+  return {
+    revision: snapshot.accepted.session.revision,
+    hash: snapshot.accepted.session.canonicalHash,
+    text: snapshot.accepted.editor.view.document.blocks
+      .map((block) => block.text ?? block.nodeKind ?? '')
+      .join('\n'),
+    selection: snapshot.accepted.editor.view.selection,
+    history: snapshot.accepted.session.history,
+  }
+}
+
+test('Phase 2 paragraph tracer crosses migration, ReplaceSelection, persistence, and recovery', async () => {
+  const root = document.createElement('div')
+  document.body.replaceChildren(root)
+
+  const options = {
+    databaseName: 'flowpdf-phase2-paragraph-tracer-browser-test',
+    clock: () => new Date('2026-08-14T22:00:00Z'),
+  }
+  const controller = await mountEditorApp(root, options)
+  await settleEditor(controller)
+  expect(root.querySelector('[data-empty-document]')?.textContent).toMatch(/не відкрито/i)
+
+  await (editorAction(root, 'open-older').click(), settleEditor(controller))
+  const migrated = controller.snapshot()
+  expect(migrated.accepted?.session.revision).toBe(1)
+  expect(migrated.accepted?.view.revisionProvenance.lineage).toMatchObject({
+    kind: 'migrated',
+  })
+  const migratedState = durableEditorState(migrated)
+  expect(migratedState.text).toMatch(/Український/)
+
+  const acceptedBeforeEdit = migrated.accepted
+  editorAction(root, 'replace').click()
+  await settleEditor(controller)
+  const edited = controller.snapshot()
+  expect(edited.accepted).not.toBe(acceptedBeforeEdit)
+  const editedState = durableEditorState(edited)
+  expect(editedState.revision).toBe(2)
+  expect(editedState.hash).not.toBe(migratedState.hash)
+  expect(editedState.text).toMatch(/зміна \/ edit/)
+  expect(editedState.selection.anchor).toEqual(editedState.selection.focus)
+  expect(editedState.selection.anchor.utf16Offset).toBeGreaterThan(0)
+
+  editorAction(root, 'undo').click()
+  await settleEditor(controller)
+  const undone = durableEditorState(controller.snapshot())
+  expect(undone.revision).toBe(3)
+  expect(undone.hash).not.toBe(editedState.hash)
+  expect(undone.text).toBe(migratedState.text)
+
+  editorAction(root, 'redo').click()
+  await settleEditor(controller)
+  const redoneSnapshot = controller.snapshot()
+  const redone = durableEditorState(redoneSnapshot)
+  expect(redone.revision).toBe(4)
+  expect(redone.text).toMatch(/зміна \/ edit/)
+
+  await controller.reloadFromStorage()
+  await settleEditor(controller)
+  expect(durableEditorState(controller.snapshot())).toEqual(redone)
+
+  const remountRoot = document.createElement('div')
+  document.body.replaceChildren(remountRoot)
+  const remounted = await mountEditorApp(remountRoot, options)
+  await settleEditor(remounted)
+  expect(durableEditorState(remounted.snapshot())).toEqual(redone)
+
+  await remounted.recoverFromStorage()
+  await settleEditor(remounted)
+  expect(durableEditorState(remounted.snapshot())).toEqual(redone)
+  expect(remountRoot.querySelector('summary')?.textContent).toMatch(/Інспектор|Inspector/)
+  expect(remountRoot.querySelectorAll('[data-editor-document] p')).toHaveLength(2)
 })

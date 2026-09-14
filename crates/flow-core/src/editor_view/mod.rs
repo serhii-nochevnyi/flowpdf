@@ -105,6 +105,18 @@ impl EditorSessionState {
         })
     }
 
+    pub fn from_document_with_selection(
+        document: &FlowDocument,
+        selection: DirectionalSelection,
+    ) -> Result<Self, EditorSessionError> {
+        let mut state = Self::from_document(document)?;
+        validate_selection(document, &selection)?;
+        state.pending_marks = pending_marks_for_selection(document, &selection)?;
+        state.selection = selection;
+        state.formatting = formatting_for_selection(document, &state.selection)?;
+        Ok(state)
+    }
+
     pub fn validate_against(&self, document: &FlowDocument) -> Result<(), EditorSessionError> {
         if self.document_id != document.document_id {
             return Err(EditorSessionError::DocumentMismatch);
@@ -126,6 +138,18 @@ impl EditorSessionState {
 
     #[must_use]
     pub fn view(&self) -> EditorViewDto {
+        self.view_with_document(EditorDocumentViewDto::empty(
+            self.document_id.clone(),
+            self.revision,
+        ))
+    }
+
+    #[must_use]
+    pub fn view_for_document(&self, document: &FlowDocument) -> EditorViewDto {
+        self.view_with_document(EditorDocumentViewDto::from_document(document))
+    }
+
+    fn view_with_document(&self, document: EditorDocumentViewDto) -> EditorViewDto {
         EditorViewDto {
             document_id: self.document_id.clone(),
             revision: self.revision,
@@ -134,6 +158,80 @@ impl EditorSessionState {
             pending_marks: self.pending_marks.clone(),
             formatting: self.formatting.clone(),
             capabilities: self.capabilities.clone(),
+            document,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EditorDocumentViewDto {
+    pub document_id: DocumentId,
+    pub revision: u32,
+    pub blocks: Vec<EditorBlockViewDto>,
+}
+
+impl EditorDocumentViewDto {
+    fn empty(document_id: DocumentId, revision: u32) -> Self {
+        Self {
+            document_id,
+            revision,
+            blocks: Vec::new(),
+        }
+    }
+
+    fn from_document(document: &FlowDocument) -> Self {
+        Self {
+            document_id: document.document_id.clone(),
+            revision: document.revision,
+            blocks: document
+                .content
+                .iter()
+                .map(EditorBlockViewDto::from_node)
+                .collect(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
+)]
+pub enum EditorBlockViewDto {
+    Paragraph {
+        node_id: NodeId,
+        text: String,
+    },
+    Heading {
+        node_id: NodeId,
+        level: u8,
+        text: String,
+    },
+    Atomic {
+        node_id: NodeId,
+        node_kind: String,
+    },
+}
+
+impl EditorBlockViewDto {
+    fn from_node(node: &ContentNode) -> Self {
+        match &node.body {
+            crate::model::BlockKind::Paragraph { .. } => Self::Paragraph {
+                node_id: node.id.clone(),
+                text: node.text(),
+            },
+            crate::model::BlockKind::Heading { level, .. } => Self::Heading {
+                node_id: node.id.clone(),
+                level: *level,
+                text: node.text(),
+            },
+            body => Self::Atomic {
+                node_id: node.id.clone(),
+                node_kind: body_kind(body).to_owned(),
+            },
         }
     }
 }
@@ -148,6 +246,7 @@ pub struct EditorViewDto {
     pub pending_marks: MarkSet,
     pub formatting: FormattingProjectionDto,
     pub capabilities: Vec<CapabilityDto>,
+    pub document: EditorDocumentViewDto,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -300,6 +399,21 @@ fn find_node<'a>(nodes: &'a [ContentNode], target: &NodeId) -> Option<&'a Conten
     None
 }
 
+fn body_kind(body: &crate::model::BlockKind) -> &'static str {
+    match body {
+        crate::model::BlockKind::Paragraph { .. } => "paragraph",
+        crate::model::BlockKind::Heading { .. } => "heading",
+        crate::model::BlockKind::OrderedList { .. } => "orderedList",
+        crate::model::BlockKind::UnorderedList { .. } => "unorderedList",
+        crate::model::BlockKind::ListItem { .. } => "listItem",
+        crate::model::BlockKind::Image { .. } => "image",
+        crate::model::BlockKind::Table { .. } => "table",
+        crate::model::BlockKind::TableRow { .. } => "tableRow",
+        crate::model::BlockKind::TableCell { .. } => "tableCell",
+        crate::model::BlockKind::PageBreak => "pageBreak",
+    }
+}
+
 fn validate_selection(
     document: &FlowDocument,
     selection: &DirectionalSelection,
@@ -322,6 +436,20 @@ fn validate_pending_marks(marks: &MarkSet) -> Result<(), EditorSessionError> {
         return Err(EditorSessionError::InvalidPendingMarks);
     }
     Ok(())
+}
+
+fn pending_marks_for_selection(
+    document: &FlowDocument,
+    selection: &DirectionalSelection,
+) -> Result<MarkSet, EditorSessionError> {
+    if !selection.collapsed() {
+        return Ok(MarkSet::default());
+    }
+    let node = find_node(&document.content, &selection.anchor.node_id)
+        .ok_or(EditorSessionError::UnknownNode)?;
+    Ok(node.runs().map_or_else(MarkSet::default, |runs| {
+        marks_at_offset(runs, selection.anchor.utf16_offset.get())
+    }))
 }
 
 fn marks_at_offset(runs: &[crate::model::InlineRun], offset: u32) -> MarkSet {
@@ -445,15 +573,7 @@ pub(crate) fn apply_action(
     match action {
         EditorSessionAction::SetSelection { selection } => {
             validate_selection(document, &selection)?;
-            state.pending_marks = if selection.collapsed() {
-                let node = find_node(&document.content, &selection.anchor.node_id)
-                    .ok_or(EditorSessionError::UnknownNode)?;
-                node.runs().map_or_else(MarkSet::default, |runs| {
-                    marks_at_offset(runs, selection.anchor.utf16_offset.get())
-                })
-            } else {
-                MarkSet::default()
-            };
+            state.pending_marks = pending_marks_for_selection(document, &selection)?;
             state.selection = selection;
         }
         EditorSessionAction::SetPendingMarks { marks } => {
@@ -479,7 +599,7 @@ pub(crate) fn apply_action(
         .session_generation
         .checked_add(1)
         .ok_or(EditorSessionError::GenerationOverflow)?;
-    let view = state.view();
+    let view = state.view_for_document(document);
     Ok(EditorSessionResponse {
         session: state,
         view,
@@ -491,5 +611,5 @@ pub(crate) fn project_view(
     session: &EditorSessionState,
 ) -> Result<EditorViewDto, EditorSessionError> {
     session.validate_against(document)?;
-    Ok(session.view())
+    Ok(session.view_for_document(document))
 }

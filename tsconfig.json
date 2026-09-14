@@ -4,6 +4,7 @@
     "exactOptionalPropertyTypes": true,
     "forceConsistentCasingInFileNames": true,
     "isolatedModules": true,
+    "jsx": "react-jsx",
     "lib": ["ES2023", "DOM", "DOM.Iterable", "WebWorker"],
     "module": "ESNext",
     "moduleDetection": "force",
@@ -17,6 +18,5 @@
     "target": "ES2023",
     "types": ["vitest/globals"]
   },
-  "include": ["vitest.config.ts", "web/**/*.ts"]
+  "include": ["vitest.config.ts", "web/**/*.ts", "web/**/*.tsx"]
 }
-

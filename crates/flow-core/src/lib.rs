@@ -25,9 +25,10 @@ use audit::{
 pub use audit::{AuditEvent as AuditRecord, AuditOutcome};
 use canonical::{canonical_bytes, canonical_hash, decode_canonical};
 pub use editor_view::{
-    CapabilityDto, DirectionalSelection, EditorCapability, EditorSessionAction, EditorSessionError,
-    EditorSessionRequest, EditorSessionResponse, EditorSessionState, EditorViewDto,
-    EditorViewRequest, FormattingProjectionDto, FormattingState,
+    CapabilityDto, DirectionalSelection, EditorBlockViewDto, EditorCapability,
+    EditorDocumentViewDto, EditorSessionAction, EditorSessionError, EditorSessionRequest,
+    EditorSessionResponse, EditorSessionState, EditorViewDto, EditorViewRequest,
+    FormattingProjectionDto, FormattingState,
 };
 use model::{
     Affinity, CommandId, DocumentId, FlowDocument, LogicalPosition, MigrationHop, Provenance,
@@ -80,6 +81,7 @@ pub struct MigrateDocumentResult {
     pub revision_provenance: RevisionProvenance,
     pub report: MigrationReport,
     pub commit: Option<MigrationPersistenceCommit>,
+    pub editor: EditorSessionResponse,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -209,6 +211,7 @@ pub struct InspectorView {
 pub struct OperationResult {
     pub session: SessionDto,
     pub view: InspectorView,
+    pub editor: EditorSessionResponse,
     pub commit: PersistenceCommit,
 }
 
@@ -259,6 +262,7 @@ pub enum StandaloneAuditDerivation {
 pub struct RecoverResult {
     pub session: SessionDto,
     pub view: InspectorView,
+    pub editor: EditorSessionResponse,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -479,6 +483,7 @@ fn create_sample_inner(request: CreateSampleRequest) -> Result<OperationResult, 
         canonical_hash,
         transaction,
         audit,
+        None,
     )
 }
 
@@ -653,13 +658,15 @@ fn migrate_document_inner(
     } else {
         None
     };
+    let editor = editor_response(&outcome.document, None)?;
     Ok(MigrateDocumentResult {
         canonical_json,
         canonical_hash: outcome.canonical_hash,
-        provenance: outcome.document.provenance,
+        provenance: outcome.document.provenance.clone(),
         revision_provenance,
         report: outcome.report,
         commit,
+        editor,
     })
 }
 
@@ -690,6 +697,7 @@ fn apply_command_inner(request: ApplyCommandRequest) -> Result<OperationResult, 
         resulting_hash,
         applied.transaction,
         audit,
+        applied.selection,
     )
 }
 
@@ -726,6 +734,7 @@ const fn audit_command_kind(kind: &CommandKind) -> AuditCommandKind {
     match kind {
         CommandKind::InsertText { .. } => AuditCommandKind::InsertText,
         CommandKind::ReplaceText { .. } => AuditCommandKind::ReplaceText,
+        CommandKind::ReplaceSelection { .. } => AuditCommandKind::ReplaceSelection,
         CommandKind::DeleteText { .. } => AuditCommandKind::DeleteText,
         CommandKind::SetNodeStyle { .. } => AuditCommandKind::SetNodeStyle,
         CommandKind::InsertNode { .. } => AuditCommandKind::InsertNode,
@@ -904,7 +913,12 @@ fn recover_from_snapshot(
             .map(|boundary| boundary.source_canonical_hash.as_str()),
         audits,
     )?;
-    Ok(RecoverResult { session, view })
+    let editor = editor_response(&document, None)?;
+    Ok(RecoverResult {
+        session,
+        view,
+        editor,
+    })
 }
 
 pub(crate) fn preflight_recovery_records(request: &RecoverRequest) -> Result<(), CoreError> {
@@ -1462,6 +1476,7 @@ pub(crate) fn replay_history_effect(
                 || ![
                     "insertText",
                     "replaceText",
+                    "replaceSelection",
                     "deleteText",
                     "setNodeStyle",
                     "insertNode",
@@ -1536,6 +1551,7 @@ fn operation_result(
     canonical_hash: String,
     transaction: TransactionRecord,
     audit: AuditRecord,
+    selection: Option<DirectionalSelection>,
 ) -> Result<OperationResult, CoreError> {
     let snapshot = SnapshotRecord {
         record_format_version: RECORD_FORMAT_VERSION,
@@ -1560,9 +1576,11 @@ fn operation_result(
     let replace_existing = transaction.base_revision == 0;
     let session = session_dto(&document, history, canonical_json, canonical_hash.clone())?;
     let view = inspector_view(&document, canonical_hash, None, vec![audit.clone()])?;
+    let editor = editor_response(&document, selection)?;
     Ok(OperationResult {
         session,
         view,
+        editor,
         commit: PersistenceCommit {
             replace_existing,
             snapshot,
@@ -1571,6 +1589,18 @@ fn operation_result(
             assets,
         },
     })
+}
+
+fn editor_response(
+    document: &FlowDocument,
+    selection: Option<DirectionalSelection>,
+) -> Result<EditorSessionResponse, CoreError> {
+    let session = match selection {
+        Some(selection) => EditorSessionState::from_document_with_selection(document, selection)?,
+        None => EditorSessionState::from_document(document)?,
+    };
+    let view = session.view_for_document(document);
+    Ok(EditorSessionResponse { session, view })
 }
 
 fn session_dto(

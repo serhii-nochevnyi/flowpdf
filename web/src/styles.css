@@ -422,6 +422,118 @@ a:focus-visible {
   border: 0;
 }
 
+.editor-shell {
+  width: min(100%, 1000px);
+  margin: 0 auto;
+  padding: 24px;
+}
+
+.editor-app-bar {
+  padding: 24px;
+  border: 1px solid var(--border-default);
+  border-radius: 6px;
+  background: var(--surface-card);
+}
+
+.editor-main {
+  display: grid;
+  gap: 24px;
+  margin-top: 32px;
+}
+
+.editor-command-panel,
+.diagnostics-panel {
+  min-width: 0;
+  padding: 24px;
+  border: 1px solid var(--border-default);
+  border-radius: 6px;
+  background: var(--surface-card);
+}
+
+.editor-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.editor-document-region {
+  display: flex;
+  justify-content: center;
+  margin-top: 24px;
+}
+
+.semantic-document {
+  width: min(100%, 816px);
+  min-height: 360px;
+  padding: 64px 72px;
+  border: 1px solid var(--border-default);
+  border-radius: 4px;
+  color: var(--text-primary);
+  background: var(--surface-card);
+  box-shadow: 0 12px 32px rgb(15 23 42 / 8%);
+}
+
+.semantic-document p,
+.semantic-document h1,
+.semantic-document h2,
+.semantic-document h3,
+.semantic-document h4,
+.semantic-document h5,
+.semantic-document h6 {
+  max-width: 65ch;
+  margin: 0 0 20px;
+  overflow-wrap: anywhere;
+}
+
+.semantic-document p:last-child,
+.semantic-document h1:last-child,
+.semantic-document h2:last-child,
+.semantic-document h3:last-child,
+.semantic-document h4:last-child,
+.semantic-document h5:last-child,
+.semantic-document h6:last-child {
+  margin-bottom: 0;
+}
+
+.semantic-document figure {
+  margin: 28px 0;
+  padding: 16px;
+  border-left: 4px solid var(--border-subtle);
+  color: var(--text-secondary);
+  background: var(--surface-app);
+}
+
+.editor-metadata {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+  margin: 20px 0 0;
+}
+
+.editor-metadata div {
+  min-width: 0;
+}
+
+.editor-metadata dt {
+  color: var(--text-secondary);
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.editor-metadata dd {
+  margin: 4px 0 0;
+  overflow-wrap: anywhere;
+}
+
+.diagnostics-panel > summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.diagnostics-panel[open] > div {
+  margin-top: 16px;
+}
+
 @media (max-width: 959px) {
   .foundation-grid {
     grid-template-columns: minmax(0, 1fr);
@@ -453,6 +565,24 @@ a:focus-visible {
 
   .copy-action {
     justify-self: start;
+  }
+
+  .editor-shell {
+    padding: 16px;
+  }
+
+  .editor-app-bar,
+  .editor-command-panel,
+  .diagnostics-panel {
+    padding: 16px;
+  }
+
+  .semantic-document {
+    padding: 32px 24px;
+  }
+
+  .editor-metadata {
+    grid-template-columns: minmax(0, 1fr);
   }
 }
 

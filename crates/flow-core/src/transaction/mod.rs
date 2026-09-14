@@ -8,10 +8,11 @@ use uuid::Uuid;
 
 use crate::{
     anchor::{
-        AnchorError, AnchorMapResult, AnchorMapping, AnchorTransformation, resolve_utf16_offset,
-        utf16_length,
+        AnchorError, AnchorMapResult, AnchorMapping, AnchorTransformation, EditorPositionError,
+        NodePositionMap, ResolvedPosition, resolve_utf16_offset, utf16_length,
     },
     canonical::{canonical_bytes, canonical_hash},
+    editor_view::DirectionalSelection,
     model::{
         Affinity, CommandId, ContentNode, FieldAnchorState, FieldDescriptor, FieldId, FlowDocument,
         LogicalPosition, NodeId, StyleId,
@@ -55,6 +56,10 @@ pub enum CommandKind {
         range: TextRange,
         text: String,
     },
+    ReplaceSelection {
+        selection: DirectionalSelection,
+        text: String,
+    },
     DeleteText {
         range: TextRange,
     },
@@ -94,6 +99,10 @@ pub enum Mutation {
     },
     ReplaceText {
         range: TextRange,
+        text: String,
+    },
+    ReplaceSelection {
+        selection: DirectionalSelection,
         text: String,
     },
     DeleteText {
@@ -323,6 +332,7 @@ impl EditorState {
 pub struct AppliedCommand {
     pub state: EditorState,
     pub transaction: Transaction,
+    pub selection: Option<DirectionalSelection>,
 }
 
 pub struct TransactionService;
@@ -354,10 +364,14 @@ pub enum CommandError {
     InvalidRange,
     #[error("The UTF-16 position splits a surrogate pair")]
     InvalidUtf16Boundary,
+    #[error(transparent)]
+    Position(#[from] EditorPositionError),
     #[error("The command would invalidate an anchor without an explicit mapping")]
     AnchorInvalidated,
     #[error("The command would violate a document or operation invariant")]
     BrokenInvariant,
+    #[error("The command would not change the document")]
+    NoOp,
     #[error("There is no committed mutation to undo")]
     UndoEmpty,
     #[error("There is no reverted mutation to redo")]
@@ -377,8 +391,10 @@ impl CommandError {
             Self::InvalidTarget => "FLOW_INVALID_TARGET",
             Self::InvalidRange => "FLOW_INVALID_RANGE",
             Self::InvalidUtf16Boundary => "FLOW_INVALID_UTF16_BOUNDARY",
+            Self::Position(error) => error.code(),
             Self::AnchorInvalidated => "FLOW_ANCHOR_INVALIDATED",
             Self::BrokenInvariant => "FLOW_BROKEN_INVARIANT",
+            Self::NoOp => "FLOW_NO_OP",
             Self::UndoEmpty => "FLOW_UNDO_EMPTY",
             Self::RedoEmpty => "FLOW_REDO_EMPTY",
             Self::HistoryConflict => "FLOW_HISTORY_CONFLICT",
@@ -513,8 +529,12 @@ fn apply_mutation(state: &EditorState, command: Command) -> Result<AppliedComman
     let mut forward = Vec::with_capacity(mutations.len());
     let mut inverse = Vec::with_capacity(mutations.len());
     let mut mapping = AnchorMapping::identity();
+    let mut selection_after = None;
     for mutation in &mutations {
         let (operation, inverse_operation) = derive_operation(&candidate, mutation)?;
+        if let Mutation::ReplaceSelection { selection, text } = mutation {
+            selection_after = Some(selection_after_replacement(selection, text)?);
+        }
         let operation_mapping = apply_operation(&mut candidate, &operation)?;
         mapping.extend(operation_mapping);
         forward.push(operation);
@@ -559,6 +579,7 @@ fn apply_mutation(state: &EditorState, command: Command) -> Result<AppliedComman
             canonical_hash: after_hash,
         },
         transaction,
+        selection: selection_after,
     })
 }
 
@@ -604,6 +625,7 @@ fn apply_undo(state: &EditorState, command: Command) -> Result<AppliedCommand, C
             canonical_hash: after_hash,
         },
         transaction,
+        selection: None,
     })
 }
 
@@ -650,6 +672,7 @@ fn apply_redo(state: &EditorState, command: Command) -> Result<AppliedCommand, C
             canonical_hash: after_hash,
         },
         transaction,
+        selection: None,
     })
 }
 
@@ -662,6 +685,10 @@ fn command_mutations(kind: &CommandKind) -> Result<Vec<Mutation>, CommandError> 
         }]),
         CommandKind::ReplaceText { range, text } => Ok(vec![Mutation::ReplaceText {
             range: range.clone(),
+            text: text.clone(),
+        }]),
+        CommandKind::ReplaceSelection { selection, text } => Ok(vec![Mutation::ReplaceSelection {
+            selection: selection.clone(),
             text: text.clone(),
         }]),
         CommandKind::DeleteText { range } => Ok(vec![Mutation::DeleteText {
@@ -704,6 +731,9 @@ fn derive_operation(
         }
         Mutation::ReplaceText { range, text } => {
             derive_text_operation(document, range.clone(), text.clone())
+        }
+        Mutation::ReplaceSelection { selection, text } => {
+            derive_selection_operation(document, selection, text.clone())
         }
         Mutation::DeleteText { range } => {
             derive_text_operation(document, range.clone(), String::new())
@@ -848,6 +878,110 @@ fn derive_text_operation(
     ))
 }
 
+fn derive_selection_operation(
+    document: &FlowDocument,
+    selection: &DirectionalSelection,
+    replacement: String,
+) -> Result<(Operation, Operation), CommandError> {
+    if selection.anchor.node_id != selection.focus.node_id {
+        return Err(CommandError::InvalidRange);
+    }
+    let node = find_node(&document.content, &selection.anchor.node_id)
+        .ok_or(CommandError::InvalidTarget)?;
+    let text = node.legacy_text().ok_or(CommandError::InvalidTarget)?;
+    let map = NodePositionMap::new(node, document.revision)?;
+    let start = map.validate(&selection.anchor, document.revision)?;
+    let end = map.validate(&selection.focus, document.revision)?;
+    let (start_position, end_position, start_byte, end_byte) = match (start, end) {
+        (ResolvedPosition::Text(start_byte), ResolvedPosition::Text(end_byte)) => {
+            if selection.anchor.utf16_offset <= selection.focus.utf16_offset {
+                (
+                    selection.anchor.clone(),
+                    selection.focus.clone(),
+                    start_byte,
+                    end_byte,
+                )
+            } else {
+                (
+                    selection.focus.clone(),
+                    selection.anchor.clone(),
+                    end_byte,
+                    start_byte,
+                )
+            }
+        }
+        _ => return Err(CommandError::InvalidTarget),
+    };
+    if start_byte.get() > end_byte.get() {
+        return Err(CommandError::InvalidRange);
+    }
+    if replacement.len() > DocumentLimits::V1.text_node_bytes
+        || text
+            .len()
+            .checked_sub(end_byte.get().saturating_sub(start_byte.get()))
+            .and_then(|remaining| remaining.checked_add(replacement.len()))
+            .is_none_or(|length| length > DocumentLimits::V1.text_node_bytes)
+    {
+        return Err(EditorPositionError::TextLimit.into());
+    }
+    let expected_text = text[start_byte.get()..end_byte.get()].to_owned();
+    if expected_text == replacement {
+        return Err(CommandError::NoOp);
+    }
+    let range = TextRange {
+        start: start_position.clone(),
+        end: end_position,
+    };
+    let inserted = utf16_length(&replacement)?;
+    let inverse_end = start_position.utf16_offset.checked_add(inserted)?;
+    let inverse_range = TextRange {
+        start: LogicalPosition {
+            affinity: Affinity::Backward,
+            ..start_position
+        },
+        end: LogicalPosition {
+            node_id: selection.anchor.node_id.clone(),
+            utf16_offset: inverse_end,
+            affinity: Affinity::Forward,
+        },
+    };
+    Ok((
+        Operation::ReplaceText {
+            range,
+            expected_text: expected_text.clone(),
+            replacement: replacement.clone(),
+        },
+        Operation::ReplaceText {
+            range: inverse_range,
+            expected_text: replacement,
+            replacement: expected_text,
+        },
+    ))
+}
+
+fn selection_after_replacement(
+    selection: &DirectionalSelection,
+    replacement: &str,
+) -> Result<DirectionalSelection, CommandError> {
+    let start = selection
+        .anchor
+        .utf16_offset
+        .get()
+        .min(selection.focus.utf16_offset.get());
+    let end = start
+        .checked_add(utf16_length(replacement)?)
+        .ok_or(AnchorError::OutOfRange)?;
+    let position = LogicalPosition {
+        node_id: selection.anchor.node_id.clone(),
+        utf16_offset: end.into(),
+        affinity: Affinity::Forward,
+    };
+    Ok(DirectionalSelection {
+        anchor: position.clone(),
+        focus: position,
+    })
+}
+
 fn resolve_range<'a>(
     document: &'a FlowDocument,
     range: &TextRange,
@@ -862,11 +996,8 @@ fn resolve_range<'a>(
     if range.start.node_id != range.end.node_id {
         return Err(CommandError::InvalidRange);
     }
-    let node = document
-        .content
-        .iter()
-        .find(|node| node.id == range.start.node_id)
-        .ok_or(CommandError::InvalidTarget)?;
+    let node =
+        find_node(&document.content, &range.start.node_id).ok_or(CommandError::InvalidTarget)?;
     let text = node.legacy_text().ok_or(CommandError::InvalidTarget)?;
     let start = resolve_utf16_offset(text, range.start.utf16_offset)?;
     let end = resolve_utf16_offset(text, range.end.utf16_offset)?;
@@ -874,6 +1005,30 @@ fn resolve_range<'a>(
         return Err(CommandError::InvalidRange);
     }
     Ok((node, start, end))
+}
+
+fn find_node<'a>(nodes: &'a [ContentNode], target: &NodeId) -> Option<&'a ContentNode> {
+    for node in nodes {
+        if &node.id == target {
+            return Some(node);
+        }
+        if let Some(found) = find_node(node.children(), target) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+fn find_node_mut<'a>(nodes: &'a mut [ContentNode], target: &NodeId) -> Option<&'a mut ContentNode> {
+    for node in nodes {
+        if &node.id == target {
+            return Some(node);
+        }
+        if let Some(found) = find_node_mut(node.children_mut(), target) {
+            return Some(found);
+        }
+    }
+    None
 }
 
 fn apply_operations(
@@ -966,12 +1121,9 @@ fn apply_operation(
             replacement,
         } => {
             let (_, start, end) = resolve_range(document, range)?;
-            let node_index = document
-                .content
-                .iter()
-                .position(|node| node.id == range.start.node_id)
+            let node = find_node_mut(&mut document.content, &range.start.node_id)
                 .ok_or(CommandError::InvalidTarget)?;
-            let mut text = document.content[node_index]
+            let mut text = node
                 .legacy_text()
                 .ok_or(CommandError::InvalidTarget)?
                 .to_owned();
@@ -986,7 +1138,7 @@ fn apply_operation(
                 .ok_or(CommandError::InvalidRange)?;
             let inserted_utf16_length = utf16_length(replacement)?;
             text.replace_range(start.get()..end.get(), replacement);
-            document.content[node_index].set_plain_text(text)?;
+            node.set_plain_text(text)?;
             let transformation = AnchorTransformation::TextEdit {
                 node_id: range.start.node_id.clone(),
                 start: range.start.utf16_offset,
@@ -1130,6 +1282,7 @@ fn command_type(kind: &CommandKind) -> &'static str {
     match kind {
         CommandKind::InsertText { .. } => "insertText",
         CommandKind::ReplaceText { .. } => "replaceText",
+        CommandKind::ReplaceSelection { .. } => "replaceSelection",
         CommandKind::DeleteText { .. } => "deleteText",
         CommandKind::SetNodeStyle { .. } => "setNodeStyle",
         CommandKind::InsertNode { .. } => "insertNode",

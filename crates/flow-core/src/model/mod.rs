@@ -281,6 +281,16 @@ impl ContentNode {
         }
     }
 
+    pub(crate) fn children_mut(&mut self) -> &mut [Self] {
+        match &mut self.body {
+            BlockKind::OrderedList { items } | BlockKind::UnorderedList { items } => items,
+            BlockKind::ListItem { children } | BlockKind::TableCell { children } => children,
+            BlockKind::Table { rows, .. } => rows,
+            BlockKind::TableRow { cells } => cells,
+            _ => &mut [],
+        }
+    }
+
     /// Compatibility for the Phase 1 text command. Rich run algebra belongs to
     /// the subsequent editor-command plans; rejecting it preserves all marks.
     pub(crate) fn legacy_text(&self) -> Option<&str> {

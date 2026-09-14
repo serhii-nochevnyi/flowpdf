@@ -5,8 +5,9 @@
     "outDir": "./dist/web",
     "rootDir": "./web",
     "sourceMap": true,
+    "jsx": "react-jsx",
     "types": []
   },
-  "include": ["web/src/**/*.ts", "web/persistence/**/*.ts"],
-  "exclude": ["web/tests/**/*.ts"]
+  "include": ["web/src/**/*.ts", "web/src/**/*.tsx", "web/persistence/**/*.ts"],
+  "exclude": ["web/src/main.ts", "web/tests/**/*.ts", "web/tests/**/*.tsx"]
 }

@@ -7,6 +7,7 @@ export interface LogicalPositionDto {
 export type AuditCommandKindDto =
   | 'insertText'
   | 'replaceText'
+  | 'replaceSelection'
   | 'deleteText'
   | 'setNodeStyle'
   | 'insertNode'
