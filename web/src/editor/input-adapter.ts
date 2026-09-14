@@ -6,8 +6,10 @@ import type {
 } from './editor-store.js'
 import type {
   SourceModality,
+  FormattingCommandDto,
   StructuralCommandDto,
 } from './editor-controller.js'
+import type { InlineMarkDto, ListKindDto } from './editor-store.js'
 import { restoreDomSelection, selectionFromDom } from './selection-bridge.js'
 
 export const MAX_COMPOSITION_UTF8_BYTES = 64 * 1024
@@ -35,6 +37,25 @@ export interface InputCommandTarget {
     modality?: SourceModality,
   ): Promise<void>
   structuralCommand(command: StructuralCommandDto, modality?: SourceModality): Promise<void>
+  setEditorSelection(selection: DirectionalSelectionDto): Promise<void>
+  setInlineMark(
+    mark: InlineMarkDto,
+    selection?: DirectionalSelectionDto,
+    modality?: SourceModality,
+  ): Promise<void>
+  setListKind(
+    kind: ListKindDto,
+    selection?: DirectionalSelectionDto,
+    modality?: SourceModality,
+  ): Promise<void>
+  continueListItem(
+    selection?: DirectionalSelectionDto,
+    modality?: SourceModality,
+  ): Promise<void>
+  exitListItem(
+    selection?: DirectionalSelectionDto,
+    modality?: SourceModality,
+  ): Promise<void>
 }
 
 export interface InputAdapterOptions {
@@ -76,6 +97,7 @@ export class InputAdapter {
   private submitting = false
   private lastView: EditorViewDto | null
   private pending: Promise<void> = Promise.resolve()
+  private lastSelectionKey = ''
 
   constructor(options: InputAdapterOptions) {
     this.root = options.root
@@ -86,6 +108,7 @@ export class InputAdapter {
     this.onError = options.onError ?? (() => undefined)
     this.lastView = this.getView()
     this.host.value = ''
+    this.lastSelectionKey = selectionKey(this.lastView?.selection ?? null)
 
     this.host.addEventListener('beforeinput', this.onBeforeInput)
     this.host.addEventListener('input', this.onInput)
@@ -132,7 +155,21 @@ export class InputAdapter {
       return
     }
     if (this.phaseValue === 'idle') {
+      const expectedSelectionKey = selectionKey(view.selection)
+      if (
+        this.selectionValue !== null &&
+        selectionKey(this.selectionValue) !== expectedSelectionKey
+      ) {
+        return
+      }
+      const domSelection = selectionFromDom(this.root, view)
+      if (this.selectionValue === null && domSelection !== null && selectionKey(domSelection) !== expectedSelectionKey) {
+        this.lastSelectionKey = selectionKey(domSelection)
+        return
+      }
+      this.lastSelectionKey = expectedSelectionKey
       queueMicrotask(() => {
+        if (!this.root.isConnected || this.lastSelectionKey !== expectedSelectionKey) return
         restoreDomSelection(this.root, view, view.selection)
       })
     }
@@ -222,7 +259,7 @@ export class InputAdapter {
         this.onError('FLOW_STRUCTURAL_SELECTION_REQUIRED')
         return
       }
-      this.submitStructural(command, 'keyboard', view)
+      this.submitEditorCommand(command, 'keyboard', view)
       return
     }
 
@@ -351,13 +388,47 @@ export class InputAdapter {
     if (
       this.phaseValue !== 'idle' ||
       this.commandTarget.snapshot().phase !== 'ready' ||
-      event.isComposing ||
-      !['Enter', 'Backspace', 'Delete'].includes(event.key)
+      event.isComposing
     ) {
       return
     }
     const view = this.currentView()
     if (view === null) return
+    if (event.ctrlKey || event.metaKey) {
+      const key = event.key.toLowerCase()
+      const selection = this.currentSelection(view)
+      if (key === 'b' || key === 'i' || key === 'u') {
+        event.preventDefault()
+        const mark = key === 'b' ? 'bold' : key === 'i' ? 'italic' : 'underline'
+        this.submitFormatting(
+          () =>
+            this.commandTarget.setInlineMark(
+              { kind: mark, value: !formattingStateOn(view, mark) },
+              selection,
+              'keyboard',
+            ),
+          view,
+          'setInlineMarks',
+        )
+        return
+      }
+      if (event.shiftKey && (event.key === '7' || event.key === '8')) {
+        event.preventDefault()
+        const target: Exclude<ListKindDto, 'none'> = event.key === '7' ? 'ordered' : 'unordered'
+        this.submitFormatting(
+          () =>
+            this.commandTarget.setListKind(
+              view.formatting.listKind === target ? 'none' : target,
+              selection,
+              'keyboard',
+            ),
+          view,
+          'setListKind',
+        )
+        return
+      }
+    }
+    if (!['Enter', 'Backspace', 'Delete'].includes(event.key)) return
     const command = this.structuralCommandFor(event.key, view)
     if (command === null) {
       if (event.key === 'Enter') {
@@ -371,14 +442,21 @@ export class InputAdapter {
       return
     }
     event.preventDefault()
-    this.submitStructural(command, 'keyboard', view)
+    this.submitEditorCommand(command, 'keyboard', view)
   }
 
   private readonly onSelectionChange = (): void => {
     const view = this.currentView()
     if (view === null) return
     const selection = selectionFromDom(this.root, view)
-    if (selection !== null) this.selectionValue = selection
+    if (selection === null) return
+    this.selectionValue = selection
+    const key = selectionKey(selection)
+    if (key === this.lastSelectionKey) return
+    this.lastSelectionKey = key
+    void this.commandTarget.setEditorSelection(selection).catch((error: unknown) => {
+      this.onError(inputErrorCode(error))
+    })
   }
 
   private currentView(): EditorViewDto | null {
@@ -432,7 +510,7 @@ export class InputAdapter {
       this.onError('FLOW_STRUCTURAL_SELECTION_REQUIRED')
       return
     }
-    this.submitStructural(command, modality, view)
+    this.submitEditorCommand(command, modality, view)
   }
 
   dispatchMerge(
@@ -448,13 +526,13 @@ export class InputAdapter {
       this.onError('FLOW_INCOMPATIBLE_STRUCTURE')
       return
     }
-    this.submitStructural(command, modality, view)
+    this.submitEditorCommand(command, modality, view)
   }
 
   private structuralCommandFor(
     key: string,
     view: EditorViewDto,
-  ): StructuralCommandDto | null {
+  ): StructuralCommandDto | FormattingCommandDto | null {
     const selection = this.currentSelection(view)
     if (
       selection.anchor.nodeId !== selection.focus.nodeId ||
@@ -465,6 +543,11 @@ export class InputAdapter {
     const block = findBlock(view.document.blocks, selection.focus.nodeId)
     if (block === undefined || !isTextBlock(block)) return null
     if (key === 'Enter') {
+      if (view.formatting.listItemId !== null) {
+        return block.text.length === 0
+          ? { type: 'exitListItem', selection }
+          : { type: 'continueListItem', selection }
+      }
       return {
         type: 'splitTextBlock',
         nodeId: block.nodeId,
@@ -567,6 +650,32 @@ export class InputAdapter {
     )
   }
 
+  private submitEditorCommand(
+    command: StructuralCommandDto | FormattingCommandDto,
+    modality: SourceModality,
+    view: EditorViewDto,
+  ): void {
+    if (
+      command.type === 'continueListItem' ||
+      command.type === 'exitListItem'
+    ) {
+      this.submitFormatting(
+        () =>
+          command.type === 'continueListItem'
+            ? this.commandTarget.continueListItem(command.selection, modality)
+            : this.commandTarget.exitListItem(command.selection, modality),
+        view,
+        command.type === 'continueListItem' ? 'continueListItem' : 'exitListItem',
+      )
+      return
+    }
+    if (!isStructuralCommand(command)) {
+      this.onError('FLOW_UNSUPPORTED_COMMAND')
+      return
+    }
+    this.submitStructural(command, modality, view)
+  }
+
   private async commit(
     text: string,
     selection: DirectionalSelectionDto,
@@ -581,9 +690,7 @@ export class InputAdapter {
       const acceptedView = snapshot.accepted?.editor.view ?? this.currentView()
       if (acceptedView !== null) {
         this.lastView = acceptedView
-        queueMicrotask(() => {
-          restoreDomSelection(this.root, acceptedView, acceptedView.selection)
-        })
+        this.restoreAcceptedSelection(acceptedView)
       }
     } catch (error: unknown) {
       this.onError(inputErrorCode(error))
@@ -606,9 +713,54 @@ export class InputAdapter {
       const acceptedView = snapshot.accepted?.editor.view ?? this.currentView()
       if (acceptedView !== null) {
         this.lastView = acceptedView
-        queueMicrotask(() => {
-          restoreDomSelection(this.root, acceptedView, acceptedView.selection)
-        })
+        this.restoreAcceptedSelection(acceptedView)
+      }
+    } catch (error: unknown) {
+      this.onError(inputErrorCode(error))
+    } finally {
+      this.submitting = false
+      this.finishIdle(this.currentView())
+    }
+  }
+
+  private submitFormatting(
+    action: () => Promise<void>,
+    view: EditorViewDto,
+    capabilityName: string,
+  ): void {
+    if (this.submitting || this.phaseValue === 'committing') {
+      this.invalidate('FLOW_INPUT_BUSY')
+      return
+    }
+    if (
+      !capabilityEnabled(view, capabilityName) &&
+      !(capabilityName === 'setInlineMarks' && capabilityEnabled(view, 'setPendingMarks'))
+    ) {
+      this.onError('FLOW_FORMATTING_SELECTION_REQUIRED')
+      return
+    }
+    this.submitting = true
+    this.phaseValue = 'committing'
+    this.commandAttemptsValue += 1
+    this.onError(null)
+    const task = this.commitFormatting(action)
+    this.pending = task.then(
+      () => undefined,
+      () => undefined,
+    )
+  }
+
+  private async commitFormatting(action: () => Promise<void>): Promise<void> {
+    try {
+      await action()
+      const snapshot = this.commandTarget.snapshot()
+      if (snapshot.phase === 'error' && snapshot.errorCode !== null) {
+        this.onError(snapshot.errorCode)
+      }
+      const acceptedView = snapshot.accepted?.editor.view ?? this.currentView()
+      if (acceptedView !== null) {
+        this.lastView = acceptedView
+        this.restoreAcceptedSelection(acceptedView)
       }
     } catch (error: unknown) {
       this.onError(inputErrorCode(error))
@@ -632,10 +784,18 @@ export class InputAdapter {
     this.clearHost()
     if (view !== null) {
       this.lastView = view
-      queueMicrotask(() => {
-        restoreDomSelection(this.root, view, view.selection)
-      })
+      this.restoreAcceptedSelection(view)
     }
+  }
+
+  private restoreAcceptedSelection(view: EditorViewDto): void {
+    const expectedSelectionKey = selectionKey(view.selection)
+    this.selectionValue = view.selection
+    this.lastSelectionKey = expectedSelectionKey
+    queueMicrotask(() => {
+      if (!this.root.isConnected || this.lastSelectionKey !== expectedSelectionKey) return
+      restoreDomSelection(this.root, view, view.selection)
+    })
   }
 
   private setCandidate(candidate: string): void {
@@ -760,6 +920,41 @@ function hasUnpairedSurrogate(value: string): boolean {
     }
   }
   return false
+}
+
+function selectionKey(selection: DirectionalSelectionDto | null): string {
+  if (selection === null) return ''
+  return [
+    selection.anchor.nodeId,
+    selection.anchor.utf16Offset,
+    selection.anchor.affinity,
+    selection.focus.nodeId,
+    selection.focus.utf16Offset,
+    selection.focus.affinity,
+  ].join(':')
+}
+
+function formattingStateOn(
+  view: EditorViewDto,
+  mark: 'bold' | 'italic' | 'underline',
+): boolean {
+  if (
+    view.selection.anchor.nodeId === view.selection.focus.nodeId &&
+    view.selection.anchor.utf16Offset === view.selection.focus.utf16Offset
+  ) {
+    return view.pendingMarks[mark]
+  }
+  return view.formatting[mark] === 'on'
+}
+
+function isStructuralCommand(
+  command: StructuralCommandDto | FormattingCommandDto,
+): command is StructuralCommandDto {
+  return (
+    command.type === 'splitTextBlock' ||
+    command.type === 'mergeTextBlocks' ||
+    command.type === 'deleteSubtree'
+  )
 }
 
 function inputErrorCode(error: unknown): string {

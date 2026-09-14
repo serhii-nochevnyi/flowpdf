@@ -1,11 +1,15 @@
 use flow_core::{
-    CommandKind, DirectionalSelection, SourceModality,
+    ApiResponse, ApplyCommandRequest, CommandDto, CommandKind, CreateSampleRequest,
+    DirectionalSelection, SourceModality,
     anchor::Utf16Offset,
-    editor_view::{EditorSessionAction, EditorSessionRequest},
+    apply_command, create_sample,
+    editor_view::{EditorBlockViewDto, EditorSessionAction, EditorSessionRequest},
     model::{
         Affinity, BlockAttributes, BlockKind, BlockStyle, ContentNode, FlowDocument, InlineMark,
         ListKind, LogicalPosition, MarkSet, NodeId,
     },
+    recover,
+    store::{CommitPlanner, DocumentStore, InMemoryDocumentStore, SnapshotPolicy, SnapshotReason},
     transaction::{Command, EditorState, TransactionService, semantic_hash},
 };
 
@@ -67,6 +71,11 @@ fn apply(
     kind: CommandKind,
 ) -> Result<flow_core::transaction::AppliedCommand, flow_core::transaction::CommandError> {
     TransactionService::apply(state, command(state, serial, kind))
+}
+
+fn success<T>(response: ApiResponse<T>) -> T {
+    assert!(response.ok, "unexpected response: {:?}", response.error);
+    response.value.expect("successful response value")
 }
 
 #[test]
@@ -432,6 +441,60 @@ fn list_conversion_continuation_exit_indent_and_outdent_are_reversible() {
     assert_eq!(
         semantic_hash(undo.state.document()),
         semantic_hash(&document)
+    );
+}
+
+#[test]
+fn formatting_commit_replays_through_the_durable_store() {
+    let created = success(create_sample(CreateSampleRequest {
+        requested_locale: "uk-UA".to_owned(),
+        issued_at: "2026-09-14T18:10:00Z".to_owned(),
+    }));
+    let planner = CommitPlanner::new(SnapshotPolicy::EveryTransaction);
+    let mut store = InMemoryDocumentStore::default();
+    planner
+        .commit(&mut store, created.commit, SnapshotReason::Creation)
+        .expect("creation commit");
+    let before = success(recover(store.load_records().expect("records")));
+    let (node_id, text_length) = match &before.editor.view.document.blocks[0] {
+        EditorBlockViewDto::Paragraph { node_id, text, .. }
+        | EditorBlockViewDto::Heading { node_id, text, .. } => {
+            (node_id.clone(), text.encode_utf16().count() as u32)
+        }
+        _ => panic!("sample starts with a text block"),
+    };
+    let applied = success(apply_command(ApplyCommandRequest {
+        canonical_json: before.session.canonical_json,
+        history: before.session.history,
+        command: CommandDto {
+            command_id: command_id(10_070),
+            base_revision: before.session.revision,
+            modality: SourceModality::Ui,
+            issued_at: "2026-09-14T18:10:01Z".to_owned(),
+            kind: CommandKind::SetInlineMark {
+                selection: DirectionalSelection {
+                    anchor: position(node_id.clone(), 0, Affinity::Forward),
+                    focus: position(node_id, text_length, Affinity::Backward),
+                },
+                mark: InlineMark::Bold { value: true },
+            },
+        },
+    }));
+    let post_document: FlowDocument =
+        serde_json::from_str(&applied.session.canonical_json).expect("post document");
+    EditorState::with_history(post_document, applied.session.history.clone()).expect("history");
+    planner
+        .commit(
+            &mut store,
+            applied.commit,
+            SnapshotReason::CommittedTransaction,
+        )
+        .expect("formatting commit");
+    let recovered = success(recover(store.load_records().expect("formatted records")));
+    assert_eq!(recovered.session.revision, before.session.revision + 1);
+    assert_eq!(
+        recovered.editor.view.formatting.bold,
+        flow_core::FormattingState::On
     );
 }
 

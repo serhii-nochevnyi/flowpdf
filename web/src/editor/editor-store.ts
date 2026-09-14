@@ -6,6 +6,65 @@ import type {
 
 export type EditorLocale = 'uk' | 'en'
 
+export type FormattingStateDto = 'on' | 'off' | 'mixed'
+
+export type RunLanguageDto = 'uk-UA' | 'en-US'
+
+export type AlignmentDto = 'start' | 'center' | 'end' | 'justify'
+
+export type ListKindDto = 'none' | 'ordered' | 'unordered'
+
+export type FontFamilyIdDto = 'notoSans' | 'notoSerif' | 'notoSansMono'
+
+export type FontFamilyDto =
+  | { readonly kind: 'known'; readonly id: FontFamilyIdDto }
+  | { readonly kind: 'legacyUnknown'; readonly original: string }
+
+export interface MarkSetDto {
+  readonly bold: boolean
+  readonly italic: boolean
+  readonly underline: boolean
+  readonly fontFamily: FontFamilyDto | null
+  readonly fontSizeMillipoints: number | null
+  readonly color: readonly [number, number, number] | null
+  readonly language: RunLanguageDto | null
+}
+
+export interface FormattingProjectionDto {
+  readonly bold: FormattingStateDto
+  readonly italic: FormattingStateDto
+  readonly underline: FormattingStateDto
+  readonly fontFamily: FontFamilyDto | null
+  readonly fontSizeMillipoints: number | null
+  readonly color: readonly [number, number, number] | null
+  readonly language: RunLanguageDto | null
+  readonly blockStyle: BlockStyleDto | null
+  readonly alignment: AlignmentDto | null
+  readonly spacingBeforeMillipoints: number | null
+  readonly spacingAfterMillipoints: number | null
+  readonly listKind: ListKindDto | null
+  readonly listItemId: string | null
+}
+
+export type BlockStyleDto =
+  | { readonly kind: 'paragraph' }
+  | { readonly kind: 'heading'; readonly level: number }
+
+export interface BlockAttributesDto {
+  readonly alignment?: AlignmentDto | null
+  readonly spacingBeforeMillipoints?: number | null
+  readonly spacingAfterMillipoints?: number | null
+}
+
+export type InlineMarkDto =
+  | { readonly kind: 'bold'; readonly value: boolean }
+  | { readonly kind: 'italic'; readonly value: boolean }
+  | { readonly kind: 'underline'; readonly value: boolean }
+  | { readonly kind: 'fontFamily'; readonly value: FontFamilyDto | null }
+  | { readonly kind: 'fontSize'; readonly value: number | null }
+  | { readonly kind: 'color'; readonly value: string | null }
+  | { readonly kind: 'language'; readonly value: RunLanguageDto | null }
+
 export interface DirectionalSelectionDto {
   readonly anchor: LogicalPositionDto
   readonly focus: LogicalPositionDto
@@ -16,8 +75,8 @@ export interface EditorSessionStateDto {
   readonly revision: number
   readonly sessionGeneration: number
   readonly selection: DirectionalSelectionDto
-  readonly pendingMarks: unknown
-  readonly formatting: unknown
+  readonly pendingMarks: MarkSetDto
+  readonly formatting: FormattingProjectionDto
   readonly capabilities: readonly EditorCapabilityDto[]
 }
 
@@ -53,8 +112,8 @@ export interface EditorViewDto {
   readonly revision: number
   readonly sessionGeneration: number
   readonly selection: DirectionalSelectionDto
-  readonly pendingMarks: unknown
-  readonly formatting: unknown
+  readonly pendingMarks: MarkSetDto
+  readonly formatting: FormattingProjectionDto
   readonly capabilities: readonly EditorCapabilityDto[]
   readonly document: EditorDocumentViewDto
 }

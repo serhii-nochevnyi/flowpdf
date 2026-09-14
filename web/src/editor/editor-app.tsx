@@ -8,10 +8,12 @@ import {
 import {
   copy,
   EditorController,
+  type FormattingCommandDto,
   type EditorAppOptions,
   type SourceModality,
   type StructuralCommandDto,
 } from './editor-controller.js'
+import { EditorToolbar } from './editor-toolbar.js'
 import { SemanticDocument } from './semantic-document.js'
 import type {
   DirectionalSelectionDto,
@@ -32,7 +34,7 @@ import type {
 
 export { EditorController }
 export { copy as editorCopy }
-export type { SourceModality, StructuralCommandDto }
+export type { FormattingCommandDto, SourceModality, StructuralCommandDto }
 export type {
   DirectionalSelectionDto,
   EditorAcceptedSnapshot,
@@ -182,6 +184,11 @@ export function EditorApp({ controller: suppliedController, options = {} }: Edit
                   {labels.recover}
                 </button>
               </div>
+              <EditorToolbar
+                view={accepted.editor.view}
+                controller={controller}
+                locale={locale}
+              />
               <p className="durable-badge">{labels.durable}</p>
               <dl className="editor-metadata">
                 <div>

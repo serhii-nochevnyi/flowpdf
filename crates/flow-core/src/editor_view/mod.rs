@@ -9,8 +9,8 @@ use thiserror::Error;
 
 use crate::anchor::{EditorPositionError, GraphemeBoundaryMap, NodePositionMap};
 use crate::model::{
-    Affinity, Alignment, BlockStyle, ContentNode, DocumentId, FlowDocument, FontFamily, ListKind,
-    LogicalPosition, MarkSet, NodeId, RunLanguage,
+    Affinity, Alignment, BlockStyle, ContentNode, DocumentId, FlowDocument, FontFamily, InlineMark,
+    ListKind, LogicalPosition, MarkSet, NodeId, RunLanguage,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -52,6 +52,7 @@ pub struct FormattingProjectionDto {
     pub spacing_before_millipoints: Option<u32>,
     pub spacing_after_millipoints: Option<u32>,
     pub list_kind: Option<ListKind>,
+    pub list_item_id: Option<NodeId>,
 }
 
 impl Default for FormattingProjectionDto {
@@ -69,6 +70,7 @@ impl Default for FormattingProjectionDto {
             spacing_before_millipoints: None,
             spacing_after_millipoints: None,
             list_kind: None,
+            list_item_id: None,
         }
     }
 }
@@ -319,6 +321,9 @@ pub enum EditorSessionAction {
     },
     SetPendingMarks {
         marks: MarkSet,
+    },
+    SetPendingMark {
+        mark: InlineMark,
     },
     SetSelectionAndPendingMarks {
         selection: DirectionalSelection,
@@ -842,6 +847,38 @@ fn apply_block_projection(
     }
     formatting.list_kind =
         list_context_for_node(&document.content, &node.id).map(|(_, _, kind)| kind);
+    formatting.list_item_id = list_item_id_for_node(&document.content, &node.id);
+}
+
+fn list_item_id_for_node(nodes: &[ContentNode], target: &NodeId) -> Option<NodeId> {
+    fn visit(nodes: &[ContentNode], target: &NodeId) -> Option<NodeId> {
+        for node in nodes {
+            match node.body {
+                crate::model::BlockKind::OrderedList { .. }
+                | crate::model::BlockKind::UnorderedList { .. } => {
+                    for item in node.children() {
+                        if item.id == *target {
+                            return Some(item.id.clone());
+                        }
+                        if item.children().iter().any(|child| child.id == *target) {
+                            return Some(item.id.clone());
+                        }
+                        if let Some(found) = visit(item.children(), target) {
+                            return Some(found);
+                        }
+                    }
+                }
+                _ => {
+                    if let Some(found) = visit(node.children(), target) {
+                        return Some(found);
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    visit(nodes, target)
 }
 
 fn bool_state(values: impl IntoIterator<Item = bool>) -> FormattingState {
@@ -885,6 +922,14 @@ pub(crate) fn apply_action(
             validate_pending_marks(&marks)?;
             state.pending_marks = marks;
         }
+        EditorSessionAction::SetPendingMark { mark } => {
+            if !state.selection.collapsed() {
+                return Err(EditorSessionError::PendingMarksRequireCollapsedSelection);
+            }
+            let mut marks = state.pending_marks.clone();
+            apply_pending_mark(&mut marks, &mark)?;
+            state.pending_marks = marks;
+        }
         EditorSessionAction::SetSelectionAndPendingMarks { selection, marks } => {
             if !selection.collapsed() {
                 return Err(EditorSessionError::PendingMarksRequireCollapsedSelection);
@@ -907,6 +952,40 @@ pub(crate) fn apply_action(
         session: state,
         view,
     })
+}
+
+fn apply_pending_mark(marks: &mut MarkSet, mark: &InlineMark) -> Result<(), EditorSessionError> {
+    match mark {
+        InlineMark::Bold { value } => marks.bold = *value,
+        InlineMark::Italic { value } => marks.italic = *value,
+        InlineMark::Underline { value } => marks.underline = *value,
+        InlineMark::FontFamily { value } => marks.font_family = value.clone(),
+        InlineMark::FontSize { value } => marks.font_size_millipoints = *value,
+        InlineMark::Color { value } => {
+            marks.color = value.as_deref().map(parse_pending_color).transpose()?;
+        }
+        InlineMark::Language { value } => marks.language = value.clone(),
+    }
+    validate_pending_marks(marks)
+}
+
+fn parse_pending_color(value: &str) -> Result<[u8; 3], EditorSessionError> {
+    if value.len() != 7
+        || !value.starts_with('#')
+        || !value[1..].bytes().all(|byte| byte.is_ascii_hexdigit())
+        || value[1..]
+            .chars()
+            .any(|character| character.is_ascii_lowercase())
+    {
+        return Err(EditorSessionError::InvalidPendingMarks);
+    }
+    let red = u8::from_str_radix(&value[1..3], 16)
+        .map_err(|_| EditorSessionError::InvalidPendingMarks)?;
+    let green = u8::from_str_radix(&value[3..5], 16)
+        .map_err(|_| EditorSessionError::InvalidPendingMarks)?;
+    let blue = u8::from_str_radix(&value[5..7], 16)
+        .map_err(|_| EditorSessionError::InvalidPendingMarks)?;
+    Ok([red, green, blue])
 }
 
 pub(crate) fn project_view(

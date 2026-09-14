@@ -57,7 +57,8 @@ export function SemanticDocument({
       ref={rootRef}
       className="semantic-document"
       data-editor-document=""
-      aria-label="FlowPDF semantic document"
+      lang={locale === 'uk' ? 'uk' : 'en'}
+      aria-label={locale === 'uk' ? 'Редактор документа' : 'Document editor'}
       onClick={(event) => {
         const target = event.target
         if (!(target instanceof HTMLElement) || !target.matches('[data-editor-input-host]')) {
@@ -184,20 +185,20 @@ function renderAtomic(block: EditorBlockViewDto) {
 }
 
 function renderHeading(nodeId: string, level: number, text: string) {
-  const content = { children: text, key: nodeId, 'data-node-id': nodeId }
+  const content = { children: text, 'data-node-id': nodeId }
   switch (Math.min(6, Math.max(1, level))) {
     case 1:
-      return <h1 {...content} />
+      return <h1 key={nodeId} {...content} />
     case 2:
-      return <h2 {...content} />
+      return <h2 key={nodeId} {...content} />
     case 3:
-      return <h3 {...content} />
+      return <h3 key={nodeId} {...content} />
     case 4:
-      return <h4 {...content} />
+      return <h4 key={nodeId} {...content} />
     case 5:
-      return <h5 {...content} />
+      return <h5 key={nodeId} {...content} />
     default:
-      return <h6 {...content} />
+      return <h6 key={nodeId} {...content} />
   }
 }
 

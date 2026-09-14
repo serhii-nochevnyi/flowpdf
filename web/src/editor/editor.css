@@ -1,0 +1,278 @@
+.editor-formatting-toolbar {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 8px 16px;
+  width: min(100%, 1200px);
+  margin: 0 auto;
+  padding: 8px;
+  border-block: 1px solid var(--border-default);
+  background: var(--surface-card);
+}
+
+.editor-formatting-toolbar,
+.editor-formatting-toolbar * {
+  min-width: 0;
+}
+
+.editor-control,
+.editor-control-group {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  max-width: 100%;
+}
+
+.editor-control {
+  flex: 0 1 auto;
+  color: var(--text-primary);
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+.editor-control > span,
+.editor-control > small {
+  overflow-wrap: anywhere;
+}
+
+.editor-control > span {
+  flex: 0 0 auto;
+}
+
+.editor-control > select,
+.editor-control > input {
+  min-width: 96px;
+  min-height: 44px;
+  max-width: 100%;
+  padding: 8px;
+  border: 1px solid var(--border-control);
+  border-radius: 6px;
+  color: var(--text-primary);
+  background: var(--surface-card);
+  font: inherit;
+  font-size: 14px;
+}
+
+.editor-control > input[type='number'] {
+  width: 112px;
+}
+
+.editor-control-group {
+  margin: 0;
+  padding: 4px;
+  border: 1px solid var(--border-default);
+  border-radius: 6px;
+}
+
+.editor-control-group legend {
+  padding-inline: 4px;
+  color: var(--text-secondary);
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+.editor-control-group button,
+.editor-more-disclosure summary {
+  min-width: 44px;
+  min-height: 44px;
+  padding: 8px 12px;
+  border: 1px solid var(--border-control);
+  border-radius: 6px;
+  color: var(--text-primary);
+  background: var(--surface-card);
+  font: inherit;
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.4;
+  cursor: pointer;
+}
+
+.editor-control-group button:hover:not(:disabled),
+.editor-more-disclosure summary:hover {
+  border-color: var(--text-primary);
+}
+
+.editor-control-group button[aria-pressed='true'] {
+  border-color: var(--accent);
+  background: #dbeafe;
+}
+
+.editor-control-group button[aria-pressed='mixed'] {
+  border-color: var(--border-control);
+  background: repeating-linear-gradient(
+    -45deg,
+    var(--surface-card),
+    var(--surface-card) 6px,
+    #e2e8f0 6px,
+    #e2e8f0 8px
+  );
+}
+
+.editor-control-group button:focus-visible,
+.editor-control > select:focus-visible,
+.editor-control > input:focus-visible,
+.editor-more-disclosure summary:focus-visible {
+  outline: 3px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.editor-control-group button:disabled,
+.editor-control > select:disabled,
+.editor-control > input:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.editor-block-style-control {
+  flex: 1 1 220px;
+}
+
+.editor-block-style-control > select {
+  flex: 1 1 140px;
+}
+
+.editor-inline-mark-group {
+  flex: 0 1 auto;
+}
+
+.editor-more-disclosure {
+  flex: 1 1 100%;
+  min-width: 0;
+}
+
+.editor-more-disclosure summary {
+  width: max-content;
+  list-style: none;
+}
+
+.editor-more-disclosure summary::-webkit-details-marker {
+  display: none;
+}
+
+.editor-more-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 8px 16px;
+  padding-top: 8px;
+}
+
+.editor-more-controls > .editor-control {
+  align-items: flex-start;
+  flex-direction: column;
+}
+
+.editor-more-controls > .editor-control > small {
+  color: var(--text-secondary);
+  font-size: 14px;
+  font-weight: 400;
+}
+
+.editor-more-controls > .editor-block-controls {
+  display: flex;
+  flex: 1 1 100%;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+}
+
+.editor-more-controls .editor-control-reason,
+.editor-control-reason {
+  flex: 1 1 100%;
+  color: var(--status-error);
+  font-size: 14px;
+  font-weight: 400;
+}
+
+.editor-list-group,
+.editor-alignment-group,
+.editor-spacing-group {
+  flex: 0 1 auto;
+}
+
+.editor-number-control {
+  flex-direction: column;
+  align-items: flex-start;
+}
+
+.editor-metadata dd {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.editor-formatting-toolbar button:focus-visible,
+.editor-formatting-toolbar summary:focus-visible,
+.editor-formatting-toolbar select:focus-visible,
+.editor-formatting-toolbar input:focus-visible {
+  outline: 3px solid var(--accent);
+  outline-offset: 2px;
+}
+
+@media (min-width: 768px) {
+  .editor-more-disclosure > summary {
+    display: none;
+  }
+
+  .editor-more-disclosure > .editor-more-controls {
+    padding-top: 0;
+  }
+}
+
+@media (max-width: 767px) {
+  .editor-formatting-toolbar {
+    gap: 8px;
+  }
+
+  .editor-more-controls {
+    flex-direction: column;
+  }
+
+  .editor-more-controls > .editor-control,
+  .editor-more-controls > .editor-block-controls {
+    width: 100%;
+  }
+}
+
+@media (max-width: 479px) {
+  .editor-formatting-toolbar {
+    padding: 8px;
+  }
+
+  .editor-block-style-control,
+  .editor-inline-mark-group,
+  .editor-more-disclosure {
+    flex-basis: 100%;
+    width: 100%;
+  }
+
+  .editor-inline-mark-group {
+    justify-content: stretch;
+  }
+
+  .editor-inline-mark-group button {
+    flex: 1 1 0;
+    overflow-wrap: anywhere;
+  }
+
+  .editor-more-disclosure > summary {
+    width: 100%;
+    text-align: start;
+  }
+
+  .editor-more-controls > .editor-block-controls > .editor-control-group {
+    width: 100%;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .editor-formatting-toolbar,
+  .editor-formatting-toolbar * {
+    scroll-behavior: auto;
+    transition: none;
+  }
+}

@@ -45,13 +45,22 @@ export function restoreDomSelection(
   const focus = endpointToDom(root, view, selection.focus)
   if (anchor === null || focus === null) return false
 
-  const range = root.ownerDocument.createRange()
-  range.setStart(anchor.node, anchor.offset)
-  range.setEnd(focus.node, focus.offset)
   const browserSelection = root.ownerDocument.getSelection()
   if (browserSelection === null) return false
   browserSelection.removeAllRanges()
-  browserSelection.addRange(range)
+  if (typeof browserSelection.setBaseAndExtent === 'function') {
+    browserSelection.setBaseAndExtent(
+      anchor.node,
+      anchor.offset,
+      focus.node,
+      focus.offset,
+    )
+  } else {
+    const range = root.ownerDocument.createRange()
+    range.setStart(anchor.node, anchor.offset)
+    range.setEnd(focus.node, focus.offset)
+    browserSelection.addRange(range)
+  }
   return true
 }
 

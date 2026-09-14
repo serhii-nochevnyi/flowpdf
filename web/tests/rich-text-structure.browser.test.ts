@@ -162,8 +162,9 @@ test('structural keys and controls use the accepted Rust projection and stable r
   expect(keyboardRoot.querySelector('[data-editor-error]')).toBeNull()
 
   const splitBlocks = acceptedBlocks(keyboard)
-  const beforeRejectedMerge = stateFingerprint(keyboard)
   setDomSelection(keyboardRoot, originalSecond.nodeId, 0)
+  await settle(keyboard)
+  const beforeRejectedMerge = stateFingerprint(keyboard)
   const rejectedKey = new KeyboardEvent('keydown', {
     key: 'Backspace',
     bubbles: true,
@@ -257,8 +258,8 @@ test('durable structural parity survives undo, redo, reload, recovery, and cold 
   merge.click()
   await settle(visible)
   const merged = stateFingerprint(visible)
-  expect(merged.revision).toBe(initial.revision + 1)
-  expect(merged.historyCursor).toBe(initial.historyCursor + 1)
+  expect(merged.revision).toBe(initial.revision + 2)
+  expect(merged.historyCursor).toBe(initial.historyCursor + 2)
 
   action(visibleRoot, 'editor-undo').click()
   await settle(visible)

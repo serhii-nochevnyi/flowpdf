@@ -21,6 +21,11 @@ import {
   type EditorViewDto,
   type InspectorViewDto,
   type SessionDto,
+  type BlockAttributesDto,
+  type BlockStyleDto,
+  type InlineMarkDto,
+  type ListKindDto,
+  type MarkSetDto,
 } from './editor-store.js'
 
 export type { EditorLocale }
@@ -43,6 +48,76 @@ export type StructuralCommandDto =
       readonly type: 'deleteSubtree'
       readonly nodeId: string
     }
+
+export type FormattingCommandDto =
+  | {
+      readonly type: 'setInlineMarks'
+      readonly selection: DirectionalSelectionDto
+      readonly marks: MarkSetDto
+    }
+  | {
+      readonly type: 'setInlineMark'
+      readonly selection: DirectionalSelectionDto
+      readonly mark: InlineMarkDto
+    }
+  | {
+      readonly type: 'setBlockAttributes'
+      readonly selection: DirectionalSelectionDto
+      readonly attributes: BlockAttributesDto
+    }
+  | {
+      readonly type: 'setBlockStyle'
+      readonly selection: DirectionalSelectionDto
+      readonly style: BlockStyleDto
+    }
+  | {
+      readonly type: 'setListKind'
+      readonly selection: DirectionalSelectionDto
+      readonly kind: ListKindDto
+    }
+  | {
+      readonly type: 'continueListItem'
+      readonly selection: DirectionalSelectionDto
+    }
+  | {
+      readonly type: 'exitListItem'
+      readonly selection: DirectionalSelectionDto
+    }
+  | {
+      readonly type: 'indentListItem'
+      readonly itemId: string
+    }
+  | {
+      readonly type: 'outdentListItem'
+      readonly itemId: string
+    }
+
+export type EditorCommandDto = StructuralCommandDto | FormattingCommandDto
+
+export interface FormattingCommandTarget {
+  setInlineMark(
+    mark: InlineMarkDto,
+    selection?: DirectionalSelectionDto,
+    modality?: SourceModality,
+  ): Promise<void>
+  setBlockStyle(
+    style: BlockStyleDto,
+    selection?: DirectionalSelectionDto,
+    modality?: SourceModality,
+  ): Promise<void>
+  setBlockAttributes(
+    attributes: BlockAttributesDto,
+    selection?: DirectionalSelectionDto,
+    modality?: SourceModality,
+  ): Promise<void>
+  setListKind(
+    kind: ListKindDto,
+    selection?: DirectionalSelectionDto,
+    modality?: SourceModality,
+  ): Promise<void>
+  indentListItem(itemId: string, modality?: SourceModality): Promise<void>
+  outdentListItem(itemId: string, modality?: SourceModality): Promise<void>
+}
 
 interface ErrorDto {
   readonly code: string
@@ -110,6 +185,7 @@ interface ApplyCommandRequestDto {
           readonly text: string
         }
       | StructuralCommandDto
+      | FormattingCommandDto
       | { readonly type: 'undo' }
       | { readonly type: 'redo' }
   }
@@ -127,10 +203,25 @@ type StandaloneAuditDerivationDto = {
   readonly auditContext: RecoveryAuditContextDto
 }
 
+type EditorSessionActionDto =
+  | {
+      readonly type: 'setSelection'
+      readonly selection: DirectionalSelectionDto
+    }
+  | {
+      readonly type: 'setPendingMarks'
+      readonly marks: MarkSetDto
+    }
+  | {
+      readonly type: 'setPendingMark'
+      readonly mark: InlineMarkDto
+    }
+
 export interface WasmBoundary {
   readonly default: () => Promise<unknown>
   readonly create_sample: (request: unknown) => ApiResponse<OperationResultDto>
   readonly apply_command: (request: unknown) => ApiResponse<OperationResultDto>
+  readonly apply_editor_session?: (request: unknown) => ApiResponse<EditorSessionResponseDto>
   readonly open_document: (request: unknown) => ApiResponse<MigrateDocumentResultDto>
   readonly commit_record: (request: unknown) => ApiResponse<PlannedPersistenceCommitDto>
   readonly plan_standalone_audit: (request: unknown) => ApiResponse<AuditRecordDto>
@@ -186,6 +277,8 @@ export const editorCopy = {
     created: 'Документ створено і перевірено зі сховища.',
     edited: 'Абзац змінено і перевірено зі сховища.',
     structural: 'Структуру документа змінено і перевірено зі сховища.',
+    formatting: 'Форматування змінено і перевірено зі сховища.',
+    selection: 'Виділення оновлено в Rust-сесії.',
     undone: 'Зміну скасовано і перевірено зі сховища.',
     redone: 'Зміну повторено і перевірено зі сховища.',
     reloaded: 'Локальний стан перезавантажено.',
@@ -220,6 +313,8 @@ export const editorCopy = {
     created: 'Document created and verified from storage.',
     edited: 'Paragraph changed and verified from storage.',
     structural: 'Document structure changed and verified from storage.',
+    formatting: 'Formatting changed and verified from storage.',
+    selection: 'Selection updated in the Rust session.',
     undone: 'Change undone and verified from storage.',
     redone: 'Change redone and verified from storage.',
     reloaded: 'Local state reloaded.',
@@ -266,6 +361,7 @@ export class EditorController {
   private readonly stateStore: EditorStore
   private initialized: Promise<void> | undefined
   private pending: Promise<void> = Promise.resolve()
+  private sessionPending: Promise<void> = Promise.resolve()
 
   constructor(
     options: EditorAppOptions = {},
@@ -294,7 +390,7 @@ export class EditorController {
   }
 
   whenIdle(): Promise<void> {
-    return this.pending
+    return Promise.all([this.pending, this.sessionPending]).then(() => undefined)
   }
 
   createSample(): Promise<void> {
@@ -434,6 +530,159 @@ export class EditorController {
     return this.structuralCommand({ type: 'deleteSubtree', nodeId }, modality)
   }
 
+  formattingCommand(
+    kind: FormattingCommandDto,
+    modality: SourceModality = 'ui',
+  ): Promise<void> {
+    return this.enqueue(async () => {
+      const accepted = this.requireAccepted()
+      const request: ApplyCommandRequestDto = {
+        canonicalJson: accepted.session.canonicalJson,
+        history: accepted.session.history,
+        command: {
+          commandId: newCommandId(),
+          baseRevision: accepted.session.revision,
+          modality,
+          issuedAt: this.currentTimestamp(),
+          kind,
+        },
+      }
+      const wasm = await this.wasm
+      const result = unwrap(wasm.apply_command(request))
+      await this.persistPlanned(result.commit, 'committedTransaction')
+      await this.publishVerified(
+        result.session,
+        copy(this.locale).formatting,
+        result.editor.session,
+      )
+    })
+  }
+
+  setInlineMark(
+    mark: InlineMarkDto,
+    selection?: DirectionalSelectionDto,
+    modality: SourceModality = 'ui',
+  ): Promise<void> {
+    const accepted = this.requireAccepted()
+    const target = selection ?? accepted.editor.session.selection
+    if (target.anchor.nodeId === target.focus.nodeId &&
+      target.anchor.utf16Offset === target.focus.utf16Offset) {
+      return this.setPendingMark(mark)
+    }
+    return this.formattingCommand(
+      { type: 'setInlineMark', selection: target, mark },
+      modality,
+    )
+  }
+
+  setInlineMarks(
+    marks: MarkSetDto,
+    selection?: DirectionalSelectionDto,
+    modality: SourceModality = 'ui',
+  ): Promise<void> {
+    const accepted = this.requireAccepted()
+    const target = selection ?? accepted.editor.session.selection
+    if (target.anchor.nodeId === target.focus.nodeId &&
+      target.anchor.utf16Offset === target.focus.utf16Offset) {
+      return this.applyEditorSession({ type: 'setPendingMarks', marks })
+    }
+    return this.formattingCommand(
+      { type: 'setInlineMarks', selection: target, marks },
+      modality,
+    )
+  }
+
+  setBlockStyle(
+    style: BlockStyleDto,
+    selection?: DirectionalSelectionDto,
+    modality: SourceModality = 'ui',
+  ): Promise<void> {
+    return this.formattingCommand(
+      {
+        type: 'setBlockStyle',
+        selection: selection ?? this.requireAccepted().editor.session.selection,
+        style,
+      },
+      modality,
+    )
+  }
+
+  setBlockAttributes(
+    attributes: BlockAttributesDto,
+    selection?: DirectionalSelectionDto,
+    modality: SourceModality = 'ui',
+  ): Promise<void> {
+    return this.formattingCommand(
+      {
+        type: 'setBlockAttributes',
+        selection: selection ?? this.requireAccepted().editor.session.selection,
+        attributes,
+      },
+      modality,
+    )
+  }
+
+  setListKind(
+    kind: ListKindDto,
+    selection?: DirectionalSelectionDto,
+    modality: SourceModality = 'ui',
+  ): Promise<void> {
+    return this.formattingCommand(
+      {
+        type: 'setListKind',
+        selection: selection ?? this.requireAccepted().editor.session.selection,
+        kind,
+      },
+      modality,
+    )
+  }
+
+  continueListItem(
+    selection?: DirectionalSelectionDto,
+    modality: SourceModality = 'keyboard',
+  ): Promise<void> {
+    return this.formattingCommand(
+      {
+        type: 'continueListItem',
+        selection: selection ?? this.requireAccepted().editor.session.selection,
+      },
+      modality,
+    )
+  }
+
+  exitListItem(
+    selection?: DirectionalSelectionDto,
+    modality: SourceModality = 'keyboard',
+  ): Promise<void> {
+    return this.formattingCommand(
+      {
+        type: 'exitListItem',
+        selection: selection ?? this.requireAccepted().editor.session.selection,
+      },
+      modality,
+    )
+  }
+
+  indentListItem(itemId: string, modality: SourceModality = 'ui'): Promise<void> {
+    return this.formattingCommand({ type: 'indentListItem', itemId }, modality)
+  }
+
+  outdentListItem(itemId: string, modality: SourceModality = 'ui'): Promise<void> {
+    return this.formattingCommand({ type: 'outdentListItem', itemId }, modality)
+  }
+
+  setEditorSelection(selection: DirectionalSelectionDto): Promise<void> {
+    const accepted = this.stateStore.accepted()
+    if (accepted === null || sameSelection(accepted.editor.session.selection, selection)) {
+      return Promise.resolve()
+    }
+    return this.applyEditorSession({ type: 'setSelection', selection })
+  }
+
+  setPendingMark(mark: InlineMarkDto): Promise<void> {
+    return this.applyEditorSession({ type: 'setPendingMark', mark })
+  }
+
   undo(): Promise<void> {
     return this.applyHistory('undo', copy(this.locale).undone)
   }
@@ -492,6 +741,30 @@ export class EditorController {
       await this.persistPlanned(result.commit, 'committedTransaction')
       await this.publishVerified(result.session, status, result.editor.session)
     })
+  }
+
+  private applyEditorSession(action: EditorSessionActionDto): Promise<void> {
+    const commandBarrier = this.pending
+    const task = this.sessionPending.then(() => commandBarrier).then(async () => {
+      const accepted = this.requireAccepted()
+      const wasm = await this.wasm
+      if (wasm.apply_editor_session === undefined) {
+        throw new EditorError('FLOW_EDITOR_SESSION_UNAVAILABLE')
+      }
+      const result = unwrap(
+        wasm.apply_editor_session({
+          canonicalJson: accepted.session.canonicalJson,
+          session: accepted.editor.session,
+          action,
+        }),
+      )
+      this.publishEditorSession(result)
+    })
+    this.sessionPending = task.then(
+      () => undefined,
+      () => undefined,
+    )
+    return task
   }
 
   private enqueue(operation: () => Promise<void>): Promise<void> {
@@ -614,6 +887,18 @@ export class EditorController {
     )
   }
 
+  private publishEditorSession(result: EditorSessionResponseDto): void {
+    const accepted = this.stateStore.accepted()
+    if (accepted === null) throw new EditorError('FLOW_NO_ACTIVE_DOCUMENT')
+    this.stateStore.publishAccepted(
+      {
+        ...accepted,
+        editor: result,
+      },
+      this.snapshot().status,
+    )
+  }
+
   private publishError(error: unknown): void {
     this.stateStore.publishError(errorCode(error))
   }
@@ -640,4 +925,18 @@ function newCommandId(): string {
 function errorCode(error: unknown): string {
   if (error instanceof EditorError || error instanceof StorageError) return error.code
   return 'FLOW_UNEXPECTED_ERROR'
+}
+
+function sameSelection(
+  left: DirectionalSelectionDto,
+  right: DirectionalSelectionDto,
+): boolean {
+  return (
+    left.anchor.nodeId === right.anchor.nodeId &&
+    left.anchor.utf16Offset === right.anchor.utf16Offset &&
+    left.anchor.affinity === right.anchor.affinity &&
+    left.focus.nodeId === right.focus.nodeId &&
+    left.focus.utf16Offset === right.focus.utf16Offset &&
+    left.focus.affinity === right.focus.affinity
+  )
 }

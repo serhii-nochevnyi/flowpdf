@@ -373,6 +373,8 @@ test('Phase 2 paragraph tracer crosses migration, ReplaceSelection, persistence,
   await remounted.recoverFromStorage()
   await settleEditor(remounted)
   expect(durableEditorState(remounted.snapshot())).toEqual(redone)
-  expect(remountRoot.querySelector('summary')?.textContent).toMatch(/Інспектор|Inspector/)
+  expect(remountRoot.querySelector('.diagnostics-panel > summary')?.textContent).toMatch(
+    /Інспектор|Inspector/,
+  )
   expect(remountRoot.querySelectorAll('[data-editor-document] p')).toHaveLength(2)
 })
