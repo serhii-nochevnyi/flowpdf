@@ -4,16 +4,16 @@ milestone: v1.0
 current_phase: 2
 current_phase_name: Accessible Rich-Text Editing
 status: executing
-stopped_at: Completed 02-14-PLAN.md
-last_updated: "2026-09-14T21:45:20Z"
+stopped_at: Completed 02-15-PLAN.md
+last_updated: "2026-09-14T22:13:16Z"
 last_activity: 2026-09-15
-last_activity_desc: Plan 02-14 closed browser image persistence, accessible controls, receipt-only WASM routing, and recovery evidence
-state_head: 84c5eb3
+last_activity_desc: Plan 02-15 closed exhaustive command modality parity and retained Phase 1/2 boundary contracts
+state_head: 5c1280d
 progress:
   total_phases: 9
   completed_phases: 1
   total_plans: 24
-  completed_plans: 20
+  completed_plans: 21
 milestone_name: milestone
 ---
 
@@ -29,17 +29,17 @@ See: .planning/PROJECT.md (updated 2026-08-25)
 ## Current Position
 
 Phase: 2 (Accessible Rich-Text Editing) — EXECUTING
-Plan: 15 of 18
+Plan: 16 of 18
 Status: Ready to execute
-Last activity: 2026-09-15 — Plan 02-14 completed; ready for exhaustive command parity and boundary contracts
+Last activity: 2026-09-15 — Plan 02-15 completed; ready for existing-field and editor-shell accessibility
 
-Progress: Phase 2 — 14/18 plans complete; milestone percentage unavailable while later phases remain unplanned.
+Progress: Phase 2 — 15/18 plans complete; milestone percentage unavailable while later phases remain unplanned.
 
 ## Performance Metrics
 
 **Velocity:**
 
-- Total plans completed: 19
+- Total plans completed: 21
 - Average duration: not comparable (Plan 05 was a multi-session closeout)
 - Total execution time: multi-session
 
@@ -48,7 +48,7 @@ Progress: Phase 2 — 14/18 plans complete; milestone percentage unavailable whi
 | Phase | Plans | Total | Avg/Plan |
 |-------|-------|-------|----------|
 | 1 | 6 | - | - |
-| 2 | 14 | multi-session | - |
+| 2 | 15 | multi-session | - |
 
 **Recent Trend:** Schema-v2 tree and lossless migration gates remain green. Plan 02-14 now passes binary IndexedDB envelopes with legacy reads, receipt-only WASM image routing, accessible image controls, real Chromium persistence/recovery, and the full Rust/WASM/web gate; four editor plans remain.
 **Per-Plan Metrics:**
@@ -75,6 +75,7 @@ Progress: Phase 2 — 14/18 plans complete; milestone percentage unavailable whi
 | Phase FLOWPDF-02 P12 | resumed multi-session | 2 tasks | 12 files |
 | Phase FLOWPDF-02 P13 | resumed multi-session | 2 tasks | 12 files |
 | Phase FLOWPDF-02 P14 | resumed multi-session | 2 tasks | 13 files |
+| Phase FLOWPDF-02 P15 | resumed multi-session | 2 tasks | 8 files |
 
 ## Accumulated Context
 
@@ -110,6 +111,8 @@ Decisions are logged in `.planning/PROJECT.md`.
 - [Phase 2]: Native structural projection consumes Rust placement, limits, header state, confirmation metadata, and table-cell focus order; React does not infer semantic coordinates from DOM order.
 - [Phase 2]: Image bytes enter Rust only through bounded binary staging; canonical assets use the existing BLAKE3 identity, receipts are one-use revision-bound secrets, and semantic DTOs never carry raw bytes or staging digests.
 - [Phase 2]: Image replacement/removal retains physical records until a future persistence policy proves safe collection with undo/recovery retention; current commits prioritize no premature shared-byte deletion.
+- [Phase 2]: The closed Rust mutation catalog is the sole source of command capability parity; visible, keyboard, and future voice routes share intent, risk, confirmation, validation, and undo semantics.
+- [Phase 2]: Physical image bytes and hashes remain outside semantic command DTOs, while phase-aware contracts retain immutable WASM, safe native DOM, and deferred layout/PDF/voice/backend exclusions.
 
 ### Pending Todos
 
@@ -129,6 +132,6 @@ Decisions are logged in `.planning/PROJECT.md`.
 
 ## Session Continuity
 
-Last session: 2026-09-14T21:02:24Z
-Stopped at: Completed 02-13-PLAN.md
+Last session: 2026-09-14T22:13:16Z
+Stopped at: Completed 02-15-PLAN.md
 Resume file: None
