@@ -4,16 +4,16 @@ milestone: v1.0
 current_phase: 2
 current_phase_name: Accessible Rich-Text Editing
 status: executing
-stopped_at: Completed 02-12-PLAN.md
-last_updated: "2026-09-14T20:18:30Z"
-last_activity: 2026-09-14
-last_activity_desc: Plan 02-12 closed native table/page-break semantics, Rust-owned cell focus, accessible controls, confirmation, and Chromium evidence
-state_head: f264933
+stopped_at: Completed 02-13-PLAN.md
+last_updated: "2026-09-14T21:02:24Z"
+last_activity: 2026-09-15
+last_activity_desc: Plan 02-13 closed bounded image staging, Rust-owned image lifecycle, shared physical-byte retention, and recovery evidence
+state_head: 13ca8de
 progress:
   total_phases: 9
   completed_phases: 1
   total_plans: 24
-  completed_plans: 18
+  completed_plans: 19
 milestone_name: milestone
 ---
 
@@ -29,17 +29,17 @@ See: .planning/PROJECT.md (updated 2026-08-25)
 ## Current Position
 
 Phase: 2 (Accessible Rich-Text Editing) — EXECUTING
-Plan: 13 of 18
+Plan: 14 of 18
 Status: Ready to execute
-Last activity: 2026-09-14 — Plan 02-12 completed; ready for bounded image lifecycle and shared reachability
+Last activity: 2026-09-15 — Plan 02-13 completed; ready for atomic image persistence and accessible browser controls
 
-Progress: Phase 2 — 12/18 plans complete; milestone percentage unavailable while later phases remain unplanned.
+Progress: Phase 2 — 13/18 plans complete; milestone percentage unavailable while later phases remain unplanned.
 
 ## Performance Metrics
 
 **Velocity:**
 
-- Total plans completed: 18
+- Total plans completed: 19
 - Average duration: not comparable (Plan 05 was a multi-session closeout)
 - Total execution time: multi-session
 
@@ -48,9 +48,9 @@ Progress: Phase 2 — 12/18 plans complete; milestone percentage unavailable whi
 | Phase | Plans | Total | Avg/Plan |
 |-------|-------|-------|----------|
 | 1 | 6 | - | - |
-| 2 | 12 | multi-session | - |
+| 2 | 13 | multi-session | - |
 
-**Recent Trend:** Schema-v2 tree and lossless migration gates remain green. Plan 02-12 now passes Rust-owned table-cell focus projection, native table/page-break semantics, destructive confirmation, durable replay, and the full Rust/WASM/web gate; six editor plans remain.
+**Recent Trend:** Schema-v2 tree and lossless migration gates remain green. Plan 02-13 now passes bounded Rust PNG/JPEG staging, canonical BLAKE3 identity, one-use revision-bound receipts, reversible image lifecycle commands, shared-byte retention, recovery, and the full Rust/WASM/web gate; five editor plans remain.
 **Per-Plan Metrics:**
 
 | Plan | Duration | Tasks | Files |
@@ -73,6 +73,7 @@ Progress: Phase 2 — 12/18 plans complete; milestone percentage unavailable whi
 | Phase FLOWPDF-02 P10 | resumed multi-session | 2 tasks | 19 files |
 | Phase FLOWPDF-02 P11 | resumed multi-session | 2 tasks | 8 files |
 | Phase FLOWPDF-02 P12 | resumed multi-session | 2 tasks | 12 files |
+| Phase FLOWPDF-02 P13 | resumed multi-session | 2 tasks | 12 files |
 
 ## Accumulated Context
 
@@ -106,6 +107,8 @@ Decisions are logged in `.planning/PROJECT.md`.
 - [Phase 2]: Simple tables remain bounded to 50 rows, 20 columns, and 1,000 cells, with an optional first header row, Rust-owned row-major focus, and confirmation-gated whole-table/last-dimension removal.
 - [Phase 2]: Structural table/page-break commands are audit/replay-closed and use exact subtree preimages so durable recovery restores canonical content and header state.
 - [Phase 2]: Native structural projection consumes Rust placement, limits, header state, confirmation metadata, and table-cell focus order; React does not infer semantic coordinates from DOM order.
+- [Phase 2]: Image bytes enter Rust only through bounded binary staging; canonical assets use the existing BLAKE3 identity, receipts are one-use revision-bound secrets, and semantic DTOs never carry raw bytes or staging digests.
+- [Phase 2]: Image replacement/removal retains physical records until a future persistence policy proves safe collection with undo/recovery retention; current commits prioritize no premature shared-byte deletion.
 
 ### Pending Todos
 
@@ -125,6 +128,6 @@ Decisions are logged in `.planning/PROJECT.md`.
 
 ## Session Continuity
 
-Last session: 2026-09-14T18:19:01Z
-Stopped at: Completed 02-09-PLAN.md
+Last session: 2026-09-14T21:02:24Z
+Stopped at: Completed 02-13-PLAN.md
 Resume file: None
