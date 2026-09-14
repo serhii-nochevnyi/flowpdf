@@ -92,6 +92,7 @@ const semanticOwnerName = /^(?:apply|canonicalize|hash|migrate|mutate|recover|re
 test('the checked-in Phase 1 workspace preserves deferred scope and Rust semantic ownership', async () => {
   const snapshot = loadWorkspaceSnapshot(projectRoot)
   assert.deepEqual(boundaryDiagnostics(snapshot, { phase: 2 }), [])
+  assertPhaseTwoParityBoundary(projectRoot, snapshot)
 
   const gatePath = resolve(projectRoot, 'scripts/check-phase1.mjs')
   assert.equal(existsSync(gatePath), true, 'scripts/check-phase1.mjs must close the phase')
@@ -470,7 +471,7 @@ function expectedWasmSizeContext(report) {
   })
 }
 
-function loadWorkspaceSnapshot(root) {
+export function loadWorkspaceSnapshot(root) {
   const typescript = new Map()
   for (const directory of ['web/src', 'web/persistence']) {
     for (const path of productionFiles(resolve(root, directory))) {
@@ -521,7 +522,7 @@ function validFixture() {
   }
 }
 
-function boundaryDiagnostics(snapshot, options = {}) {
+export function boundaryDiagnostics(snapshot, options = {}) {
   const policy = boundaryPolicy(options)
   const diagnostics = []
   validatePackageManifest(snapshot.packageJson, diagnostics, policy)
@@ -570,6 +571,84 @@ function boundaryPolicy(options) {
     }
   }
   throw new RangeError(`unsupported boundary policy phase ${phase}`)
+}
+
+export function assertPhaseTwoParityBoundary(root, snapshot = loadWorkspaceSnapshot(root)) {
+  const contract = JSON.parse(
+    readFileSync(resolve(root, 'tests/contracts/phase2-command-parity.json'), 'utf8'),
+  )
+  const expectedCommandTypes = [
+    'insertText',
+    'replaceText',
+    'replaceSelection',
+    'deleteText',
+    'setNodeStyle',
+    'insertNode',
+    'deleteNode',
+    'splitTextBlock',
+    'mergeTextBlocks',
+    'deleteSubtree',
+    'setInlineMarks',
+    'setInlineMark',
+    'setBlockAttributes',
+    'setBlockStyle',
+    'setListKind',
+    'continueListItem',
+    'exitListItem',
+    'indentListItem',
+    'outdentListItem',
+    'insertPageBreak',
+    'removePageBreak',
+    'insertTable',
+    'insertImage',
+    'replaceImage',
+    'setImageAccessibility',
+    'removeImage',
+    'addTableRow',
+    'removeTableRow',
+    'addTableColumn',
+    'removeTableColumn',
+    'setTableHeaderRow',
+    'removeTable',
+    'setField',
+  ]
+  assert.equal(contract.formatVersion, 1)
+  assert.equal(contract.phase, 'FLOWPDF-02-accessible-rich-text-editing')
+  assert.equal(contract.mutationCount, expectedCommandTypes.length)
+  assert.deepEqual(
+    contract.commands.map(({ commandType }) => commandType),
+    expectedCommandTypes,
+  )
+  assert.equal(
+    new Set(contract.commands.map(({ commandType }) => commandType)).size,
+    expectedCommandTypes.length,
+  )
+  for (const capability of contract.commands) {
+    assert.match(capability.intent, /^editor\.intent\.[A-Za-z]+$/)
+    assert.match(capability.visible?.labelKey ?? '', /^editor\.parity\.visible\./)
+    assert.ok(capability.visible?.route, `${capability.commandType}: visible route required`)
+    assert.match(capability.keyboard?.labelKey ?? '', /^editor\.parity\.keyboard\./)
+    assert.ok(capability.keyboard?.route, `${capability.commandType}: keyboard route required`)
+    assert.equal(capability.futureVoice?.commandType, capability.commandType)
+    assert.equal(capability.futureVoice?.intent, capability.intent)
+  }
+
+  const controller = snapshot.typescript.get('web/src/editor/editor-controller.ts')
+  const editorStore = snapshot.typescript.get('web/src/editor/editor-store.ts')
+  assert.ok(controller, 'editor controller must be part of the Phase 2 boundary')
+  assert.ok(editorStore, 'editor store must be part of the Phase 2 boundary')
+  const structuralStart = controller.indexOf('export type StructuralCommandDto')
+  const formattingStart = controller.indexOf('export type FormattingCommandDto')
+  assert.ok(structuralStart >= 0 && formattingStart > structuralStart)
+  assert.doesNotMatch(controller.slice(structuralStart, formattingStart), /\bbytes\s*:/)
+  const requestStart = controller.indexOf('interface ApplyCommandRequestDto')
+  const recoveryStart = controller.indexOf('interface RecoveryAuditContextDto')
+  assert.ok(requestStart >= 0 && recoveryStart > requestStart)
+  assert.doesNotMatch(controller.slice(requestStart, recoveryStart), /\bbytes\s*:/)
+  assert.match(controller, /stage_asset/)
+  assert.match(controller, /receipt:\s*staged\.receipt/)
+  assert.doesNotMatch(controller, /(?:crypto\.subtle|createHash|blake3\s*\()/)
+  assert.doesNotMatch(editorStore, /\bbytes\s*:/)
 }
 
 function validatePackageManifest(packageJson, diagnostics, policy) {

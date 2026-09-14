@@ -1,0 +1,667 @@
+{
+  "formatVersion": 1,
+  "phase": "FLOWPDF-02-accessible-rich-text-editing",
+  "mutationCount": 33,
+  "commands": [
+    {
+      "family": "insertText",
+      "commandType": "insertText",
+      "intent": "editor.intent.insertText",
+      "risk": "text",
+      "confirmation": "none",
+      "undo": "reversible",
+      "visible": {
+        "labelKey": "editor.parity.visible.insertText",
+        "route": "editor.inputHost"
+      },
+      "keyboard": {
+        "labelKey": "editor.parity.keyboard.insertText",
+        "route": "keyboard.textInput"
+      },
+      "futureVoice": {
+        "intent": "editor.intent.insertText",
+        "commandType": "insertText"
+      }
+    },
+    {
+      "family": "replaceText",
+      "commandType": "replaceText",
+      "intent": "editor.intent.replaceText",
+      "risk": "text",
+      "confirmation": "none",
+      "undo": "reversible",
+      "visible": {
+        "labelKey": "editor.parity.visible.replaceText",
+        "route": "editor.document.selection"
+      },
+      "keyboard": {
+        "labelKey": "editor.parity.keyboard.replaceText",
+        "route": "keyboard.textSelection"
+      },
+      "futureVoice": {
+        "intent": "editor.intent.replaceText",
+        "commandType": "replaceText"
+      }
+    },
+    {
+      "family": "replaceSelection",
+      "commandType": "replaceSelection",
+      "intent": "editor.intent.replaceSelection",
+      "risk": "text",
+      "confirmation": "none",
+      "undo": "reversible",
+      "visible": {
+        "labelKey": "editor.parity.visible.replaceSelection",
+        "route": "editor.inputHost"
+      },
+      "keyboard": {
+        "labelKey": "editor.parity.keyboard.replaceSelection",
+        "route": "keyboard.textSelection"
+      },
+      "futureVoice": {
+        "intent": "editor.intent.replaceSelection",
+        "commandType": "replaceSelection"
+      }
+    },
+    {
+      "family": "deleteText",
+      "commandType": "deleteText",
+      "intent": "editor.intent.deleteText",
+      "risk": "destructive",
+      "confirmation": "none",
+      "undo": "reversible",
+      "visible": {
+        "labelKey": "editor.parity.visible.deleteText",
+        "route": "editor.document.selection"
+      },
+      "keyboard": {
+        "labelKey": "editor.parity.keyboard.deleteText",
+        "route": "keyboard.delete"
+      },
+      "futureVoice": {
+        "intent": "editor.intent.deleteText",
+        "commandType": "deleteText"
+      }
+    },
+    {
+      "family": "setNodeStyle",
+      "commandType": "setNodeStyle",
+      "intent": "editor.intent.setNodeStyle",
+      "risk": "formatting",
+      "confirmation": "none",
+      "undo": "reversible",
+      "visible": {
+        "labelKey": "editor.parity.visible.setNodeStyle",
+        "route": "editor.formatting.blockStyle"
+      },
+      "keyboard": {
+        "labelKey": "editor.parity.keyboard.setNodeStyle",
+        "route": "keyboard.blockStyle"
+      },
+      "futureVoice": {
+        "intent": "editor.intent.setNodeStyle",
+        "commandType": "setNodeStyle"
+      }
+    },
+    {
+      "family": "insertNode",
+      "commandType": "insertNode",
+      "intent": "editor.intent.insertNode",
+      "risk": "structure",
+      "confirmation": "none",
+      "undo": "reversible",
+      "visible": {
+        "labelKey": "editor.parity.visible.insertNode",
+        "route": "editor.insertMenu"
+      },
+      "keyboard": {
+        "labelKey": "editor.parity.keyboard.insertNode",
+        "route": "keyboard.insertStructure"
+      },
+      "futureVoice": {
+        "intent": "editor.intent.insertNode",
+        "commandType": "insertNode"
+      }
+    },
+    {
+      "family": "deleteNode",
+      "commandType": "deleteNode",
+      "intent": "editor.intent.deleteNode",
+      "risk": "destructive",
+      "confirmation": "explicit",
+      "undo": "reversible",
+      "visible": {
+        "labelKey": "editor.parity.visible.deleteNode",
+        "route": "editor.document.atomicActions"
+      },
+      "keyboard": {
+        "labelKey": "editor.parity.keyboard.deleteNode",
+        "route": "keyboard.delete"
+      },
+      "futureVoice": {
+        "intent": "editor.intent.deleteNode",
+        "commandType": "deleteNode"
+      }
+    },
+    {
+      "family": "splitTextBlock",
+      "commandType": "splitTextBlock",
+      "intent": "editor.intent.splitTextBlock",
+      "risk": "structure",
+      "confirmation": "none",
+      "undo": "reversible",
+      "visible": {
+        "labelKey": "editor.parity.visible.splitTextBlock",
+        "route": "editor.structure"
+      },
+      "keyboard": {
+        "labelKey": "editor.parity.keyboard.splitTextBlock",
+        "route": "keyboard.enter"
+      },
+      "futureVoice": {
+        "intent": "editor.intent.splitTextBlock",
+        "commandType": "splitTextBlock"
+      }
+    },
+    {
+      "family": "mergeTextBlocks",
+      "commandType": "mergeTextBlocks",
+      "intent": "editor.intent.mergeTextBlocks",
+      "risk": "structure",
+      "confirmation": "none",
+      "undo": "reversible",
+      "visible": {
+        "labelKey": "editor.parity.visible.mergeTextBlocks",
+        "route": "editor.structure"
+      },
+      "keyboard": {
+        "labelKey": "editor.parity.keyboard.mergeTextBlocks",
+        "route": "keyboard.backspace"
+      },
+      "futureVoice": {
+        "intent": "editor.intent.mergeTextBlocks",
+        "commandType": "mergeTextBlocks"
+      }
+    },
+    {
+      "family": "deleteSubtree",
+      "commandType": "deleteSubtree",
+      "intent": "editor.intent.deleteSubtree",
+      "risk": "destructive",
+      "confirmation": "explicit",
+      "undo": "reversible",
+      "visible": {
+        "labelKey": "editor.parity.visible.deleteSubtree",
+        "route": "editor.document.atomicActions"
+      },
+      "keyboard": {
+        "labelKey": "editor.parity.keyboard.deleteSubtree",
+        "route": "keyboard.delete"
+      },
+      "futureVoice": {
+        "intent": "editor.intent.deleteSubtree",
+        "commandType": "deleteSubtree"
+      }
+    },
+    {
+      "family": "setInlineMarks",
+      "commandType": "setInlineMarks",
+      "intent": "editor.intent.setInlineMarks",
+      "risk": "formatting",
+      "confirmation": "none",
+      "undo": "reversible",
+      "visible": {
+        "labelKey": "editor.parity.visible.setInlineMarks",
+        "route": "editor.toolbar.inlineMarks"
+      },
+      "keyboard": {
+        "labelKey": "editor.parity.keyboard.setInlineMarks",
+        "route": "keyboard.modifierMarks"
+      },
+      "futureVoice": {
+        "intent": "editor.intent.setInlineMarks",
+        "commandType": "setInlineMarks"
+      }
+    },
+    {
+      "family": "setInlineMark",
+      "commandType": "setInlineMark",
+      "intent": "editor.intent.setInlineMark",
+      "risk": "formatting",
+      "confirmation": "none",
+      "undo": "reversible",
+      "visible": {
+        "labelKey": "editor.parity.visible.setInlineMark",
+        "route": "editor.toolbar.inlineMarks"
+      },
+      "keyboard": {
+        "labelKey": "editor.parity.keyboard.setInlineMark",
+        "route": "keyboard.modifierMarks"
+      },
+      "futureVoice": {
+        "intent": "editor.intent.setInlineMark",
+        "commandType": "setInlineMark"
+      }
+    },
+    {
+      "family": "setBlockAttributes",
+      "commandType": "setBlockAttributes",
+      "intent": "editor.intent.setBlockAttributes",
+      "risk": "formatting",
+      "confirmation": "none",
+      "undo": "reversible",
+      "visible": {
+        "labelKey": "editor.parity.visible.setBlockAttributes",
+        "route": "editor.toolbar.blockAttributes"
+      },
+      "keyboard": {
+        "labelKey": "editor.parity.keyboard.setBlockAttributes",
+        "route": "keyboard.blockAttributes"
+      },
+      "futureVoice": {
+        "intent": "editor.intent.setBlockAttributes",
+        "commandType": "setBlockAttributes"
+      }
+    },
+    {
+      "family": "setBlockStyle",
+      "commandType": "setBlockStyle",
+      "intent": "editor.intent.setBlockStyle",
+      "risk": "formatting",
+      "confirmation": "none",
+      "undo": "reversible",
+      "visible": {
+        "labelKey": "editor.parity.visible.setBlockStyle",
+        "route": "editor.toolbar.blockStyle"
+      },
+      "keyboard": {
+        "labelKey": "editor.parity.keyboard.setBlockStyle",
+        "route": "keyboard.blockStyle"
+      },
+      "futureVoice": {
+        "intent": "editor.intent.setBlockStyle",
+        "commandType": "setBlockStyle"
+      }
+    },
+    {
+      "family": "setListKind",
+      "commandType": "setListKind",
+      "intent": "editor.intent.setListKind",
+      "risk": "formatting",
+      "confirmation": "none",
+      "undo": "reversible",
+      "visible": {
+        "labelKey": "editor.parity.visible.setListKind",
+        "route": "editor.toolbar.list"
+      },
+      "keyboard": {
+        "labelKey": "editor.parity.keyboard.setListKind",
+        "route": "keyboard.listShortcut"
+      },
+      "futureVoice": {
+        "intent": "editor.intent.setListKind",
+        "commandType": "setListKind"
+      }
+    },
+    {
+      "family": "continueListItem",
+      "commandType": "continueListItem",
+      "intent": "editor.intent.continueListItem",
+      "risk": "structure",
+      "confirmation": "none",
+      "undo": "reversible",
+      "visible": {
+        "labelKey": "editor.parity.visible.continueListItem",
+        "route": "editor.listActions"
+      },
+      "keyboard": {
+        "labelKey": "editor.parity.keyboard.continueListItem",
+        "route": "keyboard.enter"
+      },
+      "futureVoice": {
+        "intent": "editor.intent.continueListItem",
+        "commandType": "continueListItem"
+      }
+    },
+    {
+      "family": "exitListItem",
+      "commandType": "exitListItem",
+      "intent": "editor.intent.exitListItem",
+      "risk": "structure",
+      "confirmation": "none",
+      "undo": "reversible",
+      "visible": {
+        "labelKey": "editor.parity.visible.exitListItem",
+        "route": "editor.listActions"
+      },
+      "keyboard": {
+        "labelKey": "editor.parity.keyboard.exitListItem",
+        "route": "keyboard.enter"
+      },
+      "futureVoice": {
+        "intent": "editor.intent.exitListItem",
+        "commandType": "exitListItem"
+      }
+    },
+    {
+      "family": "indentListItem",
+      "commandType": "indentListItem",
+      "intent": "editor.intent.indentListItem",
+      "risk": "structure",
+      "confirmation": "none",
+      "undo": "reversible",
+      "visible": {
+        "labelKey": "editor.parity.visible.indentListItem",
+        "route": "editor.listActions"
+      },
+      "keyboard": {
+        "labelKey": "editor.parity.keyboard.indentListItem",
+        "route": "keyboard.tab"
+      },
+      "futureVoice": {
+        "intent": "editor.intent.indentListItem",
+        "commandType": "indentListItem"
+      }
+    },
+    {
+      "family": "outdentListItem",
+      "commandType": "outdentListItem",
+      "intent": "editor.intent.outdentListItem",
+      "risk": "structure",
+      "confirmation": "none",
+      "undo": "reversible",
+      "visible": {
+        "labelKey": "editor.parity.visible.outdentListItem",
+        "route": "editor.listActions"
+      },
+      "keyboard": {
+        "labelKey": "editor.parity.keyboard.outdentListItem",
+        "route": "keyboard.shiftTab"
+      },
+      "futureVoice": {
+        "intent": "editor.intent.outdentListItem",
+        "commandType": "outdentListItem"
+      }
+    },
+    {
+      "family": "insertPageBreak",
+      "commandType": "insertPageBreak",
+      "intent": "editor.intent.insertPageBreak",
+      "risk": "structure",
+      "confirmation": "none",
+      "undo": "reversible",
+      "visible": {
+        "labelKey": "editor.parity.visible.insertPageBreak",
+        "route": "editor.insertMenu"
+      },
+      "keyboard": {
+        "labelKey": "editor.parity.keyboard.insertPageBreak",
+        "route": "keyboard.insertStructure"
+      },
+      "futureVoice": {
+        "intent": "editor.intent.insertPageBreak",
+        "commandType": "insertPageBreak"
+      }
+    },
+    {
+      "family": "removePageBreak",
+      "commandType": "removePageBreak",
+      "intent": "editor.intent.removePageBreak",
+      "risk": "destructive",
+      "confirmation": "none",
+      "undo": "reversible",
+      "visible": {
+        "labelKey": "editor.parity.visible.removePageBreak",
+        "route": "editor.document.atomicActions"
+      },
+      "keyboard": {
+        "labelKey": "editor.parity.keyboard.removePageBreak",
+        "route": "keyboard.delete"
+      },
+      "futureVoice": {
+        "intent": "editor.intent.removePageBreak",
+        "commandType": "removePageBreak"
+      }
+    },
+    {
+      "family": "insertTable",
+      "commandType": "insertTable",
+      "intent": "editor.intent.insertTable",
+      "risk": "structure",
+      "confirmation": "none",
+      "undo": "reversible",
+      "visible": {
+        "labelKey": "editor.parity.visible.insertTable",
+        "route": "editor.insertMenu"
+      },
+      "keyboard": {
+        "labelKey": "editor.parity.keyboard.insertTable",
+        "route": "keyboard.insertStructure"
+      },
+      "futureVoice": {
+        "intent": "editor.intent.insertTable",
+        "commandType": "insertTable"
+      }
+    },
+    {
+      "family": "insertImage",
+      "commandType": "insertImage",
+      "intent": "editor.intent.insertImage",
+      "risk": "asset",
+      "confirmation": "none",
+      "undo": "reversible",
+      "visible": {
+        "labelKey": "editor.parity.visible.insertImage",
+        "route": "editor.insertMenu"
+      },
+      "keyboard": {
+        "labelKey": "editor.parity.keyboard.insertImage",
+        "route": "keyboard.insertStructure"
+      },
+      "futureVoice": {
+        "intent": "editor.intent.insertImage",
+        "commandType": "insertImage"
+      }
+    },
+    {
+      "family": "replaceImage",
+      "commandType": "replaceImage",
+      "intent": "editor.intent.replaceImage",
+      "risk": "asset",
+      "confirmation": "none",
+      "undo": "reversible",
+      "visible": {
+        "labelKey": "editor.parity.visible.replaceImage",
+        "route": "editor.imageActions"
+      },
+      "keyboard": {
+        "labelKey": "editor.parity.keyboard.replaceImage",
+        "route": "keyboard.replaceAtomic"
+      },
+      "futureVoice": {
+        "intent": "editor.intent.replaceImage",
+        "commandType": "replaceImage"
+      }
+    },
+    {
+      "family": "setImageAccessibility",
+      "commandType": "setImageAccessibility",
+      "intent": "editor.intent.setImageAccessibility",
+      "risk": "asset",
+      "confirmation": "none",
+      "undo": "reversible",
+      "visible": {
+        "labelKey": "editor.parity.visible.setImageAccessibility",
+        "route": "editor.imageActions"
+      },
+      "keyboard": {
+        "labelKey": "editor.parity.keyboard.setImageAccessibility",
+        "route": "keyboard.imageAccessibility"
+      },
+      "futureVoice": {
+        "intent": "editor.intent.setImageAccessibility",
+        "commandType": "setImageAccessibility"
+      }
+    },
+    {
+      "family": "removeImage",
+      "commandType": "removeImage",
+      "intent": "editor.intent.removeImage",
+      "risk": "destructive",
+      "confirmation": "explicit",
+      "undo": "reversible",
+      "visible": {
+        "labelKey": "editor.parity.visible.removeImage",
+        "route": "editor.imageActions"
+      },
+      "keyboard": {
+        "labelKey": "editor.parity.keyboard.removeImage",
+        "route": "keyboard.delete"
+      },
+      "futureVoice": {
+        "intent": "editor.intent.removeImage",
+        "commandType": "removeImage"
+      }
+    },
+    {
+      "family": "addTableRow",
+      "commandType": "addTableRow",
+      "intent": "editor.intent.addTableRow",
+      "risk": "structure",
+      "confirmation": "none",
+      "undo": "reversible",
+      "visible": {
+        "labelKey": "editor.parity.visible.addTableRow",
+        "route": "editor.tableActions"
+      },
+      "keyboard": {
+        "labelKey": "editor.parity.keyboard.addTableRow",
+        "route": "keyboard.tableNavigation"
+      },
+      "futureVoice": {
+        "intent": "editor.intent.addTableRow",
+        "commandType": "addTableRow"
+      }
+    },
+    {
+      "family": "removeTableRow",
+      "commandType": "removeTableRow",
+      "intent": "editor.intent.removeTableRow",
+      "risk": "destructive",
+      "confirmation": "conditional",
+      "undo": "reversible",
+      "visible": {
+        "labelKey": "editor.parity.visible.removeTableRow",
+        "route": "editor.tableActions"
+      },
+      "keyboard": {
+        "labelKey": "editor.parity.keyboard.removeTableRow",
+        "route": "keyboard.tableNavigation"
+      },
+      "futureVoice": {
+        "intent": "editor.intent.removeTableRow",
+        "commandType": "removeTableRow"
+      }
+    },
+    {
+      "family": "addTableColumn",
+      "commandType": "addTableColumn",
+      "intent": "editor.intent.addTableColumn",
+      "risk": "structure",
+      "confirmation": "none",
+      "undo": "reversible",
+      "visible": {
+        "labelKey": "editor.parity.visible.addTableColumn",
+        "route": "editor.tableActions"
+      },
+      "keyboard": {
+        "labelKey": "editor.parity.keyboard.addTableColumn",
+        "route": "keyboard.tableNavigation"
+      },
+      "futureVoice": {
+        "intent": "editor.intent.addTableColumn",
+        "commandType": "addTableColumn"
+      }
+    },
+    {
+      "family": "removeTableColumn",
+      "commandType": "removeTableColumn",
+      "intent": "editor.intent.removeTableColumn",
+      "risk": "destructive",
+      "confirmation": "conditional",
+      "undo": "reversible",
+      "visible": {
+        "labelKey": "editor.parity.visible.removeTableColumn",
+        "route": "editor.tableActions"
+      },
+      "keyboard": {
+        "labelKey": "editor.parity.keyboard.removeTableColumn",
+        "route": "keyboard.tableNavigation"
+      },
+      "futureVoice": {
+        "intent": "editor.intent.removeTableColumn",
+        "commandType": "removeTableColumn"
+      }
+    },
+    {
+      "family": "setTableHeaderRow",
+      "commandType": "setTableHeaderRow",
+      "intent": "editor.intent.setTableHeaderRow",
+      "risk": "structure",
+      "confirmation": "none",
+      "undo": "reversible",
+      "visible": {
+        "labelKey": "editor.parity.visible.setTableHeaderRow",
+        "route": "editor.tableActions"
+      },
+      "keyboard": {
+        "labelKey": "editor.parity.keyboard.setTableHeaderRow",
+        "route": "keyboard.tableHeader"
+      },
+      "futureVoice": {
+        "intent": "editor.intent.setTableHeaderRow",
+        "commandType": "setTableHeaderRow"
+      }
+    },
+    {
+      "family": "removeTable",
+      "commandType": "removeTable",
+      "intent": "editor.intent.removeTable",
+      "risk": "destructive",
+      "confirmation": "explicit",
+      "undo": "reversible",
+      "visible": {
+        "labelKey": "editor.parity.visible.removeTable",
+        "route": "editor.tableActions"
+      },
+      "keyboard": {
+        "labelKey": "editor.parity.keyboard.removeTable",
+        "route": "keyboard.delete"
+      },
+      "futureVoice": {
+        "intent": "editor.intent.removeTable",
+        "commandType": "removeTable"
+      }
+    },
+    {
+      "family": "setField",
+      "commandType": "setField",
+      "intent": "editor.intent.setField",
+      "risk": "compatibility",
+      "confirmation": "none",
+      "undo": "reversible",
+      "visible": {
+        "labelKey": "editor.parity.visible.setField",
+        "route": "foundationInspector.fieldReview"
+      },
+      "keyboard": {
+        "labelKey": "editor.parity.keyboard.setField",
+        "route": "keyboard.fieldReview"
+      },
+      "futureVoice": {
+        "intent": "editor.intent.setField",
+        "commandType": "setField"
+      }
+    }
+  ]
+}

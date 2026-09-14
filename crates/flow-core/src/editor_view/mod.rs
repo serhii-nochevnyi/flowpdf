@@ -111,6 +111,40 @@ pub enum EditorCapability {
     RemoveTable,
 }
 
+impl EditorCapability {
+    /// Returns the closed transaction command represented by this dynamic
+    /// capability. Session-only capabilities intentionally return `None`.
+    #[must_use]
+    pub const fn command_type(&self) -> Option<&'static str> {
+        match self {
+            Self::SetSelection | Self::SetPendingMarks => None,
+            Self::SetInlineMarks => Some("setInlineMarks"),
+            Self::SetBlockAttributes => Some("setBlockAttributes"),
+            Self::SetListKind => Some("setListKind"),
+            Self::ContinueListItem => Some("continueListItem"),
+            Self::ExitListItem => Some("exitListItem"),
+            Self::IndentListItem => Some("indentListItem"),
+            Self::OutdentListItem => Some("outdentListItem"),
+            Self::SplitTextBlock => Some("splitTextBlock"),
+            Self::MergeTextBlocks => Some("mergeTextBlocks"),
+            Self::DeleteSubtree => Some("deleteSubtree"),
+            Self::InsertPageBreak => Some("insertPageBreak"),
+            Self::RemovePageBreak => Some("removePageBreak"),
+            Self::InsertTable => Some("insertTable"),
+            Self::InsertImage => Some("insertImage"),
+            Self::ReplaceImage => Some("replaceImage"),
+            Self::SetImageAccessibility => Some("setImageAccessibility"),
+            Self::RemoveImage => Some("removeImage"),
+            Self::AddTableRow => Some("addTableRow"),
+            Self::RemoveTableRow => Some("removeTableRow"),
+            Self::AddTableColumn => Some("addTableColumn"),
+            Self::RemoveTableColumn => Some("removeTableColumn"),
+            Self::SetTableHeaderRow => Some("setTableHeaderRow"),
+            Self::RemoveTable => Some("removeTable"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum ConfirmationKindDto {

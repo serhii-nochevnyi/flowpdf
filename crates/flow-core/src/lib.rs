@@ -8,6 +8,7 @@ pub mod anchor;
 pub mod asset;
 pub mod audit;
 pub mod canonical;
+pub mod capability;
 pub mod editor_view;
 pub mod model;
 pub mod provenance;
@@ -30,6 +31,12 @@ use audit::{
 };
 pub use audit::{AuditEvent as AuditRecord, AuditOutcome};
 use canonical::{canonical_bytes, canonical_hash, decode_canonical};
+pub use capability::{
+    CommandCapability, CommandParityContract, ConfirmationPolicy, FutureVoiceBinding,
+    MutationFamily, RiskLevel, RouteBinding, UndoPolicy, command_capabilities,
+    command_capability_for_command_kind, command_capability_for_family,
+    command_capability_for_voice_intent, command_parity_contract, command_with_modality,
+};
 pub use editor_view::{
     CapabilityDto, ConfirmationKindDto, ConfirmationMetadataDto, DirectionalSelection,
     EditorBlockViewDto, EditorCapability, EditorDocumentViewDto, EditorSessionAction,
