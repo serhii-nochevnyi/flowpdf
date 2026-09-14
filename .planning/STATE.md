@@ -4,16 +4,16 @@ milestone: v1.0
 current_phase: 2
 current_phase_name: Accessible Rich-Text Editing
 status: executing
-stopped_at: Completed 02-13-PLAN.md
-last_updated: "2026-09-14T21:02:24Z"
+stopped_at: Completed 02-14-PLAN.md
+last_updated: "2026-09-14T21:45:20Z"
 last_activity: 2026-09-15
-last_activity_desc: Plan 02-13 closed bounded image staging, Rust-owned image lifecycle, shared physical-byte retention, and recovery evidence
-state_head: 13ca8de
+last_activity_desc: Plan 02-14 closed browser image persistence, accessible controls, receipt-only WASM routing, and recovery evidence
+state_head: 84c5eb3
 progress:
   total_phases: 9
   completed_phases: 1
   total_plans: 24
-  completed_plans: 19
+  completed_plans: 20
 milestone_name: milestone
 ---
 
@@ -29,11 +29,11 @@ See: .planning/PROJECT.md (updated 2026-08-25)
 ## Current Position
 
 Phase: 2 (Accessible Rich-Text Editing) — EXECUTING
-Plan: 14 of 18
+Plan: 15 of 18
 Status: Ready to execute
-Last activity: 2026-09-15 — Plan 02-13 completed; ready for atomic image persistence and accessible browser controls
+Last activity: 2026-09-15 — Plan 02-14 completed; ready for exhaustive command parity and boundary contracts
 
-Progress: Phase 2 — 13/18 plans complete; milestone percentage unavailable while later phases remain unplanned.
+Progress: Phase 2 — 14/18 plans complete; milestone percentage unavailable while later phases remain unplanned.
 
 ## Performance Metrics
 
@@ -48,9 +48,9 @@ Progress: Phase 2 — 13/18 plans complete; milestone percentage unavailable whi
 | Phase | Plans | Total | Avg/Plan |
 |-------|-------|-------|----------|
 | 1 | 6 | - | - |
-| 2 | 13 | multi-session | - |
+| 2 | 14 | multi-session | - |
 
-**Recent Trend:** Schema-v2 tree and lossless migration gates remain green. Plan 02-13 now passes bounded Rust PNG/JPEG staging, canonical BLAKE3 identity, one-use revision-bound receipts, reversible image lifecycle commands, shared-byte retention, recovery, and the full Rust/WASM/web gate; five editor plans remain.
+**Recent Trend:** Schema-v2 tree and lossless migration gates remain green. Plan 02-14 now passes binary IndexedDB envelopes with legacy reads, receipt-only WASM image routing, accessible image controls, real Chromium persistence/recovery, and the full Rust/WASM/web gate; four editor plans remain.
 **Per-Plan Metrics:**
 
 | Plan | Duration | Tasks | Files |
@@ -74,6 +74,7 @@ Progress: Phase 2 — 13/18 plans complete; milestone percentage unavailable whi
 | Phase FLOWPDF-02 P11 | resumed multi-session | 2 tasks | 8 files |
 | Phase FLOWPDF-02 P12 | resumed multi-session | 2 tasks | 12 files |
 | Phase FLOWPDF-02 P13 | resumed multi-session | 2 tasks | 12 files |
+| Phase FLOWPDF-02 P14 | resumed multi-session | 2 tasks | 13 files |
 
 ## Accumulated Context
 
