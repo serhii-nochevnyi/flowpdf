@@ -144,6 +144,43 @@ describe('IndexedDbDocumentStore', () => {
     expect(records.sources).toEqual([])
   })
 
+  it('stores asset payloads as versioned binary envelopes while exposing legacy DTOs', async () => {
+    const store = new IndexedDbDocumentStore()
+    const commit = commitFor(1, 'asset-binary')
+
+    await store.commit(commit)
+
+    const database = await openCurrentDatabase()
+    const transaction = database.transaction('assets-v3', 'readonly')
+    const stored = await requestResultForTest<{ readonly record: unknown }[]>(
+      transaction.objectStore('assets-v3').getAll(),
+    )
+    await transactionCompleteForTest(transaction)
+    database.close()
+
+    expect(stored).toHaveLength(1)
+    const envelope = stored[0]?.record as {
+      readonly envelopeVersion: number
+      readonly byteLength: number
+      readonly bytes: Uint8Array
+    }
+    expect(envelope.envelopeVersion).toBe(1)
+    expect(envelope.byteLength).toBe(commit.assets[0]!.bytes.length)
+    expect(envelope.bytes).toBeInstanceOf(Uint8Array)
+    expect(Array.isArray(envelope.bytes)).toBe(false)
+    await expect(store.loadRecords()).resolves.toMatchObject({ assets: commit.assets })
+  })
+
+  it('reads v4 number-array asset records without changing their public DTO', async () => {
+    const commit = commitFor(1, 'legacy-array-asset')
+    const legacyDatabase = await openV4Database(commit)
+    legacyDatabase.close()
+
+    const store = new IndexedDbDocumentStore()
+    await expect(store.loadRecords()).resolves.toMatchObject({ assets: commit.assets })
+    await expect(store.loadRecords()).resolves.toMatchObject({ assets: commit.assets })
+  })
+
   it('aborts the entire commit when the late assets write fails', async () => {
     const store = new IndexedDbDocumentStore()
     const baseline = commitFor(1, 'asset-1')

@@ -190,16 +190,28 @@ interface StoredEnvelope<T> {
   readonly record: T
 }
 
+const ASSET_ENVELOPE_VERSION = 1
+
+interface BinaryAssetRecordEnvelope {
+  readonly envelopeVersion: typeof ASSET_ENVELOPE_VERSION
+  readonly recordFormatVersion: number
+  readonly contentHash: string
+  readonly byteLength: number
+  readonly bytes: Uint8Array
+}
+
 type SameIdentity<T> = (left: T, right: T) => boolean
 
 interface GuardedRecord {
   readonly envelope: StoredEnvelope<unknown>
   readonly sameIdentity: SameIdentity<unknown>
+  readonly logicalRecord: (record: unknown) => unknown
 }
 
 interface GuardedStoreWrites {
   readonly storeName: string
   readonly records: readonly GuardedRecord[]
+  readonly logicalRecord?: (record: unknown) => unknown
 }
 
 export class IndexedDbDocumentStore {
@@ -218,7 +230,7 @@ export class IndexedDbDocumentStore {
     )
     const audit = await recordEnvelope(commit.audit, 'FLOW_STORAGE_WRITE_FAILED')
     const assets = await Promise.all(
-      commit.assets.map((asset) => recordEnvelope(asset, 'FLOW_STORAGE_WRITE_FAILED')),
+      commit.assets.map((asset) => assetRecordEnvelope(asset, 'FLOW_STORAGE_WRITE_FAILED')),
     )
     const database = await this.open()
 
@@ -243,7 +255,8 @@ export class IndexedDbDocumentStore {
         },
         {
           storeName: ASSETS,
-          records: assets.map((asset) => guardedRecord(asset, sameAssetIdentity)),
+          records: assets.map((asset) => assetGuardedRecord(asset)),
+          logicalRecord: decodeStoredAssetRecord,
         },
         { storeName: SOURCES, records: [] },
       ],
@@ -271,7 +284,7 @@ export class IndexedDbDocumentStore {
       recordEnvelope(commit.audit, 'FLOW_STORAGE_WRITE_FAILED'),
       recordEnvelope(commit.source, 'FLOW_STORAGE_WRITE_FAILED'),
       Promise.all(
-        commit.assets.map((asset) => recordEnvelope(asset, 'FLOW_STORAGE_WRITE_FAILED')),
+        commit.assets.map((asset) => assetRecordEnvelope(asset, 'FLOW_STORAGE_WRITE_FAILED')),
       ),
     ])
     const database = await this.open()
@@ -291,7 +304,8 @@ export class IndexedDbDocumentStore {
         },
         {
           storeName: ASSETS,
-          records: assets.map((asset) => guardedRecord(asset, sameAssetIdentity)),
+          records: assets.map((asset) => assetGuardedRecord(asset)),
+          logicalRecord: decodeStoredAssetRecord,
         },
         {
           storeName: SOURCES,
@@ -322,7 +336,7 @@ export class IndexedDbDocumentStore {
       let snapshots: readonly StoredEnvelope<SnapshotRecordDto>[] = []
       let transactions: readonly StoredEnvelope<TransactionRecordDto>[] = []
       let audits: readonly StoredEnvelope<AuditRecordDto>[] = []
-      let assets: readonly StoredEnvelope<AssetRecordDto>[] = []
+      let assets: readonly StoredEnvelope<unknown>[] = []
       let sources: readonly StoredEnvelope<MigrationSourceRecordDto>[] = []
       let metadata: readonly StorageMetadata[] = []
       let readsRemaining = 6
@@ -397,7 +411,7 @@ export class IndexedDbDocumentStore {
               { storeName: SNAPSHOTS, records: [] },
               { storeName: TRANSACTIONS, records: [] },
               { storeName: AUDITS, records: [guardedRecord(audit, sameAuditIdentity)] },
-              { storeName: ASSETS, records: [] },
+              { storeName: ASSETS, records: [], logicalRecord: decodeStoredAssetRecord },
               { storeName: SOURCES, records: [] },
             ],
           )
@@ -429,7 +443,7 @@ export class IndexedDbDocumentStore {
       read<StoredEnvelope<AuditRecordDto>>(AUDITS, (records) => {
         audits = records
       })
-      read<StoredEnvelope<AssetRecordDto>>(ASSETS, (records) => {
+      read<StoredEnvelope<unknown>>(ASSETS, (records) => {
         assets = records
       })
       read<StoredEnvelope<MigrationSourceRecordDto>>(SOURCES, (records) => {
@@ -475,7 +489,7 @@ export class IndexedDbDocumentStore {
       requestResult<StoredEnvelope<SnapshotRecordDto>[]>(snapshotsRequest),
       requestResult<StoredEnvelope<TransactionRecordDto>[]>(transactionsRequest),
       requestResult<StoredEnvelope<AuditRecordDto>[]>(auditsRequest),
-      requestResult<StoredEnvelope<AssetRecordDto>[]>(assetsRequest),
+      requestResult<StoredEnvelope<unknown>[]>(assetsRequest),
       requestResult<StoredEnvelope<MigrationSourceRecordDto>[]>(sourcesRequest),
       requestResult<StorageMetadata | undefined>(migrationRequiredRequest),
       requestResult<DocumentHeadDto[]>(headsRequest),
@@ -484,7 +498,7 @@ export class IndexedDbDocumentStore {
     const snapshots = snapshotEnvelopes.map(({ record }) => record)
     const transactions = transactionEnvelopes.map(({ record }) => record)
     const audits = auditEnvelopes.map(({ record }) => record)
-    const assets = assetEnvelopes.map(({ record }) => record)
+    const assets = assetEnvelopes.map(({ record }) => decodeStoredAssetRecord(record))
     const sources = sourceEnvelopes.map(({ record }) => record)
 
     if (migrationRequired?.value === true) {
@@ -689,14 +703,111 @@ async function recordEnvelope<T>(record: T, errorCode: string): Promise<StoredEn
   }
 }
 
+async function assetRecordEnvelope(
+  asset: AssetRecordDto,
+  errorCode: string,
+): Promise<StoredEnvelope<BinaryAssetRecordEnvelope>> {
+  try {
+    const bytes = new Uint8Array(asset.bytes)
+    const logicalRecord: AssetRecordDto = {
+      recordFormatVersion: asset.recordFormatVersion,
+      contentHash: asset.contentHash,
+      bytes: Array.from(bytes),
+    }
+    const digest = await globalThis.crypto.subtle.digest(
+      'SHA-256',
+      new TextEncoder().encode(deterministicJson(logicalRecord)),
+    )
+    const physicalKey = Array.from(new Uint8Array(digest), (byte) =>
+      byte.toString(16).padStart(2, '0'),
+    ).join('')
+    return {
+      physicalKey,
+      record: {
+        envelopeVersion: ASSET_ENVELOPE_VERSION,
+        recordFormatVersion: asset.recordFormatVersion,
+        contentHash: asset.contentHash,
+        byteLength: bytes.byteLength,
+        bytes,
+      },
+    }
+  } catch (error: unknown) {
+    throw storageError(errorCode, error)
+  }
+}
+
 function guardedRecord<T>(
   envelope: StoredEnvelope<T>,
   sameIdentity: SameIdentity<T>,
+  logicalRecord: (record: unknown) => unknown = (record) => record,
 ): GuardedRecord {
   return {
     envelope: envelope as StoredEnvelope<unknown>,
     sameIdentity: (left, right) => sameIdentity(left as T, right as T),
+    logicalRecord,
   }
+}
+
+function assetGuardedRecord(
+  envelope: StoredEnvelope<BinaryAssetRecordEnvelope>,
+): GuardedRecord {
+  return {
+    envelope: envelope as StoredEnvelope<unknown>,
+    sameIdentity: (left, right) =>
+      sameAssetIdentity(decodeStoredAssetRecord(left), decodeStoredAssetRecord(right)),
+    logicalRecord: decodeStoredAssetRecord,
+  }
+}
+
+function decodeStoredAssetRecord(value: unknown): AssetRecordDto {
+  try {
+    if (isBinaryAssetRecordEnvelope(value)) {
+      if (value.byteLength !== value.bytes.byteLength) {
+        throw new TypeError('Binary asset byte length does not match its payload')
+      }
+      return {
+        recordFormatVersion: value.recordFormatVersion,
+        contentHash: value.contentHash,
+        bytes: Array.from(value.bytes),
+      }
+    }
+    if (!isLegacyAssetRecord(value)) throw new TypeError('Invalid asset record')
+    return {
+      recordFormatVersion: value.recordFormatVersion,
+      contentHash: value.contentHash,
+      bytes: [...value.bytes],
+    }
+  } catch (error: unknown) {
+    if (error instanceof StorageError) throw error
+    throw storageError('FLOW_STORAGE_READ_FAILED', error)
+  }
+}
+
+function isBinaryAssetRecordEnvelope(
+  value: unknown,
+): value is BinaryAssetRecordEnvelope {
+  if (value === null || typeof value !== 'object') return false
+  const candidate = value as Partial<BinaryAssetRecordEnvelope>
+  return (
+    candidate.envelopeVersion === ASSET_ENVELOPE_VERSION &&
+    typeof candidate.recordFormatVersion === 'number' &&
+    typeof candidate.contentHash === 'string' &&
+    typeof candidate.byteLength === 'number' &&
+    candidate.bytes instanceof Uint8Array
+  )
+}
+
+function isLegacyAssetRecord(
+  value: unknown,
+): value is AssetRecordDto {
+  if (value === null || typeof value !== 'object') return false
+  const candidate = value as Partial<AssetRecordDto>
+  return (
+    typeof candidate.recordFormatVersion === 'number' &&
+    typeof candidate.contentHash === 'string' &&
+    Array.isArray(candidate.bytes) &&
+    candidate.bytes.every((byte) => Number.isInteger(byte) && byte >= 0 && byte <= 255)
+  )
 }
 
 function commitGuardedRecords(
@@ -847,7 +958,9 @@ function assertRecoveryBudget(
     for (const { envelope } of group.records) projected.set(envelope.physicalKey, envelope)
     recordCount += projected.size
     for (const { record } of projected.values()) {
-      replayBytes += encoder.encode(deterministicJson(record)).byteLength
+      replayBytes += encoder
+        .encode(deterministicJson(group.logicalRecord?.(record) ?? record))
+        .byteLength
     }
   }
   if (recordCount > RECOVERY_RECORD_LIMIT) {
@@ -865,9 +978,11 @@ function assertIdentityCompatibility(
   const observed = [...existing]
   for (const candidate of candidates) {
     for (const durable of observed) {
+      const durableLogical = candidate.logicalRecord(durable.record)
+      const candidateLogical = candidate.logicalRecord(candidate.envelope.record)
       if (
-        candidate.sameIdentity(durable.record, candidate.envelope.record) &&
-        deterministicJson(durable.record) !== deterministicJson(candidate.envelope.record)
+        candidate.sameIdentity(durableLogical, candidateLogical) &&
+        deterministicJson(durableLogical) !== deterministicJson(candidateLogical)
       ) {
         throw storageError('FLOW_STORE_IDENTITY_CONFLICT')
       }
@@ -885,7 +1000,12 @@ function exactStoredGroup(
     existing.some(
       (durable) =>
         durable.physicalKey === candidate.physicalKey &&
-        deterministicJson(durable.record) === deterministicJson(candidate.record),
+        deterministicJson(
+          group.records[0]?.logicalRecord(durable.record) ?? durable.record,
+        ) ===
+          deterministicJson(
+            group.records[0]?.logicalRecord(candidate.record) ?? candidate.record,
+          ),
     ),
   )
 }
@@ -943,7 +1063,9 @@ function recoveryRecordsFromEnvelopes(
     snapshots: records<SnapshotRecordDto>(SNAPSHOTS),
     transactions: records<TransactionRecordDto>(TRANSACTIONS),
     audits: records<AuditRecordDto>(AUDITS),
-    assets: records<AssetRecordDto>(ASSETS),
+    assets: (stores.get(ASSETS) ?? []).map((value) =>
+      decodeStoredAssetRecord((value as StoredEnvelope<unknown>).record),
+    ),
     sources: records<MigrationSourceRecordDto>(SOURCES),
   }
 }
