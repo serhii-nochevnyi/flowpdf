@@ -39,10 +39,12 @@ pub use capability::{
 };
 pub use editor_view::{
     CapabilityDto, ConfirmationKindDto, ConfirmationMetadataDto, DirectionalSelection,
-    EditorBlockViewDto, EditorCapability, EditorDocumentViewDto, EditorSessionAction,
-    EditorSessionError, EditorSessionRequest, EditorSessionResponse, EditorSessionState,
-    EditorTextSpanDto, EditorViewDto, EditorViewRequest, FormattingProjectionDto, FormattingState,
-    ImageBlockViewDto, ImageLimitsDto, StructuralPlacementDto, TableCellFocusDto, TableLimitsDto,
+    EditorBlockViewDto, EditorCapability, EditorDocumentViewDto, EditorFieldReviewDto,
+    EditorFieldReviewStatusDto, EditorFieldValueSummaryDto, EditorFieldViewDto,
+    EditorSessionAction, EditorSessionError, EditorSessionRequest, EditorSessionResponse,
+    EditorSessionState, EditorTextSpanDto, EditorViewDto, EditorViewRequest,
+    FormattingProjectionDto, FormattingState, ImageBlockViewDto, ImageLimitsDto,
+    StructuralPlacementDto, TableCellFocusDto, TableLimitsDto,
 };
 use model::{
     Affinity, CommandId, DocumentId, FlowDocument, LogicalPosition, MigrationHop, Provenance,

@@ -5,6 +5,7 @@
 //! coordinates, DOM paths, and mutable editor handles never cross this module.
 
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use thiserror::Error;
 
 use crate::anchor::{EditorPositionError, GraphemeBoundaryMap, NodePositionMap};
@@ -14,8 +15,9 @@ use crate::asset::{
     STAGING_RECEIPT_TTL_SECONDS,
 };
 use crate::model::{
-    Affinity, Alignment, BlockStyle, ContentNode, DocumentId, FlowDocument, FontFamily,
-    ImageAccessibility, InlineMark, ListKind, LogicalPosition, MarkSet, NodeId, RunLanguage,
+    Affinity, Alignment, BlockStyle, ContentNode, DocumentId, FieldAnchorState, FieldDescriptor,
+    FieldId, FieldOptionId, FieldValue, FlowDocument, FontFamily, ImageAccessibility, InlineMark,
+    LegacyAnchorReason, ListKind, LogicalPosition, MarkSet, NodeId, RunLanguage, TombstoneToken,
 };
 use crate::schema::{MAX_TABLE_COLUMNS, MAX_TABLE_ROWS};
 
@@ -319,6 +321,58 @@ pub struct EditorDocumentViewDto {
     pub document_id: DocumentId,
     pub revision: u32,
     pub blocks: Vec<EditorBlockViewDto>,
+    pub fields: Vec<EditorFieldViewDto>,
+    pub field_review: Vec<EditorFieldReviewDto>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
+)]
+pub enum EditorFieldValueSummaryDto {
+    Empty,
+    Text {
+        value: String,
+    },
+    Checked {
+        value: bool,
+    },
+    Selected {
+        option_ids: Vec<FieldOptionId>,
+        labels: Vec<String>,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EditorFieldViewDto {
+    pub descriptor: FieldDescriptor,
+    pub value_summary: EditorFieldValueSummaryDto,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
+)]
+pub enum EditorFieldReviewStatusDto {
+    LegacyInvalid { reason: LegacyAnchorReason },
+    TargetDeleted { tombstone: TombstoneToken },
+    GraphemeSafeTargetMissing,
+    GraphemeSafePositionInvalid,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EditorFieldReviewDto {
+    pub descriptor: FieldDescriptor,
+    pub value_summary: EditorFieldValueSummaryDto,
+    pub status: EditorFieldReviewStatusDto,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -334,10 +388,13 @@ impl EditorDocumentViewDto {
             document_id,
             revision,
             blocks: Vec::new(),
+            fields: Vec::new(),
+            field_review: Vec::new(),
         }
     }
 
     fn from_document(document: &FlowDocument) -> Self {
+        let (fields, field_review) = field_views(document);
         Self {
             document_id: document.document_id.clone(),
             revision: document.revision,
@@ -346,7 +403,146 @@ impl EditorDocumentViewDto {
                 .iter()
                 .map(|node| EditorBlockViewDto::from_node(node, &document.assets))
                 .collect(),
+            fields,
+            field_review,
         }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct FieldOrderKey {
+    node_path: Vec<usize>,
+    utf16_offset: u32,
+    affinity: u8,
+    node_id: NodeId,
+    field_id: FieldId,
+}
+
+fn field_views(document: &FlowDocument) -> (Vec<EditorFieldViewDto>, Vec<EditorFieldReviewDto>) {
+    let mut node_paths = BTreeMap::new();
+    collect_node_paths(&document.content, &mut Vec::new(), &mut node_paths);
+
+    let mut fields = Vec::new();
+    let mut field_review = Vec::new();
+    for descriptor in &document.fields {
+        let original = descriptor.anchor.original();
+        let key = FieldOrderKey {
+            node_path: node_paths
+                .get(&original.node_id)
+                .cloned()
+                .unwrap_or_else(|| vec![usize::MAX]),
+            utf16_offset: original.utf16_offset.get(),
+            affinity: affinity_order(&original.affinity),
+            node_id: original.node_id.clone(),
+            field_id: descriptor.id.clone(),
+        };
+        let value_summary = field_value_summary(descriptor);
+        if valid_field_anchor(document, descriptor) {
+            fields.push((
+                key,
+                EditorFieldViewDto {
+                    descriptor: descriptor.clone(),
+                    value_summary,
+                },
+            ));
+        } else {
+            field_review.push((
+                key,
+                EditorFieldReviewDto {
+                    descriptor: descriptor.clone(),
+                    value_summary,
+                    status: field_review_status(document, descriptor),
+                },
+            ));
+        }
+    }
+
+    fields.sort_by(|left, right| left.0.cmp(&right.0));
+    field_review.sort_by(|left, right| left.0.cmp(&right.0));
+    (
+        fields.into_iter().map(|(_, field)| field).collect(),
+        field_review.into_iter().map(|(_, field)| field).collect(),
+    )
+}
+
+fn collect_node_paths(
+    nodes: &[ContentNode],
+    parent_path: &mut Vec<usize>,
+    paths: &mut BTreeMap<NodeId, Vec<usize>>,
+) {
+    for (index, node) in nodes.iter().enumerate() {
+        parent_path.push(index);
+        paths.insert(node.id.clone(), parent_path.clone());
+        collect_node_paths(node.children(), parent_path, paths);
+        parent_path.pop();
+    }
+}
+
+fn affinity_order(affinity: &Affinity) -> u8 {
+    match affinity {
+        Affinity::Forward => 0,
+        Affinity::Backward => 1,
+    }
+}
+
+fn valid_field_anchor(document: &FlowDocument, descriptor: &FieldDescriptor) -> bool {
+    let FieldAnchorState::GraphemeSafe { original } = &descriptor.anchor else {
+        return false;
+    };
+    let Some(node) = find_node(&document.content, &original.node_id) else {
+        return false;
+    };
+    let Ok(map) = NodePositionMap::new(node, document.revision) else {
+        return false;
+    };
+    map.validate(original, document.revision).is_ok()
+}
+
+fn field_review_status(
+    document: &FlowDocument,
+    descriptor: &FieldDescriptor,
+) -> EditorFieldReviewStatusDto {
+    match &descriptor.anchor {
+        FieldAnchorState::LegacyInvalid { reason, .. } => {
+            EditorFieldReviewStatusDto::LegacyInvalid {
+                reason: reason.clone(),
+            }
+        }
+        FieldAnchorState::TargetDeleted { tombstone, .. } => {
+            EditorFieldReviewStatusDto::TargetDeleted {
+                tombstone: tombstone.clone(),
+            }
+        }
+        FieldAnchorState::GraphemeSafe { original } => {
+            if find_node(&document.content, &original.node_id).is_none() {
+                EditorFieldReviewStatusDto::GraphemeSafeTargetMissing
+            } else {
+                EditorFieldReviewStatusDto::GraphemeSafePositionInvalid
+            }
+        }
+    }
+}
+
+fn field_value_summary(descriptor: &FieldDescriptor) -> EditorFieldValueSummaryDto {
+    match &descriptor.default_value {
+        FieldValue::Empty => EditorFieldValueSummaryDto::Empty,
+        FieldValue::Text { value } => EditorFieldValueSummaryDto::Text {
+            value: value.clone(),
+        },
+        FieldValue::Checked { value } => EditorFieldValueSummaryDto::Checked { value: *value },
+        FieldValue::Selected { option_ids } => EditorFieldValueSummaryDto::Selected {
+            option_ids: option_ids.clone(),
+            labels: option_ids
+                .iter()
+                .filter_map(|option_id| {
+                    descriptor
+                        .options
+                        .iter()
+                        .find(|option| option.id == *option_id)
+                        .map(|option| option.label.clone())
+                })
+                .collect(),
+        },
     }
 }
 

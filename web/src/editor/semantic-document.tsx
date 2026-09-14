@@ -23,6 +23,7 @@ import {
   imageSelection,
   imageSource,
 } from './embedded-blocks.js'
+import { FieldNavigation } from './field-navigation.js'
 
 export interface SemanticDocumentProps {
   readonly view: EditorViewDto
@@ -168,6 +169,11 @@ export function SemanticDocument({
         </button>
       </div>
       {view.document.blocks.map((block) => renderBlock(block, context))}
+      <FieldNavigation
+        fields={view.document.fields}
+        fieldReview={view.document.fieldReview}
+        locale={locale}
+      />
       <textarea
         ref={hostRef}
         className="editor-input-host"

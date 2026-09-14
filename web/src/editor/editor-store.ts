@@ -123,6 +123,85 @@ export interface ImageBlockViewDto {
   readonly accessibility: ImageAccessibilityDto
 }
 
+export type FieldAnchorStateDto =
+  | { readonly status: 'graphemeSafe'; readonly original: LogicalPositionDto }
+  | {
+      readonly status: 'legacyInvalid'
+      readonly original: LogicalPositionDto
+      readonly reason: 'nonGraphemeBoundary' | 'missingNode'
+    }
+  | {
+      readonly status: 'targetDeleted'
+      readonly original: LogicalPositionDto
+      readonly tombstone: { readonly commandId: string; readonly slot: number }
+    }
+
+export type FieldKindDto =
+  | {
+      readonly type: 'text'
+      readonly multiline: boolean
+      readonly inputHint: 'plain' | 'date' | 'number' | 'email'
+    }
+  | { readonly type: 'checkbox' }
+  | { readonly type: 'radioGroup' }
+  | { readonly type: 'select'; readonly multiple: boolean }
+  | { readonly type: 'signature' }
+  | { readonly type: 'button' }
+
+export type FieldValueDto =
+  | { readonly type: 'empty' }
+  | { readonly type: 'text'; readonly value: string }
+  | { readonly type: 'checked'; readonly value: boolean }
+  | { readonly type: 'selected'; readonly optionIds: readonly string[] }
+
+export interface FieldOptionDto {
+  readonly id: string
+  readonly label: string
+  readonly exportValue: string
+}
+
+export interface FieldDescriptorDto {
+  readonly id: string
+  readonly name: string
+  readonly label: string | null
+  readonly anchor: FieldAnchorStateDto
+  readonly kind: FieldKindDto
+  readonly required: boolean
+  readonly readOnly: boolean
+  readonly defaultValue: FieldValueDto
+  readonly options: readonly FieldOptionDto[]
+}
+
+export type EditorFieldValueSummaryDto =
+  | { readonly kind: 'empty' }
+  | { readonly kind: 'text'; readonly value: string }
+  | { readonly kind: 'checked'; readonly value: boolean }
+  | {
+      readonly kind: 'selected'
+      readonly optionIds: readonly string[]
+      readonly labels: readonly string[]
+    }
+
+export interface EditorFieldViewDto {
+  readonly descriptor: FieldDescriptorDto
+  readonly valueSummary: EditorFieldValueSummaryDto
+}
+
+export type EditorFieldReviewStatusDto =
+  | { readonly kind: 'legacyInvalid'; readonly reason: 'nonGraphemeBoundary' | 'missingNode' }
+  | {
+      readonly kind: 'targetDeleted'
+      readonly tombstone: { readonly commandId: string; readonly slot: number }
+    }
+  | { readonly kind: 'graphemeSafeTargetMissing' }
+  | { readonly kind: 'graphemeSafePositionInvalid' }
+
+export interface EditorFieldReviewDto {
+  readonly descriptor: FieldDescriptorDto
+  readonly valueSummary: EditorFieldValueSummaryDto
+  readonly status: EditorFieldReviewStatusDto
+}
+
 export interface TableCellFocusDto {
   readonly cellId: string
   readonly selection: DirectionalSelectionDto
@@ -163,6 +242,8 @@ export interface EditorDocumentViewDto {
   readonly documentId: string
   readonly revision: number
   readonly blocks: readonly EditorBlockViewDto[]
+  readonly fields: readonly EditorFieldViewDto[]
+  readonly fieldReview: readonly EditorFieldReviewDto[]
 }
 
 export interface EditorViewDto {

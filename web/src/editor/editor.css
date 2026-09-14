@@ -229,6 +229,98 @@
   min-height: 44px;
 }
 
+.editor-fields-region,
+.editor-field-review-region {
+  display: grid;
+  gap: 12px;
+  max-width: 65ch;
+  margin: 32px 0 0;
+  padding: 16px;
+  border: 1px solid var(--border-default);
+  border-radius: 6px;
+  background: var(--surface-app);
+}
+
+.editor-fields-region h2,
+.editor-field-review-region h2 {
+  margin: 0;
+  color: var(--text-primary);
+  font-size: 18px;
+}
+
+.editor-field-review-region {
+  border-color: var(--status-error);
+}
+
+.editor-field-review-intro,
+.editor-field-empty,
+.editor-field-review-status,
+.editor-field-state {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.editor-field-review-status {
+  color: var(--status-error);
+  font-weight: 600;
+}
+
+.editor-field-list {
+  display: grid;
+  gap: 12px;
+}
+
+.editor-field-card {
+  min-width: 0;
+  min-height: 44px;
+  padding: 12px;
+  border: 1px solid var(--border-default);
+  border-radius: 6px;
+  background: var(--surface-card);
+}
+
+.editor-field-card:focus-visible {
+  outline: 3px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.editor-field-card h3 {
+  margin: 0 0 8px;
+  overflow-wrap: anywhere;
+  color: var(--text-primary);
+  font-size: 16px;
+}
+
+.editor-field-card-review {
+  border-color: var(--status-error);
+}
+
+.editor-field-metadata {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+}
+
+.editor-field-metadata div {
+  min-width: 0;
+}
+
+.editor-field-metadata dt {
+  color: var(--text-secondary);
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.editor-field-metadata dd {
+  margin: 2px 0 0;
+  overflow-wrap: anywhere;
+}
+
+.editor-field-options {
+  margin: 0;
+  padding-inline-start: 20px;
+}
+
 .editor-table-wrapper[data-selected='true'] {
   outline: 3px solid var(--accent);
   outline-offset: 4px;

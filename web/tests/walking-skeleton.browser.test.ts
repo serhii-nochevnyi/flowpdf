@@ -376,5 +376,5 @@ test('Phase 2 paragraph tracer crosses migration, ReplaceSelection, persistence,
   expect(remountRoot.querySelector('.diagnostics-panel > summary')?.textContent).toMatch(
     /Інспектор|Inspector/,
   )
-  expect(remountRoot.querySelectorAll('[data-editor-document] p')).toHaveLength(2)
+  expect(remountRoot.querySelectorAll('[data-editor-document] [data-text-block]')).toHaveLength(2)
 })

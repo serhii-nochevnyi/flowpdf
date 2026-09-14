@@ -183,6 +183,8 @@ function acceptedFixture(): EditorAcceptedSnapshot {
           spans: [{ startUtf16: 0, endUtf16: 5 }],
         },
       ],
+      fields: [],
+      fieldReview: [],
     },
   } as const
   return {
