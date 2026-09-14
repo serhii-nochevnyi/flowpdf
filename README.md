@@ -1,0 +1,202 @@
+# FlowPDF
+
+FlowPDF is a web-first document editor for Ukrainian- and English-language
+contracts, forms, reports, and similar professional documents. Its intended
+core value is natural editing of semantic document text, with deterministic
+reflow and a visually consistent, selectable, form-capable PDF export.
+The intended product combines semantic rich-text flow, document-wide reflow,
+fillable forms, and voice control without requiring a commercial PDF SDK.
+
+This repository is in active development. It currently contains the durable
+document-engine foundation and a small browser Foundation Inspector; it is not
+yet a complete PDF editor and should not be evaluated as production-ready
+editing software.
+
+## Purpose and architecture
+
+FlowPDF keeps a semantic `FlowDocument` as the source of truth. The document
+model is separate from the representations that will be derived from it:
+
+```text
+FlowDocument
+    -> Rust transactions, anchors, and canonical serialization
+    -> layout fragments and display lists (planned)
+    -> browser rendering and semantic accessibility DOM (planned)
+    -> owned fixed-layout PDF objects and export (planned)
+```
+
+Rust owns the document model, revision checks, transactions, recovery rules,
+logical positions, and the native/WASM semantic boundary. React and TypeScript
+provide the browser shell, controls, physical browser I/O, and presentation.
+The planned layout and PDF workloads will run away from the UI thread through
+Web Workers. IndexedDB is the current browser durability adapter.
+
+The canonical model is deliberately not the DOM and is not a PDF page tree.
+This keeps reflow, undo/redo, accessibility projections, and future PDF
+conversion from depending on unstable browser coordinates. Imported or
+unsupported PDF content is intended to remain explicitly marked and
+preserved; the future reconstruction path is best effort and must not claim
+lossless semantic recovery where it cannot prove it.
+
+## What is implemented
+
+The current tree includes:
+
+- a versioned FlowDocument schema with canonical inline runs, structured block
+  nodes, stable IDs, deterministic canonical bytes, hashes, and migration
+  fixtures;
+- Rust transaction lifecycle support with revision preconditions, undo/redo,
+  anchor transformations, recovery, provenance, and privacy-preserving audit
+  projections;
+- a Rust/WASM bridge and a React/TypeScript Foundation Inspector that exercises
+  document creation, mutation, recovery, and browser persistence through
+  IndexedDB;
+- pinned ICU4X grapheme-boundary validation for UTF-16 browser positions,
+  exact atomic-node edges, and a Rust-owned noncanonical editor session/view
+  projection in the current Phase 2 working tree;
+- Phase 1 and Phase 2 foundation fixtures, Unicode 17 grapheme conformance
+  data, dependency provenance checks, Rust tests, TypeScript checks, and
+  browser tests for the implemented foundation.
+
+These capabilities provide the engine contracts and inspection surface. They
+do not yet constitute a finished rich-text editor. In particular, schema
+support for images, lists, tables, page breaks, fields, and styles should not
+be read as a claim that all corresponding UI operations or PDF behavior are
+already implemented.
+
+## Planned capabilities
+
+The roadmap is intentionally staged. Remaining work includes, among other
+things:
+
+- accessible paragraph and structured rich-text editing with keyboard, IME,
+  clipboard, visible controls, and synchronized semantic content;
+- deterministic shaping, line breaking, layout, fragmentation, and pagination;
+- an owned PDF preview/writer and a bounded PDF reader, with selectable text,
+  reproducibility evidence, explicit unsupported-content reporting, and an
+  exact owned-source round trip when the source payload is available;
+- semantic fields that become interoperable PDF form widgets after layout;
+- voice dictation and commands through the same revision-checked transaction
+  boundary;
+- controlled external-PDF reconstruction/OCR and later native editing of
+  supported PDF scene islands.
+
+The current Phase 2 work is still incomplete. Text shaping, full repagination,
+general PDF import/export, complete assistive-technology validation, voice
+control, and production hardening are not delivered by this repository state.
+See the [roadmap](.planning/ROADMAP.md) and [project constraints](.planning/PROJECT.md)
+for the authoritative scope and sequencing.
+
+## Repository map
+
+- [`crates/flow-core`](crates/flow-core) — canonical Rust model, schema,
+  transactions, anchors, recovery, and editor-session authority.
+- [`crates/flow-wasm`](crates/flow-wasm) — wasm-bindgen exports for the browser
+  boundary.
+- [`web`](web) — React/TypeScript browser shell, Foundation Inspector, and
+  IndexedDB persistence adapter.
+- [`fixtures`](fixtures) — canonical documents, migrations, Unicode data, and
+  recovery recipes.
+- [`scripts`](scripts) — locked build, provenance, evidence, inspector, and
+  verification scripts.
+- [`config`](config) — dependency provenance configuration.
+- [`artifacts`](artifacts) — retained benchmark and provenance evidence.
+- [`.planning`](.planning) — project decisions, roadmap, state, research, and
+  executable phase plans.
+
+Useful entry points include [`package.json`](package.json),
+[`Cargo.toml`](Cargo.toml), [`rust-toolchain.toml`](rust-toolchain.toml), the
+[dependency provenance configuration](config/dependency-provenance.json), the
+[web build script](scripts/build-web.mjs), the
+[local inspector server](scripts/serve-inspector.mjs), and the
+[WASM tool verifier](scripts/verify-wasm-bindgen-tool.mjs).
+
+## Prerequisites
+
+The checked-in toolchain policy is exact:
+
+- Node.js `24.10.0`;
+- npm `11.9.0`;
+- Rust `1.97.1` with the `wasm32-unknown-unknown` target;
+- `rustfmt` and `clippy` for that Rust toolchain;
+- `wasm-bindgen-cli` `0.2.108`.
+
+The repository's verification commands use the prepared workspace-local
+toolchain under `work/toolchains/rustup` and `work/toolchains/cargo`, not an
+arbitrary global Cargo installation. The configured binary target is
+`aarch64-apple-darwin`. Dependency verification also checks the approved
+lockfiles, successful tracked provenance, and the Cargo installation receipt
+at `work/toolchains/cargo/.crates2.json`; rebuilding a same-version binary or
+using another platform does not automatically create approved evidence.
+
+This workspace currently assumes that the local Rust/WASM and pinned
+Chromium toolchain have already been prepared. There is not yet a portable
+fresh-clone bootstrap command: `npm ci` installs JavaScript dependencies but
+does not install the pinned Rust toolchain, `wasm-bindgen-cli`, or the browser
+binary. Generated WASM under `web/generated`, browser binaries and local
+toolchains under `work`, `node_modules`, Rust `target`, and `dist` are local
+build outputs and are not source prerequisites to commit.
+
+## Run the current inspector
+
+From the repository root:
+
+```sh
+npm ci
+npm run inspector
+```
+
+The inspector is served locally at
+[`http://127.0.0.1:4173`](http://127.0.0.1:4173). Set
+`FLOWPDF_INSPECTOR_PORT` to use another local port. The inspector command
+builds the web output first. If using Vite directly, build the WASM module
+before starting it because `npm run dev` does not generate WASM:
+
+```sh
+npm run build:wasm
+npm run dev
+```
+
+Keep development servers bound to local interfaces. The current browser app
+is the Foundation Inspector, not the planned full document-editing shell.
+
+## Checks
+
+The most useful commands in the prepared environment are:
+
+```sh
+npm run build:wasm   # build Rust/WASM and generate web/generated
+npm run build:web    # build WASM, assemble dist/web, and typecheck
+npm run typecheck    # TypeScript without emitting files
+npm run test:unit    # unit and inspector-unit suites
+npm run test:browser # pinned Chromium browser suites
+npm test             # all configured Vitest projects
+npm run check        # the full Phase 1 evidence and regression gate
+```
+
+`npm run test:browser` requires the pinned Chromium installation under
+`work/playwright`. `npm run check` is broader than a local source-only check:
+it validates retained evidence and live dependency provenance as well as Rust,
+WASM, TypeScript, unit, and browser gates, so it can be network- and
+environment-sensitive.
+
+For a direct Rust workspace check using the repository-local toolchain:
+
+```sh
+RUSTUP_HOME=./work/toolchains/rustup \
+CARGO_HOME=./work/toolchains/cargo \
+PATH=./work/toolchains/cargo/bin:$PATH \
+cargo test --locked --workspace --all-targets
+```
+
+The planning files record the exact focused commands and retained evidence for
+each phase. Start with [`STATE.md`](.planning/STATE.md), then inspect the
+relevant plan under [`.planning/phases`](.planning/phases).
+
+## Development status
+
+Phase 1, Durable Flow Foundation, is complete. Phase 2, Accessible Rich-Text
+Editing, is in progress; its later plans still cover the user-facing editor,
+input methods, formatting, structures, accessibility, scale feedback, and
+release gates. The current implementation intentionally makes no claim of
+complete PDF compatibility, commercial-SDK parity, or production readiness.
