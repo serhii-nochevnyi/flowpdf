@@ -181,6 +181,39 @@ pub enum Alignment {
     Justify,
 }
 
+/// The closed block style vocabulary accepted by authoring commands. Stored
+/// paragraphs and headings remain represented by their concrete `BlockKind`;
+/// this type is the command/projection vocabulary only.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
+pub enum BlockStyle {
+    Paragraph,
+    Heading { level: u8 },
+}
+
+/// The only list semantics available to Phase 2 authoring.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum ListKind {
+    None,
+    Ordered,
+    Unordered,
+}
+
+/// Optional block attributes used by an explicit set command. `None` means
+/// "leave this attribute unchanged"; removing heading semantics is expressed
+/// by `SetBlockStyle::Paragraph`, never by an implicit null/default.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BlockAttributes {
+    #[serde(default)]
+    pub alignment: Option<Alignment>,
+    #[serde(default)]
+    pub spacing_before_millipoints: Option<u32>,
+    #[serde(default)]
+    pub spacing_after_millipoints: Option<u32>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct InlineRun {
@@ -198,6 +231,41 @@ pub struct MarkSet {
     pub font_size_millipoints: Option<u32>,
     pub color: Option<[u8; 3]>,
     pub language: Option<RunLanguage>,
+}
+
+/// One explicit inline attribute update. A missing attribute is impossible at
+/// this boundary: each command names exactly one closed property and value.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
+)]
+pub enum InlineMark {
+    Bold {
+        value: bool,
+    },
+    Italic {
+        value: bool,
+    },
+    Underline {
+        value: bool,
+    },
+    FontFamily {
+        value: Option<FontFamily>,
+    },
+    FontSize {
+        value: Option<u32>,
+    },
+    /// Command input is an uppercase `#RRGGBB` string. It is converted to the
+    /// typed `[u8; 3]` representation in `MarkSet` before persistence.
+    Color {
+        value: Option<String>,
+    },
+    Language {
+        value: Option<RunLanguage>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

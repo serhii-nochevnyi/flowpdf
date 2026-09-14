@@ -14,9 +14,9 @@ use crate::{
     canonical::{canonical_bytes, canonical_hash},
     editor_view::DirectionalSelection,
     model::{
-        Affinity, BlockKind, CommandId, ContentNode, FieldAnchorState, FieldDescriptor, FieldId,
-        FlowDocument, InlineRun, LogicalPosition, MarkSet, NodeId, ParagraphAttrs, StyleId,
-        TombstoneToken,
+        Affinity, BlockAttributes, BlockKind, BlockStyle, CommandId, ContentNode, FieldAnchorState,
+        FieldDescriptor, FieldId, FlowDocument, InlineMark, InlineRun, ListKind, LogicalPosition,
+        MarkSet, NodeId, ParagraphAttrs, StyleId, TombstoneToken,
     },
     schema::{DocumentLimits, SchemaError, validate_document},
 };
@@ -87,6 +87,38 @@ pub enum CommandKind {
     DeleteSubtree {
         node_id: NodeId,
     },
+    SetInlineMarks {
+        selection: DirectionalSelection,
+        marks: MarkSet,
+    },
+    SetInlineMark {
+        selection: DirectionalSelection,
+        mark: InlineMark,
+    },
+    SetBlockAttributes {
+        selection: DirectionalSelection,
+        attributes: BlockAttributes,
+    },
+    SetBlockStyle {
+        selection: DirectionalSelection,
+        style: BlockStyle,
+    },
+    SetListKind {
+        selection: DirectionalSelection,
+        kind: ListKind,
+    },
+    ContinueListItem {
+        selection: DirectionalSelection,
+    },
+    ExitListItem {
+        selection: DirectionalSelection,
+    },
+    IndentListItem {
+        item_id: NodeId,
+    },
+    OutdentListItem {
+        item_id: NodeId,
+    },
     SetField {
         field_id: FieldId,
         field: FieldDescriptor,
@@ -143,6 +175,38 @@ pub enum Mutation {
     },
     DeleteSubtree {
         node_id: NodeId,
+    },
+    SetInlineMarks {
+        selection: DirectionalSelection,
+        marks: MarkSet,
+    },
+    SetInlineMark {
+        selection: DirectionalSelection,
+        mark: InlineMark,
+    },
+    SetBlockAttributes {
+        selection: DirectionalSelection,
+        attributes: BlockAttributes,
+    },
+    SetBlockStyle {
+        selection: DirectionalSelection,
+        style: BlockStyle,
+    },
+    SetListKind {
+        selection: DirectionalSelection,
+        kind: ListKind,
+    },
+    ContinueListItem {
+        selection: DirectionalSelection,
+    },
+    ExitListItem {
+        selection: DirectionalSelection,
+    },
+    IndentListItem {
+        item_id: NodeId,
+    },
+    OutdentListItem {
+        item_id: NodeId,
     },
     SetField {
         field_id: FieldId,
@@ -455,6 +519,12 @@ pub enum CommandError {
     InvalidPreimage,
     #[error("The operation would exceed the bounded anchor-preimage budget")]
     PreimageLimit,
+    #[error("The formatting value is outside the closed authoring vocabulary")]
+    InvalidFormatting,
+    #[error("The list structure is not valid for this operation")]
+    InvalidListStructure,
+    #[error("The list nesting depth would exceed the authoring limit")]
+    ListDepthExceeded,
 }
 
 impl CommandError {
@@ -479,6 +549,9 @@ impl CommandError {
             Self::InvalidContainer => "FLOW_INVALID_CONTAINER",
             Self::InvalidPreimage => "FLOW_INVALID_PREIMAGE",
             Self::PreimageLimit => "FLOW_LIMIT_ANCHOR_PREIMAGE",
+            Self::InvalidFormatting => "FLOW_INVALID_FORMATTING",
+            Self::InvalidListStructure => "FLOW_INVALID_LIST_STRUCTURE",
+            Self::ListDepthExceeded => "FLOW_LIMIT_LIST_DEPTH",
         }
     }
 }
@@ -627,6 +700,26 @@ fn apply_mutation(state: &EditorState, command: Command) -> Result<AppliedComman
         } else {
             None
         };
+        let list_selection = match mutation {
+            Mutation::ContinueListItem { selection } => Some(collapsed_selection(
+                deterministic_node_id(
+                    &command.command_id,
+                    if find_node(&candidate.content, &selection.anchor.node_id)
+                        .is_some_and(|node| node.text().is_empty())
+                    {
+                        "list-exit-paragraph"
+                    } else {
+                        "list-continuation-text"
+                    },
+                )?,
+                0,
+            )),
+            Mutation::ExitListItem { .. } => Some(collapsed_selection(
+                deterministic_node_id(&command.command_id, "list-exit-paragraph")?,
+                0,
+            )),
+            _ => None,
+        };
         let operation_mapping = apply_operation(&mut candidate, &operation)?;
         selection_after = match mutation {
             Mutation::ReplaceSelection { .. } => replacement_selection,
@@ -638,6 +731,15 @@ fn apply_mutation(state: &EditorState, command: Command) -> Result<AppliedComman
                 merge_offset.ok_or(CommandError::BrokenInvariant)?,
             )),
             Mutation::DeleteSubtree { .. } => first_text_selection(&candidate),
+            Mutation::SetInlineMarks { selection, .. }
+            | Mutation::SetInlineMark { selection, .. }
+            | Mutation::SetBlockAttributes { selection, .. }
+            | Mutation::SetBlockStyle { selection, .. }
+            | Mutation::SetListKind { selection, .. } => Some(selection.clone()),
+            Mutation::ContinueListItem { .. } | Mutation::ExitListItem { .. } => list_selection,
+            Mutation::IndentListItem { item_id } | Mutation::OutdentListItem { item_id } => {
+                first_text_selection_for_node(&candidate.content, item_id)
+            }
             _ => selection_after,
         };
         mapping.extend(operation_mapping);
@@ -828,6 +930,41 @@ fn command_mutations(kind: &CommandKind) -> Result<Vec<Mutation>, CommandError> 
         CommandKind::DeleteSubtree { node_id } => Ok(vec![Mutation::DeleteSubtree {
             node_id: node_id.clone(),
         }]),
+        CommandKind::SetInlineMarks { selection, marks } => Ok(vec![Mutation::SetInlineMarks {
+            selection: selection.clone(),
+            marks: marks.clone(),
+        }]),
+        CommandKind::SetInlineMark { selection, mark } => Ok(vec![Mutation::SetInlineMark {
+            selection: selection.clone(),
+            mark: mark.clone(),
+        }]),
+        CommandKind::SetBlockAttributes {
+            selection,
+            attributes,
+        } => Ok(vec![Mutation::SetBlockAttributes {
+            selection: selection.clone(),
+            attributes: attributes.clone(),
+        }]),
+        CommandKind::SetBlockStyle { selection, style } => Ok(vec![Mutation::SetBlockStyle {
+            selection: selection.clone(),
+            style: style.clone(),
+        }]),
+        CommandKind::SetListKind { selection, kind } => Ok(vec![Mutation::SetListKind {
+            selection: selection.clone(),
+            kind: *kind,
+        }]),
+        CommandKind::ContinueListItem { selection } => Ok(vec![Mutation::ContinueListItem {
+            selection: selection.clone(),
+        }]),
+        CommandKind::ExitListItem { selection } => Ok(vec![Mutation::ExitListItem {
+            selection: selection.clone(),
+        }]),
+        CommandKind::IndentListItem { item_id } => Ok(vec![Mutation::IndentListItem {
+            item_id: item_id.clone(),
+        }]),
+        CommandKind::OutdentListItem { item_id } => Ok(vec![Mutation::OutdentListItem {
+            item_id: item_id.clone(),
+        }]),
         CommandKind::SetField { field_id, field } => Ok(vec![Mutation::SetField {
             field_id: field_id.clone(),
             field: field.clone(),
@@ -945,6 +1082,34 @@ fn derive_operation(
         } => derive_merge_operation(document, first_node_id, second_node_id),
         Mutation::DeleteSubtree { node_id } => {
             derive_delete_subtree_operation(document, node_id, command_id)
+        }
+        Mutation::SetInlineMarks { selection, marks } => {
+            derive_inline_marks_operation(document, selection, marks)
+        }
+        Mutation::SetInlineMark { selection, mark } => {
+            derive_inline_mark_operation(document, selection, mark)
+        }
+        Mutation::SetBlockAttributes {
+            selection,
+            attributes,
+        } => derive_block_attributes_operation(document, selection, attributes),
+        Mutation::SetBlockStyle { selection, style } => {
+            derive_block_style_operation(document, selection, style)
+        }
+        Mutation::SetListKind { selection, kind } => {
+            derive_list_kind_operation(document, selection, *kind, command_id)
+        }
+        Mutation::ContinueListItem { selection } => {
+            derive_continue_list_item_operation(document, selection, command_id)
+        }
+        Mutation::ExitListItem { selection } => {
+            derive_exit_list_item_operation(document, selection, command_id)
+        }
+        Mutation::IndentListItem { item_id } => {
+            derive_indent_list_item_operation(document, item_id, command_id)
+        }
+        Mutation::OutdentListItem { item_id } => {
+            derive_outdent_list_item_operation(document, item_id)
         }
         Mutation::SetField { field_id, field } => {
             if !matches!(field.anchor, FieldAnchorState::GraphemeSafe { .. }) {
@@ -1195,6 +1360,388 @@ fn derive_rich_selection_operation(
     )
 }
 
+#[derive(Debug, Clone, Copy)]
+struct SelectionSpan {
+    index: usize,
+    start: u32,
+    end: u32,
+}
+
+/// Resolve a directional selection into document-local spans. The public
+/// anchor/focus order is retained by the caller; only this command-local
+/// representation is normalized. Every endpoint is validated through the
+/// grapheme-aware `NodePositionMap`, so formatting cannot split a cluster.
+fn selection_spans(
+    document: &FlowDocument,
+    selection: &DirectionalSelection,
+) -> Result<(Option<NodeId>, Vec<SelectionSpan>), CommandError> {
+    let anchor = locate_node(&document.content, &selection.anchor.node_id)
+        .ok_or(CommandError::InvalidTarget)?;
+    let focus = locate_node(&document.content, &selection.focus.node_id)
+        .ok_or(CommandError::InvalidTarget)?;
+    if anchor.parent_id != focus.parent_id {
+        return Err(CommandError::IncompatibleStructure);
+    }
+    let validate_endpoint =
+        |location: &NodeLocation, position: &LogicalPosition| -> Result<u32, CommandError> {
+            match NodePositionMap::new(&location.node, document.revision)?
+                .validate(position, document.revision)?
+            {
+                ResolvedPosition::Text(byte) => {
+                    let text = location.node.text();
+                    u32::try_from(text[..byte.get()].encode_utf16().count())
+                        .map_err(|_| CommandError::InvalidRange)
+                }
+                _ => Err(CommandError::InvalidTarget),
+            }
+        };
+    let anchor_offset = validate_endpoint(&anchor, &selection.anchor)?;
+    let focus_offset = validate_endpoint(&focus, &selection.focus)?;
+
+    let (first, first_offset, last, last_offset) = if anchor.index < focus.index
+        || (anchor.index == focus.index && anchor_offset <= focus_offset)
+    {
+        (&anchor, anchor_offset, &focus, focus_offset)
+    } else {
+        (&focus, focus_offset, &anchor, anchor_offset)
+    };
+    let expected = container_children(document, first.parent_id.as_ref())?;
+    if first.index >= expected.len() || last.index >= expected.len() {
+        return Err(CommandError::InvalidRange);
+    }
+    let mut spans = Vec::new();
+    if first.index == last.index {
+        if first_offset > last_offset {
+            return Err(CommandError::InvalidRange);
+        }
+        if node_runs(&expected[first.index]).is_none() {
+            return Err(CommandError::InvalidTarget);
+        }
+        spans.push(SelectionSpan {
+            index: first.index,
+            start: first_offset,
+            end: last_offset,
+        });
+    } else {
+        for index in first.index..=last.index {
+            let node = expected.get(index).ok_or(CommandError::InvalidRange)?;
+            if node_runs(node).is_none() {
+                return Err(CommandError::IncompatibleStructure);
+            }
+            let length = utf16_length(&node.text())?;
+            spans.push(SelectionSpan {
+                index,
+                start: if index == first.index {
+                    first_offset
+                } else {
+                    0
+                },
+                end: if index == last.index {
+                    last_offset
+                } else {
+                    length
+                },
+            });
+        }
+    }
+    Ok((first.parent_id.clone(), spans))
+}
+
+fn validate_authoring_marks(marks: &MarkSet) -> Result<(), CommandError> {
+    if matches!(
+        marks.font_family,
+        Some(crate::model::FontFamily::LegacyUnknown { .. })
+    ) || marks
+        .font_size_millipoints
+        .is_some_and(|size| !(6_000..=288_000).contains(&size))
+    {
+        return Err(CommandError::InvalidFormatting);
+    }
+    Ok(())
+}
+
+fn parse_authoring_color(value: &str) -> Result<[u8; 3], CommandError> {
+    let bytes = value.as_bytes();
+    if bytes.len() != 7 || bytes[0] != b'#' {
+        return Err(CommandError::InvalidFormatting);
+    }
+    let mut color = [0_u8; 3];
+    for (index, slot) in color.iter_mut().enumerate() {
+        let high = bytes[1 + index * 2];
+        let low = bytes[2 + index * 2];
+        if !(high.is_ascii_digit() || (b'A'..=b'F').contains(&high))
+            || !(low.is_ascii_digit() || (b'A'..=b'F').contains(&low))
+        {
+            return Err(CommandError::InvalidFormatting);
+        }
+        let decode = |byte: u8| -> u8 {
+            if byte.is_ascii_digit() {
+                byte - b'0'
+            } else {
+                byte - b'A' + 10
+            }
+        };
+        *slot = decode(high) * 16 + decode(low);
+    }
+    Ok(color)
+}
+
+fn update_inline_mark(marks: &mut MarkSet, mark: &InlineMark) -> Result<(), CommandError> {
+    match mark {
+        InlineMark::Bold { value } => marks.bold = *value,
+        InlineMark::Italic { value } => marks.italic = *value,
+        InlineMark::Underline { value } => marks.underline = *value,
+        InlineMark::FontFamily { value } => {
+            if matches!(value, Some(crate::model::FontFamily::LegacyUnknown { .. })) {
+                return Err(CommandError::InvalidFormatting);
+            }
+            marks.font_family = value.clone();
+        }
+        InlineMark::FontSize { value } => {
+            if value.is_some_and(|size| !(6_000..=288_000).contains(&size)) {
+                return Err(CommandError::InvalidFormatting);
+            }
+            marks.font_size_millipoints = *value;
+        }
+        InlineMark::Color { value } => {
+            marks.color = value.as_deref().map(parse_authoring_color).transpose()?;
+        }
+        InlineMark::Language { value } => marks.language = value.clone(),
+    }
+    Ok(())
+}
+
+fn apply_marked_range(
+    node: &ContentNode,
+    start: u32,
+    end: u32,
+    marks: Option<&MarkSet>,
+    mark: Option<&InlineMark>,
+) -> Result<ContentNode, CommandError> {
+    if start == end {
+        return Ok(node.clone());
+    }
+    let runs = node_runs(node).ok_or(CommandError::InvalidTarget)?;
+    let (prefix, rest) = split_runs_at(runs, start)?;
+    let (selected, suffix) = split_runs_at(
+        &rest,
+        end.checked_sub(start).ok_or(CommandError::InvalidRange)?,
+    )?;
+    let mut result = Vec::new();
+    for run in prefix {
+        append_run(&mut result, &run.text, &run.marks);
+    }
+    for run in selected {
+        let mut selected_marks = marks.cloned().unwrap_or_else(|| run.marks.clone());
+        if let Some(mark) = mark {
+            update_inline_mark(&mut selected_marks, mark)?;
+        }
+        append_run(&mut result, &run.text, &selected_marks);
+    }
+    for run in suffix {
+        append_run(&mut result, &run.text, &run.marks);
+    }
+    let mut changed = node.clone();
+    set_node_runs(&mut changed, result)?;
+    Ok(changed)
+}
+
+fn derive_inline_marks_operation(
+    document: &FlowDocument,
+    selection: &DirectionalSelection,
+    marks: &MarkSet,
+) -> Result<(Operation, Operation), CommandError> {
+    validate_authoring_marks(marks)?;
+    let (parent_id, spans) = selection_spans(document, selection)?;
+    if spans.iter().all(|span| span.start == span.end) {
+        return Err(CommandError::NoOp);
+    }
+    let expected = container_children(document, parent_id.as_ref())?;
+    let mut replacement = expected.clone();
+    let mut changed = false;
+    for span in spans {
+        let node = expected.get(span.index).ok_or(CommandError::InvalidRange)?;
+        let updated = apply_marked_range(node, span.start, span.end, Some(marks), None)?;
+        changed |= updated != *node;
+        replacement[span.index] = updated;
+    }
+    if !changed {
+        return Err(CommandError::NoOp);
+    }
+    structural_pair(
+        document,
+        parent_id,
+        expected,
+        replacement,
+        AnchorMapping::identity(),
+        AnchorMapping::identity(),
+        None,
+    )
+}
+
+fn derive_inline_mark_operation(
+    document: &FlowDocument,
+    selection: &DirectionalSelection,
+    mark: &InlineMark,
+) -> Result<(Operation, Operation), CommandError> {
+    let (parent_id, spans) = selection_spans(document, selection)?;
+    if spans.iter().all(|span| span.start == span.end) {
+        return Err(CommandError::NoOp);
+    }
+    let expected = container_children(document, parent_id.as_ref())?;
+    let mut replacement = expected.clone();
+    let mut changed = false;
+    for span in spans {
+        let node = expected.get(span.index).ok_or(CommandError::InvalidRange)?;
+        let updated = apply_marked_range(node, span.start, span.end, None, Some(mark))?;
+        changed |= updated != *node;
+        replacement[span.index] = updated;
+    }
+    if !changed {
+        return Err(CommandError::NoOp);
+    }
+    structural_pair(
+        document,
+        parent_id,
+        expected,
+        replacement,
+        AnchorMapping::identity(),
+        AnchorMapping::identity(),
+        None,
+    )
+}
+
+fn update_block_attributes(
+    node: &ContentNode,
+    attributes: &BlockAttributes,
+) -> Result<ContentNode, CommandError> {
+    if attributes
+        .spacing_before_millipoints
+        .is_some_and(|value| value > 144_000)
+        || attributes
+            .spacing_after_millipoints
+            .is_some_and(|value| value > 144_000)
+    {
+        return Err(CommandError::InvalidFormatting);
+    }
+    let mut changed = node.clone();
+    let attrs = match &mut changed.body {
+        BlockKind::Paragraph { attrs, .. } | BlockKind::Heading { attrs, .. } => attrs,
+        _ => return Err(CommandError::InvalidTarget),
+    };
+    if let Some(alignment) = &attributes.alignment {
+        attrs.alignment = alignment.clone();
+    }
+    if let Some(value) = attributes.spacing_before_millipoints {
+        attrs.spacing_before_millipoints = value;
+    }
+    if let Some(value) = attributes.spacing_after_millipoints {
+        attrs.spacing_after_millipoints = value;
+    }
+    Ok(changed)
+}
+
+fn apply_block_change(
+    document: &FlowDocument,
+    selection: &DirectionalSelection,
+    mut update: impl FnMut(&ContentNode) -> Result<ContentNode, CommandError>,
+) -> Result<(Operation, Operation), CommandError> {
+    let (parent_id, spans) = selection_spans(document, selection)?;
+    let expected = container_children(document, parent_id.as_ref())?;
+    let mut replacement = expected.clone();
+    let mut changed = false;
+    let mut visited = BTreeSet::new();
+    for span in spans {
+        if !visited.insert(span.index) {
+            continue;
+        }
+        let node = expected.get(span.index).ok_or(CommandError::InvalidRange)?;
+        let updated = update(node)?;
+        changed |= updated != *node;
+        replacement[span.index] = updated;
+    }
+    if !changed {
+        return Err(CommandError::NoOp);
+    }
+    structural_pair(
+        document,
+        parent_id,
+        expected,
+        replacement,
+        AnchorMapping::identity(),
+        AnchorMapping::identity(),
+        None,
+    )
+}
+
+fn derive_block_attributes_operation(
+    document: &FlowDocument,
+    selection: &DirectionalSelection,
+    attributes: &BlockAttributes,
+) -> Result<(Operation, Operation), CommandError> {
+    if attributes.alignment.is_none()
+        && attributes.spacing_before_millipoints.is_none()
+        && attributes.spacing_after_millipoints.is_none()
+    {
+        return Err(CommandError::NoOp);
+    }
+    apply_block_change(document, selection, |node| {
+        update_block_attributes(node, attributes)
+    })
+}
+
+fn apply_block_style(node: &ContentNode, style: &BlockStyle) -> Result<ContentNode, CommandError> {
+    let mut changed = node.clone();
+    match style {
+        BlockStyle::Paragraph => match &node.body {
+            BlockKind::Paragraph { .. } => return Ok(node.clone()),
+            BlockKind::Heading { attrs, runs, .. } => {
+                changed.body = BlockKind::Paragraph {
+                    attrs: attrs.clone(),
+                    runs: runs.clone(),
+                };
+            }
+            _ => return Err(CommandError::InvalidTarget),
+        },
+        BlockStyle::Heading { level } => {
+            if !(1..=6).contains(level) {
+                return Err(CommandError::InvalidFormatting);
+            }
+            match &node.body {
+                BlockKind::Paragraph { attrs, runs } => {
+                    changed.body = BlockKind::Heading {
+                        level: *level,
+                        attrs: attrs.clone(),
+                        runs: runs.clone(),
+                    };
+                }
+                BlockKind::Heading {
+                    level: current,
+                    attrs,
+                    runs,
+                } if current != level => {
+                    changed.body = BlockKind::Heading {
+                        level: *level,
+                        attrs: attrs.clone(),
+                        runs: runs.clone(),
+                    };
+                }
+                BlockKind::Heading { .. } => return Ok(node.clone()),
+                _ => return Err(CommandError::InvalidTarget),
+            }
+        }
+    }
+    Ok(changed)
+}
+
+fn derive_block_style_operation(
+    document: &FlowDocument,
+    selection: &DirectionalSelection,
+    style: &BlockStyle,
+) -> Result<(Operation, Operation), CommandError> {
+    apply_block_change(document, selection, |node| apply_block_style(node, style))
+}
+
 #[derive(Debug, Clone)]
 struct NodeLocation {
     parent_id: Option<NodeId>,
@@ -1224,6 +1771,543 @@ fn locate_node(nodes: &[ContentNode], target: &NodeId) -> Option<NodeLocation> {
     }
 
     visit(nodes, target, None)
+}
+
+fn find_path(nodes: &[ContentNode], target: &NodeId) -> Option<Vec<usize>> {
+    fn visit(nodes: &[ContentNode], target: &NodeId, prefix: &[usize]) -> Option<Vec<usize>> {
+        for (index, node) in nodes.iter().enumerate() {
+            let mut path = prefix.to_vec();
+            path.push(index);
+            if node.id == *target {
+                return Some(path);
+            }
+            if let Some(found) = visit(node.children(), target, &path) {
+                return Some(found);
+            }
+        }
+        None
+    }
+
+    visit(nodes, target, &[])
+}
+
+fn node_at_path<'a>(nodes: &'a [ContentNode], path: &[usize]) -> Option<&'a ContentNode> {
+    let index = *path.first()?;
+    let node = nodes.get(index)?;
+    if path.len() == 1 {
+        Some(node)
+    } else {
+        node_at_path(node.children(), &path[1..])
+    }
+}
+
+fn node_at_path_mut<'a>(
+    nodes: &'a mut [ContentNode],
+    path: &[usize],
+) -> Option<&'a mut ContentNode> {
+    let index = *path.first()?;
+    let node = nodes.get_mut(index)?;
+    if path.len() == 1 {
+        Some(node)
+    } else {
+        node_at_path_mut(node.children_vec_mut()?, &path[1..])
+    }
+}
+
+fn list_kind_of(node: &ContentNode) -> Option<ListKind> {
+    match node.body {
+        BlockKind::OrderedList { .. } => Some(ListKind::Ordered),
+        BlockKind::UnorderedList { .. } => Some(ListKind::Unordered),
+        _ => None,
+    }
+}
+
+fn list_items(node: &ContentNode) -> Option<&[ContentNode]> {
+    match &node.body {
+        BlockKind::OrderedList { items } | BlockKind::UnorderedList { items } => Some(items),
+        _ => None,
+    }
+}
+
+fn list_items_mut(node: &mut ContentNode) -> Option<&mut Vec<ContentNode>> {
+    match &mut node.body {
+        BlockKind::OrderedList { items } | BlockKind::UnorderedList { items } => Some(items),
+        _ => None,
+    }
+}
+
+fn list_body(kind: ListKind, items: Vec<ContentNode>) -> BlockKind {
+    match kind {
+        ListKind::Ordered => BlockKind::OrderedList { items },
+        ListKind::Unordered => BlockKind::UnorderedList { items },
+        ListKind::None => unreachable!("none is not a list body"),
+    }
+}
+
+fn list_context_for_path(
+    nodes: &[ContentNode],
+    path: &[usize],
+) -> Option<(Vec<usize>, Vec<usize>)> {
+    if path.len() < 2 {
+        return None;
+    }
+    if list_kind_of(node_at_path(nodes, path)?).is_some() {
+        return None;
+    }
+    for depth in (1..=path.len()).rev() {
+        let item_path = &path[..depth];
+        if !matches!(
+            node_at_path(nodes, item_path)?.body,
+            BlockKind::ListItem { .. }
+        ) {
+            continue;
+        }
+        let list_path = &item_path[..item_path.len() - 1];
+        if list_kind_of(node_at_path(nodes, list_path)?).is_some() {
+            return Some((list_path.to_vec(), item_path.to_vec()));
+        }
+    }
+    None
+}
+
+fn validate_text_position(
+    document: &FlowDocument,
+    position: &LogicalPosition,
+) -> Result<(), CommandError> {
+    let node =
+        find_node(&document.content, &position.node_id).ok_or(CommandError::InvalidTarget)?;
+    match NodePositionMap::new(node, document.revision)?.validate(position, document.revision)? {
+        ResolvedPosition::Text(_) => Ok(()),
+        _ => Err(CommandError::InvalidTarget),
+    }
+}
+
+fn list_selection_context(
+    document: &FlowDocument,
+    selection: &DirectionalSelection,
+) -> Result<(Vec<usize>, usize, usize), CommandError> {
+    validate_text_position(document, &selection.anchor)?;
+    validate_text_position(document, &selection.focus)?;
+    let anchor_path = find_path(&document.content, &selection.anchor.node_id)
+        .ok_or(CommandError::InvalidTarget)?;
+    let focus_path = find_path(&document.content, &selection.focus.node_id)
+        .ok_or(CommandError::InvalidTarget)?;
+    let (anchor_list, anchor_item) = list_context_for_path(&document.content, &anchor_path)
+        .ok_or(CommandError::InvalidListStructure)?;
+    let (focus_list, focus_item) = list_context_for_path(&document.content, &focus_path)
+        .ok_or(CommandError::InvalidListStructure)?;
+    if anchor_list != focus_list {
+        return Err(CommandError::InvalidListStructure);
+    }
+    let anchor_index = *anchor_item
+        .last()
+        .ok_or(CommandError::InvalidListStructure)?;
+    let focus_index = *focus_item
+        .last()
+        .ok_or(CommandError::InvalidListStructure)?;
+    Ok((
+        anchor_list,
+        anchor_index.min(focus_index),
+        anchor_index.max(focus_index),
+    ))
+}
+
+fn list_context_for_node(
+    document: &FlowDocument,
+    node_id: &NodeId,
+) -> Option<(Vec<usize>, Vec<usize>)> {
+    let path = find_path(&document.content, node_id)?;
+    list_context_for_path(&document.content, &path)
+}
+
+fn list_node_id_exists(document: &FlowDocument, id: &NodeId) -> bool {
+    find_node(&document.content, id).is_some()
+}
+
+fn derive_list_kind_operation(
+    document: &FlowDocument,
+    selection: &DirectionalSelection,
+    kind: ListKind,
+    command_id: &CommandId,
+) -> Result<(Operation, Operation), CommandError> {
+    if let Ok((list_path, first, last)) = list_selection_context(document, selection) {
+        let list =
+            node_at_path(&document.content, &list_path).ok_or(CommandError::InvalidTarget)?;
+        let current = list_kind_of(list).ok_or(CommandError::InvalidListStructure)?;
+        let items = list_items(list).ok_or(CommandError::InvalidListStructure)?;
+        if first != 0 || last + 1 != items.len() {
+            return Err(CommandError::InvalidListStructure);
+        }
+        if current == kind {
+            return Err(CommandError::NoOp);
+        }
+        let parent_path = &list_path[..list_path.len().saturating_sub(1)];
+        let parent_id = node_at_path(&document.content, parent_path).map(|node| node.id.clone());
+        let expected = container_children(document, parent_id.as_ref())?;
+        let list_index = *list_path.last().ok_or(CommandError::InvalidListStructure)?;
+        let mut replacement = expected.clone();
+        if kind == ListKind::None {
+            let mut flattened = Vec::new();
+            for item in items {
+                if !matches!(item.body, BlockKind::ListItem { .. }) {
+                    return Err(CommandError::InvalidListStructure);
+                }
+                flattened.extend(item.children().iter().cloned());
+            }
+            replacement.splice(list_index..=list_index, flattened);
+        } else {
+            let mut changed_list = list.clone();
+            let changed_items = items.to_vec();
+            changed_list.body = list_body(kind, changed_items);
+            replacement[list_index] = changed_list;
+        }
+        return structural_pair(
+            document,
+            parent_id,
+            expected,
+            replacement,
+            AnchorMapping::identity(),
+            AnchorMapping::identity(),
+            None,
+        );
+    }
+
+    let (parent_id, spans) = selection_spans(document, selection)?;
+    if parent_id.is_some() {
+        return Err(CommandError::InvalidListStructure);
+    }
+    if kind == ListKind::None {
+        return Err(CommandError::NoOp);
+    }
+    let expected = container_children(document, None)?;
+    let first = spans.first().ok_or(CommandError::InvalidRange)?.index;
+    let last = spans.last().ok_or(CommandError::InvalidRange)?.index;
+    let mut items = Vec::with_capacity(last - first + 1);
+    for (offset, node) in expected[first..=last].iter().cloned().enumerate() {
+        if node_runs(&node).is_none() {
+            return Err(CommandError::IncompatibleStructure);
+        }
+        let item_id = deterministic_node_id(command_id, &format!("list-item-{offset}"))?;
+        if list_node_id_exists(document, &item_id)
+            || items.iter().any(|item: &ContentNode| item.id == item_id)
+        {
+            return Err(CommandError::InvalidRange);
+        }
+        items.push(ContentNode {
+            id: item_id,
+            style_id: None,
+            body: BlockKind::ListItem {
+                children: vec![node],
+            },
+        });
+    }
+    let list_id = deterministic_node_id(command_id, "list")?;
+    if list_node_id_exists(document, &list_id) {
+        return Err(CommandError::InvalidRange);
+    }
+    let list = ContentNode {
+        id: list_id,
+        style_id: None,
+        body: list_body(kind, items),
+    };
+    let mut replacement = expected.clone();
+    replacement.splice(first..=last, [list]);
+    structural_pair(
+        document,
+        None,
+        expected,
+        replacement,
+        AnchorMapping::identity(),
+        AnchorMapping::identity(),
+        None,
+    )
+}
+
+fn derive_continue_list_item_operation(
+    document: &FlowDocument,
+    selection: &DirectionalSelection,
+    command_id: &CommandId,
+) -> Result<(Operation, Operation), CommandError> {
+    if !selection.collapsed() {
+        return Err(CommandError::InvalidRange);
+    }
+    let path = find_path(&document.content, &selection.anchor.node_id)
+        .ok_or(CommandError::InvalidTarget)?;
+    let (list_path, item_path) = list_context_for_path(&document.content, &path)
+        .ok_or(CommandError::InvalidListStructure)?;
+    if path.len() != item_path.len() + 1 {
+        return Err(CommandError::InvalidListStructure);
+    }
+    let item_index = *item_path.last().ok_or(CommandError::InvalidListStructure)?;
+    let text_index = *path.last().ok_or(CommandError::InvalidTarget)?;
+    let item = node_at_path(&document.content, &item_path).ok_or(CommandError::InvalidTarget)?;
+    let text_node = item
+        .children()
+        .get(text_index)
+        .ok_or(CommandError::InvalidTarget)?;
+    let position = LogicalPosition {
+        affinity: Affinity::Forward,
+        ..selection.anchor.clone()
+    };
+    NodePositionMap::new(text_node, document.revision)?.validate(&position, document.revision)?;
+    if text_node.text().is_empty() {
+        return derive_exit_list_item_operation(document, selection, command_id);
+    }
+    let list = node_at_path(&document.content, &list_path).ok_or(CommandError::InvalidTarget)?;
+    let expected = list_items(list)
+        .ok_or(CommandError::InvalidListStructure)?
+        .to_vec();
+    let (retained, generated) = split_text_node(
+        text_node,
+        selection.anchor.utf16_offset.get(),
+        deterministic_node_id(command_id, "list-continuation-text")?,
+    )?;
+    let new_item_id = deterministic_node_id(command_id, "list-continuation-item")?;
+    if list_node_id_exists(document, &new_item_id) || list_node_id_exists(document, &generated.id) {
+        return Err(CommandError::InvalidRange);
+    }
+    let mut current_children = item.children().to_vec();
+    let trailing = current_children.split_off(text_index + 1);
+    current_children[text_index] = retained;
+    let mut new_children = vec![generated];
+    new_children.extend(trailing);
+    let mut current_item = item.clone();
+    current_item.body = BlockKind::ListItem {
+        children: current_children,
+    };
+    let new_item = ContentNode {
+        id: new_item_id,
+        style_id: item.style_id.clone(),
+        body: BlockKind::ListItem {
+            children: new_children,
+        },
+    };
+    let mut replacement = expected.clone();
+    replacement[item_index] = current_item;
+    replacement.insert(item_index + 1, new_item);
+    structural_pair(
+        document,
+        Some(
+            node_at_path(&document.content, &list_path)
+                .ok_or(CommandError::InvalidTarget)?
+                .id
+                .clone(),
+        ),
+        expected,
+        replacement,
+        AnchorMapping::identity(),
+        AnchorMapping::identity(),
+        None,
+    )
+}
+
+fn derive_exit_list_item_operation(
+    document: &FlowDocument,
+    selection: &DirectionalSelection,
+    command_id: &CommandId,
+) -> Result<(Operation, Operation), CommandError> {
+    if !selection.collapsed() {
+        return Err(CommandError::InvalidRange);
+    }
+    let path = find_path(&document.content, &selection.anchor.node_id)
+        .ok_or(CommandError::InvalidTarget)?;
+    let (list_path, item_path) = list_context_for_path(&document.content, &path)
+        .ok_or(CommandError::InvalidListStructure)?;
+    if path.len() != item_path.len() + 1 {
+        return Err(CommandError::InvalidListStructure);
+    }
+    let item = node_at_path(&document.content, &item_path).ok_or(CommandError::InvalidTarget)?;
+    let text_index = *path.last().ok_or(CommandError::InvalidTarget)?;
+    let text_node = item
+        .children()
+        .get(text_index)
+        .ok_or(CommandError::InvalidTarget)?;
+    if item.children().len() != 1 || !text_node.text().is_empty() {
+        return Err(CommandError::InvalidListStructure);
+    }
+    let list = node_at_path(&document.content, &list_path).ok_or(CommandError::InvalidTarget)?;
+    let item_index = *item_path.last().ok_or(CommandError::InvalidListStructure)?;
+    let list_index = *list_path.last().ok_or(CommandError::InvalidListStructure)?;
+    let parent_path = &list_path[..list_path.len() - 1];
+    let parent_id = node_at_path(&document.content, parent_path).map(|node| node.id.clone());
+    let expected = container_children(document, parent_id.as_ref())?;
+    let mut replacement = expected.clone();
+    let mut remaining_items = list_items(list)
+        .ok_or(CommandError::InvalidListStructure)?
+        .to_vec();
+    remaining_items.remove(item_index);
+    let paragraph_id = deterministic_node_id(command_id, "list-exit-paragraph")?;
+    if list_node_id_exists(document, &paragraph_id) {
+        return Err(CommandError::InvalidRange);
+    }
+    let paragraph = ContentNode::paragraph(paragraph_id, text_node.style_id.clone(), String::new());
+    let mut inserted = Vec::new();
+    if !remaining_items.is_empty() {
+        let mut changed_list = list.clone();
+        changed_list.body = list_body(
+            list_kind_of(list).ok_or(CommandError::InvalidListStructure)?,
+            remaining_items,
+        );
+        inserted.push(changed_list);
+    }
+    inserted.push(paragraph);
+    replacement.splice(list_index..=list_index, inserted);
+    structural_pair(
+        document,
+        parent_id,
+        expected,
+        replacement,
+        AnchorMapping::identity(),
+        AnchorMapping::identity(),
+        None,
+    )
+}
+
+fn derive_indent_list_item_operation(
+    document: &FlowDocument,
+    item_id: &NodeId,
+    command_id: &CommandId,
+) -> Result<(Operation, Operation), CommandError> {
+    let (list_path, item_path) =
+        list_context_for_node(document, item_id).ok_or(CommandError::InvalidListStructure)?;
+    let item_index = *item_path.last().ok_or(CommandError::InvalidListStructure)?;
+    if item_index == 0 {
+        return Err(CommandError::InvalidListStructure);
+    }
+    let list = node_at_path(&document.content, &list_path).ok_or(CommandError::InvalidTarget)?;
+    let kind = list_kind_of(list).ok_or(CommandError::InvalidListStructure)?;
+    let depth = list_depth_at_path(&document.content, &list_path);
+    if depth >= crate::schema::MAX_LIST_DEPTH {
+        return Err(CommandError::ListDepthExceeded);
+    }
+    let mut replacement = document.content.clone();
+    let item = {
+        let current_list =
+            node_at_path_mut(&mut replacement, &list_path).ok_or(CommandError::InvalidTarget)?;
+        list_items_mut(current_list)
+            .ok_or(CommandError::InvalidListStructure)?
+            .remove(item_index)
+    };
+    let previous_path = {
+        let mut path = list_path.clone();
+        path.push(item_index - 1);
+        path
+    };
+    let previous =
+        node_at_path_mut(&mut replacement, &previous_path).ok_or(CommandError::InvalidTarget)?;
+    let nested_index = previous
+        .children()
+        .iter()
+        .position(|child| list_kind_of(child) == Some(kind));
+    if let Some(index) = nested_index {
+        list_items_mut(
+            previous
+                .children_vec_mut()
+                .ok_or(CommandError::InvalidListStructure)?
+                .get_mut(index)
+                .ok_or(CommandError::InvalidListStructure)?,
+        )
+        .ok_or(CommandError::InvalidListStructure)?
+        .push(item);
+    } else {
+        let nested_id = deterministic_node_id(command_id, "indented-list")?;
+        if list_node_id_exists(document, &nested_id) {
+            return Err(CommandError::InvalidRange);
+        }
+        previous
+            .children_vec_mut()
+            .ok_or(CommandError::InvalidListStructure)?
+            .push(ContentNode {
+                id: nested_id,
+                style_id: None,
+                body: list_body(kind, vec![item]),
+            });
+    }
+    structural_pair(
+        document,
+        None,
+        document.content.clone(),
+        replacement,
+        AnchorMapping::identity(),
+        AnchorMapping::identity(),
+        None,
+    )
+}
+
+fn list_depth_at_path(nodes: &[ContentNode], list_path: &[usize]) -> usize {
+    let mut depth = 0;
+    let mut prefix = Vec::new();
+    for index in list_path {
+        prefix.push(*index);
+        if node_at_path(nodes, &prefix).is_some_and(|node| list_kind_of(node).is_some()) {
+            depth += 1;
+        }
+    }
+    depth
+}
+
+fn derive_outdent_list_item_operation(
+    document: &FlowDocument,
+    item_id: &NodeId,
+) -> Result<(Operation, Operation), CommandError> {
+    let (list_path, item_path) =
+        list_context_for_node(document, item_id).ok_or(CommandError::InvalidListStructure)?;
+    if list_path.is_empty() || item_path.len() < 2 {
+        return Err(CommandError::InvalidListStructure);
+    }
+    let parent_item_path = &list_path[..list_path.len() - 1];
+    if !matches!(
+        node_at_path(&document.content, parent_item_path)
+            .ok_or(CommandError::InvalidTarget)?
+            .body,
+        BlockKind::ListItem { .. }
+    ) {
+        return Err(CommandError::InvalidListStructure);
+    }
+    let outer_list_path = &parent_item_path[..parent_item_path.len() - 1];
+    let outer_list =
+        node_at_path(&document.content, outer_list_path).ok_or(CommandError::InvalidTarget)?;
+    if list_kind_of(outer_list).is_none() {
+        return Err(CommandError::InvalidListStructure);
+    }
+    let inner_index = *item_path.last().ok_or(CommandError::InvalidListStructure)?;
+    let parent_item_index = *parent_item_path
+        .last()
+        .ok_or(CommandError::InvalidListStructure)?;
+    let mut replacement = document.content.clone();
+    let item = {
+        let inner =
+            node_at_path_mut(&mut replacement, &list_path).ok_or(CommandError::InvalidTarget)?;
+        list_items_mut(inner)
+            .ok_or(CommandError::InvalidListStructure)?
+            .remove(inner_index)
+    };
+    let inner_empty = node_at_path(&replacement, &list_path)
+        .and_then(list_items)
+        .is_some_and(<[ContentNode]>::is_empty);
+    if inner_empty {
+        let parent_item = node_at_path_mut(&mut replacement, parent_item_path)
+            .ok_or(CommandError::InvalidTarget)?;
+        let child_index = *list_path.last().ok_or(CommandError::InvalidListStructure)?;
+        parent_item
+            .children_vec_mut()
+            .ok_or(CommandError::InvalidListStructure)?
+            .remove(child_index);
+    }
+    let outer =
+        node_at_path_mut(&mut replacement, outer_list_path).ok_or(CommandError::InvalidTarget)?;
+    list_items_mut(outer)
+        .ok_or(CommandError::InvalidListStructure)?
+        .insert(parent_item_index + 1, item);
+    structural_pair(
+        document,
+        None,
+        document.content.clone(),
+        replacement,
+        AnchorMapping::identity(),
+        AnchorMapping::identity(),
+        None,
+    )
 }
 
 fn container_children(
@@ -1995,6 +3079,37 @@ fn first_text_selection(document: &FlowDocument) -> Option<DirectionalSelection>
     visit(&document.content)
 }
 
+fn first_text_selection_for_node(
+    nodes: &[ContentNode],
+    target: &NodeId,
+) -> Option<DirectionalSelection> {
+    fn visit(nodes: &[ContentNode], target: &NodeId) -> Option<DirectionalSelection> {
+        for node in nodes {
+            if node.id == *target {
+                return first_text_selection_in_node(node);
+            }
+            if let Some(selection) = visit(node.children(), target) {
+                return Some(selection);
+            }
+        }
+        None
+    }
+
+    visit(nodes, target)
+}
+
+fn first_text_selection_in_node(node: &ContentNode) -> Option<DirectionalSelection> {
+    if node.runs().is_some() {
+        return Some(collapsed_selection(node.id.clone(), 0));
+    }
+    for child in node.children() {
+        if let Some(selection) = first_text_selection_in_node(child) {
+            return Some(selection);
+        }
+    }
+    None
+}
+
 fn ordered_selection_start(
     document: &FlowDocument,
     selection: &DirectionalSelection,
@@ -2424,6 +3539,15 @@ fn command_type(kind: &CommandKind) -> &'static str {
         CommandKind::SplitTextBlock { .. } => "splitTextBlock",
         CommandKind::MergeTextBlocks { .. } => "mergeTextBlocks",
         CommandKind::DeleteSubtree { .. } => "deleteSubtree",
+        CommandKind::SetInlineMarks { .. } => "setInlineMarks",
+        CommandKind::SetInlineMark { .. } => "setInlineMark",
+        CommandKind::SetBlockAttributes { .. } => "setBlockAttributes",
+        CommandKind::SetBlockStyle { .. } => "setBlockStyle",
+        CommandKind::SetListKind { .. } => "setListKind",
+        CommandKind::ContinueListItem { .. } => "continueListItem",
+        CommandKind::ExitListItem { .. } => "exitListItem",
+        CommandKind::IndentListItem { .. } => "indentListItem",
+        CommandKind::OutdentListItem { .. } => "outdentListItem",
         CommandKind::SetField { .. } => "setField",
         CommandKind::Batch { .. } => "batch",
         CommandKind::Undo => "undo",

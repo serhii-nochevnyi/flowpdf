@@ -9,8 +9,8 @@ use thiserror::Error;
 
 use crate::anchor::{EditorPositionError, GraphemeBoundaryMap, NodePositionMap};
 use crate::model::{
-    Affinity, ContentNode, DocumentId, FlowDocument, FontFamily, LogicalPosition, MarkSet, NodeId,
-    RunLanguage,
+    Affinity, Alignment, BlockStyle, ContentNode, DocumentId, FlowDocument, FontFamily, ListKind,
+    LogicalPosition, MarkSet, NodeId, RunLanguage,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -47,6 +47,11 @@ pub struct FormattingProjectionDto {
     pub font_size_millipoints: Option<u32>,
     pub color: Option<[u8; 3]>,
     pub language: Option<RunLanguage>,
+    pub block_style: Option<BlockStyle>,
+    pub alignment: Option<Alignment>,
+    pub spacing_before_millipoints: Option<u32>,
+    pub spacing_after_millipoints: Option<u32>,
+    pub list_kind: Option<ListKind>,
 }
 
 impl Default for FormattingProjectionDto {
@@ -59,6 +64,11 @@ impl Default for FormattingProjectionDto {
             font_size_millipoints: None,
             color: None,
             language: None,
+            block_style: None,
+            alignment: None,
+            spacing_before_millipoints: None,
+            spacing_after_millipoints: None,
+            list_kind: None,
         }
     }
 }
@@ -68,6 +78,13 @@ impl Default for FormattingProjectionDto {
 pub enum EditorCapability {
     SetSelection,
     SetPendingMarks,
+    SetInlineMarks,
+    SetBlockAttributes,
+    SetListKind,
+    ContinueListItem,
+    ExitListItem,
+    IndentListItem,
+    OutdentListItem,
     SplitTextBlock,
     MergeTextBlocks,
     DeleteSubtree,
@@ -376,11 +393,18 @@ fn capabilities_for(
     document: &FlowDocument,
     selection: &DirectionalSelection,
 ) -> Vec<CapabilityDto> {
-    let split_enabled = selection.collapsed()
-        && find_node(&document.content, &selection.anchor.node_id)
-            .is_some_and(|node| node.runs().is_some());
+    let anchor_node = find_node(&document.content, &selection.anchor.node_id);
+    let focus_node = find_node(&document.content, &selection.focus.node_id);
+    let text_selection = anchor_node.is_some_and(|node| node.runs().is_some())
+        && focus_node.is_some_and(|node| node.runs().is_some());
+    let list_context = list_context_for_node(&document.content, &selection.anchor.node_id);
+    let same_list_item = selection.collapsed()
+        && list_context.is_some()
+        && list_context_for_node(&document.content, &selection.focus.node_id) == list_context;
+    let list_item_index = list_context.map(|(_, index, _)| index);
+    let split_enabled = selection.collapsed() && text_selection;
     let merge_enabled = selection.collapsed()
-        && find_node(&document.content, &selection.anchor.node_id).is_some_and(|node| {
+        && anchor_node.is_some_and(|node| {
             has_compatible_text_neighbor(document, node, selection.anchor.utf16_offset.get())
         });
     let delete_enabled = find_node(&document.content, &selection.focus.node_id).is_some();
@@ -394,6 +418,43 @@ fn capabilities_for(
             name: EditorCapability::SetPendingMarks,
             enabled: true,
             reason_key: None,
+        },
+        CapabilityDto {
+            name: EditorCapability::SetBlockAttributes,
+            enabled: text_selection,
+            reason_key: (!text_selection).then_some("textBlockRequired".to_owned()),
+        },
+        CapabilityDto {
+            name: EditorCapability::SetListKind,
+            enabled: text_selection,
+            reason_key: (!text_selection).then_some("textBlockRequired".to_owned()),
+        },
+        CapabilityDto {
+            name: EditorCapability::ContinueListItem,
+            enabled: same_list_item,
+            reason_key: (!same_list_item).then_some("listItemRequired".to_owned()),
+        },
+        CapabilityDto {
+            name: EditorCapability::ExitListItem,
+            enabled: same_list_item,
+            reason_key: (!same_list_item).then_some("emptyListItemRequired".to_owned()),
+        },
+        CapabilityDto {
+            name: EditorCapability::IndentListItem,
+            enabled: same_list_item && list_item_index.is_some_and(|index| index > 0),
+            reason_key: (!(same_list_item && list_item_index.is_some_and(|index| index > 0)))
+                .then_some("listSiblingRequired".to_owned()),
+        },
+        CapabilityDto {
+            name: EditorCapability::OutdentListItem,
+            enabled: same_list_item,
+            reason_key: (!same_list_item).then_some("nestedListItemRequired".to_owned()),
+        },
+        CapabilityDto {
+            name: EditorCapability::SetInlineMarks,
+            enabled: text_selection && !selection.collapsed(),
+            reason_key: (!text_selection || selection.collapsed())
+                .then_some("formattingRangeRequired".to_owned()),
         },
         CapabilityDto {
             name: EditorCapability::SplitTextBlock,
@@ -411,6 +472,53 @@ fn capabilities_for(
             reason_key: (!delete_enabled).then_some("unknownNode".to_owned()),
         },
     ]
+}
+
+fn list_context_for_node(
+    nodes: &[ContentNode],
+    target: &NodeId,
+) -> Option<(NodeId, usize, ListKind)> {
+    fn visit(
+        nodes: &[ContentNode],
+        target: &NodeId,
+        inherited: Option<(NodeId, usize, ListKind)>,
+    ) -> Option<(NodeId, usize, ListKind)> {
+        for node in nodes {
+            if node.id == *target {
+                return inherited;
+            }
+            match node.body {
+                crate::model::BlockKind::OrderedList { .. }
+                | crate::model::BlockKind::UnorderedList { .. } => {
+                    let kind = if matches!(node.body, crate::model::BlockKind::OrderedList { .. }) {
+                        ListKind::Ordered
+                    } else {
+                        ListKind::Unordered
+                    };
+                    for (index, item) in node.children().iter().enumerate() {
+                        if item.id == *target {
+                            return Some((node.id.clone(), index, kind));
+                        }
+                        if let Some(found) = visit(
+                            item.children(),
+                            target,
+                            Some((node.id.clone(), index, kind)),
+                        ) {
+                            return Some(found);
+                        }
+                    }
+                }
+                _ => {
+                    if let Some(found) = visit(node.children(), target, inherited.clone()) {
+                        return Some(found);
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    visit(nodes, target, None)
 }
 
 fn has_compatible_text_neighbor(document: &FlowDocument, node: &ContentNode, offset: u32) -> bool {
@@ -652,7 +760,11 @@ fn formatting_for_selection(
         .get()
         .max(selection.focus.utf16_offset.get());
     if start == end {
-        return Ok(formatting_from_marks(&marks_at_offset(runs, start)));
+        return Ok(formatting_from_node(
+            node,
+            &marks_at_offset(runs, start),
+            document,
+        ));
     }
 
     let mut selected = Vec::new();
@@ -668,7 +780,7 @@ fn formatting_for_selection(
         return Ok(FormattingProjectionDto::default());
     }
 
-    Ok(FormattingProjectionDto {
+    let mut formatting = FormattingProjectionDto {
         bold: bool_state(selected.iter().map(|marks| marks.bold)),
         italic: bool_state(selected.iter().map(|marks| marks.italic)),
         underline: bool_state(selected.iter().map(|marks| marks.underline)),
@@ -678,7 +790,10 @@ fn formatting_for_selection(
         ),
         color: uniform_value(selected.iter().map(|marks| marks.color)),
         language: uniform_value(selected.iter().map(|marks| marks.language.clone())),
-    })
+        ..FormattingProjectionDto::default()
+    };
+    apply_block_projection(&mut formatting, node, document);
+    Ok(formatting)
 }
 
 fn formatting_from_marks(marks: &MarkSet) -> FormattingProjectionDto {
@@ -690,7 +805,43 @@ fn formatting_from_marks(marks: &MarkSet) -> FormattingProjectionDto {
         font_size_millipoints: marks.font_size_millipoints,
         color: marks.color,
         language: marks.language.clone(),
+        ..FormattingProjectionDto::default()
     }
+}
+
+fn formatting_from_node(
+    node: &ContentNode,
+    marks: &MarkSet,
+    document: &FlowDocument,
+) -> FormattingProjectionDto {
+    let mut formatting = formatting_from_marks(marks);
+    apply_block_projection(&mut formatting, node, document);
+    formatting
+}
+
+fn apply_block_projection(
+    formatting: &mut FormattingProjectionDto,
+    node: &ContentNode,
+    document: &FlowDocument,
+) {
+    formatting.block_style = match &node.body {
+        crate::model::BlockKind::Paragraph { .. } => Some(BlockStyle::Paragraph),
+        crate::model::BlockKind::Heading { level, .. } => {
+            Some(BlockStyle::Heading { level: *level })
+        }
+        _ => None,
+    };
+    match &node.body {
+        crate::model::BlockKind::Paragraph { attrs, .. }
+        | crate::model::BlockKind::Heading { attrs, .. } => {
+            formatting.alignment = Some(attrs.alignment.clone());
+            formatting.spacing_before_millipoints = Some(attrs.spacing_before_millipoints);
+            formatting.spacing_after_millipoints = Some(attrs.spacing_after_millipoints);
+        }
+        _ => {}
+    }
+    formatting.list_kind =
+        list_context_for_node(&document.content, &node.id).map(|(_, _, kind)| kind);
 }
 
 fn bool_state(values: impl IntoIterator<Item = bool>) -> FormattingState {
