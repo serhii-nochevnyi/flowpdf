@@ -12,12 +12,14 @@ use thiserror::Error;
 use crate::layout::{LayoutRect, LayoutUnit};
 
 mod display_list;
+mod font;
 
 pub use display_list::{
     PDF_DISPLAY_LIST_SCHEMA_VERSION, PdfDisplayDiagnostic, PdfDisplayDiagnosticCode,
     PdfDisplayList, PdfDisplayListError, PdfDisplayPage, PdfGlyphPlacement, PdfTextItem,
     PdfTextLine, build_display_list,
 };
+pub use font::{PdfFontError, PdfFontResource, PdfSubsetGlyph, build_font_resources};
 
 /// Version of the owned PDF export envelope.
 pub const PDF_EXPORT_SCHEMA_VERSION: u32 = 1;

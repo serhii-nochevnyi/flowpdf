@@ -87,6 +87,7 @@ pub enum PdfDisplayDiagnosticCode {
     UnsupportedFragment,
     SourceMappingMissing,
     GlyphMappingMissing,
+    UnsupportedGlyph,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -300,6 +301,14 @@ fn append_fragment(
                 Err(PdfDisplayListError::GlyphMappingMissing) => {
                     diagnostics.push(PdfDisplayDiagnostic {
                         code: PdfDisplayDiagnosticCode::GlyphMappingMissing,
+                        page_index: page.page_index,
+                        fragment_id: fragment.id.clone(),
+                        source_node_id: fragment.source_node_id.clone(),
+                    });
+                }
+                Err(PdfDisplayListError::Layout(LayoutError::UnsupportedGlyph)) => {
+                    diagnostics.push(PdfDisplayDiagnostic {
+                        code: PdfDisplayDiagnosticCode::UnsupportedGlyph,
                         page_index: page.page_index,
                         fragment_id: fragment.id.clone(),
                         source_node_id: fragment.source_node_id.clone(),

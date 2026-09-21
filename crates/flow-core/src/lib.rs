@@ -68,8 +68,11 @@ use model::{
     SCHEMA_VERSION,
 };
 pub use pdf::{
-    CosDocument, CosValue, PDF_EXPORT_SCHEMA_VERSION, PdfError, PdfExportOptions, PdfExportRequest,
-    PdfExportResult, PdfName, PdfPageContent, PdfPagePlan, PdfRef, export_pdf,
+    CosDocument, CosValue, PDF_DISPLAY_LIST_SCHEMA_VERSION, PDF_EXPORT_SCHEMA_VERSION,
+    PdfDisplayDiagnostic, PdfDisplayDiagnosticCode, PdfDisplayList, PdfDisplayListError,
+    PdfDisplayPage, PdfError, PdfExportOptions, PdfExportRequest, PdfExportResult, PdfFontError,
+    PdfFontResource, PdfGlyphPlacement, PdfName, PdfPageContent, PdfPagePlan, PdfRef,
+    PdfSubsetGlyph, PdfTextItem, PdfTextLine, build_display_list, build_font_resources, export_pdf,
 };
 use provenance::{ProvenanceError, RevisionHash, RevisionProvenance};
 use schema::{DocumentLimits, LimitKind, MigrationRegistry, MigrationReport, SchemaError};

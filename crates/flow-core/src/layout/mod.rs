@@ -249,6 +249,35 @@ impl FontFace {
         rustybuzz::Face::from_slice(&self.bytes, self.identity.face_index)
             .ok_or(LayoutError::InvalidFont)
     }
+
+    /// Returns the admitted bytes to another Rust-owned derived adapter. The
+    /// method stays crate-visible so browser/WASM DTOs cannot expose a font
+    /// resource accidentally.
+    pub(crate) fn bytes_for_derived_adapter(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    /// Returns the admitted face index to another Rust-owned derived
+    /// adapter. The method stays crate-visible so browser/WASM DTOs cannot
+    /// expose font resources accidentally.
+    pub(crate) const fn face_index_for_derived_adapter(&self) -> u32 {
+        self.identity.face_index
+    }
+
+    /// Returns metrics needed by a derived PDF font resource.
+    pub(crate) fn glyph_metrics_for_derived_adapter(
+        &self,
+        glyph_id: u32,
+    ) -> Result<(u16, u16), LayoutError> {
+        let face = ttf_parser::Face::parse(&self.bytes, self.identity.face_index)
+            .map_err(|_| LayoutError::InvalidFont)?;
+        let glyph_id =
+            ttf_parser::GlyphId(u16::try_from(glyph_id).map_err(|_| LayoutError::InvalidFont)?);
+        let advance = face
+            .glyph_hor_advance(glyph_id)
+            .ok_or(LayoutError::InvalidFont)?;
+        Ok((advance, face.units_per_em()))
+    }
 }
 
 /// Ordered, bounded fallback catalog. Earlier faces win when more than one

@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 1,
+  "font": "noto-sans-regular",
+  "cases": [
+    {
+      "id": "ukrainian-logical-extraction",
+      "language": "ukrainian",
+      "direction": "auto",
+      "text": "Договір набирає чинності після підписання сторонами.",
+      "assertions": ["source-clusters", "to-unicode", "embedded-subset"]
+    },
+    {
+      "id": "english-combining-cluster",
+      "language": "english",
+      "direction": "auto",
+      "text": "Cafe\u0301 review — stable source ranges.",
+      "assertions": ["utf8-utf16", "combining-cluster", "deterministic-resource"]
+    },
+    {
+      "id": "bidi-control-sample",
+      "language": "english",
+      "direction": "rightToLeft",
+      "text": "FlowPDF 2026",
+      "assertions": ["direction-preserved", "bounded-diagnostic"]
+    },
+    {
+      "id": "unsupported-emoji",
+      "language": "english",
+      "direction": "auto",
+      "text": "Unsupported glyph: 👩‍💻",
+      "assertions": ["explicit-unsupported-diagnostic", "no-authored-text-leakage"]
+    }
+  ]
+}
