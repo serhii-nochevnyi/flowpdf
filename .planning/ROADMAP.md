@@ -171,16 +171,19 @@ compatibility, and general PDF import remain unclaimed.
   4. Exported fields and appearance states behave consistently in the target viewer matrix.
   5. Flattening is explicit, selected, validated and never silently replaces the editable source.
 
-**Plans**: 2 plans executed; follow-on plans remain to be decomposed
+**Plans**: 3 plans executed; follow-on plans remain to be decomposed
 
 - [x] 05-01-PLAN.md — Add Rust-owned field-value validation and deterministic
   display-list anchor-to-widget projection with explicit review paths.
 - [x] 05-02-PLAN.md — Add a revision/hash-bound noncanonical Rust form-value
   session with immutable fill, clear, and effective-value operations.
+- [x] 05-03-PLAN.md — Connect validated session values to a versioned
+  session-aware widget projection while preserving authored defaults.
 
-The first two Phase 5 slices validate the existing semantic field vocabulary,
+The first three Phase 5 slices validate the existing semantic field vocabulary,
 derive revision/hash-bound fixed-point widget projections, and keep explicit
-noncanonical fill overrides separate from authored defaults. They do not claim
+noncanonical fill overrides separate from authored defaults through to the
+derived widget. They do not claim
 browser/WASM transport, durable current-value persistence, AcroForm
 dictionaries/appearances, flattening, external form import, or target-viewer
 compatibility. Those remain separately planned and verified.
@@ -262,7 +265,7 @@ compatibility. Those remain separately planned and verified.
 | 2. Accessible Rich-Text Editing | 18/18 | In Progress (external AT checkpoint) |  |
 | 3. Deterministic Reflow and Pagination | 6/6 | In Progress (external AT checkpoint) |  |
 | 4. Owned PDF Preview and Export | 6/6 | In Progress (reference evidence unavailable) |  |
-| 5. Semantic Fillable Forms | 2/2 executed (follow-on TBD) | In Progress (Rust core slices) |  |
+| 5. Semantic Fillable Forms | 3/3 executed (follow-on TBD) | In Progress (Rust core slices) |  |
 | 6. Voice Dictation and Commands | 0/TBD | Not started | - |
 | 7. Secure PDF Reader and Scene | 0/TBD | Not started | - |
 | 8. External Reconstruction and OCR | 0/TBD | Not started | - |

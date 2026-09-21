@@ -274,8 +274,9 @@ Phase 3, Deterministic Reflow and Pagination, has completed its six local
 implementation plans and dual-run gate. Phase 4 has completed its six local
 implementation plans and dual-run local gate; its qpdf/Poppler/target-viewer
 reference rows remain unavailable, so the phase is not marked complete. The
-Phase 5 has two completed local Rust slices for validation/projection and a
-noncanonical fill session; browser transport, durable fill values, AcroForm
-emission, flattening, and viewer compatibility remain unimplemented. The
+Phase 5 has three completed local Rust slices for validation/projection,
+noncanonical fill state, and effective-value projection; browser transport,
+durable fill values, AcroForm emission, flattening, and viewer compatibility
+remain unimplemented. The
 current implementation still makes no claim of complete PDF compatibility,
 commercial-SDK parity, or production readiness.

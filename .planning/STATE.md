@@ -4,16 +4,16 @@ milestone: v1.0
 current_phase: 5
 current_phase_name: Semantic Fillable Forms
 status: executing
-stopped_at: Completed 05-02-PLAN.md; the Phase 5 Rust validation/projection and noncanonical form-session slices are green, while browser/durable fill transport, follow-on form plans, four external Phase 4 PDF/reference rows, and the inherited Phase 2/3 external AT checkpoint remain open
-last_updated: "2026-09-21T20:12:11Z"
+stopped_at: Completed 05-03-PLAN.md; the Phase 5 Rust validation/session/projection slices are green, while browser/durable fill transport, follow-on form plans, four external Phase 4 PDF/reference rows, and the inherited Phase 2/3 external AT checkpoint remain open
+last_updated: "2026-09-21T20:17:24Z"
 last_activity: 2026-09-21
-last_activity_desc: Completed Phase 5 Plan 05-02 Rust-owned revision/hash-bound noncanonical form session with immutable fill/clear/effective-value operations and focused regression coverage
-state_head: 207da62
+last_activity_desc: Completed Phase 5 Plan 05-03 session-aware versioned widget projection with separate authored/effective values and stale-session rejection
+state_head: 3c6f3c2
 progress:
   total_phases: 9
   completed_phases: 1
-  total_plans: 38
-  completed_plans: 38
+  total_plans: 39
+  completed_plans: 39
 milestone_name: milestone
 ---
 
@@ -24,22 +24,22 @@ milestone_name: milestone
 See: .planning/PROJECT.md (updated 2026-08-25)
 
 **Core value:** A user can edit semantic document text naturally, repaginate following content, and export a visually consistent, selectable, form-capable PDF.
-**Current focus:** Phase 5 — Semantic Fillable Forms (two Rust core slices complete; browser/durable form transport and follow-on plans open)
+**Current focus:** Phase 5 — Semantic Fillable Forms (three Rust core slices complete; browser/durable form transport and follow-on plans open)
 
 ## Current Position
 
 Phase: 5 (Semantic Fillable Forms) — EXECUTING
-Plan: 2 executed; follow-on plans to be decomposed
-Status: 05-02 complete; Rust validates the current field vocabulary, derives deterministic revision/hash-bound fixed-point widget projections with explicit invalid/deleted/unmapped review, and keeps immutable explicit fill overrides separate from authored defaults. Browser/WASM transport, durable current values, AcroForm emission, flattening, and target-viewer evidence remain open. Phase 4 external PDF/reference rows and Phase 2/3 external Edge/Windows screen-reader evidence remain outstanding.
-Last activity: 2026-09-21 — Phase 5 Plan 05-02 Rust-owned noncanonical form session completed
+Plan: 3 executed; follow-on plans to be decomposed
+Status: 05-03 complete; Rust validates the current field vocabulary, derives deterministic revision/hash-bound fixed-point widget projections with explicit invalid/deleted/unmapped review, and exposes separate authored defaults/effective session values. Browser/WASM transport, durable current values, AcroForm emission, flattening, and target-viewer evidence remain open. Phase 4 external PDF/reference rows and Phase 2/3 external Edge/Windows screen-reader evidence remain outstanding.
+Last activity: 2026-09-21 — Phase 5 Plan 05-03 session-aware versioned widget projection completed
 
-Progress: Phase 2 — 18/18 implementation plans complete; Phase 3 — 6/6 local implementation plans executed; Phase 4 — 6/6 plans executed; Phase 5 — 2 local Rust plans executed with browser/durable transport and follow-on plans still to be decomposed. Phase 2/3 phase-level closure remains honest about inherited external AT evidence, and Phase 4 remains open for unavailable external PDF/reference evidence.
+Progress: Phase 2 — 18/18 implementation plans complete; Phase 3 — 6/6 local implementation plans executed; Phase 4 — 6/6 plans executed; Phase 5 — 3 local Rust plans executed with browser/durable transport and follow-on plans still to be decomposed. Phase 2/3 phase-level closure remains honest about inherited external AT evidence, and Phase 4 remains open for unavailable external PDF/reference evidence.
 
 ## Performance Metrics
 
 **Velocity:**
 
-- Total plans completed: 38
+- Total plans completed: 39
 - Average duration: not comparable (Plan 05 was a multi-session closeout)
 - Total execution time: multi-session
 
@@ -51,7 +51,7 @@ Progress: Phase 2 — 18/18 implementation plans complete; Phase 3 — 6/6 local
 | 2 | 18 | multi-session | - |
 | 3 | 6 | multi-session | - |
 | 4 | 6 | planned | - |
-| 5 | 2 executed (follow-on TBD) | same session | - |
+| 5 | 3 executed (follow-on TBD) | same session | - |
 
 **Recent Trend:** Schema-v2 tree, lossless migration, editor accessibility, exact UI coverage, deterministic semantic scale, and the dual-run release gate remain green. Plan 02-18 closes all Phase 2 implementation plans with 7/7 requirements, 33/33 edges, 108/108 UI owners, and 3/3 flagged prohibitions; Edge/Windows screen-reader UAT remains explicitly outstanding before Phase 2 closure. Phase 3 now has all six local implementation plans complete, including Rust typography/pagination, schema-v3 sections, incremental equivalence, revision-safe workers, the accessible viewport, and a two-run local gate; Phase 3 phase-level closure does not invent the inherited external AT result. Phase 4 now has all six local plans complete and a two-run local gate, while structural/extraction/raster/target-viewer evidence remains explicitly unavailable.
 **Per-Plan Metrics:**
@@ -160,6 +160,7 @@ Decisions are logged in `.planning/PROJECT.md`.
 - [Phase 5]: Semantic fields remain canonical `FieldDescriptor`/anchor data; the first forms slice validates values and derives revision/hash-bound fixed-point widgets from accepted display-list source ranges, while invalid/deleted/unmapped anchors enter explicit review and no page/widget state is persisted.
 - [Phase 5]: The first forms slice deliberately does not invent a durable current-value record, AcroForm dictionaries/appearances, flattening, external-PDF form import, or target-viewer compatibility; each is a follow-on contract.
 - [Phase 5]: Form fill state is a noncanonical document-ID/revision/hash-bound override map; absent overrides resolve to authored defaults, set/clear operations are immutable generation changes, and read-only/forged/stale state fails closed. Durable persistence and WASM/UI transport remain later contracts.
+- [Phase 5]: Version-2 derived widgets carry both authored `default_value` and effective session `value`; the default-only resolver remains deterministic, while session-aware projection rejects invalid session identity before placement and never changes canonical bytes.
 
 ### Pending Todos
 
@@ -180,6 +181,6 @@ Decisions are logged in `.planning/PROJECT.md`.
 
 ## Session Continuity
 
-Last session: 2026-09-21T20:12:11Z
-Stopped at: Completed 05-02-PLAN.md; Phase 5 Rust core slices are green, Phase 4 reference PDF rows are unavailable, and the inherited Phase 2/3 external AT checkpoint remains outstanding
+Last session: 2026-09-21T20:17:24Z
+Stopped at: Completed 05-03-PLAN.md; Phase 5 Rust core slices are green, Phase 4 reference PDF rows are unavailable, and the inherited Phase 2/3 external AT checkpoint remains outstanding
 Resume file: None
