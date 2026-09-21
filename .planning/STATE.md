@@ -4,16 +4,16 @@ milestone: v1.0
 current_phase: 3
 current_phase_name: Deterministic Reflow and Pagination
 status: executing
-stopped_at: Completed 03-01-PLAN.md; ready for 03-02-PLAN.md
-last_updated: "2026-09-21T12:22:39Z"
+stopped_at: Completed 03-02-PLAN.md; ready for 03-03-PLAN.md
+last_updated: "2026-09-21T13:03:46Z"
 last_activity: 2026-09-21
-last_activity_desc: Completed Phase 3 Plan 03-01 deterministic fixed-point text layout tracer; Phase 2 implementation remains complete with external Edge/Windows AT evidence outstanding
-state_head: 300f32aec60658b5fc71fbeedc29cb18d8ecef34
+last_activity_desc: Completed Phase 3 Plan 03-02 durable schema-v3 layout settings and lossless v2-to-v3 migration; Phase 2 implementation remains complete with external Edge/Windows AT evidence outstanding
+state_head: 4d3d7306f52a8f5f4b7239633d076d791c8ddd81
 progress:
   total_phases: 9
   completed_phases: 1
   total_plans: 30
-  completed_plans: 25
+  completed_plans: 26
 milestone_name: milestone
 ---
 
@@ -29,11 +29,11 @@ See: .planning/PROJECT.md (updated 2026-08-25)
 ## Current Position
 
 Phase: 3 (Deterministic Reflow and Pagination) — EXECUTING
-Plan: 1 of 6
-Status: 03-01 complete; ready for 03-02. Phase 2 external Edge/Windows screen-reader evidence remains outstanding.
-Last activity: 2026-09-21 — Deterministic fixed-point text layout tracer completed with explicit font/data provenance and fail-closed diagnostics
+Plan: 2 of 6
+Status: 03-02 complete; ready for 03-03. Phase 2 external Edge/Windows screen-reader evidence remains outstanding.
+Last activity: 2026-09-21 — Durable schema-v3 page/section/header/footer settings and lossless v2-to-v3 migration completed with bounded validation and canonical goldens
 
-Progress: Phase 2 — 18/18 implementation plans complete; Phase 3 — 1/6 plans executed; milestone percentage unavailable while later phases remain unplanned.
+Progress: Phase 2 — 18/18 implementation plans complete; Phase 3 — 2/6 plans executed; milestone percentage unavailable while later phases remain unplanned.
 
 ## Performance Metrics
 
@@ -49,7 +49,7 @@ Progress: Phase 2 — 18/18 implementation plans complete; Phase 3 — 1/6 plans
 |-------|-------|-------|----------|
 | 1 | 6 | - | - |
 | 2 | 18 | multi-session | - |
-| 3 | 1 | same session | - |
+| 3 | 2 | same session | - |
 
 **Recent Trend:** Schema-v2 tree, lossless migration, editor accessibility, exact UI coverage, deterministic semantic scale, and the dual-run release gate remain green. Plan 02-18 closes all Phase 2 implementation plans with 7/7 requirements, 33/33 edges, 108/108 UI owners, and 3/3 flagged prohibitions; Edge/Windows screen-reader UAT remains explicitly outstanding before Phase 2 closure. Phase 3 Plan 03-01 now provides the Rust-first typography tracer as the first executable slice.
 **Per-Plan Metrics:**
@@ -81,6 +81,7 @@ Progress: Phase 2 — 18/18 implementation plans complete; Phase 3 — 1/6 plans
 | Phase FLOWPDF-02 P17 | resumed multi-session | 2 tasks | 9 files |
 | Phase FLOWPDF-02 P18 | resumed multi-session | 2 tasks | 14 files |
 | Phase FLOWPDF-03 P01 | same session | 2 tasks | 11 files |
+| Phase FLOWPDF-03 P02 | same session | 2 tasks | 13 files |
 
 ## Accumulated Context
 
@@ -126,6 +127,9 @@ Decisions are logged in `.planning/PROJECT.md`.
 - [Phase 3]: Text layout is derived from canonical source text and bound to source revision/hash, explicit byte-backed font catalog identity, hyphenation identity, and engine version; it never becomes canonical document state.
 - [Phase 3]: The admitted typography fixture is checked-in Noto Sans Regular with OFL text and SHA-256 provenance; unsupported glyphs, malformed fonts, duplicate identities, and missing/mismatched Ukrainian data fail closed without host-font discovery.
 - [Phase 3]: ICU grapheme/line segmentation, Unicode bidi, RustyBuzz shaping, and versioned Ukrainian hyphenation are the first adapters; pagination, schema-v3 sections, workers, and PDF output remain later plans.
+- [Phase 3]: Schema-v3 stores page geometry, ordered semantic section boundaries, and bounded typed static header/footer runs; it never stores derived fragments, glyphs, display-list bytes, or coordinates.
+- [Phase 3]: The frozen v0/v1 decoder and source/hash gate remain unchanged; a private canonical v2 envelope admits exactly one v2-to-v3 migration hop with deterministic default section settings and preserved provenance.
+- [Phase 3]: The first section is the document-start boundary and mirrors top-level page settings; later boundaries reference ordered top-level content nodes and reject duplicate, missing, or out-of-order anchors before publication.
 
 ### Pending Todos
 
@@ -146,6 +150,6 @@ Decisions are logged in `.planning/PROJECT.md`.
 
 ## Session Continuity
 
-Last session: 2026-09-21T12:22:39Z
-Stopped at: Completed 03-01-PLAN.md; ready for 03-02-PLAN.md
+Last session: 2026-09-21T13:03:46Z
+Stopped at: Completed 03-02-PLAN.md; ready for 03-03-PLAN.md
 Resume file: None
