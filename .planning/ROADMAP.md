@@ -135,21 +135,23 @@ Chromium/macOS evidence is not a substitute.
   4. Reopening an owned PDF restores an identical canonical FlowDocument when its source payload is available.
   5. Every export records reproducibility inputs and passes structural, extraction, visual and form validation gates.
 
-**Plans**: 6/6 planned
+**Plans**: 3/6 executed
 
 - [x] 04-01-PLAN.md — Establish bounded COS values and a deterministic PDF page envelope.
 - [x] 04-02-PLAN.md — Connect shaped layout to embedded fonts, Unicode mappings, and selectable text.
-- [ ] 04-03-PLAN.md — Add bounded images, metadata, outlines/links, and unsupported-content reporting.
+- [x] 04-03-PLAN.md — Add bounded images, metadata, outlines/links, and unsupported-content reporting.
 - [ ] 04-04-PLAN.md — Add reproducibility manifests and exact owned-source recovery.
 - [ ] 04-05-PLAN.md — Expose revision-safe export and the accessible virtualized PDF preview.
 - [ ] 04-06-PLAN.md — Run the Phase 4 structural/extraction/visual release gate honestly.
 
 Phase 4 is planned from the Phase 3 fixed-point/display-list contracts. Plans
-04-01 and 04-02 now provide the bounded syntax/page-envelope foundation,
-revision-bound display list, and deterministic TrueType/ToUnicode resource
-preparation. End-to-end PDF content streams, images, recovery, preview, and
-target-viewer compatibility remain unimplemented until their plans execute and
-the required evidence is observed.
+04-01 through 04-03 now provide the bounded syntax/page-envelope foundation,
+revision-bound display list, deterministic TrueType/ToUnicode resource
+preparation, bounded PNG/JPEG resource preparation, and typed metadata,
+outline, internal-link, and unsupported-feature reporting. End-to-end PDF
+text/image content streams, source recovery, preview, and target-viewer
+compatibility remain unimplemented until their plans execute and the required
+evidence is observed.
 **UI hint**: yes
 
 ### Phase 5: Semantic Fillable Forms
@@ -243,8 +245,8 @@ the required evidence is observed.
 |-------|----------------|--------|-----------|
 | 1. Durable Flow Foundation | 6/6 | Complete    | 2026-08-25 |
 | 2. Accessible Rich-Text Editing | 18/18 | In Progress (external AT checkpoint) |  |
-| 3. Deterministic Reflow and Pagination | 4/6 | In Progress |  |
-| 4. Owned PDF Preview and Export | 0/TBD | Not started | - |
+| 3. Deterministic Reflow and Pagination | 6/6 | In Progress (external AT checkpoint) |  |
+| 4. Owned PDF Preview and Export | 3/6 | In Progress |  |
 | 5. Semantic Fillable Forms | 0/TBD | Not started | - |
 | 6. Voice Dictation and Commands | 0/TBD | Not started | - |
 | 7. Secure PDF Reader and Scene | 0/TBD | Not started | - |

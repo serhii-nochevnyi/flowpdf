@@ -4,16 +4,16 @@ milestone: v1.0
 current_phase: 4
 current_phase_name: Owned PDF Preview and Export
 status: executing
-stopped_at: Completed 04-02-PLAN.md; revision-bound display list and deterministic TrueType/ToUnicode resource preparation are green, ready to execute 04-03 while Phase 2/3 external AT closure remains outstanding
-last_updated: "2026-09-21T17:14:05Z"
+stopped_at: Completed 04-03-PLAN.md; bounded image resources and typed metadata/outline/internal-link structure are green, ready to execute 04-04 while Phase 2/3 external AT closure remains outstanding
+last_updated: "2026-09-21T17:45:41Z"
 last_activity: 2026-09-21
-last_activity_desc: Completed Phase 4 Plan 04-02 revision-bound display list, bounded TrueType subset resources, and Unicode mapping tests; end-to-end content streams/resources/recovery/preview remain later plans
-state_head: 8e22b7a
+last_activity_desc: Completed Phase 4 Plan 04-03 bounded PNG/JPEG resource preparation, fixed-point image display entries, metadata/outline/internal-link structure, and unsupported-feature reporting; content streams/recovery/preview remain later plans
+state_head: 371dfd8
 progress:
   total_phases: 9
   completed_phases: 1
   total_plans: 36
-  completed_plans: 32
+  completed_plans: 33
 milestone_name: milestone
 ---
 
@@ -29,17 +29,17 @@ See: .planning/PROJECT.md (updated 2026-08-25)
 ## Current Position
 
 Phase: 4 (Owned PDF Preview and Export) — EXECUTING
-Plan: 2 of 6
-Status: 04-02 complete; deterministic bounded COS/page envelope, revision-bound display list, TrueType subset resources, and ToUnicode mappings are green. Plans 04-03 through 04-06 remain. Phase 2/3 external Edge/Windows screen-reader evidence remains outstanding.
-Last activity: 2026-09-21 — Phase 4 Plan 04-02 display-list, compact-font, Unicode mapping, and unsupported-glyph diagnostics completed
+Plan: 3 of 6
+Status: 04-03 complete; deterministic bounded COS/page envelope, revision-bound display list, TrueType subset resources, bounded PNG/JPEG resources, and typed metadata/outline/internal-link structure are green. Plans 04-04 through 04-06 remain. Phase 2/3 external Edge/Windows screen-reader evidence remains outstanding.
+Last activity: 2026-09-21 — Phase 4 Plan 04-03 image resources, fixed-point image display entries, metadata/outline/internal-link structure, and unsupported-feature diagnostics completed
 
-Progress: Phase 2 — 18/18 implementation plans complete; Phase 3 — 6/6 local implementation plans executed; Phase 4 — 2/6 plans executed and 6/6 planned. Phase 2/3 phase-level closure remains honest about inherited external AT evidence.
+Progress: Phase 2 — 18/18 implementation plans complete; Phase 3 — 6/6 local implementation plans executed; Phase 4 — 3/6 plans executed and 6/6 planned. Phase 2/3 phase-level closure remains honest about inherited external AT evidence.
 
 ## Performance Metrics
 
 **Velocity:**
 
-- Total plans completed: 31
+- Total plans completed: 33
 - Average duration: not comparable (Plan 05 was a multi-session closeout)
 - Total execution time: multi-session
 
@@ -87,6 +87,7 @@ Progress: Phase 2 — 18/18 implementation plans complete; Phase 3 — 6/6 local
 | Phase FLOWPDF-03 P04 | same session | 2 tasks | 5 files |
 | Phase FLOWPDF-04 P01 | same session | 2 tasks | 3 files |
 | Phase FLOWPDF-04 P02 | same session | 2 tasks | 7 files |
+| Phase FLOWPDF-04 P03 | same session | 2 tasks | 7 files |
 
 ## Accumulated Context
 
@@ -146,6 +147,8 @@ Decisions are logged in `.planning/PROJECT.md`.
 - [Phase 4]: Owned PDF output begins with a bounded Rust COS graph and fixed-point page envelope; legal page-tree `/Parent` back-references are allowed, arbitrary cycles/dangling references are rejected, and the first slice makes no selectable-text or compatibility claim.
 - [Phase 4]: PDF/preview display data is a derived revision/hash/catalog-bound Rust projection; source ranges, glyph clusters, direction, fixed-point placements, and repeated-band provenance remain attached to every emitted text item.
 - [Phase 4]: The first admitted PDF font profile is a deterministic bounded TrueType subset with `.notdef`/composite dependencies, compact glyph IDs, fixed metrics, format-12 cmap, and explicit ToUnicode mappings; TTC/CFF/malformed tables and unsupported glyph coverage fail closed.
+- [Phase 4]: PDF image resources reuse revision-owned asset hashes and admission limits, deduplicate by stable content identity, and carry fixed-point display-list rectangles without copying bytes into semantic DTOs or diagnostics.
+- [Phase 4]: Export structure is a closed typed subset: escaped metadata, deterministic internal outlines/links, and an explicit support report; JavaScript, launch/external actions, arbitrary annotations/paths, fields, and encryption are not inferred or emitted.
 
 ### Pending Todos
 
@@ -166,6 +169,6 @@ Decisions are logged in `.planning/PROJECT.md`.
 
 ## Session Continuity
 
-Last session: 2026-09-21T17:14:05Z
-Stopped at: Completed 04-02-PLAN.md; focused/full Rust PDF text gates are green and the inherited Phase 2/3 external AT checkpoint remains outstanding
+Last session: 2026-09-21T17:45:41Z
+Stopped at: Completed 04-03-PLAN.md; focused/full Rust PDF resource and structure gates are green and the inherited Phase 2/3 external AT checkpoint remains outstanding
 Resume file: None

@@ -71,6 +71,10 @@ The current tree includes:
   UTF-8/UTF-16 ranges, shaped glyph placements, page order, repeated-band
   provenance, bounded unsupported-content diagnostics, and deterministic
   admitted TrueType subset/ToUnicode resource preparation;
+- a bounded revision-owned PNG/JPEG resource adapter with content-identity
+  deduplication, fixed-point image rectangles, deterministic PDF metadata,
+  outline and internal-link records, and an explicit support matrix that
+  excludes active/external actions;
 - Phase 1 and Phase 2 foundation fixtures, Unicode 17 grapheme conformance
   data, dependency provenance checks, Rust tests, TypeScript checks, and
   browser tests for the implemented foundation and Phase 3 layout path.
@@ -102,12 +106,14 @@ things:
 Phase 2 implementation plans and the Phase 3 local implementation gate are
 complete, but the explicitly required Microsoft Edge on Windows plus Windows
 screen-reader evidence remains outstanding. Phase 4 owned PDF preview/export
-plans are now materialized. The first two Phase 4 slices add a deterministic
-bounded Rust COS/page envelope, a revision-bound display list, and compact
-TrueType/ToUnicode resource inputs. End-to-end PDF content streams, image
-resources, source recovery, preview, target-viewer validation, and general PDF
-import remain planned. Complete assistive-technology validation, voice control,
-and production hardening are not delivered by this repository state. See the
+plans are now materialized. The first three Phase 4 slices add a deterministic
+bounded Rust COS/page envelope, a revision-bound display list, compact
+TrueType/ToUnicode resource inputs, bounded PNG/JPEG resource preparation, and
+typed metadata/outline/internal-link support with explicit exclusions for
+active and external actions. End-to-end PDF text/image content streams, source
+recovery, preview, target-viewer validation, and general PDF import remain
+planned. Complete assistive-technology validation, voice control, and
+production hardening are not delivered by this repository state. See the
 [roadmap](.planning/ROADMAP.md) and [project constraints](.planning/PROJECT.md)
 for authoritative scope and sequencing.
 
