@@ -11,6 +11,14 @@ use thiserror::Error;
 
 use crate::layout::{LayoutRect, LayoutUnit};
 
+mod display_list;
+
+pub use display_list::{
+    PDF_DISPLAY_LIST_SCHEMA_VERSION, PdfDisplayDiagnostic, PdfDisplayDiagnosticCode,
+    PdfDisplayList, PdfDisplayListError, PdfDisplayPage, PdfGlyphPlacement, PdfTextItem,
+    PdfTextLine, build_display_list,
+};
+
 /// Version of the owned PDF export envelope.
 pub const PDF_EXPORT_SCHEMA_VERSION: u32 = 1;
 const MAX_PDF_OBJECTS: usize = 4_096;
