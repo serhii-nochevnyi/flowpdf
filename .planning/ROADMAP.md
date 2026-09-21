@@ -104,7 +104,7 @@ Chromium/macOS evidence is not a substitute.
   4. Incremental reflow is structurally and visually identical to full reflow for the same revision.
   5. User can continue working on the active viewport while later pages paginate in a worker.
 
-**Plans**: 5/6 plans executed (6/6 planned)
+**Plans**: 6/6 local plans executed
 
 Plans:
 
@@ -113,7 +113,12 @@ Plans:
 - [x] 03-03-PLAN.md — Build fragment-tree pagination and bounded constraints.
 - [x] 03-04-PLAN.md — Prove incremental/full reflow equivalence.
 - [x] 03-05-PLAN.md — Expose revision-safe WASM and worker layout scheduling.
-- [ ] 03-06-PLAN.md — Deliver the accessible page viewport and Phase 3 gate.
+- [x] 03-06-PLAN.md — Deliver the accessible page viewport and Phase 3 gate.
+
+All six Phase 3 implementation plans and the deterministic local gate are
+complete. Phase-level closure remains explicit about the inherited Phase 2
+Microsoft Edge on Windows plus Windows-screen-reader checkpoint; local
+Chromium/macOS evidence is not a substitute.
 **UI hint**: yes
 
 ### Phase 4: Owned PDF Preview and Export

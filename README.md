@@ -20,16 +20,20 @@ model is separate from the representations that will be derived from it:
 ```text
 FlowDocument
     -> Rust transactions, anchors, and canonical serialization
-    -> layout fragments and display lists (planned)
-    -> browser rendering and semantic accessibility DOM (planned)
+    -> Rust-owned fixed-point layout, pagination, and derived fragments
+    -> versioned WASM boundary and revision-safe Web Worker scheduling
+    -> browser page viewport plus synchronized semantic accessibility DOM
     -> owned fixed-layout PDF objects and export (planned)
 ```
 
 Rust owns the document model, revision checks, transactions, recovery rules,
 logical positions, and the native/WASM semantic boundary. React and TypeScript
 provide the browser shell, controls, physical browser I/O, and presentation.
-The planned layout and PDF workloads will run away from the UI thread through
-Web Workers. IndexedDB is the current browser durability adapter.
+Layout work is already derived from canonical bytes through the Rust/WASM
+boundary and scheduled away from the UI thread through a revision-aware Web
+Worker adapter. IndexedDB is the current browser durability adapter. The page
+viewport is a projection of accepted Rust geometry; the semantic DOM remains
+the authoring and accessibility surface.
 
 The canonical model is deliberately not the DOM and is not a PDF page tree.
 This keeps reflow, undo/redo, accessibility projections, and future PDF
@@ -54,24 +58,34 @@ The current tree includes:
 - pinned ICU4X grapheme-boundary validation for UTF-16 browser positions,
   exact atomic-node edges, and a Rust-owned noncanonical editor session/view
   projection in the current Phase 2 working tree;
+- deterministic fixed-point text layout with explicit Noto Sans/font and
+  Ukrainian hyphenation provenance, ICU line segmentation, bidi runs, shaping,
+  UTF-8/UTF-16 cluster ranges, and fail-closed unsupported-glyph paths;
+- schema-v3 section/page settings, bounded static header/footer runs,
+  deterministic fragment pagination, table-row overflow diagnostics, and
+  conservative incremental/full-reflow equivalence checks;
+- a closed string-only Rust/WASM layout protocol, revision/hash-bound worker
+  scheduling with cancellation and stale-result rejection, and an accessible
+  page viewport that renders accepted Rust coordinates beside the semantic DOM;
 - Phase 1 and Phase 2 foundation fixtures, Unicode 17 grapheme conformance
   data, dependency provenance checks, Rust tests, TypeScript checks, and
-  browser tests for the implemented foundation.
+  browser tests for the implemented foundation and Phase 3 layout path.
 
-These capabilities provide the engine contracts and inspection surface. They
-do not yet constitute a finished rich-text editor. In particular, schema
-support for images, lists, tables, page breaks, fields, and styles should not
-be read as a claim that all corresponding UI operations or PDF behavior are
-already implemented.
+These capabilities provide deterministic engine contracts and an inspection
+surface; they do not yet constitute a finished rich-text editor or PDF
+product. Schema support for images, lists, tables, page breaks, fields, and
+styles should not be read as a claim that all corresponding UI operations or
+PDF behavior are already implemented.
 
 ## Planned capabilities
 
 The roadmap is intentionally staged. Remaining work includes, among other
 things:
 
-- accessible paragraph and structured rich-text editing with keyboard, IME,
-  clipboard, visible controls, and synchronized semantic content;
-- deterministic shaping, line breaking, layout, fragmentation, and pagination;
+- broader accessible paragraph and structured rich-text editing with complete
+  keyboard, IME, clipboard, and visible-control coverage;
+- broader script/font coverage, advanced layout constraints, and production
+  pagination hardening beyond the admitted fixtures and bounded Phase 3 path;
 - an owned PDF preview/writer and a bounded PDF reader, with selectable text,
   reproducibility evidence, explicit unsupported-content reporting, and an
   exact owned-source round trip when the source payload is available;
@@ -81,11 +95,13 @@ things:
 - controlled external-PDF reconstruction/OCR and later native editing of
   supported PDF scene islands.
 
-The current Phase 2 work is still incomplete. Text shaping, full repagination,
-general PDF import/export, complete assistive-technology validation, voice
-control, and production hardening are not delivered by this repository state.
-See the [roadmap](.planning/ROADMAP.md) and [project constraints](.planning/PROJECT.md)
-for the authoritative scope and sequencing.
+Phase 2 implementation plans and the Phase 3 local implementation gate are
+complete, but the explicitly required Microsoft Edge on Windows plus Windows
+screen-reader evidence remains outstanding. General PDF import/export,
+complete assistive-technology validation, voice control, and production
+hardening are not delivered by this repository state. See the
+[roadmap](.planning/ROADMAP.md) and [project constraints](.planning/PROJECT.md)
+for authoritative scope and sequencing.
 
 ## Repository map
 
@@ -172,13 +188,19 @@ npm run test:unit    # unit and inspector-unit suites
 npm run test:browser # pinned Chromium browser suites
 npm test             # all configured Vitest projects
 npm run check        # the full Phase 1 evidence and regression gate
+npm run check:phase3:smoke # Phase 3 manifest/diagnostic contract smoke
+npm run check:phase3       # Phase 3 local gate; runs exact rows in fixed order
 ```
 
 `npm run test:browser` requires the pinned Chromium installation under
 `work/playwright`. `npm run check` is broader than a local source-only check:
 it validates retained evidence and live dependency provenance as well as Rust,
 WASM, TypeScript, unit, and browser gates, so it can be network- and
-environment-sensitive.
+environment-sensitive. `npm run check:phase3` additionally covers the
+deterministic layout, pagination, worker, viewport, migration, and scale
+lanes; its external AT status remains explicit rather than substituted by
+local Chromium evidence. The terminal Phase 3 verification is two consecutive
+full gate runs after the smoke contract.
 
 For a direct Rust workspace check using the repository-local toolchain:
 
@@ -195,8 +217,9 @@ relevant plan under [`.planning/phases`](.planning/phases).
 
 ## Development status
 
-Phase 1, Durable Flow Foundation, is complete. Phase 2, Accessible Rich-Text
-Editing, is in progress; its later plans still cover the user-facing editor,
-input methods, formatting, structures, accessibility, scale feedback, and
-release gates. The current implementation intentionally makes no claim of
-complete PDF compatibility, commercial-SDK parity, or production readiness.
+Phase 1, Durable Flow Foundation, is complete. Phase 2 implementation plans
+are complete with external Windows/Edge/screen-reader closure still open.
+Phase 3, Deterministic Reflow and Pagination, has completed its six local
+implementation plans and dual-run gate. The current implementation still makes
+no claim of complete PDF compatibility, commercial-SDK parity, or production
+readiness.

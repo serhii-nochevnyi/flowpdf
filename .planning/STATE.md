@@ -4,16 +4,16 @@ milestone: v1.0
 current_phase: 3
 current_phase_name: Deterministic Reflow and Pagination
 status: executing
-stopped_at: Completed 03-05-PLAN.md; ready for 03-06-PLAN.md
-last_updated: "2026-09-21T14:35:03Z"
+stopped_at: Completed 03-06-PLAN.md; Phase 3 local gate is green, with inherited Phase 2 external AT closure still outstanding
+last_updated: "2026-09-21T15:40:17Z"
 last_activity: 2026-09-21
-last_activity_desc: Completed Phase 3 Plan 03-05 revision-safe serialized WASM layout boundary, worker scheduler, stale-result guards, and background editor bridge; Phase 2 implementation remains complete with external Edge/Windows AT evidence outstanding
-state_head: 24155cd
+last_activity_desc: Completed Phase 3 Plan 03-06 accessible page viewport and deterministic dual-run gate; Phase 2 implementation remains complete with external Edge/Windows AT evidence outstanding
+state_head: d777df1
 progress:
   total_phases: 9
   completed_phases: 1
   total_plans: 30
-  completed_plans: 29
+  completed_plans: 30
 milestone_name: milestone
 ---
 
@@ -29,17 +29,17 @@ See: .planning/PROJECT.md (updated 2026-08-25)
 ## Current Position
 
 Phase: 3 (Deterministic Reflow and Pagination) — EXECUTING
-Plan: 5 of 6
-Status: 03-05 complete; ready for 03-06. Phase 2 external Edge/Windows screen-reader evidence remains outstanding.
-Last activity: 2026-09-21 — Revision-safe serialized WASM layout boundary, worker scheduler, stale-result guards, and background editor bridge completed
+Plan: 6 of 6
+Status: 03-06 complete; Phase 3 local implementation and gate are green. Phase 2 external Edge/Windows screen-reader evidence remains outstanding.
+Last activity: 2026-09-21 — Accessible page viewport, semantic/visual revision synchronization, and deterministic Phase 3 dual-run gate completed
 
-Progress: Phase 2 — 18/18 implementation plans complete; Phase 3 — 4/6 plans executed; milestone percentage unavailable while later phases remain unplanned.
+Progress: Phase 2 — 18/18 implementation plans complete; Phase 3 — 6/6 local implementation plans executed; phase-level closure remains honest about inherited external AT evidence and later phases remain unplanned.
 
 ## Performance Metrics
 
 **Velocity:**
 
-- Total plans completed: 25
+- Total plans completed: 30
 - Average duration: not comparable (Plan 05 was a multi-session closeout)
 - Total execution time: multi-session
 
@@ -49,9 +49,9 @@ Progress: Phase 2 — 18/18 implementation plans complete; Phase 3 — 4/6 plans
 |-------|-------|-------|----------|
 | 1 | 6 | - | - |
 | 2 | 18 | multi-session | - |
-| 3 | 2 | same session | - |
+| 3 | 6 | multi-session | - |
 
-**Recent Trend:** Schema-v2 tree, lossless migration, editor accessibility, exact UI coverage, deterministic semantic scale, and the dual-run release gate remain green. Plan 02-18 closes all Phase 2 implementation plans with 7/7 requirements, 33/33 edges, 108/108 UI owners, and 3/3 flagged prohibitions; Edge/Windows screen-reader UAT remains explicitly outstanding before Phase 2 closure. Phase 3 Plan 03-01 now provides the Rust-first typography tracer as the first executable slice.
+**Recent Trend:** Schema-v2 tree, lossless migration, editor accessibility, exact UI coverage, deterministic semantic scale, and the dual-run release gate remain green. Plan 02-18 closes all Phase 2 implementation plans with 7/7 requirements, 33/33 edges, 108/108 UI owners, and 3/3 flagged prohibitions; Edge/Windows screen-reader UAT remains explicitly outstanding before Phase 2 closure. Phase 3 now has all six local implementation plans complete, including Rust typography/pagination, schema-v3 sections, incremental equivalence, revision-safe workers, the accessible viewport, and a two-run local gate; Phase 3 phase-level closure does not invent the inherited external AT result.
 **Per-Plan Metrics:**
 
 | Plan | Duration | Tasks | Files |
@@ -138,6 +138,8 @@ Decisions are logged in `.planning/PROJECT.md`.
 - [Phase 3]: Carry signatures bind revision/hash, layout settings, font/hyphenation identities, boundary, and accepted page prefix; stale, forged, cross-fingerprint, and unknown inputs cannot publish reused results.
 - [Phase 3]: The WASM layout boundary is string-only and versioned; bounded canonical/font/data ingress is consumed by Rust, while results expose only derived fragments, privacy-safe diagnostics, identities, and Rust-verified hashes.
 - [Phase 3]: A single-flight worker scheduler aborts superseded requests and atomically publishes only complete results whose request ID, source revision/hash, settings, font/data identities, and result hash still match; editor/session input remains independent.
+- [Phase 3]: The page viewport is a derived visual projection over accepted Rust fixed-point fragments; the semantic DOM/input host remains the single authoring and accessibility surface.
+- [Phase 3]: The executable Phase 3 gate covers exactly the local LAYO-01..08 rows, retains Phase 1/2 local regression lanes, emits allowlisted diagnostics, and records inherited Edge/Windows AT as unavailable/outstanding rather than substituting local Chromium evidence.
 
 ### Pending Todos
 
@@ -158,6 +160,6 @@ Decisions are logged in `.planning/PROJECT.md`.
 
 ## Session Continuity
 
-Last session: 2026-09-21T14:35:03Z
-Stopped at: Completed 03-05-PLAN.md; ready for 03-06-PLAN.md
+Last session: 2026-09-21T15:40:17Z
+Stopped at: Completed 03-06-PLAN.md; local Phase 3 gate is green and the inherited Phase 2 external AT checkpoint remains outstanding
 Resume file: None
