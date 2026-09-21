@@ -13,6 +13,7 @@ pub mod editor_view;
 pub mod invalidation;
 pub mod layout;
 pub mod model;
+pub mod pdf;
 pub mod provenance;
 pub mod schema;
 pub mod store;
@@ -65,6 +66,10 @@ pub use layout::{
 use model::{
     Affinity, CommandId, DocumentId, FlowDocument, LogicalPosition, MigrationHop, Provenance,
     SCHEMA_VERSION,
+};
+pub use pdf::{
+    CosDocument, CosValue, PDF_EXPORT_SCHEMA_VERSION, PdfError, PdfExportOptions, PdfExportRequest,
+    PdfExportResult, PdfName, PdfPageContent, PdfPagePlan, PdfRef, export_pdf,
 };
 use provenance::{ProvenanceError, RevisionHash, RevisionProvenance};
 use schema::{DocumentLimits, LimitKind, MigrationRegistry, MigrationReport, SchemaError};
