@@ -49,7 +49,7 @@
       },
       {
         "path": "crates/flow-core/src/forms/mod.rs",
-        "sha256": "sha256:1b352e62631772cc5355a1cdb3d9fdf8bad2ea6edc8580cea834d2b4bff4117e"
+        "sha256": "sha256:a37a121285ebbf2ccf920e662ba4f55afdf9cca78e158fdbadf5437b450b8403"
       },
       {
         "path": "crates/flow-core/src/invalidation/mod.rs",
@@ -61,7 +61,7 @@
       },
       {
         "path": "crates/flow-core/src/lib.rs",
-        "sha256": "sha256:d08ec006bd4dd3e1c8da4ebd62486632ff59252c99bab3523f34adca2ab82b0e"
+        "sha256": "sha256:bec3a4d934020fce8b1e4cb6d348e1bc9f0db70e23ffcc873bdadac5a9ed8d8d"
       },
       {
         "path": "crates/flow-core/src/model/mod.rs",
@@ -136,7 +136,7 @@
         "sha256": "sha256:9d50a6f28923fc94c0d56dccc9038a12a8ff040f764a8ff048fa6d5a9eba722c"
       }
     ],
-    "digest": "sha256:4fbfb3a5f93f57d5a47aa2e92841e66ccdbf1374716cbdca47f416dc9bb33e23"
+    "digest": "sha256:8a5ade325e59b358e7c63ede68397eef71dd285673297f249872a03485e17716"
   },
   "toolchain": {
     "node": "v24.10.0",
@@ -181,37 +181,37 @@
         "plannedTransactionCount": 1000
       },
       "durationsMilliseconds": [
-        508.178167,
-        507.389916,
-        507.187375,
-        510.32129199999997,
-        508.897916,
-        508.97445799999997,
-        509.20799999999997,
-        509.57154199999997,
-        508.523917,
-        512.851833,
-        514.253958,
-        513.2602499999999,
-        512.039916,
-        512.78,
-        511.27058299999993,
-        511.54625,
-        514.902791,
-        512.024708,
-        513.618958,
-        508.87412499999994
+        498.618125,
+        503.35037500000004,
+        503.029583,
+        503.00058299999995,
+        508.24241699999993,
+        504.29966699999994,
+        506.99579100000005,
+        512.033,
+        505.70591600000006,
+        506.243167,
+        502.23091600000004,
+        501.83733399999994,
+        501.311375,
+        503.06125000000003,
+        502.13383300000004,
+        500.28775,
+        502.64312499999994,
+        505.042875,
+        503.20983399999994,
+        504.989708
       ],
-      "p50Milliseconds": 510.32129199999997,
-      "p95Milliseconds": 514.253958
+      "p50Milliseconds": 503.06125000000003,
+      "p95Milliseconds": 508.24241699999993
     }
   ],
   "selectedPolicy": {
     "transactionInterval": 100,
     "byteInterval": 4194304
   },
-  "p50Milliseconds": 510.32129199999997,
-  "p95Milliseconds": 514.253958,
+  "p50Milliseconds": 503.06125000000003,
+  "p95Milliseconds": 508.24241699999993,
   "p95TargetMilliseconds": 2000,
   "passed": true,
   "blocked": false
