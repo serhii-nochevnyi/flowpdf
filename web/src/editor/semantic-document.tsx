@@ -24,12 +24,19 @@ import {
   imageSource,
 } from './embedded-blocks.js'
 import { FieldNavigation } from './field-navigation.js'
+import type {
+  FormSessionCoordinator,
+  FormSessionCoordinatorSnapshot,
+} from '../forms/form-session.js'
 
 export interface SemanticDocumentProps {
   readonly view: EditorViewDto
   readonly controller: InputCommandTarget
   readonly locale?: EditorLocale
   readonly onInputError?: (code: string | null) => void
+  readonly canonicalJson?: string | undefined
+  readonly formSession?: FormSessionCoordinator | undefined
+  readonly formSessionSnapshot?: FormSessionCoordinatorSnapshot | undefined
 }
 
 interface RenderContext {
@@ -58,6 +65,9 @@ export function SemanticDocument({
   controller,
   locale = 'uk',
   onInputError,
+  canonicalJson,
+  formSession,
+  formSessionSnapshot,
 }: SemanticDocumentProps) {
   const rootRef = useRef<HTMLElement>(null)
   const hostRef = useRef<HTMLTextAreaElement>(null)
@@ -175,6 +185,9 @@ export function SemanticDocument({
         fields={view.document.fields}
         fieldReview={view.document.fieldReview}
         locale={locale}
+        canonicalJson={canonicalJson}
+        formSession={formSession}
+        formSessionSnapshot={formSessionSnapshot}
       />
       <textarea
         ref={hostRef}

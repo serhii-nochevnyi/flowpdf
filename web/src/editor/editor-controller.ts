@@ -46,6 +46,7 @@ import type {
   PdfExportSchedulerSnapshotDto,
 } from '../pdf/pdf-protocol.js'
 import type { PdfExportScheduleOutcome } from '../pdf/pdf-worker.js'
+import type { FormSessionWasmBoundary } from '../forms/form-session.js'
 
 export type { EditorLocale }
 
@@ -349,6 +350,7 @@ export interface WasmBoundary {
   readonly query_document: (request: RecoveryRecordsDto) => ApiResponse<RecoverResultDto>
   readonly query_editor_view: (request: unknown) => ApiResponse<EditorViewDto>
   readonly recover_document_audited: (request: unknown) => ApiResponse<AuditedRecoverResultDto>
+  readonly apply_form_session?: FormSessionWasmBoundary['apply_form_session']
   readonly layout_document?: (requestJson: string) => string
   readonly verify_layout_response?: (responseJson: string) => boolean
   readonly export_pdf?: (requestJson: string) => string
@@ -489,7 +491,7 @@ const EMPTY_ASSET_HASH =
 const EDITED_TEXT = ' — зміна / edit'
 let wasmPromise: Promise<WasmBoundary> | undefined
 
-async function loadWasm(): Promise<WasmBoundary> {
+export async function loadWasm(): Promise<WasmBoundary> {
   if (wasmPromise === undefined) {
     const pending = import(/* @vite-ignore */ GENERATED_WASM_MODULE).then(
       async (module: unknown) => {

@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 
 import {
   FormSessionBridgeError,
+  FormSessionCoordinator,
   RustFormSessionBridge,
   type FormSessionApiResponse,
   type FormSessionPersistence,
@@ -176,6 +177,67 @@ describe('RustFormSessionBridge', () => {
     )
     await expect(mismatched.restoreOrStart('{}', identity)).rejects.toMatchObject({
       code: 'FLOW_FORM_SESSION_IDENTITY_MISMATCH',
+    })
+  })
+})
+
+describe('FormSessionCoordinator', () => {
+  it('publishes one source-bound session and serializes accepted mutations', async () => {
+    const requests: FormSessionRequestDto[] = []
+    const persistence = new MemoryFormSessionPersistence()
+    const coordinator = new FormSessionCoordinator({
+      wasm: Promise.resolve(wasmFixture(requests)),
+      persistence,
+    })
+    let notifications = 0
+    const unsubscribe = coordinator.subscribe(() => {
+      notifications += 1
+    })
+
+    await coordinator.synchronize('{"revision":3}', identity)
+    expect(coordinator.getSnapshot()).toMatchObject({
+      phase: 'ready',
+      identity,
+      session: { generation: 0, overrides: {} },
+      errorCode: null,
+    })
+    await coordinator.setValue(
+      '{"revision":3}',
+      identity,
+      'name',
+      { type: 'text', value: 'Олена' },
+    )
+    expect(coordinator.getSnapshot().session?.overrides).toEqual({
+      name: { type: 'text', value: 'Олена' },
+    })
+    await coordinator.clearValue('{"revision":3}', identity, 'name')
+    expect(coordinator.getSnapshot().session?.overrides).toEqual({})
+    expect(persistence.saves.map(({ expected }) => expected)).toEqual([null, 0, 1])
+    expect(requests.map(({ action }) => action.type)).toEqual([
+      'start',
+      'setValue',
+      'clearValue',
+    ])
+    expect(notifications).toBeGreaterThanOrEqual(4)
+    unsubscribe()
+  })
+
+  it('drops the previous session on a source change before loading the new identity', async () => {
+    const requests: FormSessionRequestDto[] = []
+    const persistence = new MemoryFormSessionPersistence()
+    const coordinator = new FormSessionCoordinator({
+      wasm: Promise.resolve(
+        wasmFixture(requests, { identity: { ...identity, sourceRevision: 4 } }),
+      ),
+      persistence,
+    })
+    const otherIdentity = { ...identity, sourceRevision: 4 }
+
+    await coordinator.synchronize('{"revision":4}', otherIdentity)
+    expect(coordinator.getSnapshot()).toMatchObject({
+      phase: 'ready',
+      identity: otherIdentity,
+      session: { sourceRevision: 4 },
     })
   })
 })

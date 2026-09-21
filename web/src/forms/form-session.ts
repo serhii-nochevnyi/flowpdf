@@ -51,11 +51,33 @@ export interface FormSessionPersistence {
   saveFormSession(session: FormSessionStateDto, expectedGeneration: number | null): Promise<void>
 }
 
+export type FormSessionCoordinatorPhase = 'idle' | 'loading' | 'ready' | 'error'
+
+export interface FormSessionCoordinatorSnapshot {
+  readonly phase: FormSessionCoordinatorPhase
+  readonly identity: FormSessionIdentityDto | null
+  readonly session: FormSessionStateDto | null
+  readonly errorCode: string | null
+}
+
+export interface OptionalFormSessionWasmBoundary {
+  readonly apply_form_session?: FormSessionWasmBoundary['apply_form_session']
+}
+
 export class FormSessionBridgeError extends Error {
   constructor(readonly code: string) {
     super(code)
     this.name = 'FormSessionBridgeError'
   }
+}
+
+export function requireFormSessionWasm(
+  boundary: OptionalFormSessionWasmBoundary,
+): FormSessionWasmBoundary {
+  if (boundary.apply_form_session === undefined) {
+    throw new FormSessionBridgeError('FLOW_FORM_SESSION_UNAVAILABLE')
+  }
+  return { apply_form_session: boundary.apply_form_session }
 }
 
 /**
@@ -153,6 +175,137 @@ export class RustFormSessionBridge {
   }
 }
 
+/**
+ * Owns only the browser-facing lifecycle of one source-bound session. The
+ * editor controller remains the authority for canonical revisions/history.
+ */
+export class FormSessionCoordinator {
+  private readonly bridge: Promise<RustFormSessionBridge>
+  private readonly listeners = new Set<() => void>()
+  private snapshotValue: FormSessionCoordinatorSnapshot = Object.freeze({
+    phase: 'idle',
+    identity: null,
+    session: null,
+    errorCode: null,
+  })
+  private synchronizationToken = 0
+  private actionQueue: Promise<void> = Promise.resolve()
+
+  constructor(options: {
+    readonly wasm: Promise<FormSessionWasmBoundary>
+    readonly persistence: FormSessionPersistence
+  }) {
+    this.bridge = options.wasm.then(
+      (wasm) => new RustFormSessionBridge(wasm, options.persistence),
+    )
+  }
+
+  readonly subscribe = (listener: () => void): (() => void) => {
+    this.listeners.add(listener)
+    return () => this.listeners.delete(listener)
+  }
+
+  readonly getSnapshot = (): FormSessionCoordinatorSnapshot => this.snapshotValue
+
+  async synchronize(
+    canonicalJson: string,
+    identity: FormSessionIdentityDto,
+  ): Promise<void> {
+    const current = this.snapshotValue
+    if (
+      sameIdentity(current.identity, identity) &&
+      (current.phase === 'ready' || current.phase === 'loading')
+    ) {
+      return
+    }
+    const token = ++this.synchronizationToken
+    this.publish({ phase: 'loading', identity, session: null, errorCode: null })
+    try {
+      const session = await (await this.bridge).restoreOrStart(canonicalJson, identity)
+      if (token !== this.synchronizationToken) return
+      this.publish({ phase: 'ready', identity, session, errorCode: null })
+    } catch (error: unknown) {
+      if (token !== this.synchronizationToken) return
+      this.publish({
+        phase: 'error',
+        identity,
+        session: null,
+        errorCode: sessionErrorCode(error),
+      })
+    }
+  }
+
+  setValue(
+    canonicalJson: string,
+    identity: FormSessionIdentityDto,
+    fieldId: string,
+    value: FormSessionValueDto,
+  ): Promise<void> {
+    return this.enqueue(() => this.mutate('set', canonicalJson, identity, fieldId, value))
+  }
+
+  clearValue(
+    canonicalJson: string,
+    identity: FormSessionIdentityDto,
+    fieldId: string,
+  ): Promise<void> {
+    return this.enqueue(() => this.mutate('clear', canonicalJson, identity, fieldId, null))
+  }
+
+  private enqueue(work: () => Promise<void>): Promise<void> {
+    const next = this.actionQueue.then(work, work)
+    this.actionQueue = next.then(
+      () => undefined,
+      () => undefined,
+    )
+    return next
+  }
+
+  private async mutate(
+    operation: 'set' | 'clear',
+    canonicalJson: string,
+    identity: FormSessionIdentityDto,
+    fieldId: string,
+    value: FormSessionValueDto | null,
+  ): Promise<void> {
+    const current = this.snapshotValue
+    if (current.session === null || !sameIdentity(current.identity, identity)) {
+      const error = new FormSessionBridgeError('FLOW_FORM_SESSION_NOT_READY')
+      this.publishError(identity, error.code, current.session)
+      throw error
+    }
+    try {
+      const bridge = await this.bridge
+      const session =
+        operation === 'set'
+          ? await bridge.setValue(canonicalJson, identity, current.session, fieldId, value!)
+          : await bridge.clearValue(canonicalJson, identity, current.session, fieldId)
+      if (!sameIdentity(this.snapshotValue.identity, identity)) {
+        throw new FormSessionBridgeError('FLOW_FORM_SESSION_SOURCE_CHANGED')
+      }
+      this.publish({ phase: 'ready', identity, session, errorCode: null })
+    } catch (error: unknown) {
+      if (sameIdentity(this.snapshotValue.identity, identity)) {
+        this.publishError(identity, sessionErrorCode(error), current.session)
+      }
+      throw error
+    }
+  }
+
+  private publishError(
+    identity: FormSessionIdentityDto,
+    errorCode: string,
+    session: FormSessionStateDto | null,
+  ): void {
+    this.publish({ phase: 'error', identity, session, errorCode })
+  }
+
+  private publish(snapshot: FormSessionCoordinatorSnapshot): void {
+    this.snapshotValue = Object.freeze(snapshot)
+    for (const listener of this.listeners) listener()
+  }
+}
+
 function isTransportSession(value: unknown): value is FormSessionStateDto {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return false
   const candidate = value as Partial<FormSessionStateDto>
@@ -171,12 +324,22 @@ function isTransportSession(value: unknown): value is FormSessionStateDto {
 }
 
 function sameIdentity(
-  left: FormSessionIdentityDto,
-  right: FormSessionIdentityDto,
+  left: FormSessionIdentityDto | null,
+  right: FormSessionIdentityDto | null,
 ): boolean {
+  if (left === null || right === null) return left === right
   return (
     left.documentId === right.documentId &&
     left.sourceRevision === right.sourceRevision &&
     left.sourceHash === right.sourceHash
   )
+}
+
+function sessionErrorCode(error: unknown): string {
+  if (error instanceof FormSessionBridgeError) return error.code
+  if (error !== null && typeof error === 'object') {
+    const code = (error as { readonly code?: unknown }).code
+    if (typeof code === 'string' && code.length > 0) return code
+  }
+  return 'FLOW_FORM_SESSION_UNEXPECTED'
 }

@@ -71,7 +71,21 @@ for (const locale of ['uk', 'en'] as const) {
       expect(card.dataset.fieldNodeId).toBe(
         accepted.editor.view.document.fields[index]?.descriptor.anchor.original.nodeId,
       )
-      expect(card.querySelectorAll('input, select, textarea, button')).toHaveLength(0)
+      const descriptor = accepted.editor.view.document.fields[index]?.descriptor
+      if (descriptor === undefined) throw new Error('field descriptor is required')
+      const nativeControlCount =
+        descriptor.kind.type === 'text'
+          ? 1
+          : descriptor.kind.type === 'checkbox'
+            ? 1
+            : descriptor.kind.type === 'radioGroup'
+              ? descriptor.options.length
+              : descriptor.kind.type === 'select'
+                ? 1
+                : 0
+      expect(card.querySelectorAll('input, select, textarea, button')).toHaveLength(
+        nativeControlCount + (descriptor.kind.type === 'signature' || descriptor.kind.type === 'button' ? 0 : 1),
+      )
       expect(getComputedStyle(card).minHeight).toBe('44px')
     }
     expect(fieldsRegion.querySelectorAll('[data-field-option-id]').length).toBeGreaterThan(0)

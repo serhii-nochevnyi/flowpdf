@@ -1,6 +1,7 @@
 import { createRoot } from 'react-dom/client'
 import { useEffect, useRef, useState, useSyncExternalStore } from 'react'
 
+import { IndexedDbDocumentStore } from '../../persistence/indexeddb-store.js'
 import {
   mountFoundationInspector,
   type FoundationInspectorLocale,
@@ -14,12 +15,14 @@ import {
   type EditorPdfExportScheduler,
   type SourceModality,
   type StructuralCommandDto,
+  loadWasm,
 } from './editor-controller.js'
 import { EditorToolbar } from './editor-toolbar.js'
 import { EditorShell } from './editor-shell.js'
 import { SemanticDocument } from './semantic-document.js'
 import { PageViewport } from '../layout/page-viewport.js'
 import { PdfPreview } from '../pdf/pdf-preview.js'
+import { FormSessionCoordinator, requireFormSessionWasm } from '../forms/form-session.js'
 import type {
   DirectionalSelectionDto,
   EditorAcceptedSnapshot,
@@ -75,10 +78,22 @@ export function EditorApp({ controller: suppliedController, options = {} }: Edit
   const [controller] = useState(
     () => suppliedController ?? new EditorController(options),
   )
+  const [formSession] = useState(
+    () =>
+      new FormSessionCoordinator({
+        wasm: loadWasm().then(requireFormSessionWasm),
+        persistence: new IndexedDbDocumentStore(options.databaseName),
+      }),
+  )
   const snapshot = useSyncExternalStore(
     controller.subscribe,
     controller.getSnapshot,
     controller.getSnapshot,
+  )
+  const formSessionSnapshot = useSyncExternalStore(
+    formSession.subscribe,
+    formSession.getSnapshot,
+    formSession.getSnapshot,
   )
   const locale = options.locale ?? 'uk'
   const labels = copy(locale)
@@ -95,6 +110,22 @@ export function EditorApp({ controller: suppliedController, options = {} }: Edit
   useEffect(() => {
     setInputError(null)
   }, [snapshot.accepted?.session.revision])
+
+  useEffect(() => {
+    const accepted = snapshot.accepted
+    if (accepted === null) return
+    void formSession.synchronize(accepted.session.canonicalJson, {
+      documentId: accepted.session.documentId,
+      sourceRevision: accepted.session.revision,
+      sourceHash: accepted.session.canonicalHash,
+    })
+  }, [
+    formSession,
+    snapshot.accepted?.session.canonicalHash,
+    snapshot.accepted?.session.canonicalJson,
+    snapshot.accepted?.session.documentId,
+    snapshot.accepted?.session.revision,
+  ])
 
   const openDiagnostics = (): void => {
     if (diagnosticsMounted.current || diagnosticsRoot.current === null) return
@@ -216,6 +247,9 @@ export function EditorApp({ controller: suppliedController, options = {} }: Edit
               controller={controller}
               locale={locale}
               onInputError={setInputError}
+              canonicalJson={accepted.session.canonicalJson}
+              formSession={formSession}
+              formSessionSnapshot={formSessionSnapshot}
             />
           </section>
           <PageViewport

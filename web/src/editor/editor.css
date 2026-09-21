@@ -265,6 +265,17 @@
   font-weight: 600;
 }
 
+.editor-field-session-status {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.editor-field-session-error,
+.editor-field-noneditable {
+  color: var(--status-error);
+  font-weight: 600;
+}
+
 .editor-field-list {
   display: grid;
   gap: 12px;
@@ -319,6 +330,76 @@
 .editor-field-options {
   margin: 0;
   padding-inline-start: 20px;
+}
+
+.editor-field-control {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.editor-field-control label,
+.editor-field-control legend {
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
+.editor-field-control input:not([type='checkbox']):not([type='radio']),
+.editor-field-control select,
+.editor-field-control textarea {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 44px;
+  padding: 8px;
+  border: 1px solid var(--border-default);
+  border-radius: 4px;
+  background: var(--surface-app);
+  color: var(--text-primary);
+  font: inherit;
+}
+
+.editor-field-control textarea {
+  min-height: 96px;
+  resize: vertical;
+}
+
+.editor-field-control fieldset {
+  min-width: 0;
+  padding: 8px;
+  border: 1px solid var(--border-default);
+  border-radius: 4px;
+}
+
+.editor-field-control fieldset label {
+  display: block;
+  min-height: 44px;
+  padding: 8px 0;
+}
+
+.editor-field-control input[type='checkbox'],
+.editor-field-control input[type='radio'] {
+  inline-size: 44px;
+  block-size: 44px;
+  vertical-align: middle;
+}
+
+.editor-field-clear {
+  justify-self: start;
+  min-height: 44px;
+  padding: 8px 12px;
+  border: 1px solid var(--border-default);
+  border-radius: 4px;
+  background: var(--surface-card);
+  color: var(--text-primary);
+  font: inherit;
+}
+
+.editor-field-clear:focus-visible,
+.editor-field-control input:focus-visible,
+.editor-field-control select:focus-visible,
+.editor-field-control textarea:focus-visible {
+  outline: 3px solid var(--accent);
+  outline-offset: 2px;
 }
 
 .editor-table-wrapper[data-selected='true'] {
