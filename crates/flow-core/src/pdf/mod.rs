@@ -14,6 +14,7 @@ use crate::layout::{LayoutRect, LayoutUnit};
 mod assets;
 mod display_list;
 mod font;
+mod forms;
 mod metadata;
 mod provenance;
 mod recovery;
@@ -25,6 +26,10 @@ pub use display_list::{
     PdfTextItem, PdfTextLine, build_display_list,
 };
 pub use font::{PdfFontError, PdfFontResource, PdfSubsetGlyph, build_font_resources};
+pub use forms::{
+    PDF_FORM_SCHEMA_VERSION, PdfFormError, PdfFormField, PdfFormFieldType, PdfFormOption,
+    PdfFormPlan, PdfFormValue, build_pdf_form_plan,
+};
 pub use metadata::{
     MAX_PDF_LINK_ENTRIES, MAX_PDF_METADATA_FIELD_BYTES, MAX_PDF_OUTLINE_ENTRIES, PdfInternalLink,
     PdfMetadataError, PdfMetadataOptions, PdfOutlineEntry, PdfSupportReport, PdfSupportedFeature,
@@ -409,6 +414,7 @@ pub struct PdfExportRequest {
     pub pages: Vec<PdfPagePlan>,
     pub options: PdfExportOptions,
     pub reproducibility: PdfReproducibilityInputs,
+    pub form_plan: Option<PdfFormPlan>,
     source_payload: Option<Vec<u8>>,
 }
 
@@ -425,6 +431,7 @@ impl fmt::Debug for PdfExportRequest {
             .field("pages", &self.pages)
             .field("options", &self.options)
             .field("reproducibility", &self.reproducibility)
+            .field("form_plan_present", &self.form_plan.is_some())
             .field("source_payload_present", &self.source_payload.is_some())
             .finish()
     }
@@ -469,8 +476,22 @@ impl PdfExportRequest {
             pages,
             options,
             reproducibility: PdfReproducibilityInputs::default(),
+            form_plan: None,
             source_payload: None,
         })
+    }
+
+    /// Attaches a validated, source-bound derived form plan to the export.
+    pub fn with_form_plan(mut self, plan: PdfFormPlan) -> Result<Self, PdfError> {
+        if plan.source_revision != self.source_revision {
+            return Err(PdfFormError::RevisionMismatch.into());
+        }
+        if plan.source_hash != self.source_hash {
+            return Err(PdfFormError::SourceHashMismatch.into());
+        }
+        forms::validate_pdf_form_plan(&plan)?;
+        self.form_plan = Some(plan);
+        Ok(self)
     }
 
     /// Adds the exact derived identities that make an export reproducible.
@@ -528,6 +549,12 @@ impl PdfExportRequest {
             &self.options.internal_links,
         );
         provenance::append_inputs_fingerprint(&mut bytes, &self.reproducibility);
+        if let Some(form_plan) = &self.form_plan {
+            let form_bytes = serde_json::to_vec(form_plan)
+                .map_err(|_| PdfError::Forms(PdfFormError::Serialization))?;
+            bytes.extend_from_slice(&form_bytes);
+            bytes.push(b'\n');
+        }
         for page in &self.pages {
             append_ascii(
                 &mut bytes,
@@ -622,6 +649,8 @@ pub enum PdfError {
     Metadata(#[from] PdfMetadataError),
     #[error("PDF provenance or source-payload validation failed: {0}")]
     Provenance(#[from] PdfProvenanceError),
+    #[error("PDF form validation failed: {0}")]
+    Forms(#[from] PdfFormError),
 }
 
 impl PdfError {
@@ -648,6 +677,7 @@ impl PdfError {
             Self::NumericLimit => "FLOW_PDF_NUMERIC_LIMIT",
             Self::Metadata(error) => error.code(),
             Self::Provenance(error) => error.code(),
+            Self::Forms(error) => error.code(),
         }
     }
 }
@@ -658,7 +688,11 @@ pub fn export_pdf(request: &PdfExportRequest) -> Result<PdfExportResult, PdfErro
     let manifest = provenance::build_manifest(request, &export_fingerprint)?;
     let private_source_stream =
         provenance::encode_source_envelope(&manifest, request.source_payload.as_deref())?;
-    let support_report = PdfSupportReport::current();
+    let support_report = if request.form_plan.is_some() {
+        PdfSupportReport::current().with_form_fields()
+    } else {
+        PdfSupportReport::current()
+    };
     let mut document = CosDocument::new();
     let pages_ref = document.add_object(CosValue::Null)?;
     let mut page_refs = Vec::with_capacity(request.pages.len());
@@ -717,6 +751,16 @@ pub fn export_pdf(request: &PdfExportRequest) -> Result<PdfExportResult, PdfErro
         ])?)?;
         page_annotations[page_index].push(link_ref);
     }
+
+    let acro_form_ref = if let Some(form_plan) = &request.form_plan {
+        let emission = forms::emit_form_objects(&mut document, form_plan, &page_refs)?;
+        for (page_index, widgets) in emission.page_widgets.into_iter().enumerate() {
+            page_annotations[page_index].extend(widgets);
+        }
+        Some(emission.acro_form_ref)
+    } else {
+        None
+    };
 
     let outline_ref = if request.options.outlines.is_empty() {
         None
@@ -874,6 +918,12 @@ pub fn export_pdf(request: &PdfExportRequest) -> Result<PdfExportResult, PdfErro
     if let Some(outline_ref) = outline_ref {
         catalog_entries.push((PdfName::new("Outlines")?, CosValue::Reference(outline_ref)));
     }
+    if let Some(acro_form_ref) = acro_form_ref {
+        catalog_entries.push((
+            PdfName::new("AcroForm")?,
+            CosValue::Reference(acro_form_ref),
+        ));
+    }
     let catalog_ref = document.add_object(CosValue::dictionary(catalog_entries)?)?;
     document.set_root(catalog_ref)?;
     let bytes = document.write(&export_fingerprint)?;
@@ -916,8 +966,10 @@ fn validate_value_references(
         }
         CosValue::Dictionary(entries) => {
             for (name, value) in entries {
-                let allow_structural_cycle =
-                    allow_parent_cycle || matches!(name.0.as_str(), "Parent" | "Kids" | "Dest");
+                // PDF page, widget, and field dictionaries form legal
+                // back-reference cycles through Parent, Kids, P, and Annots.
+                let allow_structural_cycle = allow_parent_cycle
+                    || matches!(name.0.as_str(), "Parent" | "Kids" | "Dest" | "P" | "Annots");
                 validate_value_references(value, depth + 1, allow_structural_cycle, visit)?;
             }
         }

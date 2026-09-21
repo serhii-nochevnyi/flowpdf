@@ -67,6 +67,7 @@ pub enum PdfSupportedFeature {
     Metadata,
     Outlines,
     InternalLinks,
+    FormFields,
 }
 
 /// Source/PDF constructs that remain explicit non-goals for this export
@@ -133,6 +134,16 @@ impl PdfSupportReport {
                 PdfUnsupportedFeature::Encryption,
             ],
         }
+    }
+
+    /// Returns the current report with semantic form fields promoted to the
+    /// supported subset. Generic annotations remain unsupported.
+    #[must_use]
+    pub fn with_form_fields(mut self) -> Self {
+        self.supported.push(PdfSupportedFeature::FormFields);
+        self.unsupported
+            .retain(|feature| *feature != PdfUnsupportedFeature::FormFields);
+        self
     }
 }
 
