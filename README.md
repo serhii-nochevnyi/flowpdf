@@ -67,6 +67,10 @@ The current tree includes:
 - a closed string-only Rust/WASM layout protocol, revision/hash-bound worker
   scheduling with cancellation and stale-result rejection, and an accessible
   page viewport that renders accepted Rust coordinates beside the semantic DOM;
+- a revision/hash/catalog-bound Rust PDF display-list projection with source
+  UTF-8/UTF-16 ranges, shaped glyph placements, page order, repeated-band
+  provenance, bounded unsupported-content diagnostics, and deterministic
+  admitted TrueType subset/ToUnicode resource preparation;
 - Phase 1 and Phase 2 foundation fixtures, Unicode 17 grapheme conformance
   data, dependency provenance checks, Rust tests, TypeScript checks, and
   browser tests for the implemented foundation and Phase 3 layout path.
@@ -98,11 +102,12 @@ things:
 Phase 2 implementation plans and the Phase 3 local implementation gate are
 complete, but the explicitly required Microsoft Edge on Windows plus Windows
 screen-reader evidence remains outstanding. Phase 4 owned PDF preview/export
-plans are now materialized. The first Phase 4 slice adds only a deterministic
-bounded Rust COS/page envelope; selectable text, embedded fonts, images, source
-recovery, preview, and target-viewer validation remain planned. General PDF
-import/export, complete assistive-technology validation, voice control, and production
-hardening are not delivered by this repository state. See the
+plans are now materialized. The first two Phase 4 slices add a deterministic
+bounded Rust COS/page envelope, a revision-bound display list, and compact
+TrueType/ToUnicode resource inputs. End-to-end PDF content streams, image
+resources, source recovery, preview, target-viewer validation, and general PDF
+import remain planned. Complete assistive-technology validation, voice control,
+and production hardening are not delivered by this repository state. See the
 [roadmap](.planning/ROADMAP.md) and [project constraints](.planning/PROJECT.md)
 for authoritative scope and sequencing.
 
