@@ -4,16 +4,16 @@ milestone: v1.0
 current_phase: 4
 current_phase_name: Owned PDF Preview and Export
 status: executing
-stopped_at: Phase 4 plans 04-01 through 04-06 materialized; ready to execute 04-01 while Phase 2/3 external AT closure remains outstanding
-last_updated: "2026-09-21T16:05:00Z"
+stopped_at: Completed 04-01-PLAN.md; deterministic bounded COS/page envelope is green, ready to execute 04-02 while Phase 2/3 external AT closure remains outstanding
+last_updated: "2026-09-21T16:35:00Z"
 last_activity: 2026-09-21
-last_activity_desc: Planned Phase 4 owned PDF preview/export from the fixed-point layout/display-list contract; no PDF implementation claim yet
-state_head: d777df1
+last_activity_desc: Completed Phase 4 Plan 04-01 deterministic COS/page envelope; selectable text/resources/recovery/preview remain later plans
+state_head: d9c9198
 progress:
   total_phases: 9
   completed_phases: 1
   total_plans: 36
-  completed_plans: 30
+  completed_plans: 31
 milestone_name: milestone
 ---
 
@@ -29,17 +29,17 @@ See: .planning/PROJECT.md (updated 2026-08-25)
 ## Current Position
 
 Phase: 4 (Owned PDF Preview and Export) — EXECUTING
-Plan: 0 of 6
-Status: Plans 04-01 through 04-06 are materialized; Phase 4 implementation has not started. Phase 2/3 external Edge/Windows screen-reader evidence remains outstanding.
-Last activity: 2026-09-21 — Phase 4 COS, selectable export, source recovery, preview, and gate plans created
+Plan: 1 of 6
+Status: 04-01 complete; deterministic bounded COS/page envelope is green. Plans 04-02 through 04-06 remain. Phase 2/3 external Edge/Windows screen-reader evidence remains outstanding.
+Last activity: 2026-09-21 — Phase 4 Plan 04-01 COS, fixed-point serialization, page tree, xref, and bounded failure tests completed
 
-Progress: Phase 2 — 18/18 implementation plans complete; Phase 3 — 6/6 local implementation plans executed; Phase 4 — 0/6 plans executed and 6/6 planned. Phase 2/3 phase-level closure remains honest about inherited external AT evidence.
+Progress: Phase 2 — 18/18 implementation plans complete; Phase 3 — 6/6 local implementation plans executed; Phase 4 — 1/6 plans executed and 6/6 planned. Phase 2/3 phase-level closure remains honest about inherited external AT evidence.
 
 ## Performance Metrics
 
 **Velocity:**
 
-- Total plans completed: 30
+- Total plans completed: 31
 - Average duration: not comparable (Plan 05 was a multi-session closeout)
 - Total execution time: multi-session
 
@@ -85,6 +85,7 @@ Progress: Phase 2 — 18/18 implementation plans complete; Phase 3 — 6/6 local
 | Phase FLOWPDF-03 P02 | same session | 2 tasks | 13 files |
 | Phase FLOWPDF-03 P03 | same session | 2 tasks | 5 files |
 | Phase FLOWPDF-03 P04 | same session | 2 tasks | 5 files |
+| Phase FLOWPDF-04 P01 | same session | 2 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -141,6 +142,7 @@ Decisions are logged in `.planning/PROJECT.md`.
 - [Phase 3]: A single-flight worker scheduler aborts superseded requests and atomically publishes only complete results whose request ID, source revision/hash, settings, font/data identities, and result hash still match; editor/session input remains independent.
 - [Phase 3]: The page viewport is a derived visual projection over accepted Rust fixed-point fragments; the semantic DOM/input host remains the single authoring and accessibility surface.
 - [Phase 3]: The executable Phase 3 gate covers exactly the local LAYO-01..08 rows, retains Phase 1/2 local regression lanes, emits allowlisted diagnostics, and records inherited Edge/Windows AT as unavailable/outstanding rather than substituting local Chromium evidence.
+- [Phase 4]: Owned PDF output begins with a bounded Rust COS graph and fixed-point page envelope; legal page-tree `/Parent` back-references are allowed, arbitrary cycles/dangling references are rejected, and the first slice makes no selectable-text or compatibility claim.
 
 ### Pending Todos
 

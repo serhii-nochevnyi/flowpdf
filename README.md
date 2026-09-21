@@ -98,8 +98,10 @@ things:
 Phase 2 implementation plans and the Phase 3 local implementation gate are
 complete, but the explicitly required Microsoft Edge on Windows plus Windows
 screen-reader evidence remains outstanding. Phase 4 owned PDF preview/export
-plans are now materialized, but their implementation has not started. General
-PDF import/export, complete assistive-technology validation, voice control, and production
+plans are now materialized. The first Phase 4 slice adds only a deterministic
+bounded Rust COS/page envelope; selectable text, embedded fonts, images, source
+recovery, preview, and target-viewer validation remain planned. General PDF
+import/export, complete assistive-technology validation, voice control, and production
 hardening are not delivered by this repository state. See the
 [roadmap](.planning/ROADMAP.md) and [project constraints](.planning/PROJECT.md)
 for authoritative scope and sequencing.
