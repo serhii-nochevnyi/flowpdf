@@ -35,6 +35,7 @@ import {
 import type {
   AcceptedLayoutDto,
   LayoutRequestDto,
+  LayoutSchedulerSnapshotDto,
 } from '../layout/layout-protocol.js'
 import type {
   LayoutScheduleOutcome,
@@ -376,6 +377,7 @@ export interface EditorLayoutScheduler {
   request(request: LayoutRequestDto): Promise<LayoutScheduleOutcome>
   cancel(requestId?: string): void
   accepted(): AcceptedLayoutDto | null
+  snapshot(): LayoutSchedulerSnapshotDto
   subscribe?(listener: () => void): () => void
 }
 
@@ -491,6 +493,7 @@ export class EditorController {
   private readonly layoutRequestFactory:
     | ((accepted: EditorAcceptedSnapshot) => LayoutRequestDto | null)
     | undefined
+  private readonly layoutUnsubscribe: (() => void) | undefined
   private initialized: Promise<void> | undefined
   private pending: Promise<void> = Promise.resolve()
   private sessionPending: Promise<void> = Promise.resolve()
@@ -509,6 +512,12 @@ export class EditorController {
     this.wasm = dependencies.wasm ?? loadWasm()
     this.layoutScheduler = dependencies.layoutScheduler
     this.layoutRequestFactory = dependencies.layoutRequestFactory
+    this.layoutUnsubscribe = this.layoutScheduler?.subscribe?.(() => {
+      this.stateStore.publishLayout(this.layoutScheduler?.snapshot() ?? emptyLayoutSnapshot())
+    })
+    if (this.layoutScheduler !== undefined) {
+      this.stateStore.publishLayout(this.layoutScheduler.snapshot())
+    }
   }
 
   readonly subscribe = (listener: () => void): (() => void) =>
@@ -987,6 +996,7 @@ export class EditorController {
 
   dispose(): void {
     this.layoutScheduler?.cancel()
+    this.layoutUnsubscribe?.()
     if (typeof globalThis.URL?.revokeObjectURL === 'function') {
       for (const objectUrl of this.imageObjectUrls.values()) {
         globalThis.URL.revokeObjectURL(objectUrl)
@@ -1255,6 +1265,15 @@ export class EditorController {
     // Layout is a derived background projection. A slow worker must never
     // extend the command/session barrier or block active IME/editor input.
     void this.layoutScheduler.request(request)
+  }
+}
+
+function emptyLayoutSnapshot(): LayoutSchedulerSnapshotDto {
+  return {
+    phase: 'idle',
+    accepted: null,
+    requestId: null,
+    errorCode: null,
   }
 }
 

@@ -94,6 +94,16 @@
     },
     {
       "ecosystem": "crates.io",
+      "name": "hyphenation",
+      "version": "0.8.4",
+      "kind": "dependency",
+      "repository": "https://github.com/tapeinosyne/hyphenation",
+      "publishedAt": "2021-08-19T10:23:20.719344Z",
+      "checksum": "bcf4dd4c44ae85155502a52c48739c8a48185d1449fff1963cffee63c28a50f0",
+      "source": "https://crates.io/api/v1/crates/hyphenation/0.8.4"
+    },
+    {
+      "ecosystem": "crates.io",
       "name": "icu_segmenter",
       "version": "2.3.0",
       "kind": "dependency",
@@ -111,6 +121,36 @@
       "publishedAt": "2026-03-10T16:29:18.250581Z",
       "checksum": "85ab80394333c02fe689eaf900ab500fbd0c2213da414687ebf995a65d5a6104",
       "source": "https://crates.io/api/v1/crates/image/0.25.10"
+    },
+    {
+      "ecosystem": "crates.io",
+      "name": "rustybuzz",
+      "version": "0.20.1",
+      "kind": "dependency",
+      "repository": "https://github.com/harfbuzz/rustybuzz",
+      "publishedAt": "2024-11-12T11:53:33.625252Z",
+      "checksum": "fd3c7c96f8a08ee34eff8857b11b49b07d71d1c3f4e88f8a88d4c9e9f90b1702",
+      "source": "https://crates.io/api/v1/crates/rustybuzz/0.20.1"
+    },
+    {
+      "ecosystem": "crates.io",
+      "name": "ttf-parser",
+      "version": "0.25.1",
+      "kind": "dependency",
+      "repository": "https://github.com/harfbuzz/ttf-parser",
+      "publishedAt": "2024-11-29T19:59:37.395141Z",
+      "checksum": "d2df906b07856748fa3f6e0ad0cbaa047052d4a7dd609e231c4f72cee8c36f31",
+      "source": "https://crates.io/api/v1/crates/ttf-parser/0.25.1"
+    },
+    {
+      "ecosystem": "crates.io",
+      "name": "unicode-bidi",
+      "version": "0.3.18",
+      "kind": "dependency",
+      "repository": "https://github.com/servo/unicode-bidi",
+      "publishedAt": "2024-12-16T23:09:47.459625Z",
+      "checksum": "5c1cb5db39152898a79168971543b1cb5020dff7fe43c8dc468b0885f5e29df5",
+      "source": "https://crates.io/api/v1/crates/unicode-bidi/0.3.18"
     }
   ],
   "npm": [

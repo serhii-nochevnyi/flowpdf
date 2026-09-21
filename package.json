@@ -20,6 +20,8 @@
     "test:unit": "PLAYWRIGHT_BROWSERS_PATH=./work/playwright vitest run --project unit --project inspector-unit",
     "check:phase2:smoke": "node --test tests/contracts/phase2-scale.test.mjs && node scripts/verify-phase2-scale.mjs --smoke",
     "check:phase2": "node scripts/check-phase2.mjs",
+    "check:phase3:smoke": "node --test tests/contracts/phase3-gate.test.mjs",
+    "check:phase3": "node scripts/check-phase3.mjs",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

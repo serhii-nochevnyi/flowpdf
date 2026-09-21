@@ -124,6 +124,8 @@ export function SemanticDocument({
       ref={rootRef}
       className="semantic-document"
       data-editor-document=""
+      data-semantic-source-revision={view.revision}
+      data-semantic-document-copy=""
       lang={locale === 'uk' ? 'uk' : 'en'}
       aria-label={locale === 'uk' ? 'Редактор документа' : 'Document editor'}
       onClick={(event) => {

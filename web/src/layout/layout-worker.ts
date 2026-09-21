@@ -3,6 +3,7 @@ import {
   type AcceptedLayoutDto,
   type LayoutRequestDto,
   type LayoutResultDto,
+  type LayoutSchedulerSnapshotDto,
   type LayoutWorkerDiagnosticDto,
   type LayoutWorkerInboundMessage,
   type LayoutWorkerOutboundMessage,
@@ -66,6 +67,9 @@ export class RevisionAwareLayoutScheduler {
   private generation = 0
   private activeRequest: ActiveRequest | null = null
   private acceptedValue: AcceptedLayoutDto | null = null
+  private phase: LayoutSchedulerSnapshotDto['phase'] = 'idle'
+  private pendingRequestId: string | null = null
+  private errorValue: string | null = null
 
   constructor(
     private readonly engine: LayoutEngine,
@@ -76,6 +80,15 @@ export class RevisionAwareLayoutScheduler {
     return this.acceptedValue
   }
 
+  snapshot(): LayoutSchedulerSnapshotDto {
+    return {
+      phase: this.phase,
+      accepted: this.acceptedValue,
+      requestId: this.pendingRequestId,
+      errorCode: this.errorValue,
+    }
+  }
+
   subscribe(listener: () => void): () => void {
     this.listeners.add(listener)
     return () => this.listeners.delete(listener)
@@ -84,6 +97,10 @@ export class RevisionAwareLayoutScheduler {
   request(request: LayoutRequestDto): Promise<LayoutScheduleOutcome> {
     const requestError = validateLayoutRequest(request)
     if (requestError !== null) {
+      this.phase = 'error'
+      this.pendingRequestId = request.requestId
+      this.errorValue = requestError
+      this.notify()
       this.report(request, requestError)
       return Promise.resolve({
         kind: 'failed',
@@ -101,6 +118,10 @@ export class RevisionAwareLayoutScheduler {
       requestId: request.requestId,
       controller,
     }
+    this.phase = 'pending'
+    this.pendingRequestId = request.requestId
+    this.errorValue = null
+    this.notify()
 
     return this.run(request, generation, controller)
   }
@@ -111,6 +132,10 @@ export class RevisionAwareLayoutScheduler {
     active.controller.abort()
     this.generation += 1
     this.activeRequest = null
+    this.phase = this.acceptedValue === null ? 'idle' : 'ready'
+    this.pendingRequestId = null
+    this.errorValue = null
+    this.notify()
   }
 
   dispose(): void {
@@ -138,10 +163,12 @@ export class RevisionAwareLayoutScheduler {
 
       const mismatch = validateLayoutResult(request, result)
       if (mismatch !== null) {
+        this.finishWithError(mismatch)
         this.report(request, mismatch)
         return { kind: 'discarded', requestId: request.requestId, code: mismatch }
       }
       if (!(await this.options.verifyResultHash(result))) {
+        this.finishWithError('FLOW_LAYOUT_RESULT_HASH_INVALID')
         this.report(request, 'FLOW_LAYOUT_RESULT_HASH_INVALID')
         return {
           kind: 'discarded',
@@ -154,7 +181,10 @@ export class RevisionAwareLayoutScheduler {
       // or fragment is visible to consumers before this point.
       const accepted = Object.freeze({ request, result })
       this.acceptedValue = accepted
-      for (const listener of this.listeners) listener()
+      this.phase = 'ready'
+      this.pendingRequestId = null
+      this.errorValue = null
+      this.notify()
       this.options.onPublished?.(accepted)
       return { kind: 'published', accepted }
     } catch (error: unknown) {
@@ -162,6 +192,7 @@ export class RevisionAwareLayoutScheduler {
         return { kind: 'cancelled', requestId: request.requestId }
       }
       const code = errorCode(error)
+      this.finishWithError(code)
       this.report(request, code)
       return { kind: 'failed', requestId: request.requestId, code }
     } finally {
@@ -183,6 +214,17 @@ export class RevisionAwareLayoutScheduler {
       sourceRevision: request.sourceRevision,
       code,
     })
+  }
+
+  private finishWithError(code: string): void {
+    this.phase = 'error'
+    this.pendingRequestId = null
+    this.errorValue = code
+    this.notify()
+  }
+
+  private notify(): void {
+    for (const listener of this.listeners) listener()
   }
 }
 

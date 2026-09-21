@@ -91,6 +91,15 @@ export interface AcceptedLayoutDto {
   readonly result: LayoutWorkerResultDto
 }
 
+export type LayoutSchedulerPhase = 'idle' | 'pending' | 'ready' | 'error'
+
+export interface LayoutSchedulerSnapshotDto {
+  readonly phase: LayoutSchedulerPhase
+  readonly accepted: AcceptedLayoutDto | null
+  readonly requestId: string | null
+  readonly errorCode: string | null
+}
+
 export type LayoutWorkerInboundMessage =
   | { readonly type: 'paginate'; readonly request: LayoutRequestDto }
   | { readonly type: 'cancel'; readonly requestId: string }

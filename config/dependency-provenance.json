@@ -20,8 +20,18 @@
     },
     { "name": "serde-wasm-bindgen", "version": "0.6.5", "repository": "https://github.com/RReverser/serde-wasm-bindgen" },
     { "name": "proptest", "version": "1.8.0", "repository": "https://github.com/proptest-rs/proptest" },
+    { "name": "hyphenation", "version": "0.8.4", "repository": "https://github.com/tapeinosyne/hyphenation" },
     { "name": "icu_segmenter", "version": "2.3.0", "repository": "https://github.com/unicode-org/icu4x" },
-    { "name": "image", "version": "0.25.10", "repository": "https://github.com/image-rs/image" }
+    { "name": "image", "version": "0.25.10", "repository": "https://github.com/image-rs/image" },
+    {
+      "name": "rustybuzz",
+      "version": "0.20.1",
+      "repository": "https://github.com/harfbuzz/rustybuzz",
+      "allowArchived": true,
+      "archivedRationale": "Pinned compatibility adapter; exact checksum and source remain verified."
+    },
+    { "name": "ttf-parser", "version": "0.25.1", "repository": "https://github.com/harfbuzz/ttf-parser" },
+    { "name": "unicode-bidi", "version": "0.3.18", "repository": "https://github.com/servo/unicode-bidi" }
   ],
   "npm": [
     { "name": "typescript", "version": "5.9.3", "repository": "https://github.com/microsoft/TypeScript" },

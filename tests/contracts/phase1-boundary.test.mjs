@@ -33,6 +33,7 @@ const allowedWasmExports = new Set([
   'stage_asset',
   'undo',
 ])
+const phaseThreeWasmExports = new Set(['layout_document', 'verify_layout_response'])
 const forbiddenDirectPackages = new Set([
   '@vitejs/plugin-react',
   'actix-web',
@@ -75,6 +76,7 @@ const forbiddenRuntimeImports = new Set([
 const forbiddenPhaseOneWebPathSegment = /(?:^|[\/._-])(?:auth|backend|collaboration|editor|forms?|layout|pdf|voice)(?=[\/._-]|$)/i
 const forbiddenPhaseTwoWebPathSegment = /(?:^|[\/._-])(?:auth|backend|collaboration|forms?|layout|pdf|voice)(?=[\/._-]|$)/i
 const phaseTwoEditorSource = /^(?:web\/src\/main\.tsx|web\/src\/editor\/[A-Za-z0-9._/-]+\.(?:ts|tsx))$/
+const phaseThreeEditorSource = /^(?:web\/src\/main\.tsx|web\/src\/(?:editor|layout)\/[A-Za-z0-9._/-]+\.(?:ts|tsx))$/
 const phaseTwoPackagePins = new Map([
   ['react', { section: 'dependencies', version: '19.2.8' }],
   ['react-dom', { section: 'dependencies', version: '19.2.8' }],
@@ -89,9 +91,9 @@ const phaseTwoViteScripts = new Map([
 ])
 const semanticOwnerName = /^(?:apply|canonicalize|hash|migrate|mutate|recover|redact|replay|serialize)(?:Flow)?(?:Audit|Document|Revision|Transaction)/i
 
-test('the checked-in Phase 1 workspace preserves deferred scope and Rust semantic ownership', async () => {
+test('the checked-in workspace preserves deferred scope and Rust semantic ownership', async () => {
   const snapshot = loadWorkspaceSnapshot(projectRoot)
-  assert.deepEqual(boundaryDiagnostics(snapshot, { phase: 2 }), [])
+  assert.deepEqual(boundaryDiagnostics(snapshot, { phase: 3 }), [])
   assertPhaseTwoParityBoundary(projectRoot, snapshot)
 
   const gatePath = resolve(projectRoot, 'scripts/check-phase1.mjs')
@@ -552,7 +554,7 @@ export function boundaryDiagnostics(snapshot, options = {}) {
       policy,
     )
   }
-  validateWasmBoundary(snapshot.wasmSource, diagnostics)
+  validateWasmBoundary(snapshot.wasmSource, diagnostics, policy)
   return diagnostics.sort()
 }
 
@@ -570,6 +572,14 @@ function boundaryPolicy(options) {
       phase,
       forbiddenWebPathSegment: forbiddenPhaseTwoWebPathSegment,
       allowsEditorSource: (path) => phaseTwoEditorSource.test(path),
+    }
+  }
+  if (phase === 3) {
+    return {
+      phase,
+      forbiddenWebPathSegment:
+        /(?:^|[\/._-])(?:auth|backend|collaboration|forms?|pdf|voice)(?=[\/._-]|$)/i,
+      allowsEditorSource: (path) => phaseThreeEditorSource.test(path),
     }
   }
   throw new RangeError(`unsupported boundary policy phase ${phase}`)
@@ -656,7 +666,7 @@ export function assertPhaseTwoParityBoundary(root, snapshot = loadWorkspaceSnaps
 function validatePackageManifest(packageJson, diagnostics, policy) {
   for (const section of ['dependencies', 'devDependencies', 'optionalDependencies']) {
     for (const [dependency, version] of Object.entries(packageJson[section] ?? {})) {
-      const phaseTwoPin = policy.phase === 2 ? phaseTwoPackagePins.get(dependency) : undefined
+      const phaseTwoPin = policy.phase >= 2 ? phaseTwoPackagePins.get(dependency) : undefined
       if (phaseTwoPin !== undefined) {
         if (section !== phaseTwoPin.section || version !== phaseTwoPin.version) {
           diagnostics.push(
@@ -670,7 +680,7 @@ function validatePackageManifest(packageJson, diagnostics, policy) {
   }
   for (const [name, command] of Object.entries(packageJson.scripts ?? {})) {
     const exactPhaseTwoViteCommand =
-      policy.phase === 2 && phaseTwoViteScripts.get(name) === command
+      policy.phase >= 2 && phaseTwoViteScripts.get(name) === command
     if (
       /\b(?:drizzle-kit|next|prisma|react-scripts|schema\s+push|vite)\b/i.test(command) &&
       !exactPhaseTwoViteCommand
@@ -697,7 +707,7 @@ function validateTypeScript(path, source, diagnostics, capabilities, policy) {
     if (ts.isImportDeclaration(node) && ts.isStringLiteral(node.moduleSpecifier)) {
       const root = packageRoot(node.moduleSpecifier.text)
       const exactPhaseTwoReactImport =
-        policy.phase === 2 &&
+        policy.phase >= 2 &&
         /^(?:react|react-dom)$/.test(root) &&
         policy.allowsEditorSource(path)
       if (forbiddenRuntimeImports.has(root) && !exactPhaseTwoReactImport) {
@@ -709,7 +719,7 @@ function validateTypeScript(path, source, diagnostics, capabilities, policy) {
       ts.isJsxSelfClosingElement(node) ||
       ts.isJsxFragment(node)
     ) {
-      if (policy.phase !== 2 || !policy.allowsEditorSource(path)) {
+      if (policy.phase < 2 || !policy.allowsEditorSource(path)) {
         diagnostics.push(`${path}: JSX/React editor surface is deferred`)
       } else {
         validateJsxElement(path, node, diagnostics)
@@ -1092,7 +1102,11 @@ function validateAssignment(path, source, left, diagnostics) {
   }
 }
 
-function validateWasmBoundary(source, diagnostics) {
+function validateWasmBoundary(source, diagnostics, policy) {
+  const allowedExports = new Set(allowedWasmExports)
+  if (policy.phase >= 3) {
+    for (const exportName of phaseThreeWasmExports) allowedExports.add(exportName)
+  }
   const items = rustWasmItems(source)
   const exports = []
   for (const item of items) {
@@ -1107,7 +1121,7 @@ function validateWasmBoundary(source, diagnostics) {
       continue
     }
     exports.push(item.exportName)
-    if (!allowedWasmExports.has(item.exportName)) {
+    if (!allowedExports.has(item.exportName)) {
       diagnostics.push(`crates/flow-wasm/src/lib.rs: unexpected WASM export ${item.exportName}`)
     }
     if (!hasTypedWasmSignature(item)) {
@@ -1116,7 +1130,7 @@ function validateWasmBoundary(source, diagnostics) {
       )
     }
   }
-  for (const name of allowedWasmExports) {
+  for (const name of allowedExports) {
     const count = exports.filter((candidate) => candidate === name).length
     if (count === 0) {
       diagnostics.push(`crates/flow-wasm/src/lib.rs: missing typed WASM export ${name}`)
@@ -1232,6 +1246,20 @@ function hasTypedWasmSignature(item) {
   const parameters = tokens.slice(4, parametersEnd)
   if (item.exportName === 'stage_asset') {
     return parameters.join('') === 'bytes:&[u8],request:JsValue'
+  }
+  if (item.exportName === 'layout_document') {
+    return (
+      parameters.join('') === 'request_json:String' &&
+      tokens[parametersEnd + 1] === '->' &&
+      tokens.slice(parametersEnd + 2).join('') === 'String'
+    )
+  }
+  if (item.exportName === 'verify_layout_response') {
+    return (
+      parameters.join('') === 'response_json:String' &&
+      tokens[parametersEnd + 1] === '->' &&
+      tokens.slice(parametersEnd + 2).join('') === 'bool'
+    )
   }
   if (
     parameters[0] !== 'request' ||

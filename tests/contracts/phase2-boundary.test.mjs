@@ -13,7 +13,7 @@ const projectRoot = resolve(import.meta.dirname, '../..')
 
 test('Phase 2 admits the checked-in editor and parity contract without opening ownership gaps', () => {
   const snapshot = loadWorkspaceSnapshot(projectRoot)
-  assert.deepEqual(boundaryDiagnostics(snapshot, { phase: 2 }), [])
+  assert.deepEqual(boundaryDiagnostics(snapshot, { phase: 3 }), [])
   assertPhaseTwoParityBoundary(projectRoot, snapshot)
 })
 

@@ -5,19 +5,19 @@
   "sourceManifest": {
     "formatVersion": 1,
     "algorithm": "sha256",
-    "fileCount": 20,
+    "fileCount": 23,
     "files": [
       {
         "path": "Cargo.lock",
-        "sha256": "sha256:cad573e7387a488df2b5057d8232b4019b68b1c94e0e3ab45025e9295ffbb59c"
+        "sha256": "sha256:40cc0a83473a1f0376799924de557a49b23a2645e52afb99eebba2885df688b7"
       },
       {
         "path": "Cargo.toml",
-        "sha256": "sha256:75190e7758c01b9a33b7895475d09a38f8fcf438d9433eb7715fa57df1394d25"
+        "sha256": "sha256:8ffec9d559dc3d9e26ce5c99a59f91f5fe43974c2e2dfb269776726a7953ff26"
       },
       {
         "path": "crates/flow-core/Cargo.toml",
-        "sha256": "sha256:9e73c7f6a7bcfd786da809523e84ce06579cf4b8955d6d01fb1b986fbee904d4"
+        "sha256": "sha256:d8a18d33fcf277d7c172365c9f99950dd2d3e14887aa7700551a4ba2f771ce6b"
       },
       {
         "path": "crates/flow-core/examples/recovery_benchmark.rs",
@@ -48,12 +48,20 @@
         "sha256": "sha256:e4aecd147c72a7bd35db6ed10b4c916188e903916c5eb1826a4dd3fdf7f66e4e"
       },
       {
+        "path": "crates/flow-core/src/invalidation/mod.rs",
+        "sha256": "sha256:1b9d3915993b0ec3c5369570cc1b255ec0a2e0d5a45d9ea38f43e4306f037d02"
+      },
+      {
+        "path": "crates/flow-core/src/layout/mod.rs",
+        "sha256": "sha256:4a0df3e7e4dea0ec055b4694763528ce723def8bcc3af297f34b500b5fcb3402"
+      },
+      {
         "path": "crates/flow-core/src/lib.rs",
-        "sha256": "sha256:4db9673cef6968dc4321ba1e1a00191ad996ed3edf4c1945bc5bb3a4a35c0aac"
+        "sha256": "sha256:7d308eaa561504d40b9b3a4197e03e3153b5fcac29abbd8341eabc85df2f1260"
       },
       {
         "path": "crates/flow-core/src/model/mod.rs",
-        "sha256": "sha256:dd800a2ab7258f2ff6e2b69711c87f1651e16fbe8838ae1406a70ded37dbf8bd"
+        "sha256": "sha256:91ae684bbe20fa878512880ff495781f1d245fb61199b49c2f39b6f1735d9fc8"
       },
       {
         "path": "crates/flow-core/src/provenance/mod.rs",
@@ -64,8 +72,12 @@
         "sha256": "sha256:33a8569a0605fd46e3c41c063332c69ff98a7192e4808c05f718f6421d1543ef"
       },
       {
+        "path": "crates/flow-core/src/schema/legacy_v2.rs",
+        "sha256": "sha256:d0072de72d2c51c17f4a18203d6748b30f039dde4ee31204d1986b60328288f1"
+      },
+      {
         "path": "crates/flow-core/src/schema/mod.rs",
-        "sha256": "sha256:0c3080fe1fab44df83fa396043b7363dd6da9285f4371605d6682e785fc3b839"
+        "sha256": "sha256:9aae6a1d2e72fd5a66a9c4f9fd73389f9b3cdca821ef6700c4d76433848d53c4"
       },
       {
         "path": "crates/flow-core/src/store/mod.rs",
@@ -88,7 +100,7 @@
         "sha256": "sha256:9d50a6f28923fc94c0d56dccc9038a12a8ff040f764a8ff048fa6d5a9eba722c"
       }
     ],
-    "digest": "sha256:4c6ac1cbab4072e12946c7c6f5eaccc72cb3f090268aeea6487fb2337d54b515"
+    "digest": "sha256:1b22b787a733425d7287132de8f488809dd0fea71c79fdfebb5508ab28db030f"
   },
   "toolchain": {
     "node": "v24.10.0",
@@ -133,37 +145,37 @@
         "plannedTransactionCount": 1000
       },
       "durationsMilliseconds": [
-        526.7775409999999,
-        523.180625,
-        530.508958,
-        521.0132090000001,
-        527.737292,
-        531.267708,
-        525.694,
-        530.4876670000001,
-        530.1286670000001,
-        527.7794580000001,
-        530.821458,
-        530.745,
-        530.108334,
-        527.465875,
-        523.304666,
-        525.588166,
-        525.0711249999999,
-        525.084,
-        520.202,
-        531.558458
+        537.637916,
+        538.8730830000001,
+        534.847583,
+        539.374833,
+        537.1011249999999,
+        540.575166,
+        536.639541,
+        535.549083,
+        536.67475,
+        538.193875,
+        534.839125,
+        536.532208,
+        540.903291,
+        539.55475,
+        539.919,
+        541.391292,
+        540.397708,
+        532.980209,
+        530.3905840000001,
+        538.178584
       ],
-      "p50Milliseconds": 527.465875,
-      "p95Milliseconds": 531.267708
+      "p50Milliseconds": 537.637916,
+      "p95Milliseconds": 540.903291
     }
   ],
   "selectedPolicy": {
     "transactionInterval": 100,
     "byteInterval": 4194304
   },
-  "p50Milliseconds": 527.465875,
-  "p95Milliseconds": 531.267708,
+  "p50Milliseconds": 537.637916,
+  "p95Milliseconds": 540.903291,
   "p95TargetMilliseconds": 2000,
   "passed": true,
   "blocked": false

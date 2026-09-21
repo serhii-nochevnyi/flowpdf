@@ -10,12 +10,14 @@ import {
   EditorController,
   type FormattingCommandDto,
   type EditorAppOptions,
+  type EditorLayoutScheduler,
   type SourceModality,
   type StructuralCommandDto,
 } from './editor-controller.js'
 import { EditorToolbar } from './editor-toolbar.js'
 import { EditorShell } from './editor-shell.js'
 import { SemanticDocument } from './semantic-document.js'
+import { PageViewport } from '../layout/page-viewport.js'
 import type {
   DirectionalSelectionDto,
   EditorAcceptedSnapshot,
@@ -35,7 +37,7 @@ import type {
 
 export { EditorController }
 export { copy as editorCopy }
-export type { FormattingCommandDto, SourceModality, StructuralCommandDto }
+export type { EditorLayoutScheduler, FormattingCommandDto, SourceModality, StructuralCommandDto }
 export type {
   DirectionalSelectionDto,
   EditorAcceptedSnapshot,
@@ -208,6 +210,11 @@ export function EditorApp({ controller: suppliedController, options = {} }: Edit
               onInputError={setInputError}
             />
           </section>
+          <PageViewport
+            layout={snapshot.layout}
+            sourceRevision={accepted.session.revision}
+            locale={locale}
+          />
         </>
       )}
     </EditorShell>

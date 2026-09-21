@@ -3,6 +3,7 @@ import type {
   HistoryStateDto,
   LogicalPositionDto,
 } from '../../persistence/indexeddb-store.js'
+import type { LayoutSchedulerSnapshotDto } from '../layout/layout-protocol.js'
 
 export type EditorLocale = 'uk' | 'en'
 
@@ -306,6 +307,7 @@ export type EditorAppPhase = 'loading' | 'empty' | 'pending' | 'ready' | 'error'
 export interface EditorAppSnapshot {
   readonly phase: EditorAppPhase
   readonly accepted: EditorAcceptedSnapshot | null
+  readonly layout: LayoutSchedulerSnapshotDto
   readonly status: string
   readonly errorCode: string | null
 }
@@ -313,12 +315,14 @@ export interface EditorAppSnapshot {
 export class EditorStore {
   private readonly listeners = new Set<() => void>()
   private acceptedValue: EditorAcceptedSnapshot | null = null
+  private layoutValue: LayoutSchedulerSnapshotDto = emptyLayoutSnapshot()
   private snapshotValue: EditorAppSnapshot
 
   constructor(initialStatus: string) {
     this.snapshotValue = Object.freeze({
       phase: 'loading',
       accepted: null,
+      layout: this.layoutValue,
       status: initialStatus,
       errorCode: null,
     })
@@ -341,6 +345,7 @@ export class EditorStore {
     this.publish({
       phase: 'pending',
       accepted: this.acceptedValue,
+      layout: this.layoutValue,
       status,
       errorCode: null,
     })
@@ -348,9 +353,11 @@ export class EditorStore {
 
   publishEmpty(): void {
     this.acceptedValue = null
+    this.layoutValue = emptyLayoutSnapshot()
     this.publish({
       phase: 'empty',
       accepted: null,
+      layout: this.layoutValue,
       status: '',
       errorCode: null,
     })
@@ -361,6 +368,7 @@ export class EditorStore {
     this.publish({
       phase: 'ready',
       accepted: this.acceptedValue,
+      layout: this.layoutValue,
       status,
       errorCode: null,
     })
@@ -370,9 +378,15 @@ export class EditorStore {
     this.publish({
       phase: 'error',
       accepted: this.acceptedValue,
+      layout: this.layoutValue,
       status: '',
       errorCode,
     })
+  }
+
+  publishLayout(layout: LayoutSchedulerSnapshotDto): void {
+    this.layoutValue = Object.freeze({ ...layout })
+    this.publish({ ...this.snapshotValue, layout: this.layoutValue })
   }
 
   dispose(): void {
@@ -383,4 +397,13 @@ export class EditorStore {
     this.snapshotValue = Object.freeze(snapshot)
     for (const listener of this.listeners) listener()
   }
+}
+
+function emptyLayoutSnapshot(): LayoutSchedulerSnapshotDto {
+  return Object.freeze({
+    phase: 'idle',
+    accepted: null,
+    requestId: null,
+    errorCode: null,
+  })
 }

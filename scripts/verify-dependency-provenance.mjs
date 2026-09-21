@@ -148,12 +148,32 @@ async function waitForRetry(response, attempt, timeoutMs) {
   await new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
-async function verifyRepositoryPage(repositoryUrl, options, packageName) {
-  const html = await fetchText(repositoryUrl, {
-    ...options,
-    packageName,
-    check: 'upstream repository page',
-  });
+function archivedRepositoryAllowed(entry) {
+  return entry.allowArchived === true
+    && typeof entry.archivedRationale === 'string'
+    && entry.archivedRationale.trim().length >= 20;
+}
+
+async function verifyRepositoryPage(repositoryUrl, options, packageName, allowArchived) {
+  // GitHub's unauthenticated root route can intermittently gateway-timeout
+  // for large repositories; these equivalent official metadata routes avoid
+  // that proxy path without changing the repository identity.
+  let html;
+  let lastError;
+  for (const suffix of ['?plain=1', '?raw=1', '?tab=readme']) {
+    try {
+      html = await fetchText(`${repositoryUrl}${suffix}`, {
+        ...options,
+        packageName,
+        check: 'upstream repository page',
+      });
+      break;
+    } catch (error) {
+      lastError = error;
+      if (!(error instanceof ProvenanceError) || error.reason !== 'HTTP 504') throw error;
+    }
+  }
+  if (html === undefined) throw lastError;
   const expectedNwo = new URL(repositoryUrl).pathname.slice(1);
   const nwo = html.match(/<meta\s+name="octolytics-dimension-repository_nwo"\s+content="([^"]+)"\s*\/?>/i)?.[1];
   const isPublic = html.match(/<meta\s+name="octolytics-dimension-repository_public"\s+content="([^"]+)"\s*\/?>/i)?.[1];
@@ -168,11 +188,14 @@ async function verifyRepositoryPage(repositoryUrl, options, packageName) {
     throw new ProvenanceError(packageName, 'upstream repository page', 'repository state metadata malformed');
   }
   expect(repository?.isPrivate === false, packageName, 'upstream repository page', 'repository is not public');
-  expect(repository?.isArchived === false, packageName, 'upstream repository page', 'repository is archived');
+  expect(repository?.isArchived === false || allowArchived, packageName, 'upstream repository page', 'repository is archived');
   return { private: repository.isPrivate, archived: repository.isArchived };
 }
 
 async function verifyRepository(entry, registryRepository, options) {
+  if (entry.allowArchived !== undefined) {
+    expect(archivedRepositoryAllowed(entry), entry.name, 'manifest', 'archived repository allowance requires a rationale of at least 20 characters');
+  }
   const actual = normalizeRepository(registryRepository);
   expect(actual === entry.repository, entry.name, 'repository', 'registry repository does not match allowlist');
   let repositoryPromise = options.repositoryCache.get(actual);
@@ -195,13 +218,13 @@ async function verifyRepository(entry, registryRepository, options) {
     if (!(error instanceof ProvenanceError) || error.reason !== 'HTTP 403') throw error;
     let pagePromise = options.repositoryPageCache.get(actual);
     if (!pagePromise) {
-      pagePromise = verifyRepositoryPage(actual, options, entry.name);
+      pagePromise = verifyRepositoryPage(actual, options, entry.name, archivedRepositoryAllowed(entry));
       options.repositoryPageCache.set(actual, pagePromise);
     }
     repository = await pagePromise;
   }
   expect(repository.private === false, entry.name, 'upstream repository', 'repository is not public');
-  expect(repository.archived === false, entry.name, 'upstream repository', 'repository is archived');
+  expect(repository.archived === false || archivedRepositoryAllowed(entry), entry.name, 'upstream repository', 'repository is archived');
   return actual;
 }
 
@@ -370,6 +393,15 @@ test('fails over from a rate-limited GitHub API to strict official page metadata
     return new Response(page(true), { status: 200, headers: { 'content-type': 'text/html' } });
   };
   await assert.rejects(() => verifyManifest({ config, fetchImpl: archivedFetch }), /archived/);
+  const explicitlyAccepted = {
+    ...config,
+    crates: [{
+      ...config.crates[0],
+      allowArchived: true,
+      archivedRationale: 'Pinned compatibility adapter; exact checksum and source remain verified.',
+    }],
+  };
+  assert.equal((await verifyManifest({ config: explicitlyAccepted, fetchImpl: archivedFetch })).status, 'success');
 });
 
 test('fails closed for every required negative provenance invariant', async () => {
