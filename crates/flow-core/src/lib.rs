@@ -1899,10 +1899,10 @@ mod tests {
         let older = include_str!("../../../fixtures/flowdoc/older.json")
             .strip_suffix('\n')
             .unwrap_or(include_str!("../../../fixtures/flowdoc/older.json"));
-        let migrated = include_str!("../../../fixtures/flowdoc/schema-v2-migrated.json")
+        let migrated = include_str!("../../../fixtures/flowdoc/schema-v3-migrated.json")
             .strip_suffix('\n')
             .unwrap_or(include_str!(
-                "../../../fixtures/flowdoc/schema-v2-migrated.json"
+                "../../../fixtures/flowdoc/schema-v3-migrated.json"
             ));
         let result = success(migrate_document(MigrateDocumentRequest {
             canonical_json: older.to_owned(),
@@ -1921,10 +1921,12 @@ mod tests {
         assert_eq!(result.canonical_json, migrated);
         assert_eq!(
             result.canonical_hash,
-            include_str!("../../../fixtures/flowdoc/schema-v2-migrated.hash").trim()
+            include_str!("../../../fixtures/flowdoc/schema-v3-migrated.hash").trim()
         );
         assert!(matches!(result.provenance, Provenance::Migrated { .. }));
         assert_eq!(result.report.source_schema_version, 0);
+        assert_eq!(result.report.current_schema_version, 3);
+        assert_eq!(result.report.hops.len(), 3);
         assert!(result.report.requires_new_snapshot);
         let provenance_json =
             serde_json::to_string(&result.revision_provenance).expect("provenance");

@@ -10,7 +10,7 @@ use uuid::Uuid;
 use crate::anchor::Utf16Offset;
 use crate::schema::{SchemaError, validate_document};
 
-pub const SCHEMA_VERSION: u32 = 2;
+pub const SCHEMA_VERSION: u32 = 3;
 
 macro_rules! stable_id {
     ($name:ident) => {
@@ -52,6 +52,7 @@ macro_rules! stable_id {
 stable_id!(DocumentId);
 stable_id!(StyleId);
 stable_id!(NodeId);
+stable_id!(SectionId);
 stable_id!(AssetId);
 stable_id!(FieldId);
 stable_id!(FieldOptionId);
@@ -65,6 +66,10 @@ pub struct FlowDocument {
     pub revision: u32,
     pub locale: String,
     pub page_settings: PageSettings,
+    /// Ordered durable section settings. The private v2 decoder leaves this
+    /// empty so the migration boundary can install one explicit default.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sections: Vec<SectionSettings>,
     pub styles: Vec<StyleDefinition>,
     pub content: Vec<ContentNode>,
     pub assets: Vec<AssetDescriptor>,
@@ -101,6 +106,72 @@ pub struct PageMargins {
     pub right: u16,
     pub bottom: u16,
     pub left: u16,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SectionSettings {
+    pub id: SectionId,
+    /// `None` is valid only for the first section and means document start.
+    /// Other boundaries identify the first top-level node owned by the section.
+    pub start_node_id: Option<NodeId>,
+    pub page_settings: PageSettings,
+    pub header: HeaderFooterSettings,
+    pub footer: HeaderFooterSettings,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct HeaderFooterSettings {
+    pub enabled: bool,
+    pub distance_millimetres: u16,
+    pub locale: String,
+    pub runs: Vec<HeaderFooterRun>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct HeaderFooterRun {
+    pub text: String,
+    pub style: HeaderFooterStyle,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct HeaderFooterStyle {
+    pub font_family: FontFamily,
+    pub font_size_millipoints: u32,
+    pub bold: bool,
+    pub italic: bool,
+}
+
+impl HeaderFooterSettings {
+    #[must_use]
+    pub fn empty(locale: impl Into<String>) -> Self {
+        Self {
+            enabled: false,
+            distance_millimetres: 0,
+            locale: locale.into(),
+            runs: Vec::new(),
+        }
+    }
+}
+
+impl SectionSettings {
+    pub const DEFAULT_ID: &'static str = "00000000-0000-4000-8000-000000000701";
+
+    pub fn default_for(
+        document_locale: &str,
+        page_settings: PageSettings,
+    ) -> Result<Self, SchemaError> {
+        Ok(Self {
+            id: SectionId::new(Self::DEFAULT_ID)?,
+            start_node_id: None,
+            page_settings,
+            header: HeaderFooterSettings::empty(document_locale),
+            footer: HeaderFooterSettings::empty(document_locale),
+        })
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -635,6 +706,17 @@ impl FlowDocument {
         let heading_style_id = StyleId::new("00000000-0000-4000-8000-000000000302")?;
         let first_node_id = NodeId::new("00000000-0000-4000-8000-000000000101")?;
         let asset_id = AssetId::new("00000000-0000-4000-8000-000000000401")?;
+        let page_settings = PageSettings {
+            page_size: PageSize::A4,
+            orientation: PageOrientation::Portrait,
+            margins_millimetres: PageMargins {
+                top: 20,
+                right: 20,
+                bottom: 20,
+                left: 20,
+            },
+        };
+        let default_section = SectionSettings::default_for(locale, page_settings.clone())?;
 
         let radio_first = FieldOptionId::new("00000000-0000-4000-8000-000000000611")?;
         let radio_second = FieldOptionId::new("00000000-0000-4000-8000-000000000612")?;
@@ -646,16 +728,8 @@ impl FlowDocument {
             document_id: DocumentId::new("00000000-0000-4000-8000-000000000001")?,
             revision: 1,
             locale: locale.to_owned(),
-            page_settings: PageSettings {
-                page_size: PageSize::A4,
-                orientation: PageOrientation::Portrait,
-                margins_millimetres: PageMargins {
-                    top: 20,
-                    right: 20,
-                    bottom: 20,
-                    left: 20,
-                },
-            },
+            page_settings,
+            sections: vec![default_section],
             styles: vec![
                 StyleDefinition {
                     id: body_style_id.clone(),

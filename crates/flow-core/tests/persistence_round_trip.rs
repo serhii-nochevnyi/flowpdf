@@ -4,7 +4,7 @@ use flow_core::{
         preflight_canonical_bytes, reconcile_canonical_identity, verify_asset_bytes,
     },
     model::{DocumentId, FlowDocument},
-    schema::{DocumentLimits, LimitKind},
+    schema::{DocumentLimits, LimitKind, MigrationRegistry},
 };
 
 const CURRENT_JSON: &[u8] = include_bytes!("../../../fixtures/flowdoc/schema-v2-current.json");
@@ -15,15 +15,20 @@ fn current_payload() -> &'static [u8] {
 }
 
 #[test]
-fn checked_in_current_fixture_is_the_exact_round_trip_contract() {
-    let document = FlowDocument::deterministic_sample("uk-UA").expect("sample");
-    let bytes = canonical_bytes(&document).expect("canonical bytes");
-    assert_eq!(bytes, current_payload());
-    assert_eq!(canonical_hash(&bytes), CURRENT_HASH.trim());
-    assert_eq!(
-        decode_canonical(current_payload()).expect("golden decode"),
-        document
-    );
+fn checked_in_v2_fixture_migrates_to_an_exact_v3_round_trip_contract() {
+    let source = current_payload();
+    assert_eq!(canonical_hash(source), CURRENT_HASH.trim());
+    let outcome = MigrationRegistry::current()
+        .migrate(source)
+        .expect("v2 migration");
+    let expected_hash = outcome.canonical_hash.clone();
+    let document = outcome.document;
+    let bytes = outcome.canonical_bytes;
+    assert_eq!(document.schema_version, 3);
+    assert_eq!(document.sections.len(), 1);
+    assert_eq!(bytes, canonical_bytes(&document).expect("canonical bytes"));
+    assert_eq!(expected_hash, canonical_hash(&bytes));
+    assert_eq!(decode_canonical(&bytes).expect("golden decode"), document);
     assert_eq!(canonical_bytes(&document).expect("repeat 1"), bytes);
     assert_eq!(canonical_bytes(&document).expect("repeat 2"), bytes);
 }

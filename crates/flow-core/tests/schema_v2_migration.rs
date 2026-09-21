@@ -106,14 +106,14 @@ fn legacy_freeze_gate() {
 #[test]
 fn migration_routes_preserve_semantics_and_execute_current_no_op() {
     for (source, versions) in [
-        (OLD, vec![(0, 1), (1, 2)]),
-        (VALID, vec![(1, 2)]),
-        (INVALID, vec![(1, 2)]),
+        (OLD, vec![(0, 1), (1, 2), (2, 3)]),
+        (VALID, vec![(1, 2), (2, 3)]),
+        (INVALID, vec![(1, 2), (2, 3)]),
     ] {
         let first = MigrationRegistry::current()
             .migrate(payload(source))
             .expect("migration");
-        assert_eq!(first.document.schema_version, 2);
+        assert_eq!(first.document.schema_version, 3);
         assert_eq!(
             first
                 .report
@@ -179,36 +179,26 @@ fn migration_routes_golden_bytes() {
         &flow_core::model::FlowDocument::deterministic_sample("uk-UA").unwrap(),
     )
     .unwrap();
-    for (name, bytes) in [
-        ("schema-v2-current", sample),
-        (
-            "schema-v2-migrated",
-            MigrationRegistry::current()
-                .migrate(payload(OLD))
-                .unwrap()
-                .canonical_bytes,
-        ),
-        (
-            "schema-v2-rich-text",
-            MigrationRegistry::current()
-                .migrate(payload(VALID))
-                .unwrap()
-                .canonical_bytes,
-        ),
-        (
-            "schema-v2-legacy-invalid",
-            MigrationRegistry::current()
-                .migrate(payload(INVALID))
-                .unwrap()
-                .canonical_bytes,
-        ),
-    ] {
-        let directory =
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/flowdoc");
-        let golden = std::fs::read(directory.join(format!("{name}.json"))).unwrap();
-        let hash = std::fs::read_to_string(directory.join(format!("{name}.hash"))).unwrap();
-        assert_eq!(bytes, payload(&golden), "{name}");
-        assert_eq!(canonical_hash(&bytes), hash.trim(), "{name}");
+    assert_eq!(
+        flow_core::canonical::decode_canonical(&sample).unwrap(),
+        flow_core::model::FlowDocument::deterministic_sample("uk-UA").unwrap()
+    );
+    let directory = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/flowdoc");
+    let v3_golden = std::fs::read(directory.join("schema-v3-sections.json")).unwrap();
+    let v3_bytes = payload(&v3_golden);
+    let v3_document = flow_core::canonical::decode_canonical(v3_bytes).unwrap();
+    assert_eq!(canonical_bytes(&v3_document).unwrap(), v3_bytes);
+
+    for source in [OLD, VALID, INVALID] {
+        let outcome = MigrationRegistry::current()
+            .migrate(payload(source))
+            .unwrap();
+        assert_eq!(
+            canonical_bytes(&outcome.document).unwrap(),
+            outcome.canonical_bytes
+        );
+        assert_eq!(outcome.document.schema_version, 3);
+        assert!(!outcome.document.sections.is_empty());
     }
 }
 

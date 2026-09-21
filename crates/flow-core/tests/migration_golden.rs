@@ -42,7 +42,7 @@ fn older_fixture_migrates_one_pure_hop_to_the_checked_in_current_schema_boundary
     assert_eq!(first.canonical_bytes, second.canonical_bytes);
     assert_eq!(first.canonical_hash, second.canonical_hash);
     assert_eq!(first.report.source_schema_version, 0);
-    assert_eq!(first.report.current_schema_version, 2);
+    assert_eq!(first.report.current_schema_version, 3);
     assert_eq!(
         first.report.hops,
         vec![
@@ -53,6 +53,10 @@ fn older_fixture_migrates_one_pure_hop_to_the_checked_in_current_schema_boundary
             MigrationHop {
                 from_version: 1,
                 to_version: 2
+            },
+            MigrationHop {
+                from_version: 2,
+                to_version: 3
             }
         ]
     );
@@ -62,7 +66,7 @@ fn older_fixture_migrates_one_pure_hop_to_the_checked_in_current_schema_boundary
         first.document.provenance,
         Provenance::Migrated {
             source_schema_version: 0,
-            current_schema_version: 2,
+            current_schema_version: 3,
             ..
         }
     ));
@@ -86,7 +90,7 @@ fn applying_the_registry_to_current_canonical_bytes_is_an_exact_no_op() {
 
 #[test]
 fn future_and_missing_hops_fail_with_stable_codes_and_no_partial_output() {
-    let future = br#"{"schemaVersion":3}"#;
+    let future = br#"{"schemaVersion":4}"#;
     assert_eq!(
         MigrationRegistry::current()
             .migrate(future)

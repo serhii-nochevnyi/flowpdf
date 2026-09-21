@@ -8,6 +8,7 @@ use thiserror::Error;
 use uuid::Uuid;
 
 mod legacy;
+mod legacy_v2;
 
 use crate::anchor::{Utf16Offset, resolve_utf16_offset};
 use crate::model::*;
@@ -207,6 +208,27 @@ impl SchemaError {
         )
     }
 
+    fn layout_geometry_invalid() -> Self {
+        Self::new(
+            "FLOW_LAYOUT_GEOMETRY_INVALID",
+            "Page geometry or header/footer distance is outside the supported bounds",
+        )
+    }
+
+    fn section_invalid() -> Self {
+        Self::new(
+            "FLOW_LAYOUT_SECTION_INVALID",
+            "Section boundaries or settings are not ordered and reference-safe",
+        )
+    }
+
+    fn header_footer_limit() -> Self {
+        Self::new(
+            "FLOW_LAYOUT_HEADER_FOOTER_LIMIT",
+            "Static header/footer content exceeds the supported bounds",
+        )
+    }
+
     pub(crate) fn asset_hash_mismatch() -> Self {
         Self::new(
             "FLOW_ASSET_HASH_MISMATCH",
@@ -287,6 +309,7 @@ pub fn validate_document(document: &FlowDocument) -> Result<(), SchemaError> {
 
     let mut all_ids = BTreeSet::new();
     insert_id(&mut all_ids, document.document_id.as_str())?;
+    validate_sections(document, &mut all_ids, false)?;
 
     let mut style_ids = BTreeSet::new();
     let mut style_names = BTreeSet::new();
@@ -406,6 +429,11 @@ pub const MAX_TABLE_CELLS: usize = 1_000;
 pub const MAX_LIST_DEPTH: usize = 8;
 pub const MAX_INLINE_RUNS: usize = 4_096;
 pub const MAX_AUTHORED_ALT_BYTES: usize = 4_096;
+pub const MAX_SECTIONS: usize = 128;
+pub const MAX_HEADER_FOOTER_RUNS: usize = 64;
+pub const MAX_HEADER_FOOTER_BYTES: usize = 16 * 1024;
+pub const MAX_HEADER_FOOTER_DISTANCE_MILLIMETRES: u16 = 100;
+pub const MAX_PAGE_MARGIN_MILLIMETRES: u16 = 100;
 
 fn validate_font(font: &FontFamily, authoring: bool) -> Result<(), SchemaError> {
     if let FontFamily::LegacyUnknown { original } = font
@@ -421,6 +449,9 @@ fn validate_font(font: &FontFamily, authoring: bool) -> Result<(), SchemaError> 
 /// for newly supplied values rather than treating a valid stored value as consent.
 pub fn validate_new_document(document: &FlowDocument) -> Result<(), SchemaError> {
     validate_document(document)?;
+    let mut all_ids = BTreeSet::new();
+    insert_id(&mut all_ids, document.document_id.as_str())?;
+    validate_sections(document, &mut all_ids, true)?;
     for style in &document.styles {
         validate_font(&style.font_family, true)?;
         if !(6_000..=288_000).contains(&style.font_size_millipoints) {
@@ -444,13 +475,7 @@ pub fn validate_new_document(document: &FlowDocument) -> Result<(), SchemaError>
         .iter()
         .map(|asset| asset.id.as_str())
         .collect();
-    let nodes = validate_tree(
-        &document.content,
-        &styles,
-        &assets,
-        &mut BTreeSet::new(),
-        true,
-    )?;
+    let nodes = validate_tree(&document.content, &styles, &assets, &mut all_ids, true)?;
     if !nodes.values().any(|node| node.runs().is_some()) {
         return Err(SchemaError::invalid_document());
     }
@@ -479,6 +504,129 @@ pub(crate) fn validate_new_node(
         true,
     )
     .map(|_| ())
+}
+
+fn validate_sections(
+    document: &FlowDocument,
+    all_ids: &mut BTreeSet<String>,
+    authoring: bool,
+) -> Result<(), SchemaError> {
+    if document.sections.is_empty() || document.sections.len() > MAX_SECTIONS {
+        return Err(SchemaError::section_invalid());
+    }
+
+    let top_level_ids = document
+        .content
+        .iter()
+        .map(|node| node.id.as_str())
+        .collect::<BTreeSet<_>>();
+    let mut boundaries = BTreeSet::new();
+    let mut previous_boundary_index = None;
+    for (index, section) in document.sections.iter().enumerate() {
+        insert_id(all_ids, section.id.as_str())?;
+        if index == 0 {
+            if section.start_node_id.is_some() || section.page_settings != document.page_settings {
+                return Err(SchemaError::section_invalid());
+            }
+        } else {
+            let Some(start_node_id) = section.start_node_id.as_ref() else {
+                return Err(SchemaError::section_invalid());
+            };
+            let Some(start_index) = document
+                .content
+                .iter()
+                .position(|node| node.id == *start_node_id)
+            else {
+                return Err(SchemaError::section_invalid());
+            };
+            if !top_level_ids.contains(start_node_id.as_str())
+                || !boundaries.insert(start_node_id.as_str())
+                || previous_boundary_index.is_some_and(|previous| start_index <= previous)
+            {
+                return Err(SchemaError::section_invalid());
+            }
+            previous_boundary_index = Some(start_index);
+        }
+        validate_page_settings(&section.page_settings)?;
+        let page_height = page_dimensions(&section.page_settings).1;
+        let header_extent = u32::from(section.page_settings.margins_millimetres.top)
+            .checked_add(u32::from(section.header.distance_millimetres))
+            .ok_or_else(SchemaError::layout_geometry_invalid)?;
+        let footer_extent = u32::from(section.page_settings.margins_millimetres.bottom)
+            .checked_add(u32::from(section.footer.distance_millimetres))
+            .ok_or_else(SchemaError::layout_geometry_invalid)?;
+        if header_extent >= page_height || footer_extent >= page_height {
+            return Err(SchemaError::layout_geometry_invalid());
+        }
+        validate_header_footer(&section.header, authoring)?;
+        validate_header_footer(&section.footer, authoring)?;
+    }
+    Ok(())
+}
+
+fn validate_page_settings(settings: &PageSettings) -> Result<(), SchemaError> {
+    let (width, height) = page_dimensions(settings);
+    let horizontal = u32::from(settings.margins_millimetres.left)
+        .checked_add(u32::from(settings.margins_millimetres.right))
+        .ok_or_else(SchemaError::layout_geometry_invalid)?;
+    let vertical = u32::from(settings.margins_millimetres.top)
+        .checked_add(u32::from(settings.margins_millimetres.bottom))
+        .ok_or_else(SchemaError::layout_geometry_invalid)?;
+    if [
+        settings.margins_millimetres.top,
+        settings.margins_millimetres.right,
+        settings.margins_millimetres.bottom,
+        settings.margins_millimetres.left,
+    ]
+    .into_iter()
+    .any(|margin| margin > MAX_PAGE_MARGIN_MILLIMETRES)
+        || horizontal >= width
+        || vertical >= height
+    {
+        return Err(SchemaError::layout_geometry_invalid());
+    }
+    Ok(())
+}
+
+fn page_dimensions(settings: &PageSettings) -> (u32, u32) {
+    match (&settings.page_size, &settings.orientation) {
+        (PageSize::A4, PageOrientation::Portrait) => (210, 297),
+        (PageSize::A4, PageOrientation::Landscape) => (297, 210),
+        (PageSize::Letter, PageOrientation::Portrait) => (216, 279),
+        (PageSize::Letter, PageOrientation::Landscape) => (279, 216),
+    }
+}
+
+fn validate_header_footer(
+    settings: &HeaderFooterSettings,
+    authoring: bool,
+) -> Result<(), SchemaError> {
+    if settings.locale.trim().is_empty()
+        || settings.locale.len() > 32
+        || settings.distance_millimetres > MAX_HEADER_FOOTER_DISTANCE_MILLIMETRES
+        || settings.runs.len() > MAX_HEADER_FOOTER_RUNS
+        || (!settings.enabled && !settings.runs.is_empty())
+        || (settings.enabled && settings.runs.is_empty())
+    {
+        return Err(SchemaError::header_footer_limit());
+    }
+    let mut total_bytes = 0_usize;
+    for run in &settings.runs {
+        if run.text.is_empty() || run.text.contains(['\n', '\r']) {
+            return Err(SchemaError::section_invalid());
+        }
+        total_bytes = total_bytes
+            .checked_add(run.text.len())
+            .ok_or_else(SchemaError::header_footer_limit)?;
+        if total_bytes > MAX_HEADER_FOOTER_BYTES {
+            return Err(SchemaError::header_footer_limit());
+        }
+        validate_font(&run.style.font_family, authoring)?;
+        if !(6_000..=288_000).contains(&run.style.font_size_millipoints) {
+            return Err(SchemaError::section_invalid());
+        }
+    }
+    Ok(())
 }
 
 fn validate_tree<'a>(
@@ -949,6 +1097,7 @@ impl MigrationRegistry {
         Self::new(vec![
             MigrationStep::new(0, 1, migrate_v0_to_v1, validate_v1_migration_output),
             MigrationStep::new(1, 2, migrate_v1_to_v2, validate_v2_migration_output),
+            MigrationStep::new(2, 3, migrate_v2_to_v3, validate_v3_migration_output),
         ])
     }
 
@@ -1030,6 +1179,11 @@ fn validate_v1_migration_output(input: &[u8]) -> Result<(), SchemaError> {
 }
 
 fn validate_v2_migration_output(input: &[u8]) -> Result<(), SchemaError> {
+    let document = legacy_v2::decode(input)?;
+    validate_v2_document(&document)
+}
+
+fn validate_v3_migration_output(input: &[u8]) -> Result<(), SchemaError> {
     crate::canonical::decode_canonical(input).map(|_| ())
 }
 
@@ -1070,7 +1224,27 @@ fn migrate_v0_to_v1(input: &[u8]) -> Result<Vec<u8>, SchemaError> {
 }
 
 fn migrate_v1_to_v2(input: &[u8]) -> Result<Vec<u8>, SchemaError> {
-    crate::canonical::canonical_bytes(&convert_v1(&decode_legacy_validated(input, 1)?)?)
+    legacy_v2::encode(&convert_v1(&decode_legacy_validated(input, 1)?)?)
+}
+
+fn migrate_v2_to_v3(input: &[u8]) -> Result<Vec<u8>, SchemaError> {
+    let source = legacy_v2::decode(input)?;
+    let section = SectionSettings::default_for(&source.locale, source.page_settings.clone())?;
+    let provenance = migrate_provenance_v2_to_v3(source.provenance)?;
+    let document = FlowDocument {
+        schema_version: SCHEMA_VERSION,
+        document_id: source.document_id,
+        revision: source.revision,
+        locale: source.locale,
+        page_settings: source.page_settings,
+        sections: vec![section],
+        styles: source.styles,
+        content: source.content,
+        assets: source.assets,
+        fields: source.fields,
+        provenance,
+    };
+    crate::canonical::canonical_bytes(&document)
 }
 
 fn decode_legacy_validated(
@@ -1224,11 +1398,12 @@ fn convert_v1(source: &legacy::LegacyFlowDocumentV1) -> Result<FlowDocument, Sch
         }
     };
     let document = FlowDocument {
-        schema_version: SCHEMA_VERSION,
+        schema_version: 2,
         document_id: DocumentId::new(source.document_id.as_str())?,
         revision: source.revision,
         locale: source.locale.clone(),
         page_settings: retained(&source.page_settings)?,
+        sections: Vec::new(),
         styles: source
             .styles
             .iter()
@@ -1252,6 +1427,58 @@ fn convert_v1(source: &legacy::LegacyFlowDocumentV1) -> Result<FlowDocument, Sch
         fields,
         provenance,
     };
-    validate_document(&document)?;
+    validate_v2_document(&document)?;
     Ok(document)
+}
+
+fn validate_v2_document(document: &FlowDocument) -> Result<(), SchemaError> {
+    if document.schema_version != 2 || !document.sections.is_empty() {
+        return Err(SchemaError::unsupported_schema());
+    }
+    validate_provenance_version(&document.provenance, 2)?;
+    let section = SectionSettings::default_for(&document.locale, document.page_settings.clone())?;
+    let promoted = FlowDocument {
+        schema_version: SCHEMA_VERSION,
+        document_id: document.document_id.clone(),
+        revision: document.revision,
+        locale: document.locale.clone(),
+        page_settings: document.page_settings.clone(),
+        sections: vec![section],
+        styles: document.styles.clone(),
+        content: document.content.clone(),
+        assets: document.assets.clone(),
+        fields: document.fields.clone(),
+        provenance: migrate_provenance_v2_to_v3(document.provenance.clone())?,
+    };
+    validate_document(&promoted)
+}
+
+fn migrate_provenance_v2_to_v3(provenance: Provenance) -> Result<Provenance, SchemaError> {
+    validate_provenance_version(&provenance, 2)?;
+    let hop = MigrationHop {
+        from_version: 2,
+        to_version: 3,
+    };
+    Ok(match provenance {
+        Provenance::LocalSample { created_at } => Provenance::Migrated {
+            source_schema_version: 2,
+            current_schema_version: 3,
+            source_created_at: created_at,
+            hops: vec![hop],
+        },
+        Provenance::Migrated {
+            source_schema_version,
+            source_created_at,
+            mut hops,
+            ..
+        } => {
+            hops.push(hop);
+            Provenance::Migrated {
+                source_schema_version,
+                current_schema_version: 3,
+                source_created_at,
+                hops,
+            }
+        }
+    })
 }
