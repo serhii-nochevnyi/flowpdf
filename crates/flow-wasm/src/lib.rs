@@ -5,11 +5,12 @@
 use flow_core::{
     ApiResponse, ApplyCommandRequest, AssetStageRequest, AssetStageResponse, AuditedRecoverRequest,
     AuditedRecoverResult, CommandKind, CreateSampleRequest, EditorSessionRequest,
-    EditorSessionResponse, EditorViewDto, EditorViewRequest, MigrateDocumentRequest,
-    MigrateDocumentResult, OperationResult, PdfExportManifest, PdfExportOptions, PdfExportRequest,
-    PdfFontManifestIdentity, PdfInternalLink, PdfMetadataOptions, PdfOutlineEntry, PdfPagePlan,
-    PdfRecoveryExpectation, PdfReproducibilityInputs, PlanPersistenceCommitRequest,
-    PlanStandaloneAuditRequest, RecoverRequest, RecoverResult, export_pdf as core_export_pdf,
+    EditorSessionResponse, EditorViewDto, EditorViewRequest, FormSessionRequest,
+    FormSessionResponse, MigrateDocumentRequest, MigrateDocumentResult, OperationResult,
+    PdfExportManifest, PdfExportOptions, PdfExportRequest, PdfFontManifestIdentity,
+    PdfInternalLink, PdfMetadataOptions, PdfOutlineEntry, PdfPagePlan, PdfRecoveryExpectation,
+    PdfReproducibilityInputs, PlanPersistenceCommitRequest, PlanStandaloneAuditRequest,
+    RecoverRequest, RecoverResult, export_pdf as core_export_pdf,
     recover_owned_source as core_recover_owned_source, store::PlannedPersistenceCommit,
 };
 use serde::{Deserialize, Serialize};
@@ -172,6 +173,26 @@ pub fn apply_editor_session(request: JsValue) -> JsValue {
         Err(_) => flow_core::decode_failure::<EditorSessionResponse>(),
     };
     serialize_response(&response)
+}
+
+/// Applies one immutable, revision-bound noncanonical form-session action.
+#[wasm_bindgen]
+pub fn apply_form_session(request: JsValue) -> JsValue {
+    let response = match serde_wasm_bindgen::from_value::<FormSessionRequest>(request) {
+        Ok(request) => flow_core::apply_form_session(request),
+        Err(_) => flow_core::decode_failure::<FormSessionResponse>(),
+    };
+    serialize_response(&response)
+}
+
+/// String-only form-session adapter used by workers and deterministic tests.
+#[wasm_bindgen]
+pub fn apply_form_session_json(request_json: String) -> String {
+    let response = match serde_json::from_str::<FormSessionRequest>(&request_json) {
+        Ok(request) => flow_core::apply_form_session(request),
+        Err(_) => flow_core::decode_failure::<FormSessionResponse>(),
+    };
+    serialize_json_response(&response)
 }
 
 /// Revalidates and returns the immutable Rust-owned editor view projection.
@@ -524,6 +545,10 @@ fn execute_pdf_recovery(request: PdfRecoveryWireRequest) -> Result<PdfRecoveryWi
 
 fn serialize_pdf_response<T: Serialize>(response: PdfProtocolResponse<T>) -> String {
     serde_json::to_string(&response).expect("serializing a closed PDF protocol cannot fail")
+}
+
+fn serialize_json_response<T: Serialize>(response: &ApiResponse<T>) -> String {
+    serde_json::to_string(response).expect("serializing a fixed response DTO cannot fail")
 }
 
 fn encode_hex(bytes: &[u8]) -> String {

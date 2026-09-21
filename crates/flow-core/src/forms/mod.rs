@@ -27,6 +27,8 @@ use crate::{
 pub const FORM_PROJECTION_SCHEMA_VERSION: u32 = 2;
 /// Version of the noncanonical form-value session.
 pub const FORM_SESSION_SCHEMA_VERSION: u32 = 1;
+/// Version of the closed Rust/WASM form-session action protocol.
+pub const FORM_SESSION_PROTOCOL_VERSION: u32 = 1;
 
 const MAX_FORM_TEXT_BYTES: usize = 64 * 1024;
 const TEXT_WIDGET_WIDTH: i64 = 144 * 64;
@@ -87,9 +89,53 @@ pub struct FormSessionState {
     pub overrides: BTreeMap<FieldId, FieldValue>,
 }
 
+/// One noncanonical form-session action accepted by the Rust boundary.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(
+    tag = "type",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
+)]
+pub enum FormSessionAction {
+    Start,
+    Validate,
+    SetValue {
+        field_id: FieldId,
+        value: FieldValue,
+    },
+    ClearValue {
+        field_id: FieldId,
+    },
+}
+
+/// Request for one immutable form-session operation.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FormSessionRequest {
+    pub protocol_version: u32,
+    pub canonical_json: String,
+    pub session: Option<FormSessionState>,
+    pub action: FormSessionAction,
+}
+
+/// Accepted result of one form-session operation.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FormSessionResponse {
+    pub protocol_version: u32,
+    pub session: FormSessionState,
+}
+
 /// Failure taxonomy for a form-value session operation.
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum FormSessionError {
+    #[error("the form session protocol version is unsupported")]
+    ProtocolVersion,
+    #[error("the form session is required for this action")]
+    SessionMissing,
+    #[error("a new form session action cannot include an existing session")]
+    SessionUnexpected,
     #[error("the canonical document is invalid for a form session")]
     InvalidDocument,
     #[error("the form session schema version is unsupported")]
@@ -118,6 +164,9 @@ impl FormSessionError {
     #[must_use]
     pub const fn code(&self) -> &'static str {
         match self {
+            Self::ProtocolVersion => "FLOW_FORM_SESSION_PROTOCOL_UNSUPPORTED",
+            Self::SessionMissing => "FLOW_FORM_SESSION_MISSING",
+            Self::SessionUnexpected => "FLOW_FORM_SESSION_UNEXPECTED",
             Self::InvalidDocument => "FLOW_FORM_SESSION_DOCUMENT_INVALID",
             Self::SchemaVersion => "FLOW_FORM_SESSION_SCHEMA_UNSUPPORTED",
             Self::DocumentMismatch => "FLOW_FORM_SESSION_DOCUMENT_MISMATCH",

@@ -1,6 +1,8 @@
 use flow_core::{
-    FormProjectionError, FormSessionError, FormSessionState, FormValueErrorCode,
-    FormWidgetReviewReason, PdfDisplayList, build_display_list,
+    FormProjectionError, FormSessionAction, FormSessionError, FormSessionRequest, FormSessionState,
+    FormValueErrorCode, FormWidgetReviewReason, PdfDisplayList, apply_form_session,
+    build_display_list,
+    canonical::canonical_bytes,
     layout::{FontCatalog, FontFace, LayoutUnit, PaginationRequest},
     model::{
         Affinity, CommandId, ContentNode, DocumentId, FieldAnchorState, FieldDescriptor, FieldId,
@@ -530,5 +532,80 @@ fn page_geometry_uses_fixed_point_display_bounds() {
     assert!(
         widget.rect.y.raw() + widget.rect.height.raw()
             <= page.bounds.y.raw() + page.bounds.height.raw()
+    );
+}
+
+#[test]
+fn form_session_protocol_is_immutable_and_source_bound() {
+    let document = document_with_field();
+    let canonical_json = String::from_utf8(canonical_bytes(&document).expect("canonical bytes"))
+        .expect("canonical UTF-8");
+    let start = apply_form_session(FormSessionRequest {
+        protocol_version: flow_core::FORM_SESSION_PROTOCOL_VERSION,
+        canonical_json: canonical_json.clone(),
+        session: None,
+        action: FormSessionAction::Start,
+    });
+    assert!(start.ok);
+    let session = start.value.expect("started session").session;
+    assert_eq!(session.generation, 0);
+
+    let field = document.fields[0].id.clone();
+    let filled = apply_form_session(FormSessionRequest {
+        protocol_version: flow_core::FORM_SESSION_PROTOCOL_VERSION,
+        canonical_json: canonical_json.clone(),
+        session: Some(session.clone()),
+        action: FormSessionAction::SetValue {
+            field_id: field.clone(),
+            value: FieldValue::text("Alice"),
+        },
+    });
+    assert!(filled.ok);
+    let filled = filled.value.expect("filled session").session;
+    assert_eq!(filled.generation, 1);
+    assert_eq!(
+        filled.value_for(&document, &field).expect("value"),
+        FieldValue::text("Alice")
+    );
+    assert_eq!(document.revision, 1);
+
+    let cleared = apply_form_session(FormSessionRequest {
+        protocol_version: flow_core::FORM_SESSION_PROTOCOL_VERSION,
+        canonical_json: canonical_json.clone(),
+        session: Some(filled.clone()),
+        action: FormSessionAction::ClearValue {
+            field_id: field.clone(),
+        },
+    });
+    assert!(cleared.ok);
+    let cleared = cleared.value.expect("cleared session").session;
+    assert_eq!(cleared.generation, 2);
+    assert!(cleared.overrides().is_empty());
+
+    let mut stale = filled;
+    stale.source_revision += 1;
+    let rejected = apply_form_session(FormSessionRequest {
+        protocol_version: flow_core::FORM_SESSION_PROTOCOL_VERSION,
+        canonical_json,
+        session: Some(stale),
+        action: FormSessionAction::Validate,
+    });
+    assert!(!rejected.ok);
+    assert_eq!(
+        rejected.error.expect("stale error").code,
+        "FLOW_FORM_SESSION_REVISION_STALE"
+    );
+
+    let unexpected = apply_form_session(FormSessionRequest {
+        protocol_version: flow_core::FORM_SESSION_PROTOCOL_VERSION,
+        canonical_json: String::from_utf8(canonical_bytes(&document).expect("canonical bytes"))
+            .expect("canonical UTF-8"),
+        session: Some(cleared),
+        action: FormSessionAction::Start,
+    });
+    assert!(!unexpected.ok);
+    assert_eq!(
+        unexpected.error.expect("unexpected session error").code,
+        "FLOW_FORM_SESSION_UNEXPECTED"
     );
 }

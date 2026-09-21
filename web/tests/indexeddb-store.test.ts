@@ -4,6 +4,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   IndexedDbDocumentStore,
   type AuditRecordDto,
+  type FormSessionIdentityDto,
+  type FormSessionStateDto,
   type MigrationPersistenceCommitDto,
   type PersistenceCommitDto,
   type PlannedPersistenceCommitDto,
@@ -111,6 +113,23 @@ function migrationCommit(): MigrationPersistenceCommitDto {
   }
 }
 
+function formSession(
+  generation = 0,
+  overrides: FormSessionStateDto['overrides'] = {},
+): FormSessionStateDto {
+  const identity: FormSessionIdentityDto = {
+    documentId,
+    sourceRevision: 1,
+    sourceHash: 'source-hash-1',
+  }
+  return {
+    ...identity,
+    schemaVersion: 1,
+    generation,
+    overrides,
+  }
+}
+
 describe('IndexedDbDocumentStore', () => {
   beforeEach(() => {
     // A fresh in-memory factory prevents a previous test's open connection from
@@ -142,6 +161,55 @@ describe('IndexedDbDocumentStore', () => {
     expect(records.assets).toHaveLength(2)
     expect(records.assets).toEqual(expect.arrayContaining([first.assets[0], second.assets[0]]))
     expect(records.sources).toEqual([])
+  })
+
+  it('stores source-bound form sessions separately with idempotent generation guards', async () => {
+    const store = new IndexedDbDocumentStore()
+    const initial = formSession()
+    await store.saveFormSession(initial, null)
+    await expect(
+      store.loadFormSession({
+        documentId,
+        sourceRevision: 1,
+        sourceHash: 'source-hash-1',
+      }),
+    ).resolves.toEqual(initial)
+
+    await store.saveFormSession(initial, null)
+    const filled = formSession(1, { name: { type: 'text', value: 'Олена' } })
+    await store.saveFormSession(filled, 0)
+    await store.saveFormSession(filled, 0)
+    await expect(
+      store.saveFormSession(
+        formSession(2, { name: { type: 'text', value: 'Інший текст' } }),
+        0,
+      ),
+    ).rejects.toMatchObject({ code: 'FLOW_FORM_SESSION_GENERATION_CONFLICT' })
+    await expect(
+      store.saveFormSession(formSession(3, { name: { type: 'text', value: 'stale' } }), null),
+    ).rejects.toMatchObject({ code: 'FLOW_FORM_SESSION_GENERATION_CONFLICT' })
+
+    const cleared = formSession(2)
+    await store.saveFormSession(cleared, 1)
+    await expect(store.loadFormSession(cleared)).resolves.toEqual(cleared)
+    await expect(
+      store.loadFormSession({
+        documentId,
+        sourceRevision: 2,
+        sourceHash: 'source-hash-2',
+      }),
+    ).resolves.toBeNull()
+    await expect(store.loadRecords({ allowEmpty: true })).resolves.toMatchObject({
+      snapshots: [],
+      transactions: [],
+      audits: [],
+      assets: [],
+      sources: [],
+    })
+
+    const database = await openCurrentDatabase()
+    expect(Array.from(database.objectStoreNames)).toContain('form-sessions-v1')
+    database.close()
   })
 
   it('stores asset payloads as versioned binary envelopes while exposing legacy DTOs', async () => {

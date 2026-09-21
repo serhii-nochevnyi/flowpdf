@@ -51,8 +51,9 @@ pub use editor_view::{
     StructuralPlacementDto, TableCellFocusDto, TableLimitsDto,
 };
 pub use forms::{
-    FORM_PROJECTION_SCHEMA_VERSION, FORM_SESSION_SCHEMA_VERSION, FormProjectionError,
-    FormSessionError, FormSessionState, FormValueErrorCode, FormWidget, FormWidgetProjection,
+    FORM_PROJECTION_SCHEMA_VERSION, FORM_SESSION_PROTOCOL_VERSION, FORM_SESSION_SCHEMA_VERSION,
+    FormProjectionError, FormSessionAction, FormSessionError, FormSessionRequest,
+    FormSessionResponse, FormSessionState, FormValueErrorCode, FormWidget, FormWidgetProjection,
     FormWidgetReview, FormWidgetReviewReason, resolve_form_widgets,
     resolve_form_widgets_with_session, validate_field_value,
 };
@@ -406,6 +407,8 @@ pub enum CoreError {
     Command(#[from] CommandError),
     #[error(transparent)]
     EditorSession(#[from] EditorSessionError),
+    #[error(transparent)]
+    FormSession(#[from] forms::FormSessionError),
     #[error("The persisted record set is incomplete or discontinuous")]
     RecoveryGap,
     #[error("The persisted record hash does not match canonical content")]
@@ -429,6 +432,7 @@ impl CoreError {
             Self::Asset(error) => error.code(),
             Self::Command(error) => error.code(),
             Self::EditorSession(error) => error.code(),
+            Self::FormSession(error) => error.code(),
             Self::RecoveryGap => "FLOW_RECOVERY_GAP",
             Self::HashMismatch => "FLOW_HASH_MISMATCH",
             Self::UnsafeAuditRecord | Self::Audit(_) => "FLOW_UNSAFE_AUDIT_RECORD",
@@ -462,6 +466,53 @@ pub fn apply_editor_session(request: EditorSessionRequest) -> ApiResponse<Editor
         Ok(result) => ApiResponse::success(result),
         Err(error) => ApiResponse::failure(error),
     }
+}
+
+/// Applies one noncanonical, immutable Rust-owned form-session action.
+///
+/// The canonical document is decoded only for validation and value rules. No
+/// document revision, transaction, audit entry, page coordinate, or PDF
+/// object reference is created by this boundary.
+#[must_use]
+pub fn apply_form_session(request: FormSessionRequest) -> ApiResponse<FormSessionResponse> {
+    match apply_form_session_inner(request) {
+        Ok(result) => ApiResponse::success(result),
+        Err(error) => ApiResponse::failure(error),
+    }
+}
+
+fn apply_form_session_inner(request: FormSessionRequest) -> Result<FormSessionResponse, CoreError> {
+    if request.protocol_version != forms::FORM_SESSION_PROTOCOL_VERSION {
+        return Err(forms::FormSessionError::ProtocolVersion.into());
+    }
+    let document = decode_canonical(request.canonical_json.as_bytes())?;
+    let session = match request.action {
+        forms::FormSessionAction::Start => {
+            if request.session.is_some() {
+                return Err(forms::FormSessionError::SessionUnexpected.into());
+            }
+            forms::FormSessionState::from_document(&document)?
+        }
+        forms::FormSessionAction::Validate => {
+            let session = request
+                .session
+                .ok_or(forms::FormSessionError::SessionMissing)?;
+            session.validate_against(&document)?;
+            session
+        }
+        forms::FormSessionAction::SetValue { field_id, value } => request
+            .session
+            .ok_or(forms::FormSessionError::SessionMissing)?
+            .set_value(&document, &field_id, value)?,
+        forms::FormSessionAction::ClearValue { field_id } => request
+            .session
+            .ok_or(forms::FormSessionError::SessionMissing)?
+            .clear_value(&document, &field_id)?,
+    };
+    Ok(FormSessionResponse {
+        protocol_version: forms::FORM_SESSION_PROTOCOL_VERSION,
+        session,
+    })
 }
 
 fn apply_editor_session_inner(

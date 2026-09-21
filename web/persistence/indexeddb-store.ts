@@ -124,6 +124,24 @@ export interface AssetRecordDto {
   readonly bytes: readonly number[]
 }
 
+export type FormSessionValueDto =
+  | { readonly type: 'empty' }
+  | { readonly type: 'text'; readonly value: string }
+  | { readonly type: 'checked'; readonly value: boolean }
+  | { readonly type: 'selected'; readonly optionIds: readonly string[] }
+
+export interface FormSessionIdentityDto {
+  readonly documentId: string
+  readonly sourceRevision: number
+  readonly sourceHash: string
+}
+
+export interface FormSessionStateDto extends FormSessionIdentityDto {
+  readonly schemaVersion: number
+  readonly generation: number
+  readonly overrides: Readonly<Record<string, FormSessionValueDto>>
+}
+
 export interface MigrationSourceRecordDto {
   readonly recordFormatVersion: number
   readonly documentId: string
@@ -153,7 +171,7 @@ export interface RecoveryImageDto {
 }
 
 const DEFAULT_DATABASE_NAME = 'flowpdf-foundation'
-const DATABASE_VERSION = 5
+const DATABASE_VERSION = 6
 const RECORD_FORMAT_VERSION = 1
 const RECORD_STORE_VERSION = 3
 const SNAPSHOTS = `snapshots-v${RECORD_STORE_VERSION}`
@@ -161,6 +179,7 @@ const TRANSACTIONS = `transactions-v${RECORD_STORE_VERSION}`
 const AUDITS = `audits-v${RECORD_STORE_VERSION}`
 const ASSETS = `assets-v${RECORD_STORE_VERSION}`
 const SOURCES = `migration-sources-v${RECORD_STORE_VERSION}`
+const FORM_SESSIONS = 'form-sessions-v1'
 const METADATA = 'storage-metadata'
 const HEADS = 'document-heads'
 const LEGACY_MIGRATION_REQUIRED = 'legacy-migration-required'
@@ -168,6 +187,11 @@ const HEAD_BOOTSTRAP_REQUIRED = 'head-bootstrap-required'
 const LEGACY_STORES = ['snapshots', 'transactions', 'audits', 'assets', 'migration-sources']
 const RECOVERY_RECORD_LIMIT = 10_000
 const RECOVERY_BYTE_LIMIT = 64 * 1024 * 1024
+const FORM_SESSION_SCHEMA_VERSION = 1
+const FORM_SESSION_MAX_OVERRIDES = 2_048
+const FORM_SESSION_MAX_BYTES = 256 * 1024
+const FORM_SESSION_MAX_ID_BYTES = 128
+const FORM_SESSION_MAX_VALUE_BYTES = 64 * 1024
 
 interface StorageMetadata {
   readonly key: string
@@ -455,6 +479,94 @@ export class IndexedDbDocumentStore {
     })
   }
 
+  async loadFormSession(
+    identity: FormSessionIdentityDto,
+  ): Promise<FormSessionStateDto | null> {
+    assertFormSessionIdentity(identity)
+    const physicalKey = await formSessionKey(identity)
+    const database = await this.open()
+    const transaction = database.transaction(FORM_SESSIONS, 'readonly')
+    const envelope = await requestResult<StoredEnvelope<FormSessionStateDto> | undefined>(
+      transaction.objectStore(FORM_SESSIONS).get(physicalKey),
+    )
+    await transactionComplete(transaction)
+    if (envelope === undefined) return null
+    if (envelope.physicalKey !== physicalKey) {
+      throw storageError('FLOW_FORM_SESSION_RECORD_INVALID')
+    }
+    assertFormSessionState(envelope.record)
+    if (!sameFormSessionIdentity(envelope.record, identity)) {
+      throw storageError('FLOW_FORM_SESSION_IDENTITY_MISMATCH')
+    }
+    return envelope.record
+  }
+
+  async saveFormSession(
+    session: FormSessionStateDto,
+    expectedGeneration: number | null,
+  ): Promise<void> {
+    assertFormSessionState(session)
+    if (
+      expectedGeneration !== null &&
+      (!Number.isSafeInteger(expectedGeneration) || expectedGeneration < 0)
+    ) {
+      throw storageError('FLOW_FORM_SESSION_GENERATION_INVALID')
+    }
+    const physicalKey = await formSessionKey(session)
+    const envelope: StoredEnvelope<FormSessionStateDto> = { physicalKey, record: session }
+    const database = await this.open()
+
+    await new Promise<void>((resolve, reject) => {
+      const transaction = database.transaction(FORM_SESSIONS, 'readwrite', {
+        durability: 'strict',
+      })
+      let failure: StorageError | undefined
+      transaction.oncomplete = () => resolve()
+      transaction.onabort = () =>
+        reject(failure ?? storageError('FLOW_STORAGE_ABORTED', transaction.error))
+      transaction.onerror = () => {
+        failure ??= storageError('FLOW_FORM_SESSION_WRITE_FAILED', transaction.error)
+      }
+      const abort = (error: StorageError): void => {
+        failure ??= error
+        try {
+          transaction.abort()
+        } catch {
+          // The transaction may already be aborting after a request failure.
+        }
+      }
+      const read = transaction.objectStore(FORM_SESSIONS).get(physicalKey)
+      read.onsuccess = () => {
+        try {
+          const existing = read.result as StoredEnvelope<FormSessionStateDto> | undefined
+          if (existing !== undefined) {
+            if (existing.physicalKey !== physicalKey) {
+              throw storageError('FLOW_FORM_SESSION_RECORD_INVALID')
+            }
+            assertFormSessionState(existing.record)
+            if (!sameFormSessionIdentity(existing.record, session)) {
+              throw storageError('FLOW_FORM_SESSION_IDENTITY_MISMATCH')
+            }
+            if (deterministicJson(existing.record) === deterministicJson(session)) return
+            if (
+              expectedGeneration === null ||
+              existing.record.generation !== expectedGeneration ||
+              session.generation !== existing.record.generation + 1
+            ) {
+              throw storageError('FLOW_FORM_SESSION_GENERATION_CONFLICT')
+            }
+          } else if (expectedGeneration !== null || session.generation !== 0) {
+            throw storageError('FLOW_FORM_SESSION_GENERATION_CONFLICT')
+          }
+          transaction.objectStore(FORM_SESSIONS).put(envelope)
+        } catch (error: unknown) {
+          abort(error instanceof StorageError ? error : storageError('FLOW_FORM_SESSION_WRITE_FAILED', error))
+        }
+      }
+      read.onerror = () => abort(storageError('FLOW_FORM_SESSION_READ_FAILED', read.error))
+    })
+  }
+
   async loadRecords(options: { readonly allowEmpty?: boolean } = {}): Promise<RecoveryRecordsDto> {
     return (await this.loadRecoveryImage(options)).records
   }
@@ -633,7 +745,7 @@ export class IndexedDbDocumentStore {
       }
       request.onupgradeneeded = (event) => {
         const database = request.result
-        for (const storeName of [SNAPSHOTS, TRANSACTIONS, AUDITS, ASSETS, SOURCES]) {
+        for (const storeName of [SNAPSHOTS, TRANSACTIONS, AUDITS, ASSETS, SOURCES, FORM_SESSIONS]) {
           if (!database.objectStoreNames.contains(storeName)) {
             database.createObjectStore(storeName, { keyPath: 'physicalKey' })
           }
@@ -1016,6 +1128,114 @@ function sameSnapshotIdentity(left: SnapshotRecordDto, right: SnapshotRecordDto)
     left.schemaVersion === right.schemaVersion &&
     left.revision === right.revision
   )
+}
+
+function assertFormSessionIdentity(identity: unknown): asserts identity is FormSessionIdentityDto {
+  if (!isPlainRecord(identity)) throw storageError('FLOW_FORM_SESSION_RECORD_INVALID')
+  if (
+    !isBoundedString(identity.documentId) ||
+    !isSafeNonnegativeInteger(identity.sourceRevision) ||
+    !isBoundedString(identity.sourceHash)
+  ) {
+    throw storageError('FLOW_FORM_SESSION_RECORD_INVALID')
+  }
+}
+
+function assertFormSessionState(state: unknown): asserts state is FormSessionStateDto {
+  if (!isPlainRecord(state)) throw storageError('FLOW_FORM_SESSION_RECORD_INVALID')
+  if (
+    state.schemaVersion !== FORM_SESSION_SCHEMA_VERSION ||
+    !isSafeNonnegativeInteger(state.generation)
+  ) {
+    throw storageError('FLOW_FORM_SESSION_RECORD_INVALID')
+  }
+  assertFormSessionIdentity(state)
+  if (!isPlainRecord(state.overrides)) {
+    throw storageError('FLOW_FORM_SESSION_RECORD_INVALID')
+  }
+  const overrideEntries = Object.entries(state.overrides)
+  if (overrideEntries.length > FORM_SESSION_MAX_OVERRIDES) {
+    throw storageError('FLOW_FORM_SESSION_RECORD_INVALID')
+  }
+  for (const [fieldId, value] of overrideEntries) {
+    if (!isBoundedString(fieldId) || !isFormSessionValue(value)) {
+      throw storageError('FLOW_FORM_SESSION_RECORD_INVALID')
+    }
+  }
+  try {
+    if (new TextEncoder().encode(deterministicJson(state)).byteLength > FORM_SESSION_MAX_BYTES) {
+      throw storageError('FLOW_FORM_SESSION_RECORD_INVALID')
+    }
+  } catch (error: unknown) {
+    if (error instanceof StorageError) throw error
+    throw storageError('FLOW_FORM_SESSION_RECORD_INVALID', error)
+  }
+}
+
+function isFormSessionValue(value: unknown): value is FormSessionValueDto {
+  if (!isPlainRecord(value) || typeof value.type !== 'string') return false
+  switch (value.type) {
+    case 'empty':
+      return Object.keys(value).length === 1
+    case 'text':
+      return (
+        Object.keys(value).length === 2 &&
+        typeof value.value === 'string' &&
+        new TextEncoder().encode(value.value).byteLength <= FORM_SESSION_MAX_VALUE_BYTES
+      )
+    case 'checked':
+      return Object.keys(value).length === 2 && typeof value.value === 'boolean'
+    case 'selected':
+      return (
+        Object.keys(value).length === 2 &&
+        Array.isArray(value.optionIds) &&
+        value.optionIds.length <= FORM_SESSION_MAX_OVERRIDES &&
+        value.optionIds.every(
+          (optionId: unknown) =>
+            typeof optionId === 'string' && boundedString(optionId, FORM_SESSION_MAX_ID_BYTES),
+        )
+      )
+    default:
+      return false
+  }
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false
+  const prototype = Object.getPrototypeOf(value)
+  return prototype === Object.prototype || prototype === null
+}
+
+function isBoundedString(value: unknown): value is string {
+  return typeof value === 'string' && boundedString(value, FORM_SESSION_MAX_ID_BYTES)
+}
+
+function boundedString(value: string, maxBytes: number): boolean {
+  return value.length > 0 && new TextEncoder().encode(value).byteLength <= maxBytes
+}
+
+function isSafeNonnegativeInteger(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
+}
+
+function sameFormSessionIdentity(
+  left: FormSessionIdentityDto,
+  right: FormSessionIdentityDto,
+): boolean {
+  return (
+    left.documentId === right.documentId &&
+    left.sourceRevision === right.sourceRevision &&
+    left.sourceHash === right.sourceHash
+  )
+}
+
+async function formSessionKey(identity: FormSessionIdentityDto): Promise<string> {
+  const keyIdentity: FormSessionIdentityDto = {
+    documentId: identity.documentId,
+    sourceRevision: identity.sourceRevision,
+    sourceHash: identity.sourceHash,
+  }
+  return (await recordEnvelope(keyIdentity, 'FLOW_FORM_SESSION_KEY_FAILED')).physicalKey
 }
 
 function sameTransactionIdentity(
