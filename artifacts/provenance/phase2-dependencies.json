@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "status": "success",
   "phase": "FLOWPDF-02",
-  "observedAt": "2026-09-14T23:32:57.049Z",
+  "observedAt": "2026-09-21T23:40:52.260Z",
   "policy": {
     "minimumAgeDays": 30,
     "minimumWeeklyDownloads": 1000,
@@ -84,10 +84,10 @@
       },
       "numericSnapshot": {
         "metric": "weeklyDownloads",
-        "value": 128119130,
+        "value": 133327282,
         "period": "last-week",
-        "start": "2026-09-05",
-        "end": "2026-09-11",
+        "start": "2026-09-14",
+        "end": "2026-09-20",
         "source": "https://api.npmjs.org/downloads/point/last-week/react"
       },
       "sources": {
@@ -121,10 +121,10 @@
       },
       "numericSnapshot": {
         "metric": "weeklyDownloads",
-        "value": 120650097,
+        "value": 125879101,
         "period": "last-week",
-        "start": "2026-09-05",
-        "end": "2026-09-11",
+        "start": "2026-09-14",
+        "end": "2026-09-20",
         "source": "https://api.npmjs.org/downloads/point/last-week/react-dom"
       },
       "sources": {
@@ -158,10 +158,10 @@
       },
       "numericSnapshot": {
         "metric": "weeklyDownloads",
-        "value": 117806483,
+        "value": 121454258,
         "period": "last-week",
-        "start": "2026-09-05",
-        "end": "2026-09-11",
+        "start": "2026-09-14",
+        "end": "2026-09-20",
         "source": "https://api.npmjs.org/downloads/point/last-week/%40types%2Freact"
       },
       "sources": {
@@ -195,10 +195,10 @@
       },
       "numericSnapshot": {
         "metric": "weeklyDownloads",
-        "value": 98563754,
+        "value": 102379976,
         "period": "last-week",
-        "start": "2026-09-05",
-        "end": "2026-09-11",
+        "start": "2026-09-14",
+        "end": "2026-09-20",
         "source": "https://api.npmjs.org/downloads/point/last-week/%40types%2Freact-dom"
       },
       "sources": {
@@ -232,10 +232,10 @@
       },
       "numericSnapshot": {
         "metric": "weeklyDownloads",
-        "value": 132485786,
+        "value": 132496056,
         "period": "last-week",
-        "start": "2026-09-05",
-        "end": "2026-09-11",
+        "start": "2026-09-14",
+        "end": "2026-09-20",
         "source": "https://api.npmjs.org/downloads/point/last-week/vite"
       },
       "sources": {
@@ -269,10 +269,10 @@
       },
       "numericSnapshot": {
         "metric": "weeklyDownloads",
-        "value": 65129121,
+        "value": 67769767,
         "period": "last-week",
-        "start": "2026-09-05",
-        "end": "2026-09-11",
+        "start": "2026-09-14",
+        "end": "2026-09-20",
         "source": "https://api.npmjs.org/downloads/point/last-week/%40vitejs%2Fplugin-react"
       },
       "sources": {
@@ -302,7 +302,7 @@
       "yanked": false,
       "numericSnapshot": {
         "metric": "recentDownloads",
-        "value": 6479053,
+        "value": 7188041,
         "source": "https://crates.io/api/v1/crates/icu_segmenter"
       },
       "sources": {
@@ -334,7 +334,7 @@
       "yanked": false,
       "numericSnapshot": {
         "metric": "recentDownloads",
-        "value": 49304435,
+        "value": 51168893,
         "source": "https://crates.io/api/v1/crates/image"
       },
       "sources": {
