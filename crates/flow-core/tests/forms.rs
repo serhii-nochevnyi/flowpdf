@@ -261,6 +261,20 @@ fn projection_is_deterministic_and_revision_bound() {
 }
 
 #[test]
+fn required_empty_defaults_are_projectable_but_empty_user_values_are_rejected() {
+    let mut document = document_with_field();
+    document.fields[0].required = true;
+    assert_eq!(
+        validate_field_value(&document.fields[0], &FieldValue::Empty),
+        Err(FormValueErrorCode::Required)
+    );
+    let display = display_list(&document);
+    let projection = resolve_form_widgets(&document, &display).expect("empty default projection");
+    assert_eq!(projection.widgets.len(), 1);
+    assert_eq!(projection.widgets[0].default_value, FieldValue::Empty);
+}
+
+#[test]
 fn invalid_deleted_and_unmapped_anchors_are_explicitly_reviewed() {
     let mut document = document_with_field();
     let node = document.content[0].id.clone();

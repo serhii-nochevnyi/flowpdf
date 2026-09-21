@@ -75,7 +75,22 @@ pub fn validate_field_value(
     field: &FieldDescriptor,
     value: &FieldValue,
 ) -> Result<(), FormValueErrorCode> {
-    if field.required && value_is_empty(field, value) {
+    validate_field_value_inner(field, value, true)
+}
+
+fn validate_default_value(
+    field: &FieldDescriptor,
+    value: &FieldValue,
+) -> Result<(), FormValueErrorCode> {
+    validate_field_value_inner(field, value, false)
+}
+
+fn validate_field_value_inner(
+    field: &FieldDescriptor,
+    value: &FieldValue,
+    enforce_required: bool,
+) -> Result<(), FormValueErrorCode> {
+    if enforce_required && field.required && value_is_empty(field, value) {
         return Err(FormValueErrorCode::Required);
     }
 
@@ -109,7 +124,7 @@ pub fn validate_field_value(
             }
         }
         (FieldKind::Checkbox, FieldValue::Checked { value }) => {
-            if field.required && !value {
+            if enforce_required && field.required && !value {
                 Err(FormValueErrorCode::Required)
             } else {
                 Ok(())
@@ -344,7 +359,7 @@ pub fn resolve_form_widgets(
     let mut widgets = Vec::new();
     let mut review = Vec::new();
     for field in &document.fields {
-        validate_field_value(field, &field.default_value).map_err(|code| {
+        validate_default_value(field, &field.default_value).map_err(|code| {
             FormProjectionError::InvalidFieldValue {
                 field_id: field.id.clone(),
                 code,
