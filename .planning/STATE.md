@@ -4,16 +4,16 @@ milestone: v1.0
 current_phase: 3
 current_phase_name: Deterministic Reflow and Pagination
 status: executing
-stopped_at: Completed 03-02-PLAN.md; ready for 03-03-PLAN.md
-last_updated: "2026-09-21T13:03:46Z"
+stopped_at: Completed 03-03-PLAN.md; ready for 03-04-PLAN.md
+last_updated: "2026-09-21T13:48:26Z"
 last_activity: 2026-09-21
-last_activity_desc: Completed Phase 3 Plan 03-02 durable schema-v3 layout settings and lossless v2-to-v3 migration; Phase 2 implementation remains complete with external Edge/Windows AT evidence outstanding
-state_head: 4d3d7306f52a8f5f4b7239633d076d791c8ddd81
+last_activity_desc: Completed Phase 3 Plan 03-03 deterministic fragment-tree pagination and bounded constraint fallbacks; Phase 2 implementation remains complete with external Edge/Windows AT evidence outstanding
+state_head: 69ff10a6e42bc59072a8be4e83f9a7fa33e09758
 progress:
   total_phases: 9
   completed_phases: 1
   total_plans: 30
-  completed_plans: 26
+  completed_plans: 27
 milestone_name: milestone
 ---
 
@@ -29,11 +29,11 @@ See: .planning/PROJECT.md (updated 2026-08-25)
 ## Current Position
 
 Phase: 3 (Deterministic Reflow and Pagination) — EXECUTING
-Plan: 2 of 6
-Status: 03-02 complete; ready for 03-03. Phase 2 external Edge/Windows screen-reader evidence remains outstanding.
-Last activity: 2026-09-21 — Durable schema-v3 page/section/header/footer settings and lossless v2-to-v3 migration completed with bounded validation and canonical goldens
+Plan: 3 of 6
+Status: 03-03 complete; ready for 03-04. Phase 2 external Edge/Windows screen-reader evidence remains outstanding.
+Last activity: 2026-09-21 — Deterministic fragment-tree pagination and bounded constraint fallbacks completed with exact fixed-point page/fragment tests
 
-Progress: Phase 2 — 18/18 implementation plans complete; Phase 3 — 2/6 plans executed; milestone percentage unavailable while later phases remain unplanned.
+Progress: Phase 2 — 18/18 implementation plans complete; Phase 3 — 3/6 plans executed; milestone percentage unavailable while later phases remain unplanned.
 
 ## Performance Metrics
 
@@ -82,6 +82,7 @@ Progress: Phase 2 — 18/18 implementation plans complete; Phase 3 — 2/6 plans
 | Phase FLOWPDF-02 P18 | resumed multi-session | 2 tasks | 14 files |
 | Phase FLOWPDF-03 P01 | same session | 2 tasks | 11 files |
 | Phase FLOWPDF-03 P02 | same session | 2 tasks | 13 files |
+| Phase FLOWPDF-03 P03 | same session | 2 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -130,6 +131,8 @@ Decisions are logged in `.planning/PROJECT.md`.
 - [Phase 3]: Schema-v3 stores page geometry, ordered semantic section boundaries, and bounded typed static header/footer runs; it never stores derived fragments, glyphs, display-list bytes, or coordinates.
 - [Phase 3]: The frozen v0/v1 decoder and source/hash gate remain unchanged; a private canonical v2 envelope admits exactly one v2-to-v3 migration hop with deterministic default section settings and preserved provenance.
 - [Phase 3]: The first section is the document-start boundary and mirrors top-level page settings; later boundaries reference ordered top-level content nodes and reject duplicate, missing, or out-of-order anchors before publication.
+- [Phase 3]: Pagination is a borrowed, revision/hash-bound derived result using fixed-point page geometry, stable source ranges, explicit break reasons, repeated static bands, and bounded diagnostics; canonical FlowDocument state is never mutated.
+- [Phase 3]: Simple tables split only between rows; configured first header rows repeat as derived fragments, while overlarge rows and impossible constraints publish explicit overflow/fallback diagnostics rather than retrying indefinitely.
 
 ### Pending Todos
 
@@ -150,6 +153,6 @@ Decisions are logged in `.planning/PROJECT.md`.
 
 ## Session Continuity
 
-Last session: 2026-09-21T13:03:46Z
-Stopped at: Completed 03-02-PLAN.md; ready for 03-03-PLAN.md
+Last session: 2026-09-21T13:48:26Z
+Stopped at: Completed 03-03-PLAN.md; ready for 03-04-PLAN.md
 Resume file: None
