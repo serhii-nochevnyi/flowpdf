@@ -1,18 +1,18 @@
 ---
 gsd_state_version: "1.0"
 milestone: v1.0
-current_phase: 3
-current_phase_name: Deterministic Reflow and Pagination
+current_phase: 4
+current_phase_name: Owned PDF Preview and Export
 status: executing
-stopped_at: Completed 03-06-PLAN.md; Phase 3 local gate is green, with inherited Phase 2 external AT closure still outstanding
-last_updated: "2026-09-21T15:40:17Z"
+stopped_at: Phase 4 plans 04-01 through 04-06 materialized; ready to execute 04-01 while Phase 2/3 external AT closure remains outstanding
+last_updated: "2026-09-21T16:05:00Z"
 last_activity: 2026-09-21
-last_activity_desc: Completed Phase 3 Plan 03-06 accessible page viewport and deterministic dual-run gate; Phase 2 implementation remains complete with external Edge/Windows AT evidence outstanding
+last_activity_desc: Planned Phase 4 owned PDF preview/export from the fixed-point layout/display-list contract; no PDF implementation claim yet
 state_head: d777df1
 progress:
   total_phases: 9
   completed_phases: 1
-  total_plans: 30
+  total_plans: 36
   completed_plans: 30
 milestone_name: milestone
 ---
@@ -24,16 +24,16 @@ milestone_name: milestone
 See: .planning/PROJECT.md (updated 2026-08-25)
 
 **Core value:** A user can edit semantic document text naturally, repaginate following content, and export a visually consistent, selectable, form-capable PDF.
-**Current focus:** Phase 3 — Deterministic Reflow and Pagination
+**Current focus:** Phase 4 — Owned PDF Preview and Export
 
 ## Current Position
 
-Phase: 3 (Deterministic Reflow and Pagination) — EXECUTING
-Plan: 6 of 6
-Status: 03-06 complete; Phase 3 local implementation and gate are green. Phase 2 external Edge/Windows screen-reader evidence remains outstanding.
-Last activity: 2026-09-21 — Accessible page viewport, semantic/visual revision synchronization, and deterministic Phase 3 dual-run gate completed
+Phase: 4 (Owned PDF Preview and Export) — EXECUTING
+Plan: 0 of 6
+Status: Plans 04-01 through 04-06 are materialized; Phase 4 implementation has not started. Phase 2/3 external Edge/Windows screen-reader evidence remains outstanding.
+Last activity: 2026-09-21 — Phase 4 COS, selectable export, source recovery, preview, and gate plans created
 
-Progress: Phase 2 — 18/18 implementation plans complete; Phase 3 — 6/6 local implementation plans executed; phase-level closure remains honest about inherited external AT evidence and later phases remain unplanned.
+Progress: Phase 2 — 18/18 implementation plans complete; Phase 3 — 6/6 local implementation plans executed; Phase 4 — 0/6 plans executed and 6/6 planned. Phase 2/3 phase-level closure remains honest about inherited external AT evidence.
 
 ## Performance Metrics
 
@@ -50,6 +50,7 @@ Progress: Phase 2 — 18/18 implementation plans complete; Phase 3 — 6/6 local
 | 1 | 6 | - | - |
 | 2 | 18 | multi-session | - |
 | 3 | 6 | multi-session | - |
+| 4 | 6 | planned | - |
 
 **Recent Trend:** Schema-v2 tree, lossless migration, editor accessibility, exact UI coverage, deterministic semantic scale, and the dual-run release gate remain green. Plan 02-18 closes all Phase 2 implementation plans with 7/7 requirements, 33/33 edges, 108/108 UI owners, and 3/3 flagged prohibitions; Edge/Windows screen-reader UAT remains explicitly outstanding before Phase 2 closure. Phase 3 now has all six local implementation plans complete, including Rust typography/pagination, schema-v3 sections, incremental equivalence, revision-safe workers, the accessible viewport, and a two-run local gate; Phase 3 phase-level closure does not invent the inherited external AT result.
 **Per-Plan Metrics:**

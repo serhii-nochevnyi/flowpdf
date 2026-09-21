@@ -97,8 +97,9 @@ things:
 
 Phase 2 implementation plans and the Phase 3 local implementation gate are
 complete, but the explicitly required Microsoft Edge on Windows plus Windows
-screen-reader evidence remains outstanding. General PDF import/export,
-complete assistive-technology validation, voice control, and production
+screen-reader evidence remains outstanding. Phase 4 owned PDF preview/export
+plans are now materialized, but their implementation has not started. General
+PDF import/export, complete assistive-technology validation, voice control, and production
 hardening are not delivered by this repository state. See the
 [roadmap](.planning/ROADMAP.md) and [project constraints](.planning/PROJECT.md)
 for authoritative scope and sequencing.

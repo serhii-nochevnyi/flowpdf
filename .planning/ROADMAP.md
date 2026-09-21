@@ -135,7 +135,18 @@ Chromium/macOS evidence is not a substitute.
   4. Reopening an owned PDF restores an identical canonical FlowDocument when its source payload is available.
   5. Every export records reproducibility inputs and passes structural, extraction, visual and form validation gates.
 
-**Plans**: TBD
+**Plans**: 6/6 planned
+
+- [ ] 04-01-PLAN.md — Establish bounded COS values and a deterministic PDF page envelope.
+- [ ] 04-02-PLAN.md — Connect shaped layout to embedded fonts, Unicode mappings, and selectable text.
+- [ ] 04-03-PLAN.md — Add bounded images, metadata, outlines/links, and unsupported-content reporting.
+- [ ] 04-04-PLAN.md — Add reproducibility manifests and exact owned-source recovery.
+- [ ] 04-05-PLAN.md — Expose revision-safe export and the accessible virtualized PDF preview.
+- [ ] 04-06-PLAN.md — Run the Phase 4 structural/extraction/visual release gate honestly.
+
+Phase 4 is planned from the Phase 3 fixed-point/display-list contracts; no PDF
+implementation or target-viewer compatibility claim is made until its plans
+execute and the required evidence is observed.
 **UI hint**: yes
 
 ### Phase 5: Semantic Fillable Forms
