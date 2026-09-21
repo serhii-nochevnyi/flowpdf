@@ -1194,12 +1194,7 @@ pub fn paginate_document(
     .map(|bytes| blake3::hash(&bytes).to_hex().to_string())
     .map_err(|_| LayoutError::Serialization)?;
 
-    let mut paginator = Paginator::new(
-        document,
-        request,
-        catalog,
-        ukrainian_hyphenation,
-    );
+    let mut paginator = Paginator::new(document, request, catalog, ukrainian_hyphenation);
     paginator.run()?;
     let mut result = PaginationResult {
         source_revision: request.source_revision,
@@ -1213,6 +1208,57 @@ pub fn paginate_document(
     };
     result.result_hash = pagination_result_hash(&result)?;
     Ok(result)
+}
+
+/// Result of the revision-safe incremental entry point. The current Phase 3
+/// implementation intentionally uses the full paginator as its oracle for
+/// every changed revision; only a verified exact no-op cache is reused. This
+/// makes the reuse boundary observable and fail-closed before prefix/suffix
+/// splicing is introduced in a later optimization.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct IncrementalPaginationResult {
+    pub result: PaginationResult,
+    pub invalidation: crate::invalidation::InvalidationPlan,
+    pub reused: bool,
+    pub recomputed_from: usize,
+}
+
+pub fn paginate_incremental_document(
+    document: &FlowDocument,
+    request: &PaginationRequest,
+    catalog: &FontCatalog,
+    ukrainian_hyphenation: Option<&UkrainianHyphenation>,
+    cache: Option<&crate::invalidation::IncrementalLayoutCache>,
+    changes: &crate::invalidation::ChangeSet,
+) -> Result<IncrementalPaginationResult, LayoutError> {
+    if request.source_revision != document.revision {
+        return Err(LayoutError::PaginationRequestInvalid);
+    }
+    let canonical = canonical_bytes(document).map_err(|_| LayoutError::InvalidDocument)?;
+    if canonical_hash(&canonical) != request.source_hash {
+        return Err(LayoutError::PaginationRequestInvalid);
+    }
+    let invalidation = crate::invalidation::plan_for_document(document, changes);
+    if invalidation.reason == crate::invalidation::InvalidationReason::NoChanges
+        && cache.is_some_and(|cache| cache.matches(request, catalog, ukrainian_hyphenation))
+    {
+        let result = cache.ok_or(LayoutError::InvalidDocument)?.result.clone();
+        return Ok(IncrementalPaginationResult {
+            result,
+            invalidation,
+            reused: true,
+            recomputed_from: document.content.len(),
+        });
+    }
+
+    let result = paginate_document(document, request, catalog, ukrainian_hyphenation)?;
+    Ok(IncrementalPaginationResult {
+        result,
+        recomputed_from: invalidation.earliest_boundary,
+        invalidation,
+        reused: false,
+    })
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -2370,7 +2416,7 @@ fn node_text_recursive(node: &ContentNode) -> String {
         .join(" ")
 }
 
-fn pagination_result_hash(result: &PaginationResult) -> Result<String, LayoutError> {
+pub(crate) fn pagination_result_hash(result: &PaginationResult) -> Result<String, LayoutError> {
     serde_json::to_vec(&(
         result.source_revision,
         &result.source_hash,

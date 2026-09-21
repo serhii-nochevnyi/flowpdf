@@ -10,6 +10,7 @@ pub mod audit;
 pub mod canonical;
 pub mod capability;
 pub mod editor_view;
+pub mod invalidation;
 pub mod layout;
 pub mod model;
 pub mod provenance;
@@ -47,10 +48,15 @@ pub use editor_view::{
     FormattingProjectionDto, FormattingState, ImageBlockViewDto, ImageLimitsDto,
     StructuralPlacementDto, TableCellFocusDto, TableLimitsDto,
 };
+pub use invalidation::{
+    CarrySignature, ChangeKind, ChangeSet, IncrementalLayoutCache, InvalidationPlan,
+    InvalidationReason, diff_documents, plan_for_document,
+};
 pub use layout::{
-    BreakKind, BreakReason, FontCatalog, FontFace, FragmentKind, LayoutDiagnostic,
-    LayoutDiagnosticCode, LayoutError, LayoutFragment, LayoutPage, LayoutRect, LayoutUnit,
-    PaginationRequest, PaginationResult, UkrainianHyphenation, paginate_document,
+    BreakKind, BreakReason, FontCatalog, FontFace, FragmentKind, IncrementalPaginationResult,
+    LayoutDiagnostic, LayoutDiagnosticCode, LayoutError, LayoutFragment, LayoutPage, LayoutRect,
+    LayoutUnit, PaginationRequest, PaginationResult, UkrainianHyphenation, paginate_document,
+    paginate_incremental_document,
 };
 use model::{
     Affinity, CommandId, DocumentId, FlowDocument, LogicalPosition, MigrationHop, Provenance,
