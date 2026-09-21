@@ -44,11 +44,12 @@ pub enum MutationFamily {
     RemoveTableColumn,
     SetTableHeaderRow,
     RemoveTable,
+    InsertField,
     SetField,
 }
 
 impl MutationFamily {
-    pub const ALL: [Self; 33] = [
+    pub const ALL: [Self; 34] = [
         Self::InsertText,
         Self::ReplaceText,
         Self::ReplaceSelection,
@@ -81,6 +82,7 @@ impl MutationFamily {
         Self::RemoveTableColumn,
         Self::SetTableHeaderRow,
         Self::RemoveTable,
+        Self::InsertField,
         Self::SetField,
     ];
 
@@ -119,6 +121,7 @@ impl MutationFamily {
             Self::RemoveTableColumn => "removeTableColumn",
             Self::SetTableHeaderRow => "setTableHeaderRow",
             Self::RemoveTable => "removeTable",
+            Self::InsertField => "insertField",
             Self::SetField => "setField",
         }
     }
@@ -158,6 +161,7 @@ impl MutationFamily {
             Mutation::RemoveTableColumn { .. } => Self::RemoveTableColumn,
             Mutation::SetTableHeaderRow { .. } => Self::SetTableHeaderRow,
             Mutation::RemoveTable { .. } => Self::RemoveTable,
+            Mutation::InsertField { .. } => Self::InsertField,
             Mutation::SetField { .. } => Self::SetField,
         }
     }
@@ -197,6 +201,7 @@ impl MutationFamily {
             CommandKind::RemoveTableColumn { .. } => Some(Self::RemoveTableColumn),
             CommandKind::SetTableHeaderRow { .. } => Some(Self::SetTableHeaderRow),
             CommandKind::RemoveTable { .. } => Some(Self::RemoveTable),
+            CommandKind::InsertField { .. } => Some(Self::InsertField),
             CommandKind::SetField { .. } => Some(Self::SetField),
             CommandKind::Batch { .. } | CommandKind::Undo | CommandKind::Redo => None,
         }
@@ -299,7 +304,7 @@ const fn capability(
     }
 }
 
-pub static COMMAND_CAPABILITIES: [CommandCapability; 33] = [
+pub static COMMAND_CAPABILITIES: [CommandCapability; 34] = [
     capability(
         MutationFamily::InsertText,
         "editor.intent.insertText",
@@ -621,6 +626,16 @@ pub static COMMAND_CAPABILITIES: [CommandCapability; 33] = [
         "keyboard.delete",
     ),
     capability(
+        MutationFamily::InsertField,
+        "editor.intent.insertField",
+        RiskLevel::Structure,
+        ConfirmationPolicy::None,
+        "editor.parity.visible.insertField",
+        "editor.insertMenu",
+        "editor.parity.keyboard.insertField",
+        "keyboard.insertStructure",
+    ),
+    capability(
         MutationFamily::SetField,
         "editor.intent.setField",
         RiskLevel::Compatibility,
@@ -711,6 +726,7 @@ const fn family_index(family: MutationFamily) -> usize {
         MutationFamily::RemoveTableColumn => 29,
         MutationFamily::SetTableHeaderRow => 30,
         MutationFamily::RemoveTable => 31,
-        MutationFamily::SetField => 32,
+        MutationFamily::InsertField => 32,
+        MutationFamily::SetField => 33,
     }
 }

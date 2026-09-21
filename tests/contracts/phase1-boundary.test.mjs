@@ -701,6 +701,7 @@ export function assertPhaseTwoParityBoundary(root, snapshot = loadWorkspaceSnaps
     'removeTableColumn',
     'setTableHeaderRow',
     'removeTable',
+    'insertField',
     'setField',
   ]
   assert.equal(contract.formatVersion, 1)

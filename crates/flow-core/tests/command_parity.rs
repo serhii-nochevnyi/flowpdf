@@ -29,7 +29,7 @@ fn command_id(value: u32) -> flow_core::model::CommandId {
 fn catalog_is_exhaustive_non_vacuous_and_voice_safe() {
     let catalog = command_capabilities();
     assert_eq!(catalog.len(), MutationFamily::ALL.len());
-    assert_eq!(catalog.len(), 33);
+    assert_eq!(catalog.len(), 34);
     assert!(!catalog.is_empty());
 
     let command_types = catalog
@@ -90,7 +90,7 @@ fn catalog_is_exhaustive_non_vacuous_and_voice_safe() {
 #[test]
 fn generated_parity_contract_is_deterministic_and_complete() {
     let contract = command_parity_contract();
-    assert_eq!(contract.mutation_count, 33);
+    assert_eq!(contract.mutation_count, 34);
     assert_eq!(contract.commands, command_capabilities());
 
     let expected = serde_json::to_string_pretty(&contract).expect("contract serializes");
@@ -98,8 +98,8 @@ fn generated_parity_contract_is_deterministic_and_complete() {
     assert_eq!(checked_in.trim_end(), expected);
 
     let value: Value = serde_json::from_str(checked_in).expect("checked-in contract JSON");
-    assert_eq!(value["mutationCount"], 33);
-    assert_eq!(value["commands"].as_array().map(Vec::len), Some(33));
+    assert_eq!(value["mutationCount"], 34);
+    assert_eq!(value["commands"].as_array().map(Vec::len), Some(34));
 }
 
 #[test]

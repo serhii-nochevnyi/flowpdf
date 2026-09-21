@@ -6,6 +6,7 @@ import type {
   EditorCapabilityDto,
   EditorLocale,
   EditorViewDto,
+  FieldDescriptorDto,
   StructuralPlacementDto,
   TableLimitsDto,
 } from './editor-store.js'
@@ -47,6 +48,7 @@ export function StructuralControls({
 }: StructuralControlsProps) {
   const labels = editorMessages[locale]
   const tableCapability = capabilityFor(view, 'insertTable')
+  const fieldCapability = capabilityFor(view, 'insertField')
   const pageBreakCapability = capabilityFor(view, 'insertPageBreak')
   const imageCapability = capabilityFor(view, 'insertImage')
   const busy = controller.snapshot().phase === 'pending'
@@ -80,6 +82,30 @@ export function StructuralControls({
         >
           {labels.insertPageBreak}
         </button>
+        <button
+          type="button"
+          data-action="editor-insert-field"
+          disabled={busy || !fieldCapability.enabled}
+          aria-describedby={reasonId('insert-field', fieldCapability.reasonKey)}
+          onMouseDown={(event) => event.preventDefault()}
+          onClick={() => {
+            const fieldId = globalThis.crypto.randomUUID()
+            const field: FieldDescriptorDto = {
+              id: fieldId,
+              name: `field-${fieldId.slice(0, 8)}`,
+              label: labels.fieldNewLabel,
+              anchor: { status: 'graphemeSafe', original: view.selection.focus },
+              kind: { type: 'text', multiline: false, inputHint: 'plain' },
+              required: false,
+              readOnly: false,
+              defaultValue: { type: 'empty' },
+              options: [],
+            }
+            execute({ type: 'insertField', field })
+          }}
+        >
+          {labels.insertField}
+        </button>
         {imageCapability.placement == null ? null : (
           <ImageInsertDialog
             controller={controller}
@@ -89,6 +115,7 @@ export function StructuralControls({
           />
         )}
         {reasonText(locale, 'insert-table', tableCapability.reasonKey)}
+        {reasonText(locale, 'insert-field', fieldCapability.reasonKey)}
         {reasonText(locale, 'insert-page-break', pageBreakCapability.reasonKey)}
         {reasonText(locale, 'insert-image', imageCapability.reasonKey)}
       </div>

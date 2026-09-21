@@ -111,6 +111,10 @@ export type StructuralCommandDto =
       readonly confirmed: boolean
     }
   | {
+      readonly type: 'insertField'
+      readonly field: FieldDescriptorDto
+    }
+  | {
       readonly type: 'setField'
       readonly fieldId: string
       readonly field: FieldDescriptorDto

@@ -101,6 +101,7 @@ pub enum EditorCapability {
     InsertPageBreak,
     RemovePageBreak,
     InsertTable,
+    InsertField,
     InsertImage,
     ReplaceImage,
     SetImageAccessibility,
@@ -133,6 +134,7 @@ impl EditorCapability {
             Self::InsertPageBreak => Some("insertPageBreak"),
             Self::RemovePageBreak => Some("removePageBreak"),
             Self::InsertTable => Some("insertTable"),
+            Self::InsertField => Some("insertField"),
             Self::InsertImage => Some("insertImage"),
             Self::ReplaceImage => Some("replaceImage"),
             Self::SetImageAccessibility => Some("setImageAccessibility"),
@@ -983,6 +985,12 @@ fn capabilities_for(
         ),
         capability(
             EditorCapability::InsertTable,
+            selection.collapsed() && text_selection,
+            (!(selection.collapsed() && text_selection)).then_some("structuralSelectionRequired"),
+            None,
+        ),
+        capability(
+            EditorCapability::InsertField,
             selection.collapsed() && text_selection,
             (!(selection.collapsed() && text_selection)).then_some("structuralSelectionRequired"),
             None,

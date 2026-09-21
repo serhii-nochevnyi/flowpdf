@@ -265,4 +265,83 @@ for (const locale of ['uk', 'en'] as const) {
       (field) => field.descriptor.id === originalField.id,
     )?.descriptor.anchor)
   })
+
+  test(`field insertion creates a typed default descriptor at the Rust caret in ${locale}`, async () => {
+    const { root, controller } = await openFormEditor(locale)
+    const initial = controller.snapshot().accepted
+    if (initial === null) throw new Error('accepted editor state is required')
+    const textBlock = initial.editor.view.document.blocks.find((block) => block.kind !== 'atomic')
+    if (textBlock === undefined) throw new Error('text block is required')
+    const target = {
+      nodeId: textBlock.nodeId,
+      utf16Offset: 0,
+      affinity: 'forward' as const,
+    }
+    await controller.setEditorSelection({ anchor: target, focus: target })
+    await settle(controller)
+
+    const insert = root.querySelector<HTMLButtonElement>('[data-action="editor-insert-field"]')
+    if (insert === null) throw new Error('field insertion action is required')
+    expect(insert.disabled, JSON.stringify({
+      phase: controller.snapshot().phase,
+      selection: controller.snapshot().accepted?.editor.view.selection,
+      capabilities: controller.snapshot().accepted?.editor.view.capabilities,
+    })).toBe(false)
+    const initialIds = new Set(
+      initial.editor.view.document.fields.map((field) => field.descriptor.id),
+    )
+    insert.click()
+    await settle(controller)
+    await settleForm(root, controller)
+
+    const inserted = controller.snapshot().accepted
+    if (inserted === null) throw new Error('accepted field insertion is required')
+    const newFields = inserted.editor.view.document.fields.filter(
+      (field) => !initialIds.has(field.descriptor.id),
+    )
+    expect(newFields).toHaveLength(1)
+    const created = newFields[0]?.descriptor
+    if (created === undefined) throw new Error('new field descriptor is required')
+    expect(inserted.session.revision).toBe(initial.session.revision + 1)
+    expect(created.label).toBe(locale === 'uk' ? 'Нове текстове поле' : 'New text field')
+    expect(created.kind).toEqual({ type: 'text', multiline: false, inputHint: 'plain' })
+    expect(created.required).toBe(false)
+    expect(created.readOnly).toBe(false)
+    expect(created.defaultValue).toEqual({ type: 'empty' })
+    expect(created.options).toEqual([])
+    expect(created.anchor).toEqual({ status: 'graphemeSafe', original: target })
+    expect(root.querySelectorAll('[data-form-control-kind="text"]')).toHaveLength(2)
+    expect(root.querySelector(`[data-field-id="${created.id}"] [data-field-editor]`)).not.toBeNull()
+
+    await controller.undo()
+    await settle(controller)
+    await settleForm(root, controller)
+    expect(controller.snapshot().accepted?.editor.view.document.fields).toHaveLength(
+      initial.editor.view.document.fields.length,
+    )
+    await controller.redo()
+    await settle(controller)
+    await settleForm(root, controller)
+    expect(controller.snapshot().accepted?.editor.view.document.fields).toHaveLength(
+      initial.editor.view.document.fields.length + 1,
+    )
+
+    const beforeNoOp = controller.snapshot().accepted
+    if (beforeNoOp === null) throw new Error('accepted inserted state is required')
+    const nonCollapsed = {
+      anchor: target,
+      focus: { ...target, utf16Offset: 1 },
+    }
+    await controller.setEditorSelection(nonCollapsed)
+    await settle(controller)
+    const disabledInsert = root.querySelector<HTMLButtonElement>('[data-action="editor-insert-field"]')
+    if (disabledInsert === null) throw new Error('field insertion fence is required')
+    expect(disabledInsert.disabled).toBe(true)
+    disabledInsert.click()
+    await settle(controller)
+    expect(controller.snapshot().accepted?.session.revision).toBe(beforeNoOp.session.revision)
+    expect(controller.snapshot().accepted?.editor.view.document.fields).toHaveLength(
+      beforeNoOp.editor.view.document.fields.length,
+    )
+  })
 }

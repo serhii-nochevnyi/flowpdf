@@ -229,6 +229,11 @@
   min-height: 44px;
 }
 
+.editor-structure-controls button:disabled {
+  cursor: not-allowed;
+  opacity: 0.65;
+}
+
 .editor-fields-region,
 .editor-field-review-region {
   display: grid;

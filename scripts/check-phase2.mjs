@@ -241,7 +241,7 @@ export const phaseTwoValidationTasks = Object.freeze([
 
 export const phaseTwoCoverageSummary = Object.freeze({
   requirements: '7/7',
-  edges: '33/33',
+  edges: '34/34',
   ui: '108/108/0/0/0',
   prohibitions: '3/3 flagged',
   externalAt: 'unavailable/outstanding',

@@ -94,6 +94,7 @@ export const foundationInspectorUk = {
   'foundationInspector.audit.action.setNodeStyle': 'Зміна стилю',
   'foundationInspector.audit.action.insertNode': 'Додавання вузла',
   'foundationInspector.audit.action.deleteNode': 'Видалення вузла',
+  'foundationInspector.audit.action.insertField': 'Додавання поля',
   'foundationInspector.audit.action.setField': 'Зміна поля',
   'foundationInspector.audit.action.batch': 'Пакетна команда',
   'foundationInspector.audit.action.undo': 'Скасування',

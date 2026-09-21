@@ -96,6 +96,7 @@ export const foundationInspectorEn = {
   'foundationInspector.audit.action.setNodeStyle': 'Set style',
   'foundationInspector.audit.action.insertNode': 'Insert node',
   'foundationInspector.audit.action.deleteNode': 'Delete node',
+  'foundationInspector.audit.action.insertField': 'Insert field',
   'foundationInspector.audit.action.setField': 'Set field',
   'foundationInspector.audit.action.batch': 'Batch command',
   'foundationInspector.audit.action.undo': 'Undo',

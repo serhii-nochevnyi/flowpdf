@@ -176,6 +176,9 @@ pub enum CommandKind {
         table_id: NodeId,
         confirmed: bool,
     },
+    InsertField {
+        field: FieldDescriptor,
+    },
     SetField {
         field_id: FieldId,
         field: FieldDescriptor,
@@ -317,6 +320,9 @@ pub enum Mutation {
         table_id: NodeId,
         confirmed: bool,
     },
+    InsertField {
+        field: FieldDescriptor,
+    },
     SetField {
         field_id: FieldId,
         field: FieldDescriptor,
@@ -393,6 +399,14 @@ pub enum Operation {
     SetField {
         index: u32,
         expected_field: Box<FieldDescriptor>,
+        field: Box<FieldDescriptor>,
+    },
+    InsertField {
+        index: u32,
+        field: Box<FieldDescriptor>,
+    },
+    RemoveField {
+        index: u32,
         field: Box<FieldDescriptor>,
     },
 }
@@ -1275,6 +1289,9 @@ fn command_mutations(kind: &CommandKind) -> Result<Vec<Mutation>, CommandError> 
             field_id: field_id.clone(),
             field: field.clone(),
         }]),
+        CommandKind::InsertField { field } => Ok(vec![Mutation::InsertField {
+            field: field.clone(),
+        }]),
         CommandKind::Undo | CommandKind::Redo => Err(CommandError::BrokenInvariant),
     }
 }
@@ -1480,6 +1497,25 @@ fn derive_operation(
             table_id,
             confirmed,
         } => derive_remove_table_operation(document, table_id, *confirmed, command_id),
+        Mutation::InsertField { field } => {
+            if !matches!(field.anchor, FieldAnchorState::GraphemeSafe { .. })
+                || document.fields.iter().any(|current| current.id == field.id)
+            {
+                return Err(CommandError::BrokenInvariant);
+            }
+            let index =
+                u32::try_from(document.fields.len()).map_err(|_| CommandError::InvalidRange)?;
+            Ok((
+                Operation::InsertField {
+                    index,
+                    field: Box::new(field.clone()),
+                },
+                Operation::RemoveField {
+                    index,
+                    field: Box::new(field.clone()),
+                },
+            ))
+        }
         Mutation::SetField { field_id, field } => {
             if !matches!(field.anchor, FieldAnchorState::GraphemeSafe { .. }) {
                 return Err(CommandError::InvalidTarget);
@@ -4723,6 +4759,22 @@ fn apply_operation(
             }
             document.fields[index] = field.as_ref().clone();
         }
+        Operation::InsertField { index, field } => {
+            let index = usize::try_from(*index).map_err(|_| CommandError::InvalidRange)?;
+            if index != document.fields.len()
+                || document.fields.iter().any(|current| current.id == field.id)
+            {
+                return Err(CommandError::HistoryConflict);
+            }
+            document.fields.insert(index, field.as_ref().clone());
+        }
+        Operation::RemoveField { index, field } => {
+            let index = usize::try_from(*index).map_err(|_| CommandError::InvalidRange)?;
+            if document.fields.get(index) != Some(field.as_ref()) {
+                return Err(CommandError::HistoryConflict);
+            }
+            document.fields.remove(index);
+        }
     }
     Ok(mapping)
 }
@@ -4848,6 +4900,7 @@ fn command_type(kind: &CommandKind) -> &'static str {
         CommandKind::RemoveTableColumn { .. } => "removeTableColumn",
         CommandKind::SetTableHeaderRow { .. } => "setTableHeaderRow",
         CommandKind::RemoveTable { .. } => "removeTable",
+        CommandKind::InsertField { .. } => "insertField",
         CommandKind::SetField { .. } => "setField",
         CommandKind::Batch { .. } => "batch",
         CommandKind::Undo => "undo",

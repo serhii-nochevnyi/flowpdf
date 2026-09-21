@@ -888,6 +888,7 @@ const fn audit_command_kind(kind: &CommandKind) -> AuditCommandKind {
         CommandKind::RemoveTableColumn { .. } => AuditCommandKind::RemoveTableColumn,
         CommandKind::SetTableHeaderRow { .. } => AuditCommandKind::SetTableHeaderRow,
         CommandKind::RemoveTable { .. } => AuditCommandKind::RemoveTable,
+        CommandKind::InsertField { .. } => AuditCommandKind::InsertField,
         CommandKind::SetField { .. } => AuditCommandKind::SetField,
         CommandKind::Batch { .. } => AuditCommandKind::Batch,
         CommandKind::Undo => AuditCommandKind::Undo,
@@ -1656,6 +1657,7 @@ pub(crate) fn replay_history_effect(
                     "removeTableColumn",
                     "setTableHeaderRow",
                     "removeTable",
+                    "insertField",
                     "setField",
                     "batch",
                 ]

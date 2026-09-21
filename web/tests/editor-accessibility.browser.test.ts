@@ -97,6 +97,7 @@ for (const locale of ['uk', 'en'] as const) {
     expect(root.querySelectorAll('[data-field-editor]')).toHaveLength(
       accepted.editor.view.document.fields.length,
     )
+    expect(root.querySelector('[data-action="editor-insert-field"]')).not.toBeNull()
     expect(root.querySelector('[data-field-review]')).toBeNull()
 
     const first = accepted.editor.view.document.fields[0]
