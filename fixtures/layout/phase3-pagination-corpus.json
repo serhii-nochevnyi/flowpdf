@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "cases": [
+    {
+      "id": "ordinary-flow-and-height-edit",
+      "content": ["paragraph", "heading", "list", "image", "pageBreak"],
+      "assertions": ["stable-source-ranges", "suffix-reflow", "fixed-point-rects"]
+    },
+    {
+      "id": "sections-and-static-bands",
+      "content": ["sectionBoundary", "header", "footer", "letterLandscape"],
+      "assertions": ["repeat-bands", "section-geometry", "stable-break-reason"]
+    },
+    {
+      "id": "bounded-constraints",
+      "content": ["keepWithNext", "widowOrphan", "tableHeader", "oversizedRow"],
+      "assertions": ["bounded-fallback", "row-only-split", "derived-header-repetition"]
+    }
+  ]
+}

@@ -17,6 +17,15 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use unicode_bidi::{BidiInfo, LTR_LEVEL, RTL_LEVEL};
 
+use crate::{
+    canonical::{canonical_bytes, canonical_hash},
+    model::{
+        Alignment, BlockKind, ContentNode, FlowDocument, HeaderFooterSettings, InlineRun, NodeId,
+        PageOrientation, PageSettings, PageSize, SectionId,
+    },
+    schema::validate_document,
+};
+
 const ENGINE_VERSION: &str = "flowpdf-layout-text-0.1";
 const LAYOUT_UNITS_PER_POINT: i64 = 64;
 const MILLIPOINTS_PER_POINT: i64 = 1_000;
@@ -24,6 +33,14 @@ const MAX_FONT_FACES: usize = 16;
 const MAX_FONT_FACE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_TEXT_BYTES: usize = 512 * 1024;
 const MAX_REQUEST_HASH_BYTES: usize = 128;
+const MAX_PAGINATION_PAGES: u32 = 2_048;
+const MAX_STATIC_LINES: usize = 64;
+const DEFAULT_LINE_HEIGHT_NUMERATOR: u32 = 6;
+const DEFAULT_LINE_HEIGHT_DENOMINATOR: u32 = 5;
+const LIST_INDENT_MILLIPOINTS: u32 = 18_000;
+const TABLE_CELL_PADDING_MILLIPOINTS: u32 = 2_000;
+const IMAGE_PLACEHOLDER_WIDTH_MILLIMETRES: u32 = 80;
+const IMAGE_PLACEHOLDER_HEIGHT_MILLIMETRES: u32 = 40;
 
 /// The fixed-point unit used by derived layout geometry: 1/64 of a typographic
 /// point. It is serialized as a signed integer, never as a floating-point
@@ -59,6 +76,18 @@ impl LayoutUnit {
         Self::from_ratio(numerator, i128::from(MILLIPOINTS_PER_POINT))
     }
 
+    /// Converts whole millimetres to points through one checked rational
+    /// boundary. PDF/page geometry is admitted only through this conversion;
+    /// no floating-point value enters the paginator.
+    pub fn from_millimetres(value: u32) -> Result<Self, LayoutError> {
+        let numerator = i128::from(value)
+            .checked_mul(72)
+            .and_then(|value| value.checked_mul(i128::from(LAYOUT_UNITS_PER_POINT)))
+            .and_then(|value| value.checked_mul(10))
+            .ok_or(LayoutError::NumericOverflow)?;
+        Self::from_ratio(numerator, 254)
+    }
+
     /// Converts a signed font-unit advance at a concrete font size. This is
     /// the only conversion boundary from RustyBuzz/TrueType font units into
     /// FlowPDF geometry.
@@ -80,6 +109,14 @@ impl LayoutUnit {
     pub fn checked_add(self, other: Self) -> Result<Self, LayoutError> {
         self.0
             .checked_add(other.0)
+            .map(Self)
+            .ok_or(LayoutError::NumericOverflow)
+    }
+
+    /// Subtracts two fixed-point values with overflow detection.
+    pub fn checked_sub(self, other: Self) -> Result<Self, LayoutError> {
+        self.0
+            .checked_sub(other.0)
             .map(Self)
             .ok_or(LayoutError::NumericOverflow)
     }
@@ -425,6 +462,161 @@ impl TextLayoutResult {
     }
 }
 
+/// A fixed-point rectangle in page coordinates.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LayoutRect {
+    pub x: LayoutUnit,
+    pub y: LayoutUnit,
+    pub width: LayoutUnit,
+    pub height: LayoutUnit,
+}
+
+/// The semantic kind represented by one derived fragment.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "camelCase")]
+pub enum FragmentKind {
+    Paragraph,
+    Heading,
+    Line,
+    List,
+    ListItem,
+    Image,
+    Table,
+    TableRow,
+    TableCell,
+    PageBreak,
+    Header,
+    Footer,
+    Unsupported,
+}
+
+/// Why a page or fragment boundary was selected. This is intentionally a
+/// closed vocabulary so consumers cannot confuse a browser-specific reason
+/// with an engine decision.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "camelCase")]
+pub enum BreakReason {
+    DocumentStart,
+    Natural,
+    ExplicitPageBreak,
+    SectionBoundary,
+    KeepWithNext,
+    WidowOrphanFallback,
+    TableRow,
+    OverflowFallback,
+    UnsupportedFallback,
+}
+
+/// Stable diagnostics emitted when a representable source construct needs a
+/// bounded fallback. Diagnostic fields never contain authored text or bytes.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "camelCase")]
+pub enum LayoutDiagnosticCode {
+    ConstraintFallback,
+    HeaderFooterOverflow,
+    OverflowFallback,
+    UnsupportedNode,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LayoutDiagnostic {
+    pub code: LayoutDiagnosticCode,
+    pub page_index: Option<u32>,
+    pub source_node_id: Option<NodeId>,
+    pub value: Option<u32>,
+}
+
+/// Immutable identity inputs for one pagination run.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PaginationRequest {
+    pub source_revision: u32,
+    pub source_hash: String,
+    pub max_pages: u32,
+}
+
+impl PaginationRequest {
+    pub fn new(
+        source_revision: u32,
+        source_hash: impl Into<String>,
+        max_pages: u32,
+    ) -> Result<Self, LayoutError> {
+        let source_hash = source_hash.into();
+        if source_hash.trim().is_empty()
+            || source_hash.len() > MAX_REQUEST_HASH_BYTES
+            || !(1..=MAX_PAGINATION_PAGES).contains(&max_pages)
+        {
+            return Err(LayoutError::PaginationRequestInvalid);
+        }
+        Ok(Self {
+            source_revision,
+            source_hash,
+            max_pages,
+        })
+    }
+
+    /// Creates a request bound to the exact canonical bytes that will be
+    /// paginated.
+    pub fn for_document(document: &FlowDocument) -> Result<Self, LayoutError> {
+        let bytes = canonical_bytes(document).map_err(|_| LayoutError::InvalidDocument)?;
+        Self::new(
+            document.revision,
+            canonical_hash(&bytes),
+            MAX_PAGINATION_PAGES,
+        )
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LayoutFragment {
+    pub id: String,
+    pub kind: FragmentKind,
+    pub source_node_id: Option<NodeId>,
+    pub source: Option<SourceRange>,
+    pub rect: LayoutRect,
+    pub break_reason: Option<BreakReason>,
+    pub derived: bool,
+    pub repeat_index: u16,
+    pub children: Vec<Self>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LayoutPage {
+    pub page_index: u32,
+    pub section_id: SectionId,
+    pub page_settings: PageSettings,
+    pub bounds: LayoutRect,
+    pub content_rect: LayoutRect,
+    pub start_reason: BreakReason,
+    pub header: Option<LayoutFragment>,
+    pub footer: Option<LayoutFragment>,
+    pub fragments: Vec<LayoutFragment>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PaginationResult {
+    pub source_revision: u32,
+    pub source_hash: String,
+    pub layout_settings_fingerprint: String,
+    pub font_catalog_identity: String,
+    pub hyphenation_data_identity: Option<String>,
+    pub pages: Vec<LayoutPage>,
+    pub diagnostics: Vec<LayoutDiagnostic>,
+    pub result_hash: String,
+}
+
+impl PaginationResult {
+    #[must_use]
+    pub fn result_hash(&self) -> &str {
+        &self.result_hash
+    }
+}
+
 /// Stable, non-content-bearing layout failures.
 #[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
 pub enum LayoutError {
@@ -454,6 +646,14 @@ pub enum LayoutError {
     UnsupportedGlyph,
     #[error("A serialized layout value could not be encoded")]
     Serialization,
+    #[error("The canonical document is invalid for layout")]
+    InvalidDocument,
+    #[error("The pagination request is invalid")]
+    PaginationRequestInvalid,
+    #[error("The pagination page limit was exceeded")]
+    PaginationPageLimit,
+    #[error("The page geometry cannot produce a usable layout area")]
+    InvalidPaginationGeometry,
 }
 
 impl LayoutError {
@@ -474,6 +674,10 @@ impl LayoutError {
             Self::NumericOverflow => "FLOW_LAYOUT_NUMERIC_OVERFLOW",
             Self::UnsupportedGlyph => "FLOW_LAYOUT_GLYPH_UNSUPPORTED",
             Self::Serialization => "FLOW_LAYOUT_SERIALIZATION",
+            Self::InvalidDocument => "FLOW_LAYOUT_DOCUMENT_INVALID",
+            Self::PaginationRequestInvalid => "FLOW_LAYOUT_PAGINATION_REQUEST_INVALID",
+            Self::PaginationPageLimit => "FLOW_LAYOUT_PAGINATION_PAGE_LIMIT",
+            Self::InvalidPaginationGeometry => "FLOW_LAYOUT_PAGINATION_GEOMETRY_INVALID",
         }
     }
 }
@@ -816,6 +1020,7 @@ fn break_lines(
     let mut candidates: Vec<&BreakOpportunity> =
         opportunities.iter().filter(|item| item.legal).collect();
     candidates.sort_by_key(|item| item.offset_utf8);
+    let advances = AdvancePrefix::new(glyph_runs)?;
     let mut lines = Vec::new();
     let mut line_start = 0_usize;
     let mut candidate_index = 0_usize;
@@ -832,7 +1037,7 @@ fn break_lines(
         while scan < candidates.len() {
             let candidate = candidates[scan];
             let end = usize::try_from(candidate.offset_utf8).map_err(|_| LayoutError::TextLimit)?;
-            let candidate_width = width_between(glyph_runs, line_start, end)?;
+            let candidate_width = advances.width_between(line_start, end)?;
             if candidate_width.raw() <= width.raw() {
                 last_fit = Some((scan, candidate, candidate_width, end));
                 scan += 1;
@@ -856,7 +1061,7 @@ fn break_lines(
             .copied()
             .find(|boundary| *boundary > line_start)
             .unwrap_or(text.len());
-        let line_width = width_between(glyph_runs, line_start, forced_end)?;
+        let line_width = advances.width_between(line_start, forced_end)?;
         lines.push(TextLine {
             source: source_range(text, line_start, forced_end)?,
             width: line_width,
@@ -872,22 +1077,51 @@ fn break_lines(
     Ok(lines)
 }
 
-fn width_between(
-    glyph_runs: &[TextGlyphRun],
-    start: usize,
-    end: usize,
-) -> Result<LayoutUnit, LayoutError> {
-    let mut width = LayoutUnit::default();
-    for run in glyph_runs {
-        for glyph in &run.glyphs {
-            let cluster =
-                usize::try_from(glyph.cluster_utf8).map_err(|_| LayoutError::TextLimit)?;
-            if cluster >= start && cluster < end {
-                width = width.checked_add(glyph.x_advance)?;
+struct AdvancePrefix {
+    points: Vec<(usize, LayoutUnit)>,
+}
+
+impl AdvancePrefix {
+    fn new(glyph_runs: &[TextGlyphRun]) -> Result<Self, LayoutError> {
+        let mut contributions = BTreeMap::<usize, LayoutUnit>::new();
+        for run in glyph_runs {
+            for glyph in &run.glyphs {
+                let cluster =
+                    usize::try_from(glyph.cluster_utf8).map_err(|_| LayoutError::TextLimit)?;
+                let current = contributions.get(&cluster).copied().unwrap_or_default();
+                contributions.insert(cluster, current.checked_add(glyph.x_advance)?);
             }
         }
+        let mut total = LayoutUnit::default();
+        let mut points = Vec::with_capacity(contributions.len());
+        for (cluster, advance) in contributions {
+            total = total.checked_add(advance)?;
+            points.push((cluster, total));
+        }
+        Ok(Self { points })
     }
-    Ok(width)
+
+    fn width_between(&self, start: usize, end: usize) -> Result<LayoutUnit, LayoutError> {
+        let before_start = self.cumulative_before(start);
+        let before_end = self.cumulative_before(end);
+        before_end.checked_sub(before_start)
+    }
+
+    fn cumulative_before(&self, offset: usize) -> LayoutUnit {
+        let mut low = 0_usize;
+        let mut high = self.points.len();
+        while low < high {
+            let middle = low + (high - low) / 2;
+            if self.points[middle].0 < offset {
+                low = middle + 1;
+            } else {
+                high = middle;
+            }
+        }
+        low.checked_sub(1)
+            .and_then(|index| self.points.get(index).map(|(_, total)| *total))
+            .unwrap_or_default()
+    }
 }
 
 fn word_ranges(text: &str) -> Vec<(usize, usize)> {
@@ -927,6 +1161,1224 @@ fn result_hash(result: &TextLayoutResult) -> Result<String, LayoutError> {
         &result.glyph_runs,
         &result.break_opportunities,
         &result.lines,
+    ))
+    .map(|bytes| blake3::hash(&bytes).to_hex().to_string())
+    .map_err(|_| LayoutError::Serialization)
+}
+
+/// Paginates a validated canonical document into a deterministic derived page
+/// tree. The document is borrowed and never mutated; all output is bound to
+/// the caller's canonical revision/hash and explicit font/data identities.
+pub fn paginate_document(
+    document: &FlowDocument,
+    request: &PaginationRequest,
+    catalog: &FontCatalog,
+    ukrainian_hyphenation: Option<&UkrainianHyphenation>,
+) -> Result<PaginationResult, LayoutError> {
+    if request.source_revision != document.revision {
+        return Err(LayoutError::PaginationRequestInvalid);
+    }
+    validate_document(document).map_err(|_| LayoutError::InvalidDocument)?;
+    let canonical = canonical_bytes(document).map_err(|_| LayoutError::InvalidDocument)?;
+    if canonical_hash(&canonical) != request.source_hash {
+        return Err(LayoutError::PaginationRequestInvalid);
+    }
+    if document.sections.is_empty() {
+        return Err(LayoutError::InvalidDocument);
+    }
+    let layout_settings_fingerprint = serde_json::to_vec(&(
+        &document.page_settings,
+        &document.sections,
+        request.source_revision,
+    ))
+    .map(|bytes| blake3::hash(&bytes).to_hex().to_string())
+    .map_err(|_| LayoutError::Serialization)?;
+
+    let mut paginator = Paginator::new(
+        document,
+        request,
+        catalog,
+        ukrainian_hyphenation,
+    );
+    paginator.run()?;
+    let mut result = PaginationResult {
+        source_revision: request.source_revision,
+        source_hash: request.source_hash.clone(),
+        layout_settings_fingerprint,
+        font_catalog_identity: catalog.identity().to_owned(),
+        hyphenation_data_identity: ukrainian_hyphenation.map(|data| data.identity().to_owned()),
+        pages: paginator.pages,
+        diagnostics: paginator.diagnostics,
+        result_hash: String::new(),
+    };
+    result.result_hash = pagination_result_hash(&result)?;
+    Ok(result)
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PageMetrics {
+    content_left: LayoutUnit,
+    content_width: LayoutUnit,
+    content_top: LayoutUnit,
+    content_bottom: LayoutUnit,
+}
+
+#[derive(Debug, Clone)]
+struct TextBlockPlan {
+    result: TextLayoutResult,
+    line_height: LayoutUnit,
+    spacing_before: LayoutUnit,
+    spacing_after: LayoutUnit,
+    alignment: Alignment,
+}
+
+#[derive(Debug, Clone)]
+struct TableCellPlan {
+    node_id: NodeId,
+    result: TextLayoutResult,
+    line_height: LayoutUnit,
+}
+
+#[derive(Debug, Clone)]
+struct TableRowPlan {
+    cells: Vec<TableCellPlan>,
+    column_width: LayoutUnit,
+    height: LayoutUnit,
+}
+
+struct Paginator<'a> {
+    document: &'a FlowDocument,
+    request: &'a PaginationRequest,
+    catalog: &'a FontCatalog,
+    ukrainian_hyphenation: Option<&'a UkrainianHyphenation>,
+    pages: Vec<LayoutPage>,
+    diagnostics: Vec<LayoutDiagnostic>,
+    current_section_index: Option<usize>,
+    metrics: Option<PageMetrics>,
+    cursor_y: LayoutUnit,
+}
+
+impl<'a> Paginator<'a> {
+    fn new(
+        document: &'a FlowDocument,
+        request: &'a PaginationRequest,
+        catalog: &'a FontCatalog,
+        ukrainian_hyphenation: Option<&'a UkrainianHyphenation>,
+    ) -> Self {
+        Self {
+            document,
+            request,
+            catalog,
+            ukrainian_hyphenation,
+            pages: Vec::new(),
+            diagnostics: Vec::new(),
+            current_section_index: None,
+            metrics: None,
+            cursor_y: LayoutUnit::default(),
+        }
+    }
+
+    fn run(&mut self) -> Result<(), LayoutError> {
+        for index in 0..self.document.content.len() {
+            let node = self.document.content[index].clone();
+            let section_index = self.section_for_node(&node);
+            if self.current_section_index != Some(section_index) {
+                let reason = if self.pages.is_empty() {
+                    BreakReason::DocumentStart
+                } else {
+                    BreakReason::SectionBoundary
+                };
+                self.start_page(section_index, reason)?;
+            }
+            if let Some(next) = self.document.content.get(index + 1)
+                && matches!(node.body, BlockKind::Heading { .. })
+                && self.current_has_content()
+            {
+                let required = self
+                    .estimate_node_height(&node, 0)?
+                    .checked_add(self.estimate_node_height(next, 0)?)?;
+                if required > self.remaining_height()? {
+                    self.start_current_section_page(BreakReason::KeepWithNext)?;
+                }
+            }
+            self.place_node(&node, 0)?;
+        }
+        if self.pages.is_empty() {
+            self.start_page(0, BreakReason::DocumentStart)?;
+        }
+        Ok(())
+    }
+
+    fn section_for_node(&self, node: &ContentNode) -> usize {
+        self.document
+            .sections
+            .iter()
+            .enumerate()
+            .find_map(|(index, section)| {
+                (section.start_node_id.as_ref() == Some(&node.id)).then_some(index)
+            })
+            .or(self.current_section_index)
+            .unwrap_or(0)
+    }
+
+    fn start_current_section_page(&mut self, reason: BreakReason) -> Result<(), LayoutError> {
+        let section_index = self
+            .current_section_index
+            .ok_or(LayoutError::InvalidDocument)?;
+        self.start_page(section_index, reason)
+    }
+
+    fn start_page(&mut self, section_index: usize, reason: BreakReason) -> Result<(), LayoutError> {
+        if self.pages.len() as u32 >= self.request.max_pages {
+            return Err(LayoutError::PaginationPageLimit);
+        }
+        let section = self
+            .document
+            .sections
+            .get(section_index)
+            .cloned()
+            .ok_or(LayoutError::InvalidDocument)?;
+        let page_index =
+            u32::try_from(self.pages.len()).map_err(|_| LayoutError::PaginationPageLimit)?;
+        let (width, height) = page_dimensions(&section.page_settings)?;
+        let left = LayoutUnit::from_millimetres(u32::from(
+            section.page_settings.margins_millimetres.left,
+        ))?;
+        let right = LayoutUnit::from_millimetres(u32::from(
+            section.page_settings.margins_millimetres.right,
+        ))?;
+        let top =
+            LayoutUnit::from_millimetres(u32::from(section.page_settings.margins_millimetres.top))?;
+        let bottom = LayoutUnit::from_millimetres(u32::from(
+            section.page_settings.margins_millimetres.bottom,
+        ))?;
+        let content_width = width.checked_sub(left)?.checked_sub(right)?;
+        if content_width.raw() <= 0 {
+            return Err(LayoutError::InvalidPaginationGeometry);
+        }
+
+        let header = self.static_band(
+            &section.header,
+            FragmentKind::Header,
+            page_index,
+            left,
+            top,
+            content_width,
+            height,
+        )?;
+        let footer_height = self.static_band(
+            &section.footer,
+            FragmentKind::Footer,
+            page_index,
+            left,
+            height.checked_sub(bottom)?,
+            content_width,
+            height,
+        )?;
+        let footer = footer_height
+            .as_ref()
+            .map(|(fragment, _, _)| fragment.clone());
+        let header = header.map(|(fragment, height, overflow)| {
+            if overflow {
+                self.diagnostics.push(LayoutDiagnostic {
+                    code: LayoutDiagnosticCode::HeaderFooterOverflow,
+                    page_index: Some(page_index),
+                    source_node_id: None,
+                    value: Some(height.raw().unsigned_abs().min(u64::from(u32::MAX)) as u32),
+                });
+            }
+            fragment
+        });
+        if let Some((_, height, overflow)) = footer_height.as_ref()
+            && *overflow
+        {
+            self.diagnostics.push(LayoutDiagnostic {
+                code: LayoutDiagnosticCode::HeaderFooterOverflow,
+                page_index: Some(page_index),
+                source_node_id: None,
+                value: Some(height.raw().unsigned_abs().min(u64::from(u32::MAX)) as u32),
+            });
+        }
+
+        let header_extent = header
+            .as_ref()
+            .map(|fragment| fragment.rect.height)
+            .unwrap_or_default()
+            .checked_add(if header.is_some() {
+                LayoutUnit::from_millimetres(u32::from(section.header.distance_millimetres))?
+            } else {
+                LayoutUnit::default()
+            })?;
+        let footer_extent = footer
+            .as_ref()
+            .map(|fragment| fragment.rect.height)
+            .unwrap_or_default()
+            .checked_add(if footer.is_some() {
+                LayoutUnit::from_millimetres(u32::from(section.footer.distance_millimetres))?
+            } else {
+                LayoutUnit::default()
+            })?;
+        let content_top = top.checked_add(header_extent)?;
+        let content_bottom = height.checked_sub(bottom)?.checked_sub(footer_extent)?;
+        if content_top >= content_bottom {
+            return Err(LayoutError::InvalidPaginationGeometry);
+        }
+        let metrics = PageMetrics {
+            content_left: left,
+            content_width,
+            content_top,
+            content_bottom,
+        };
+        let content_rect = LayoutRect {
+            x: left,
+            y: content_top,
+            width: content_width,
+            height: content_bottom.checked_sub(content_top)?,
+        };
+        self.pages.push(LayoutPage {
+            page_index,
+            section_id: section.id,
+            page_settings: section.page_settings,
+            bounds: LayoutRect {
+                x: LayoutUnit::default(),
+                y: LayoutUnit::default(),
+                width,
+                height,
+            },
+            content_rect,
+            start_reason: reason,
+            header,
+            footer,
+            fragments: Vec::new(),
+        });
+        self.current_section_index = Some(section_index);
+        self.metrics = Some(metrics);
+        self.cursor_y = content_top;
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn static_band(
+        &self,
+        settings: &HeaderFooterSettings,
+        kind: FragmentKind,
+        page_index: u32,
+        x: LayoutUnit,
+        fallback_y: LayoutUnit,
+        width: LayoutUnit,
+        page_height: LayoutUnit,
+    ) -> Result<Option<(LayoutFragment, LayoutUnit, bool)>, LayoutError> {
+        if !settings.enabled {
+            return Ok(None);
+        }
+        let text = settings
+            .runs
+            .iter()
+            .map(|run| run.text.as_str())
+            .collect::<String>();
+        let font_size = settings
+            .runs
+            .iter()
+            .map(|run| run.style.font_size_millipoints)
+            .max()
+            .unwrap_or(12_000);
+        let language = language_for_locale(&settings.locale, &[]);
+        let (result, line_height) =
+            self.layout_text_value(&text, width, font_size, language, settings.locale.as_str())?;
+        let normal_height = multiply_units(line_height, result.lines.len())?;
+        let overflow = result.lines.len() > MAX_STATIC_LINES || normal_height > page_height;
+        let height = if overflow { line_height } else { normal_height };
+        let y = match kind {
+            FragmentKind::Header => fallback_y,
+            FragmentKind::Footer => fallback_y.checked_sub(height)?,
+            _ => fallback_y,
+        };
+        let source = source_range(&text, 0, text.len())?;
+        let mut children = Vec::new();
+        if !overflow {
+            for (index, line) in result.lines.iter().enumerate() {
+                children.push(LayoutFragment {
+                    id: format!(
+                        "flow-fragment:{}:{}:{}:{}:{}",
+                        fragment_kind_tag(kind),
+                        page_index,
+                        line.source.utf8_start,
+                        line.source.utf8_end,
+                        index
+                    ),
+                    kind: FragmentKind::Line,
+                    source_node_id: None,
+                    source: Some(line.source),
+                    rect: LayoutRect {
+                        x,
+                        y: y.checked_add(multiply_units(line_height, index)?)?,
+                        width: line.width,
+                        height: line_height,
+                    },
+                    break_reason: Some(line_break_reason(line.break_kind)),
+                    derived: true,
+                    repeat_index: u16::try_from(page_index).unwrap_or(u16::MAX),
+                    children: Vec::new(),
+                });
+            }
+        }
+        Ok(Some((
+            LayoutFragment {
+                id: format!(
+                    "flow-fragment:{}:{}:0:{}:{}",
+                    fragment_kind_tag(kind),
+                    page_index,
+                    source.utf8_end,
+                    u16::try_from(page_index).unwrap_or(u16::MAX)
+                ),
+                kind,
+                source_node_id: None,
+                source: Some(source),
+                rect: LayoutRect {
+                    x,
+                    y,
+                    width,
+                    height,
+                },
+                break_reason: overflow.then_some(BreakReason::OverflowFallback),
+                derived: true,
+                repeat_index: u16::try_from(page_index).unwrap_or(u16::MAX),
+                children,
+            },
+            height,
+            overflow,
+        )))
+    }
+
+    fn place_node(&mut self, node: &ContentNode, depth: usize) -> Result<(), LayoutError> {
+        match &node.body {
+            BlockKind::Paragraph { .. } => {
+                self.place_text_node(node, depth, FragmentKind::Paragraph)
+            }
+            BlockKind::Heading { .. } => self.place_text_node(node, depth, FragmentKind::Heading),
+            BlockKind::OrderedList { items } | BlockKind::UnorderedList { items } => {
+                self.place_marker(node, FragmentKind::List)?;
+                self.place_flow_nodes(items, depth + 1)
+            }
+            BlockKind::ListItem { children } => {
+                self.place_marker(node, FragmentKind::ListItem)?;
+                self.place_flow_nodes(children, depth)
+            }
+            BlockKind::Image { .. } => self.place_image(node, depth),
+            BlockKind::Table { header_rows, rows } => {
+                self.place_table(node, *header_rows, rows, depth)
+            }
+            BlockKind::PageBreak => self.place_page_break(node),
+            BlockKind::TableRow { .. } | BlockKind::TableCell { .. } => {
+                self.place_unsupported(node)
+            }
+        }
+    }
+
+    fn place_flow_nodes(&mut self, nodes: &[ContentNode], depth: usize) -> Result<(), LayoutError> {
+        for index in 0..nodes.len() {
+            let node = &nodes[index];
+            if let Some(next) = nodes.get(index + 1)
+                && matches!(node.body, BlockKind::Heading { .. })
+                && self.current_has_content()
+            {
+                let needed = self
+                    .estimate_node_height(node, depth)?
+                    .checked_add(self.estimate_node_height(next, depth)?)?;
+                if needed > self.remaining_height()? {
+                    self.start_current_section_page(BreakReason::KeepWithNext)?;
+                }
+            }
+            self.place_node(node, depth)?;
+        }
+        Ok(())
+    }
+
+    fn place_text_node(
+        &mut self,
+        node: &ContentNode,
+        depth: usize,
+        kind: FragmentKind,
+    ) -> Result<(), LayoutError> {
+        let plan = self.text_plan(node, depth)?;
+        if plan.spacing_before.raw() > 0 {
+            let desired = self.cursor_y.checked_add(plan.spacing_before)?;
+            if desired.checked_add(plan.line_height)? > self.content_bottom()?
+                && self.current_has_content()
+            {
+                self.start_current_section_page(BreakReason::Natural)?;
+            } else {
+                self.cursor_y = desired;
+            }
+        }
+
+        let mut line_index = 0_usize;
+        let mut first_part = true;
+        while line_index < plan.result.lines.len() {
+            let available_lines = self.available_lines(plan.line_height)?;
+            let remaining_lines = plan.result.lines.len() - line_index;
+            if available_lines == 0 && self.current_has_content() {
+                self.start_current_section_page(BreakReason::Natural)?;
+                continue;
+            }
+            if available_lines == 1
+                && remaining_lines > 1
+                && plan.result.lines.len() > 2
+                && self.current_has_content()
+            {
+                self.diagnostics.push(LayoutDiagnostic {
+                    code: LayoutDiagnosticCode::ConstraintFallback,
+                    page_index: Some(self.current_page_index()?),
+                    source_node_id: Some(node.id.clone()),
+                    value: Some(u32::try_from(remaining_lines).unwrap_or(u32::MAX)),
+                });
+                self.start_current_section_page(BreakReason::WidowOrphanFallback)?;
+                continue;
+            }
+            let overflow = available_lines == 0;
+            let take = if overflow {
+                1
+            } else {
+                available_lines.min(remaining_lines)
+            };
+            let first_line = &plan.result.lines[line_index];
+            let last_line = &plan.result.lines[line_index + take - 1];
+            let block_source = SourceRange {
+                utf8_start: first_line.source.utf8_start,
+                utf8_end: last_line.source.utf8_end,
+                utf16_start: first_line.source.utf16_start,
+                utf16_end: last_line.source.utf16_end,
+            };
+            let x = self.content_left_for_depth(depth)?;
+            let available_width = self.content_width_for_depth(depth)?;
+            let mut children = Vec::with_capacity(take);
+            for offset in 0..take {
+                let line = &plan.result.lines[line_index + offset];
+                let line_x = aligned_x(x, available_width, line.width, &plan.alignment)?;
+                children.push(LayoutFragment {
+                    id: format!(
+                        "flow-fragment:{}:{}:{}:{}:{}",
+                        fragment_kind_tag(FragmentKind::Line),
+                        node.id,
+                        line.source.utf8_start,
+                        line.source.utf8_end,
+                        self.current_page_index()?
+                    ),
+                    kind: FragmentKind::Line,
+                    source_node_id: Some(node.id.clone()),
+                    source: Some(line.source),
+                    rect: LayoutRect {
+                        x: line_x,
+                        y: self
+                            .cursor_y
+                            .checked_add(multiply_units(plan.line_height, offset)?)?,
+                        width: line.width,
+                        height: plan.line_height,
+                    },
+                    break_reason: Some(line_break_reason(line.break_kind)),
+                    derived: false,
+                    repeat_index: 0,
+                    children: Vec::new(),
+                });
+            }
+            let height = multiply_units(plan.line_height, take)?;
+            let break_reason = if overflow {
+                BreakReason::OverflowFallback
+            } else if first_part {
+                self.current_page()?.start_reason
+            } else {
+                BreakReason::Natural
+            };
+            let fragment = LayoutFragment {
+                id: format!(
+                    "flow-fragment:{}:{}:{}:{}:{}",
+                    fragment_kind_tag(kind),
+                    node.id,
+                    block_source.utf8_start,
+                    block_source.utf8_end,
+                    self.current_page_index()?
+                ),
+                kind,
+                source_node_id: Some(node.id.clone()),
+                source: Some(block_source),
+                rect: LayoutRect {
+                    x,
+                    y: self.cursor_y,
+                    width: available_width,
+                    height,
+                },
+                break_reason: Some(break_reason),
+                derived: false,
+                repeat_index: 0,
+                children,
+            };
+            self.push_fragment(fragment);
+            self.cursor_y = self.cursor_y.checked_add(height)?;
+            if overflow {
+                self.cursor_y = self.content_bottom()?;
+                self.diagnostics.push(LayoutDiagnostic {
+                    code: LayoutDiagnosticCode::OverflowFallback,
+                    page_index: Some(self.current_page_index()?),
+                    source_node_id: Some(node.id.clone()),
+                    value: Some(
+                        plan.line_height
+                            .raw()
+                            .unsigned_abs()
+                            .min(u64::from(u32::MAX)) as u32,
+                    ),
+                });
+            }
+            line_index += take;
+            first_part = false;
+        }
+        let after = self.cursor_y.checked_add(plan.spacing_after)?;
+        self.cursor_y = after.min(self.content_bottom()?);
+        Ok(())
+    }
+
+    fn place_image(&mut self, node: &ContentNode, depth: usize) -> Result<(), LayoutError> {
+        let width = LayoutUnit::from_millimetres(IMAGE_PLACEHOLDER_WIDTH_MILLIMETRES)?;
+        let height = LayoutUnit::from_millimetres(IMAGE_PLACEHOLDER_HEIGHT_MILLIMETRES)?;
+        let available_width = self.content_width_for_depth(depth)?;
+        let width = width.min(available_width);
+        let height = if width == LayoutUnit::from_millimetres(IMAGE_PLACEHOLDER_WIDTH_MILLIMETRES)?
+        {
+            height
+        } else {
+            multiply_units(height, 1)?
+        };
+        self.place_fixed_block(
+            node,
+            FragmentKind::Image,
+            depth,
+            width,
+            height,
+            BreakReason::Natural,
+        )
+    }
+
+    fn place_table(
+        &mut self,
+        node: &ContentNode,
+        header_rows: u8,
+        rows: &[ContentNode],
+        depth: usize,
+    ) -> Result<(), LayoutError> {
+        self.place_marker(node, FragmentKind::Table)?;
+        let table_width = self.content_width_for_depth(depth)?;
+        let header = (header_rows == 1).then(|| rows[0].clone());
+        for (index, row) in rows.iter().enumerate() {
+            let plan = self.table_row_plan(row, table_width)?;
+            let fits = plan.height <= self.remaining_height()?;
+            if !fits && self.current_has_content() {
+                self.start_current_section_page(BreakReason::TableRow)?;
+                if index > 0
+                    && let Some(header_row) = header.as_ref()
+                {
+                    let header_plan = self.table_row_plan(header_row, table_width)?;
+                    self.place_table_row(header_row, &header_plan, true)?;
+                }
+            }
+            self.place_table_row(row, &plan, false)?;
+        }
+        Ok(())
+    }
+
+    fn place_table_row(
+        &mut self,
+        row: &ContentNode,
+        plan: &TableRowPlan,
+        derived: bool,
+    ) -> Result<(), LayoutError> {
+        let overflow = plan.height > self.content_rect_height()?;
+        if overflow {
+            self.diagnostics.push(LayoutDiagnostic {
+                code: LayoutDiagnosticCode::OverflowFallback,
+                page_index: Some(self.current_page_index()?),
+                source_node_id: Some(row.id.clone()),
+                value: Some(plan.height.raw().unsigned_abs().min(u64::from(u32::MAX)) as u32),
+            });
+        }
+        let x = self.content_left_for_depth(0)?;
+        let y = self.cursor_y;
+        let mut cells = Vec::with_capacity(plan.cells.len());
+        for (index, cell) in plan.cells.iter().enumerate() {
+            let cell_x = x.checked_add(multiply_units(plan.column_width, index)?)?;
+            let padding = LayoutUnit::from_millipoints(TABLE_CELL_PADDING_MILLIPOINTS)?;
+            let mut lines = Vec::with_capacity(cell.result.lines.len());
+            for (line_index, line) in cell.result.lines.iter().enumerate() {
+                lines.push(LayoutFragment {
+                    id: format!(
+                        "flow-fragment:{}:{}:{}:{}:{}:{}",
+                        fragment_kind_tag(FragmentKind::Line),
+                        cell.node_id,
+                        line.source.utf8_start,
+                        line.source.utf8_end,
+                        self.current_page_index()?,
+                        u16::from(derived)
+                    ),
+                    kind: FragmentKind::Line,
+                    source_node_id: Some(cell.node_id.clone()),
+                    source: Some(line.source),
+                    rect: LayoutRect {
+                        x: cell_x.checked_add(padding)?,
+                        y: y.checked_add(padding)?
+                            .checked_add(multiply_units(cell.line_height, line_index)?)?,
+                        width: line.width,
+                        height: cell.line_height,
+                    },
+                    break_reason: Some(line_break_reason(line.break_kind)),
+                    derived,
+                    repeat_index: u16::from(derived),
+                    children: Vec::new(),
+                });
+            }
+            cells.push(LayoutFragment {
+                id: format!(
+                    "flow-fragment:{}:{}:{}:{}:{}",
+                    fragment_kind_tag(FragmentKind::TableCell),
+                    cell.node_id,
+                    self.current_page_index()?,
+                    u16::from(derived),
+                    plan.column_width.raw()
+                ),
+                kind: FragmentKind::TableCell,
+                source_node_id: Some(cell.node_id.clone()),
+                source: None,
+                rect: LayoutRect {
+                    x: cell_x,
+                    y,
+                    width: plan.column_width,
+                    height: plan.height,
+                },
+                break_reason: derived.then_some(BreakReason::TableRow),
+                derived,
+                repeat_index: u16::from(derived),
+                children: lines,
+            });
+        }
+        self.push_fragment(LayoutFragment {
+            id: format!(
+                "flow-fragment:{}:{}:{}:{}:{}",
+                fragment_kind_tag(FragmentKind::TableRow),
+                row.id,
+                self.current_page_index()?,
+                u16::from(derived),
+                plan.height.raw()
+            ),
+            kind: FragmentKind::TableRow,
+            source_node_id: Some(row.id.clone()),
+            source: None,
+            rect: LayoutRect {
+                x,
+                y,
+                width: multiply_units(plan.column_width, plan.cells.len())?,
+                height: plan.height,
+            },
+            break_reason: if overflow {
+                Some(BreakReason::OverflowFallback)
+            } else if derived {
+                Some(BreakReason::TableRow)
+            } else {
+                Some(self.current_page()?.start_reason)
+            },
+            derived,
+            repeat_index: u16::from(derived),
+            children: cells,
+        });
+        self.cursor_y = self
+            .cursor_y
+            .checked_add(plan.height)?
+            .min(self.content_bottom()?);
+        Ok(())
+    }
+
+    fn place_fixed_block(
+        &mut self,
+        node: &ContentNode,
+        kind: FragmentKind,
+        depth: usize,
+        width: LayoutUnit,
+        height: LayoutUnit,
+        default_reason: BreakReason,
+    ) -> Result<(), LayoutError> {
+        let mut overflow = false;
+        if height > self.remaining_height()? && self.current_has_content() {
+            self.start_current_section_page(default_reason)?;
+        }
+        if height > self.content_rect_height()? {
+            overflow = true;
+            self.diagnostics.push(LayoutDiagnostic {
+                code: LayoutDiagnosticCode::OverflowFallback,
+                page_index: Some(self.current_page_index()?),
+                source_node_id: Some(node.id.clone()),
+                value: Some(height.raw().unsigned_abs().min(u64::from(u32::MAX)) as u32),
+            });
+        }
+        let x = self.content_left_for_depth(depth)?;
+        self.push_fragment(LayoutFragment {
+            id: format!(
+                "flow-fragment:{}:{}:{}",
+                fragment_kind_tag(kind),
+                node.id,
+                self.current_page_index()?
+            ),
+            kind,
+            source_node_id: Some(node.id.clone()),
+            source: None,
+            rect: LayoutRect {
+                x,
+                y: self.cursor_y,
+                width,
+                height,
+            },
+            break_reason: Some(if overflow {
+                BreakReason::OverflowFallback
+            } else {
+                self.current_page()?.start_reason
+            }),
+            derived: false,
+            repeat_index: 0,
+            children: Vec::new(),
+        });
+        self.cursor_y = self
+            .cursor_y
+            .checked_add(height)?
+            .min(self.content_bottom()?);
+        Ok(())
+    }
+
+    fn place_page_break(&mut self, node: &ContentNode) -> Result<(), LayoutError> {
+        self.place_marker(node, FragmentKind::PageBreak)?;
+        if self.current_has_content() {
+            self.start_current_section_page(BreakReason::ExplicitPageBreak)?;
+        }
+        Ok(())
+    }
+
+    fn place_unsupported(&mut self, node: &ContentNode) -> Result<(), LayoutError> {
+        self.diagnostics.push(LayoutDiagnostic {
+            code: LayoutDiagnosticCode::UnsupportedNode,
+            page_index: Some(self.current_page_index()?),
+            source_node_id: Some(node.id.clone()),
+            value: None,
+        });
+        self.place_fixed_block(
+            node,
+            FragmentKind::Unsupported,
+            0,
+            self.content_width_for_depth(0)?,
+            LayoutUnit::from_millipoints(12_000)?,
+            BreakReason::UnsupportedFallback,
+        )
+    }
+
+    fn place_marker(&mut self, node: &ContentNode, kind: FragmentKind) -> Result<(), LayoutError> {
+        self.push_fragment(LayoutFragment {
+            id: format!(
+                "flow-fragment:{}:{}:{}",
+                fragment_kind_tag(kind),
+                node.id,
+                self.current_page_index()?
+            ),
+            kind,
+            source_node_id: Some(node.id.clone()),
+            source: None,
+            rect: LayoutRect {
+                x: self.content_left_for_depth(0)?,
+                y: self.cursor_y,
+                width: self.content_width_for_depth(0)?,
+                height: LayoutUnit::default(),
+            },
+            break_reason: None,
+            derived: false,
+            repeat_index: 0,
+            children: Vec::new(),
+        });
+        Ok(())
+    }
+
+    fn text_plan(&self, node: &ContentNode, depth: usize) -> Result<TextBlockPlan, LayoutError> {
+        let runs = node.runs().ok_or(LayoutError::InvalidDocument)?;
+        let text = runs.iter().map(|run| run.text.as_str()).collect::<String>();
+        let width = self.content_width_for_depth(depth)?;
+        let font_size = self.font_size_for_node(node);
+        let language = language_for_locale(&self.document.locale, runs);
+        let (result, line_height) = self.layout_text_value(
+            &text,
+            width,
+            font_size,
+            language,
+            self.document.locale.as_str(),
+        )?;
+        let (alignment, spacing_before, spacing_after) = match &node.body {
+            BlockKind::Paragraph { attrs, .. } | BlockKind::Heading { attrs, .. } => (
+                attrs.alignment.clone(),
+                LayoutUnit::from_millipoints(attrs.spacing_before_millipoints)?,
+                LayoutUnit::from_millipoints(attrs.spacing_after_millipoints)?,
+            ),
+            _ => return Err(LayoutError::InvalidDocument),
+        };
+        Ok(TextBlockPlan {
+            result,
+            line_height,
+            spacing_before,
+            spacing_after,
+            alignment,
+        })
+    }
+
+    fn layout_text_value(
+        &self,
+        text: &str,
+        width: LayoutUnit,
+        font_size: u32,
+        language: TextLanguage,
+        locale: &str,
+    ) -> Result<(TextLayoutResult, LayoutUnit), LayoutError> {
+        let dictionary_identity = self
+            .ukrainian_hyphenation
+            .map(|data| data.identity().to_owned());
+        let request = TextLayoutRequest::new(
+            self.request.source_revision,
+            blake3::hash(text.as_bytes()).to_hex().to_string(),
+            width,
+            font_size,
+            TextDirection::Auto,
+            language,
+            self.catalog,
+            dictionary_identity,
+        )?;
+        let result = layout_text(
+            text,
+            &request,
+            self.catalog,
+            if language == TextLanguage::Ukrainian && locale.starts_with("uk") {
+                self.ukrainian_hyphenation
+            } else {
+                None
+            },
+        )?;
+        Ok((result, line_height(font_size)?))
+    }
+
+    fn font_size_for_node(&self, node: &ContentNode) -> u32 {
+        let style_size = node
+            .style_id
+            .as_ref()
+            .and_then(|style_id| {
+                self.document
+                    .styles
+                    .iter()
+                    .find(|style| &style.id == style_id)
+            })
+            .map_or(12_000, |style| style.font_size_millipoints);
+        node.runs()
+            .into_iter()
+            .flatten()
+            .filter_map(|run| run.marks.font_size_millipoints)
+            .fold(style_size, u32::max)
+    }
+
+    fn estimate_node_height(
+        &self,
+        node: &ContentNode,
+        depth: usize,
+    ) -> Result<LayoutUnit, LayoutError> {
+        match &node.body {
+            BlockKind::Paragraph { .. } | BlockKind::Heading { .. } => {
+                let plan = self.text_plan(node, depth)?;
+                multiply_units(plan.line_height, plan.result.lines.len())?
+                    .checked_add(plan.spacing_before)?
+                    .checked_add(plan.spacing_after)
+            }
+            BlockKind::OrderedList { items } | BlockKind::UnorderedList { items } => items
+                .iter()
+                .try_fold(LayoutUnit::default(), |height, item| {
+                    height.checked_add(self.estimate_node_height(item, depth + 1)?)
+                }),
+            BlockKind::ListItem { children } => children
+                .iter()
+                .try_fold(LayoutUnit::default(), |height, child| {
+                    height.checked_add(self.estimate_node_height(child, depth)?)
+                }),
+            BlockKind::Image { .. } => {
+                LayoutUnit::from_millimetres(IMAGE_PLACEHOLDER_HEIGHT_MILLIMETRES)
+            }
+            BlockKind::Table { rows, .. } => {
+                let width = self.content_width_for_depth(depth)?;
+                rows.iter().try_fold(LayoutUnit::default(), |height, row| {
+                    height.checked_add(self.table_row_plan(row, width)?.height)
+                })
+            }
+            BlockKind::PageBreak => Ok(LayoutUnit::default()),
+            BlockKind::TableRow { .. } | BlockKind::TableCell { .. } => {
+                Ok(LayoutUnit::from_millipoints(12_000)?)
+            }
+        }
+    }
+
+    fn table_row_plan(
+        &self,
+        row: &ContentNode,
+        table_width: LayoutUnit,
+    ) -> Result<TableRowPlan, LayoutError> {
+        let cells = row.children();
+        if cells.is_empty() {
+            return Err(LayoutError::InvalidDocument);
+        }
+        let column_width = LayoutUnit::from_raw(
+            table_width
+                .raw()
+                .checked_div(i64::try_from(cells.len()).map_err(|_| LayoutError::NumericOverflow)?)
+                .ok_or(LayoutError::InvalidPaginationGeometry)?,
+        );
+        if column_width.raw() <= 0 {
+            return Err(LayoutError::InvalidPaginationGeometry);
+        }
+        let padding = LayoutUnit::from_millipoints(TABLE_CELL_PADDING_MILLIPOINTS)?;
+        let inner_width = column_width.checked_sub(padding.checked_add(padding)?)?;
+        let mut plans = Vec::with_capacity(cells.len());
+        let mut height = LayoutUnit::default();
+        for cell in cells {
+            let text = node_text_recursive(cell);
+            let font_size = self.font_size_for_node_recursive(cell);
+            let language = language_for_locale(&self.document.locale, &[]);
+            let (result, line_height) = self.layout_text_value(
+                &text,
+                inner_width,
+                font_size,
+                language,
+                self.document.locale.as_str(),
+            )?;
+            let cell_height = multiply_units(line_height, result.lines.len())?
+                .checked_add(padding.checked_add(padding)?)?;
+            height = height.max(cell_height);
+            plans.push(TableCellPlan {
+                node_id: cell.id.clone(),
+                result,
+                line_height,
+            });
+        }
+        Ok(TableRowPlan {
+            cells: plans,
+            column_width,
+            height,
+        })
+    }
+
+    fn font_size_for_node_recursive(&self, node: &ContentNode) -> u32 {
+        let own = self.font_size_for_node(node);
+        node.children()
+            .iter()
+            .map(|child| self.font_size_for_node_recursive(child))
+            .fold(own, u32::max)
+    }
+
+    fn current_page(&self) -> Result<&LayoutPage, LayoutError> {
+        self.pages.last().ok_or(LayoutError::InvalidDocument)
+    }
+
+    fn current_page_index(&self) -> Result<u32, LayoutError> {
+        Ok(self.current_page()?.page_index)
+    }
+
+    fn content_bottom(&self) -> Result<LayoutUnit, LayoutError> {
+        Ok(self
+            .metrics
+            .ok_or(LayoutError::InvalidDocument)?
+            .content_bottom)
+    }
+
+    fn content_rect_height(&self) -> Result<LayoutUnit, LayoutError> {
+        let metrics = self.metrics.ok_or(LayoutError::InvalidDocument)?;
+        metrics.content_bottom.checked_sub(metrics.content_top)
+    }
+
+    fn content_left_for_depth(&self, depth: usize) -> Result<LayoutUnit, LayoutError> {
+        let indent = LayoutUnit::from_millipoints(
+            u32::try_from(depth)
+                .ok()
+                .and_then(|depth| depth.checked_mul(LIST_INDENT_MILLIPOINTS))
+                .ok_or(LayoutError::NumericOverflow)?,
+        )?;
+        self.metrics
+            .ok_or(LayoutError::InvalidDocument)?
+            .content_left
+            .checked_add(indent)
+    }
+
+    fn content_width_for_depth(&self, depth: usize) -> Result<LayoutUnit, LayoutError> {
+        let indent = LayoutUnit::from_millipoints(
+            u32::try_from(depth)
+                .ok()
+                .and_then(|depth| depth.checked_mul(LIST_INDENT_MILLIPOINTS))
+                .ok_or(LayoutError::NumericOverflow)?,
+        )?;
+        self.metrics
+            .ok_or(LayoutError::InvalidDocument)?
+            .content_width
+            .checked_sub(indent)
+            .and_then(|width| {
+                (width.raw() > 0)
+                    .then_some(width)
+                    .ok_or(LayoutError::InvalidPaginationGeometry)
+            })
+    }
+
+    fn remaining_height(&self) -> Result<LayoutUnit, LayoutError> {
+        self.content_bottom()?
+            .checked_sub(self.cursor_y)
+            .map(|value| {
+                if value.raw() < 0 {
+                    LayoutUnit::default()
+                } else {
+                    value
+                }
+            })
+    }
+
+    fn available_lines(&self, line_height: LayoutUnit) -> Result<usize, LayoutError> {
+        if line_height.raw() <= 0 {
+            return Err(LayoutError::InvalidPaginationGeometry);
+        }
+        Ok(usize::try_from(self.remaining_height()?.raw() / line_height.raw()).unwrap_or(0))
+    }
+
+    fn current_has_content(&self) -> bool {
+        self.pages.last().is_some_and(|page| {
+            page.fragments.iter().any(|fragment| {
+                matches!(
+                    fragment.kind,
+                    FragmentKind::Paragraph
+                        | FragmentKind::Heading
+                        | FragmentKind::Line
+                        | FragmentKind::Image
+                        | FragmentKind::TableRow
+                        | FragmentKind::TableCell
+                        | FragmentKind::Unsupported
+                )
+            })
+        })
+    }
+
+    fn push_fragment(&mut self, fragment: LayoutFragment) {
+        if let Some(page) = self.pages.last_mut() {
+            page.fragments.push(fragment);
+        }
+    }
+}
+
+fn page_dimensions(settings: &PageSettings) -> Result<(LayoutUnit, LayoutUnit), LayoutError> {
+    let (width, height) = match (&settings.page_size, &settings.orientation) {
+        (PageSize::A4, PageOrientation::Portrait) => (210, 297),
+        (PageSize::A4, PageOrientation::Landscape) => (297, 210),
+        (PageSize::Letter, PageOrientation::Portrait) => (216, 279),
+        (PageSize::Letter, PageOrientation::Landscape) => (279, 216),
+    };
+    Ok((
+        LayoutUnit::from_millimetres(width)?,
+        LayoutUnit::from_millimetres(height)?,
+    ))
+}
+
+fn multiply_units(value: LayoutUnit, count: usize) -> Result<LayoutUnit, LayoutError> {
+    let count = i128::try_from(count).map_err(|_| LayoutError::NumericOverflow)?;
+    let product = i128::from(value.raw())
+        .checked_mul(count)
+        .ok_or(LayoutError::NumericOverflow)?;
+    Ok(LayoutUnit::from_raw(
+        i64::try_from(product).map_err(|_| LayoutError::NumericOverflow)?,
+    ))
+}
+
+fn line_height(font_size_millipoints: u32) -> Result<LayoutUnit, LayoutError> {
+    let scaled = font_size_millipoints
+        .checked_mul(DEFAULT_LINE_HEIGHT_NUMERATOR)
+        .ok_or(LayoutError::NumericOverflow)?
+        / DEFAULT_LINE_HEIGHT_DENOMINATOR;
+    LayoutUnit::from_millipoints(scaled.max(1))
+}
+
+fn aligned_x(
+    start: LayoutUnit,
+    width: LayoutUnit,
+    line_width: LayoutUnit,
+    alignment: &Alignment,
+) -> Result<LayoutUnit, LayoutError> {
+    let free = width.checked_sub(line_width).unwrap_or_default();
+    match alignment {
+        Alignment::Center => start.checked_add(LayoutUnit::from_raw(free.raw() / 2)),
+        Alignment::End => start.checked_add(free),
+        Alignment::Start | Alignment::Justify => Ok(start),
+    }
+}
+
+fn line_break_reason(kind: BreakKind) -> BreakReason {
+    match kind {
+        BreakKind::Overflow => BreakReason::OverflowFallback,
+        BreakKind::Mandatory | BreakKind::Unicode | BreakKind::UkrainianHyphenation => {
+            BreakReason::Natural
+        }
+    }
+}
+
+fn fragment_kind_tag(kind: FragmentKind) -> &'static str {
+    match kind {
+        FragmentKind::Paragraph => "paragraph",
+        FragmentKind::Heading => "heading",
+        FragmentKind::Line => "line",
+        FragmentKind::List => "list",
+        FragmentKind::ListItem => "listItem",
+        FragmentKind::Image => "image",
+        FragmentKind::Table => "table",
+        FragmentKind::TableRow => "tableRow",
+        FragmentKind::TableCell => "tableCell",
+        FragmentKind::PageBreak => "pageBreak",
+        FragmentKind::Header => "header",
+        FragmentKind::Footer => "footer",
+        FragmentKind::Unsupported => "unsupported",
+    }
+}
+
+fn language_for_locale(locale: &str, runs: &[InlineRun]) -> TextLanguage {
+    runs.first()
+        .and_then(|run| run.marks.language.as_ref())
+        .map_or_else(
+            || {
+                if locale.starts_with("uk") {
+                    TextLanguage::Ukrainian
+                } else {
+                    TextLanguage::English
+                }
+            },
+            |language| match language {
+                crate::model::RunLanguage::Ukrainian => TextLanguage::Ukrainian,
+                crate::model::RunLanguage::English => TextLanguage::English,
+            },
+        )
+}
+
+fn node_text_recursive(node: &ContentNode) -> String {
+    if let Some(runs) = node.runs() {
+        return runs.iter().map(|run| run.text.as_str()).collect::<String>();
+    }
+    node.children()
+        .iter()
+        .map(node_text_recursive)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn pagination_result_hash(result: &PaginationResult) -> Result<String, LayoutError> {
+    serde_json::to_vec(&(
+        result.source_revision,
+        &result.source_hash,
+        &result.layout_settings_fingerprint,
+        &result.font_catalog_identity,
+        &result.hyphenation_data_identity,
+        &result.pages,
+        &result.diagnostics,
     ))
     .map(|bytes| blake3::hash(&bytes).to_hex().to_string())
     .map_err(|_| LayoutError::Serialization)

@@ -47,6 +47,11 @@ pub use editor_view::{
     FormattingProjectionDto, FormattingState, ImageBlockViewDto, ImageLimitsDto,
     StructuralPlacementDto, TableCellFocusDto, TableLimitsDto,
 };
+pub use layout::{
+    BreakKind, BreakReason, FontCatalog, FontFace, FragmentKind, LayoutDiagnostic,
+    LayoutDiagnosticCode, LayoutError, LayoutFragment, LayoutPage, LayoutRect, LayoutUnit,
+    PaginationRequest, PaginationResult, UkrainianHyphenation, paginate_document,
+};
 use model::{
     Affinity, CommandId, DocumentId, FlowDocument, LogicalPosition, MigrationHop, Provenance,
     SCHEMA_VERSION,
