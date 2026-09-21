@@ -51,9 +51,9 @@ pub use editor_view::{
     StructuralPlacementDto, TableCellFocusDto, TableLimitsDto,
 };
 pub use forms::{
-    FORM_PROJECTION_SCHEMA_VERSION, FormProjectionError, FormValueErrorCode, FormWidget,
-    FormWidgetProjection, FormWidgetReview, FormWidgetReviewReason, resolve_form_widgets,
-    validate_field_value,
+    FORM_PROJECTION_SCHEMA_VERSION, FORM_SESSION_SCHEMA_VERSION, FormProjectionError,
+    FormSessionError, FormSessionState, FormValueErrorCode, FormWidget, FormWidgetProjection,
+    FormWidgetReview, FormWidgetReviewReason, resolve_form_widgets, validate_field_value,
 };
 pub use invalidation::{
     CarrySignature, ChangeKind, ChangeSet, IncrementalLayoutCache, InvalidationPlan,

@@ -1,10 +1,10 @@
 use flow_core::{
-    FormProjectionError, FormValueErrorCode, FormWidgetReviewReason, PdfDisplayList,
-    build_display_list,
+    FormProjectionError, FormSessionError, FormSessionState, FormValueErrorCode,
+    FormWidgetReviewReason, PdfDisplayList, build_display_list,
     layout::{FontCatalog, FontFace, LayoutUnit, PaginationRequest},
     model::{
-        Affinity, CommandId, ContentNode, FieldAnchorState, FieldDescriptor, FieldId, FieldKind,
-        FieldOption, FieldOptionId, FieldValue, FlowDocument, LogicalPosition, NodeId,
+        Affinity, CommandId, ContentNode, DocumentId, FieldAnchorState, FieldDescriptor, FieldId,
+        FieldKind, FieldOption, FieldOptionId, FieldValue, FlowDocument, LogicalPosition, NodeId,
         TextInputHint, TombstoneToken,
     },
     paginate_document, resolve_form_widgets, validate_field_value,
@@ -272,6 +272,145 @@ fn required_empty_defaults_are_projectable_but_empty_user_values_are_rejected() 
     let projection = resolve_form_widgets(&document, &display).expect("empty default projection");
     assert_eq!(projection.widgets.len(), 1);
     assert_eq!(projection.widgets[0].default_value, FieldValue::Empty);
+}
+
+#[test]
+fn form_session_separates_defaults_from_immutable_fill_overrides() {
+    let mut document = document_with_field();
+    document.fields[0].default_value = FieldValue::text("Template");
+    let original_document = document.clone();
+    let field = field_id(9_951);
+    let session = FormSessionState::from_document(&document).expect("form session");
+    assert_eq!(session.generation, 0);
+    assert!(session.overrides().is_empty());
+    assert_eq!(
+        session.value_for(&document, &field).expect("default value"),
+        FieldValue::text("Template")
+    );
+
+    let filled = session
+        .set_value(&document, &field, FieldValue::text("Alice"))
+        .expect("fill value");
+    assert_eq!(session.generation, 0);
+    assert!(session.overrides().is_empty());
+    assert_eq!(filled.generation, 1);
+    assert_eq!(filled.overrides().len(), 1);
+    assert_eq!(
+        filled.value_for(&document, &field).expect("current value"),
+        FieldValue::text("Alice")
+    );
+    assert_eq!(document, original_document);
+    assert_eq!(
+        document.fields[0].default_value,
+        FieldValue::text("Template")
+    );
+
+    let cleared = filled.clear_value(&document, &field).expect("clear value");
+    assert_eq!(cleared.generation, 2);
+    assert!(cleared.overrides().is_empty());
+    assert_eq!(
+        cleared
+            .value_for(&document, &field)
+            .expect("restored default"),
+        FieldValue::text("Template")
+    );
+
+    let encoded = serde_json::to_vec(&filled).expect("session JSON");
+    let decoded: FormSessionState = serde_json::from_slice(&encoded).expect("session round trip");
+    assert_eq!(decoded, filled);
+}
+
+#[test]
+fn form_session_reuses_validation_and_rejects_forged_or_stale_state() {
+    let mut document = document_with_field();
+    document.fields[0].required = true;
+    let field = field_id(9_951);
+    let session = FormSessionState::from_document(&document).expect("session");
+
+    let error = session
+        .set_value(&document, &field, FieldValue::Empty)
+        .expect_err("required empty value");
+    assert_eq!(error.code(), "FLOW_FORM_SESSION_VALUE_INVALID");
+    assert_eq!(
+        error,
+        FormSessionError::InvalidValue {
+            field_id: field.clone(),
+            code: FormValueErrorCode::Required,
+        }
+    );
+    assert!(!error.to_string().contains("secret"));
+
+    let unknown = field_id(9_999);
+    assert_eq!(
+        session.value_for(&document, &unknown),
+        Err(FormSessionError::UnknownField { field_id: unknown })
+    );
+
+    let mut stale_document = document.clone();
+    stale_document.revision += 1;
+    assert_eq!(
+        session.value_for(&stale_document, &field),
+        Err(FormSessionError::StaleRevision)
+    );
+
+    let mut other_document = FlowDocument::deterministic_sample("uk-UA").expect("other document");
+    other_document.document_id =
+        DocumentId::new("00000000-0000-4000-8000-000000009998").expect("other document id");
+    other_document.fields.clear();
+    assert_eq!(
+        session.validate_against(&other_document),
+        Err(FormSessionError::DocumentMismatch)
+    );
+
+    let mut forged = session.clone();
+    forged.source_hash = "forged".to_owned();
+    assert_eq!(
+        forged.validate_against(&document),
+        Err(FormSessionError::SourceHashMismatch)
+    );
+    forged = session.clone();
+    forged.schema_version += 1;
+    assert_eq!(
+        forged.validate_against(&document),
+        Err(FormSessionError::SchemaVersion)
+    );
+    forged = session.clone();
+    forged
+        .overrides
+        .insert(field_id(9_999), FieldValue::text("unknown"));
+    assert_eq!(
+        forged.validate_against(&document),
+        Err(FormSessionError::UnknownField {
+            field_id: field_id(9_999),
+        })
+    );
+
+    let mut read_only_document = document.clone();
+    read_only_document.fields[0].required = false;
+    read_only_document.fields[0].read_only = true;
+    let read_only_session =
+        FormSessionState::from_document(&read_only_document).expect("read-only session");
+    assert_eq!(
+        read_only_session.set_value(&read_only_document, &field, FieldValue::text("Alice")),
+        Err(FormSessionError::ReadOnlyField {
+            field_id: field.clone(),
+        })
+    );
+    let mut forged_read_only = read_only_session.clone();
+    forged_read_only
+        .overrides
+        .insert(field.clone(), FieldValue::text("Alice"));
+    assert_eq!(
+        forged_read_only.validate_against(&read_only_document),
+        Err(FormSessionError::ReadOnlyField { field_id: field })
+    );
+
+    let mut overflow = session;
+    overflow.generation = u64::MAX;
+    assert_eq!(
+        overflow.set_value(&document, &field_id(9_951), FieldValue::text("Alice")),
+        Err(FormSessionError::GenerationOverflow)
+    );
 }
 
 #[test]

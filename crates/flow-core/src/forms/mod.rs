@@ -5,7 +5,7 @@
 //! tab order; it never stores page coordinates, PDF object numbers, or browser
 //! state back into the document.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -15,7 +15,7 @@ use crate::{
     canonical::{canonical_bytes, canonical_hash},
     layout::{LayoutRect, LayoutUnit},
     model::{
-        Affinity, ContentNode, FieldAnchorState, FieldDescriptor, FieldId, FieldKind,
+        Affinity, ContentNode, DocumentId, FieldAnchorState, FieldDescriptor, FieldId, FieldKind,
         FieldOptionId, FieldValue, FlowDocument, LegacyAnchorReason, LogicalPosition, NodeId,
         TextInputHint,
     },
@@ -25,6 +25,8 @@ use crate::{
 
 /// Version of the derived semantic-form projection.
 pub const FORM_PROJECTION_SCHEMA_VERSION: u32 = 1;
+/// Version of the noncanonical form-value session.
+pub const FORM_SESSION_SCHEMA_VERSION: u32 = 1;
 
 const MAX_FORM_TEXT_BYTES: usize = 64 * 1024;
 const TEXT_WIDGET_WIDTH: i64 = 144 * 64;
@@ -66,6 +68,209 @@ impl FormValueErrorCode {
             Self::UnsupportedValue => "FLOW_FORM_VALUE_UNSUPPORTED",
         }
     }
+}
+
+/// A noncanonical, revision-bound form value session.
+///
+/// The map contains only explicit user-value overrides. An absent override is
+/// resolved to the authored `FieldDescriptor::default_value`; this keeps
+/// template defaults separate from fill state and lets an empty current value
+/// override a nonempty default without mutating the document.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FormSessionState {
+    pub schema_version: u32,
+    pub document_id: DocumentId,
+    pub source_revision: u32,
+    pub source_hash: String,
+    pub generation: u64,
+    pub overrides: BTreeMap<FieldId, FieldValue>,
+}
+
+/// Failure taxonomy for a form-value session operation.
+#[derive(Debug, Error, Clone, PartialEq, Eq)]
+pub enum FormSessionError {
+    #[error("the canonical document is invalid for a form session")]
+    InvalidDocument,
+    #[error("the form session schema version is unsupported")]
+    SchemaVersion,
+    #[error("the form session targets a different document")]
+    DocumentMismatch,
+    #[error("the form session targets a stale document revision")]
+    StaleRevision,
+    #[error("the form session source hash does not match the document")]
+    SourceHashMismatch,
+    #[error("the form session references an unknown field")]
+    UnknownField { field_id: FieldId },
+    #[error("the form session cannot mutate a read-only field")]
+    ReadOnlyField { field_id: FieldId },
+    #[error("the form session value is invalid")]
+    InvalidValue {
+        field_id: FieldId,
+        code: FormValueErrorCode,
+    },
+    #[error("the form session generation overflowed")]
+    GenerationOverflow,
+}
+
+impl FormSessionError {
+    /// Returns a stable code suitable for a boundary adapter.
+    #[must_use]
+    pub const fn code(&self) -> &'static str {
+        match self {
+            Self::InvalidDocument => "FLOW_FORM_SESSION_DOCUMENT_INVALID",
+            Self::SchemaVersion => "FLOW_FORM_SESSION_SCHEMA_UNSUPPORTED",
+            Self::DocumentMismatch => "FLOW_FORM_SESSION_DOCUMENT_MISMATCH",
+            Self::StaleRevision => "FLOW_FORM_SESSION_REVISION_STALE",
+            Self::SourceHashMismatch => "FLOW_FORM_SESSION_SOURCE_HASH_MISMATCH",
+            Self::UnknownField { .. } => "FLOW_FORM_SESSION_UNKNOWN_FIELD",
+            Self::ReadOnlyField { .. } => "FLOW_FORM_SESSION_READ_ONLY",
+            Self::InvalidValue { .. } => "FLOW_FORM_SESSION_VALUE_INVALID",
+            Self::GenerationOverflow => "FLOW_FORM_SESSION_GENERATION_OVERFLOW",
+        }
+    }
+}
+
+impl FormSessionState {
+    /// Creates an empty override session from one validated document.
+    pub fn from_document(document: &FlowDocument) -> Result<Self, FormSessionError> {
+        let source_hash = validated_document_hash(document)?;
+        Ok(Self {
+            schema_version: FORM_SESSION_SCHEMA_VERSION,
+            document_id: document.document_id.clone(),
+            source_revision: document.revision,
+            source_hash,
+            generation: 0,
+            overrides: BTreeMap::new(),
+        })
+    }
+
+    /// Verifies that this session is safe to use with the supplied document.
+    pub fn validate_against(&self, document: &FlowDocument) -> Result<(), FormSessionError> {
+        if self.schema_version != FORM_SESSION_SCHEMA_VERSION {
+            return Err(FormSessionError::SchemaVersion);
+        }
+        let source_hash = validated_document_hash(document)?;
+        if self.document_id != document.document_id {
+            return Err(FormSessionError::DocumentMismatch);
+        }
+        if self.source_revision != document.revision {
+            return Err(FormSessionError::StaleRevision);
+        }
+        if self.source_hash != source_hash {
+            return Err(FormSessionError::SourceHashMismatch);
+        }
+        for (field_id, value) in &self.overrides {
+            let field = field_for(document, field_id)?;
+            if field.read_only {
+                return Err(FormSessionError::ReadOnlyField {
+                    field_id: field_id.clone(),
+                });
+            }
+            validate_field_value(field, value).map_err(|code| FormSessionError::InvalidValue {
+                field_id: field_id.clone(),
+                code,
+            })?;
+        }
+        Ok(())
+    }
+
+    /// Returns the override map without exposing any document or page state.
+    #[must_use]
+    pub const fn overrides(&self) -> &BTreeMap<FieldId, FieldValue> {
+        &self.overrides
+    }
+
+    /// Resolves an effective value: explicit current value, otherwise default.
+    pub fn value_for(
+        &self,
+        document: &FlowDocument,
+        field_id: &FieldId,
+    ) -> Result<FieldValue, FormSessionError> {
+        self.validate_against(document)?;
+        let field = field_for(document, field_id)?;
+        Ok(self
+            .overrides
+            .get(field_id)
+            .cloned()
+            .unwrap_or_else(|| field.default_value.clone()))
+    }
+
+    /// Returns a new session with one validated current-value override.
+    pub fn set_value(
+        &self,
+        document: &FlowDocument,
+        field_id: &FieldId,
+        value: FieldValue,
+    ) -> Result<Self, FormSessionError> {
+        self.validate_against(document)?;
+        let field = field_for(document, field_id)?;
+        if field.read_only {
+            return Err(FormSessionError::ReadOnlyField {
+                field_id: field_id.clone(),
+            });
+        }
+        validate_field_value(field, &value).map_err(|code| FormSessionError::InvalidValue {
+            field_id: field_id.clone(),
+            code,
+        })?;
+        let mut next = self.clone();
+        next.overrides.insert(field_id.clone(), value);
+        next.generation = next_generation(self.generation)?;
+        Ok(next)
+    }
+
+    /// Returns a new session with one current-value override removed.
+    pub fn clear_value(
+        &self,
+        document: &FlowDocument,
+        field_id: &FieldId,
+    ) -> Result<Self, FormSessionError> {
+        self.validate_against(document)?;
+        let field = field_for(document, field_id)?;
+        if field.read_only {
+            return Err(FormSessionError::ReadOnlyField {
+                field_id: field_id.clone(),
+            });
+        }
+        let mut next = self.clone();
+        next.overrides.remove(field_id);
+        next.generation = next_generation(self.generation)?;
+        Ok(next)
+    }
+}
+
+fn next_generation(generation: u64) -> Result<u64, FormSessionError> {
+    generation
+        .checked_add(1)
+        .ok_or(FormSessionError::GenerationOverflow)
+}
+
+fn field_for<'a>(
+    document: &'a FlowDocument,
+    field_id: &FieldId,
+) -> Result<&'a FieldDescriptor, FormSessionError> {
+    document
+        .fields
+        .iter()
+        .find(|field| field.id == *field_id)
+        .ok_or_else(|| FormSessionError::UnknownField {
+            field_id: field_id.clone(),
+        })
+}
+
+fn validated_document_hash(document: &FlowDocument) -> Result<String, FormSessionError> {
+    validate_document(document).map_err(|_| FormSessionError::InvalidDocument)?;
+    for field in &document.fields {
+        validate_default_value(field, &field.default_value).map_err(|code| {
+            FormSessionError::InvalidValue {
+                field_id: field.id.clone(),
+                code,
+            }
+        })?;
+    }
+    let canonical = canonical_bytes(document).map_err(|_| FormSessionError::InvalidDocument)?;
+    Ok(canonical_hash(&canonical))
 }
 
 /// Validates one proposed semantic value without mutating its field or
