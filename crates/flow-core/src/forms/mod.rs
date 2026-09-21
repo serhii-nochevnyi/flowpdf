@@ -24,7 +24,7 @@ use crate::{
 };
 
 /// Version of the derived semantic-form projection.
-pub const FORM_PROJECTION_SCHEMA_VERSION: u32 = 1;
+pub const FORM_PROJECTION_SCHEMA_VERSION: u32 = 2;
 /// Version of the noncanonical form-value session.
 pub const FORM_SESSION_SCHEMA_VERSION: u32 = 1;
 
@@ -492,6 +492,7 @@ pub struct FormWidget {
     pub required: bool,
     pub read_only: bool,
     pub default_value: FieldValue,
+    pub value: FieldValue,
     pub page_index: u32,
     pub rect: LayoutRect,
     pub source_node_id: NodeId,
@@ -526,6 +527,8 @@ pub enum FormProjectionError {
         field_id: FieldId,
         code: FormValueErrorCode,
     },
+    #[error(transparent)]
+    Session(#[from] FormSessionError),
     #[error("form geometry overflowed")]
     GeometryOverflow,
     #[error("the form projection could not be serialized")]
@@ -541,6 +544,7 @@ impl FormProjectionError {
             Self::StaleRevision => "FLOW_FORM_DISPLAY_REVISION_STALE",
             Self::SourceHashMismatch => "FLOW_FORM_DISPLAY_SOURCE_HASH_MISMATCH",
             Self::InvalidFieldValue { .. } => "FLOW_FORM_VALUE_INVALID",
+            Self::Session(error) => error.code(),
             Self::GeometryOverflow => "FLOW_FORM_GEOMETRY_OVERFLOW",
             Self::Serialization => "FLOW_FORM_SERIALIZATION",
         }
@@ -551,6 +555,25 @@ impl FormProjectionError {
 pub fn resolve_form_widgets(
     document: &FlowDocument,
     display_list: &PdfDisplayList,
+) -> Result<FormWidgetProjection, FormProjectionError> {
+    resolve_form_widgets_inner(document, display_list, None)
+}
+
+/// Resolves semantic fields with effective values from a validated noncanonical
+/// form session. Authored defaults remain present on every widget.
+pub fn resolve_form_widgets_with_session(
+    document: &FlowDocument,
+    display_list: &PdfDisplayList,
+    session: &FormSessionState,
+) -> Result<FormWidgetProjection, FormProjectionError> {
+    session.validate_against(document)?;
+    resolve_form_widgets_inner(document, display_list, Some(session))
+}
+
+fn resolve_form_widgets_inner(
+    document: &FlowDocument,
+    display_list: &PdfDisplayList,
+    session: Option<&FormSessionState>,
 ) -> Result<FormWidgetProjection, FormProjectionError> {
     validate_document(document).map_err(|_| FormProjectionError::InvalidDocument)?;
     if display_list.source_revision != document.revision {
@@ -609,6 +632,11 @@ pub fn resolve_form_widgets(
             .find(|page| page.page_index == page_index)
             .ok_or(FormProjectionError::GeometryOverflow)?;
         let rect = widget_rect(line, page, field)?;
+        let default_value = field.default_value.clone();
+        let value = session
+            .and_then(|session| session.overrides.get(&field.id))
+            .cloned()
+            .unwrap_or_else(|| default_value.clone());
         widgets.push(FormWidget {
             widget_id: format!("flow-form-widget-{}", field.id),
             field_id: field.id.clone(),
@@ -617,7 +645,8 @@ pub fn resolve_form_widgets(
             kind: field.kind.clone(),
             required: field.required,
             read_only: field.read_only,
-            default_value: field.default_value.clone(),
+            default_value,
+            value,
             page_index,
             rect,
             source_node_id: original.node_id,

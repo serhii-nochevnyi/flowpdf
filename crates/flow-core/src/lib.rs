@@ -53,7 +53,8 @@ pub use editor_view::{
 pub use forms::{
     FORM_PROJECTION_SCHEMA_VERSION, FORM_SESSION_SCHEMA_VERSION, FormProjectionError,
     FormSessionError, FormSessionState, FormValueErrorCode, FormWidget, FormWidgetProjection,
-    FormWidgetReview, FormWidgetReviewReason, resolve_form_widgets, validate_field_value,
+    FormWidgetReview, FormWidgetReviewReason, resolve_form_widgets,
+    resolve_form_widgets_with_session, validate_field_value,
 };
 pub use invalidation::{
     CarrySignature, ChangeKind, ChangeSet, IncrementalLayoutCache, InvalidationPlan,

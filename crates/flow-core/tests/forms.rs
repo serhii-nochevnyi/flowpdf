@@ -7,7 +7,8 @@ use flow_core::{
         FieldKind, FieldOption, FieldOptionId, FieldValue, FlowDocument, LogicalPosition, NodeId,
         TextInputHint, TombstoneToken,
     },
-    paginate_document, resolve_form_widgets, validate_field_value,
+    paginate_document, resolve_form_widgets, resolve_form_widgets_with_session,
+    validate_field_value,
 };
 
 const NOTO_SANS: &[u8] = include_bytes!("../data/NotoSans-Regular.ttf");
@@ -305,6 +306,44 @@ fn form_session_separates_defaults_from_immutable_fill_overrides() {
         FieldValue::text("Template")
     );
 
+    let display = display_list(&document);
+    let default_projection = resolve_form_widgets(&document, &display).expect("default projection");
+    assert_eq!(default_projection.schema_version, 2);
+    assert_eq!(
+        default_projection.widgets[0].default_value,
+        FieldValue::text("Template")
+    );
+    assert_eq!(
+        default_projection.widgets[0].value,
+        FieldValue::text("Template")
+    );
+    let filled_projection =
+        resolve_form_widgets_with_session(&document, &display, &filled).expect("filled projection");
+    assert_eq!(
+        filled_projection.widgets[0].default_value,
+        FieldValue::text("Template")
+    );
+    assert_eq!(
+        filled_projection.widgets[0].value,
+        FieldValue::text("Alice")
+    );
+    assert_eq!(
+        filled_projection.widgets[0].rect,
+        default_projection.widgets[0].rect
+    );
+    assert_eq!(
+        filled_projection.source_hash,
+        default_projection.source_hash
+    );
+    assert_eq!(
+        filled_projection.display_list_hash,
+        default_projection.display_list_hash
+    );
+    assert_ne!(
+        filled_projection.result_hash,
+        default_projection.result_hash
+    );
+
     let cleared = filled.clear_value(&document, &field).expect("clear value");
     assert_eq!(cleared.generation, 2);
     assert!(cleared.overrides().is_empty());
@@ -314,6 +353,9 @@ fn form_session_separates_defaults_from_immutable_fill_overrides() {
             .expect("restored default"),
         FieldValue::text("Template")
     );
+    let cleared_projection = resolve_form_widgets_with_session(&document, &display, &cleared)
+        .expect("cleared projection");
+    assert_eq!(cleared_projection, default_projection);
 
     let encoded = serde_json::to_vec(&filled).expect("session JSON");
     let decoded: FormSessionState = serde_json::from_slice(&encoded).expect("session round trip");
@@ -367,6 +409,13 @@ fn form_session_reuses_validation_and_rejects_forged_or_stale_state() {
     assert_eq!(
         forged.validate_against(&document),
         Err(FormSessionError::SourceHashMismatch)
+    );
+    let display = display_list(&document);
+    assert_eq!(
+        resolve_form_widgets_with_session(&document, &display, &forged),
+        Err(FormProjectionError::Session(
+            FormSessionError::SourceHashMismatch
+        ))
     );
     forged = session.clone();
     forged.schema_version += 1;
