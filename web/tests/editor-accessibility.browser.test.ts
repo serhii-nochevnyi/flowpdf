@@ -84,6 +84,7 @@ for (const locale of ['uk', 'en'] as const) {
                 ? 1
                 : 0
       expect(card.querySelector('[data-field-editor]')).not.toBeNull()
+      expect(card.querySelector('[data-action="editor-field-place"]')).not.toBeNull()
       expect(
         card.querySelector('[data-form-control-kind]')?.querySelectorAll('input, select, textarea, button') ?? [],
       ).toHaveLength(
@@ -143,6 +144,7 @@ for (const locale of ['uk', 'en'] as const) {
     expect(reviewRoot.querySelectorAll('[data-field-review] [data-field-id]')).toHaveLength(2)
     expect(reviewRoot.querySelectorAll('[data-field-review] [tabindex="0"]')).toHaveLength(2)
     expect(reviewRoot.querySelectorAll('[data-field-review] [data-field-editor]')).toHaveLength(0)
+    expect(reviewRoot.querySelectorAll('[data-field-review] [data-action="editor-field-place"]')).toHaveLength(0)
     expect(reviewRoot.textContent).toContain(
       locale === 'uk' ? 'Старий якір поля потребує перегляду' : 'Legacy field anchor needs review',
     )

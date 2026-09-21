@@ -263,12 +263,61 @@ function FieldDescriptorEditor({
       'ui',
     )
   }
+  const acceptedSelection = controller.snapshot().accepted?.editor.view.selection ?? null
+  const selectionIsCollapsed =
+    acceptedSelection !== null &&
+    acceptedSelection.anchor.nodeId === acceptedSelection.focus.nodeId &&
+    acceptedSelection.anchor.utf16Offset === acceptedSelection.focus.utf16Offset
+  const canPlaceAtCaret =
+    selectionIsCollapsed &&
+    field.anchor.status === 'graphemeSafe' &&
+    !sameLogicalPosition(field.anchor.original, acceptedSelection?.focus ?? null)
+  const placeAtCaret = (): void => {
+    const selection = controller.snapshot().accepted?.editor.view.selection
+    if (
+      selection === undefined ||
+      selection === null ||
+      selection.anchor.nodeId !== selection.focus.nodeId ||
+      selection.anchor.utf16Offset !== selection.focus.utf16Offset ||
+      field.anchor.status !== 'graphemeSafe'
+    ) {
+      return
+    }
+    void controller.structuralCommand(
+      {
+        type: 'setField',
+        fieldId: field.id,
+        field: {
+          ...field,
+          anchor: { status: 'graphemeSafe', original: selection.focus },
+        },
+      },
+      'ui',
+    )
+  }
 
   return (
     <details className="editor-field-editor" data-field-editor="">
       <summary data-action="editor-field-configure">{labels.fieldConfigure}</summary>
       <form aria-label={labels.fieldConfigure} data-field-editor-form="" onSubmit={submit}>
         <p className="editor-field-editor-description">{labels.fieldConfigureDescription}</p>
+        <div className="editor-field-editor-placement">
+          <p>{labels.fieldPlaceAtCaretDescription}</p>
+          <button
+            type="button"
+            data-action="editor-field-place"
+            disabled={!canPlaceAtCaret}
+            aria-describedby={`flowpdf-field-place-${field.id}`}
+            onClick={placeAtCaret}
+          >
+            {labels.fieldPlaceAtCaret}
+          </button>
+          <small id={`flowpdf-field-place-${field.id}`}>
+            {selectionIsCollapsed
+              ? labels.fieldPlaceAtCaretDescription
+              : labels.fieldPlaceAtCaretRequiresCaret}
+          </small>
+        </div>
         <label htmlFor={`flowpdf-field-name-${field.id}`}>
           {labels.fieldName}
           <input
@@ -448,6 +497,18 @@ function FieldDescriptorEditor({
         </button>
       </form>
     </details>
+  )
+}
+
+function sameLogicalPosition(
+  left: { readonly nodeId: string; readonly utf16Offset: number; readonly affinity: string },
+  right: { readonly nodeId: string; readonly utf16Offset: number; readonly affinity: string } | null,
+): boolean {
+  return (
+    right !== null &&
+    left.nodeId === right.nodeId &&
+    left.utf16Offset === right.utf16Offset &&
+    left.affinity === right.affinity
   )
 }
 

@@ -199,4 +199,70 @@ for (const locale of ['uk', 'en'] as const) {
     expect(controller.snapshot().errorCode).toBe('FLOW_INVALID_DOCUMENT')
     expect(root.querySelector('[data-editor-error]')?.textContent).toContain('FLOW_INVALID_DOCUMENT')
   })
+
+  test(`field placement uses the accepted Rust caret in ${locale}`, async () => {
+    const { root, controller } = await openFormEditor(locale)
+    const initial = controller.snapshot().accepted
+    if (initial === null) throw new Error('accepted editor state is required')
+    const originalField = initial.editor.view.document.fields[0]?.descriptor
+    if (originalField === undefined) throw new Error('authored field is required')
+    const targetBlock = initial.editor.view.document.blocks.find(
+      (block) => block.kind !== 'atomic' && block.nodeId !== originalField.anchor.original.nodeId,
+    )
+    if (targetBlock === undefined) throw new Error('second text block is required')
+    const target = {
+      nodeId: targetBlock.nodeId,
+      utf16Offset: 0,
+      affinity: 'forward' as const,
+    }
+    await controller.setEditorSelection({ anchor: target, focus: target })
+    await settle(controller)
+
+    const card = root.querySelector<HTMLElement>(`[data-field-id="${originalField.id}"]`)
+    const place = card?.querySelector<HTMLButtonElement>('[data-action="editor-field-place"]')
+    if (place === null || place === undefined) throw new Error('field placement action is required')
+    expect(place.disabled).toBe(false)
+    place.click()
+    await settle(controller)
+    await settleForm(root, controller)
+
+    const moved = controller.snapshot().accepted
+    if (moved === null) throw new Error('accepted field placement is required')
+    const movedField = moved.editor.view.document.fields.find(
+      (field) => field.descriptor.id === originalField.id,
+    )?.descriptor
+    if (movedField === undefined) throw new Error('moved field is required')
+    expect(moved.session.revision).toBe(initial.session.revision + 1)
+    expect(movedField.anchor).toEqual({ status: 'graphemeSafe', original: target })
+    expect({ ...movedField, anchor: originalField.anchor }).toEqual(originalField)
+    expect(root.querySelector<HTMLInputElement>('[data-form-control-kind="text"] input')?.value).toBe(
+      'Тест',
+    )
+
+    const nonCollapsed = {
+      anchor: target,
+      focus: { ...target, utf16Offset: 1 },
+    }
+    await controller.setEditorSelection(nonCollapsed)
+    await settle(controller)
+    const beforeNoOp = controller.snapshot().accepted
+    if (beforeNoOp === null) throw new Error('accepted no-op state is required')
+    const disabledPlace = root
+      .querySelector<HTMLElement>(`[data-field-id="${originalField.id}"]`)
+      ?.querySelector<HTMLButtonElement>('[data-action="editor-field-place"]')
+    if (disabledPlace === null || disabledPlace === undefined) {
+      throw new Error('field placement fence is required')
+    }
+    expect(disabledPlace.disabled).toBe(true)
+    disabledPlace.click()
+    await settle(controller)
+    expect(controller.snapshot().accepted?.session.revision).toBe(beforeNoOp.session.revision)
+    expect(
+      controller.snapshot().accepted?.editor.view.document.fields.find(
+        (field) => field.descriptor.id === originalField.id,
+      )?.descriptor.anchor,
+    ).toEqual(beforeNoOp.editor.view.document.fields.find(
+      (field) => field.descriptor.id === originalField.id,
+    )?.descriptor.anchor)
+  })
 }

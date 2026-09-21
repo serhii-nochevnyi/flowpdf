@@ -459,6 +459,26 @@
   overflow-wrap: anywhere;
 }
 
+.editor-field-editor-placement {
+  display: grid;
+  gap: 8px;
+  padding: 8px;
+  border: 1px solid var(--border-default);
+  border-radius: 4px;
+  background: var(--surface-app);
+}
+
+.editor-field-editor-placement p,
+.editor-field-editor-placement small {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.editor-field-editor-placement button:disabled {
+  cursor: not-allowed;
+  opacity: 0.65;
+}
+
 .editor-field-editor button:focus-visible,
 .editor-field-editor summary:focus-visible,
 .editor-field-editor input:focus-visible,
