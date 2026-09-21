@@ -86,6 +86,7 @@ const phaseThreeEditorSource = /^(?:web\/src\/main\.tsx|web\/src\/(?:editor|layo
 const phaseFourPdfSource = /^web\/src\/pdf\/[A-Za-z0-9._/-]+\.(?:ts|tsx)$/
 const phaseFourEditorSource = /^(?:web\/src\/main\.tsx|web\/src\/(?:editor|layout|pdf)\/[A-Za-z0-9._/-]+\.(?:ts|tsx))$/
 const phaseFiveFormSource = /^web\/src\/forms\/[A-Za-z0-9._/-]+\.(?:ts|tsx)$/
+const phaseFiveFormEditorSource = /^web\/src\/editor\/field-navigation\.tsx$/
 const phaseTwoPackagePins = new Map([
   ['react', { section: 'dependencies', version: '19.2.8' }],
   ['react-dom', { section: 'dependencies', version: '19.2.8' }],
@@ -618,6 +619,7 @@ function boundaryPolicy(options) {
       forbiddenWebPathSegment: forbiddenPhaseOneWebPathSegment,
       allowsEditorSource: () => false,
       allowsDeferredPath: () => false,
+      allowsSemanticForm: () => false,
     }
   }
   if (phase === 2) {
@@ -626,6 +628,7 @@ function boundaryPolicy(options) {
       forbiddenWebPathSegment: forbiddenPhaseTwoWebPathSegment,
       allowsEditorSource: (path) => phaseTwoEditorSource.test(path),
       allowsDeferredPath: () => false,
+      allowsSemanticForm: () => false,
     }
   }
   if (phase === 3) {
@@ -635,6 +638,7 @@ function boundaryPolicy(options) {
         /(?:^|[\/._-])(?:auth|backend|collaboration|forms?|pdf|voice)(?=[\/._-]|$)/i,
       allowsEditorSource: (path) => phaseThreeEditorSource.test(path),
       allowsDeferredPath: () => false,
+      allowsSemanticForm: () => false,
     }
   }
   if (phase === 4) {
@@ -644,6 +648,7 @@ function boundaryPolicy(options) {
         /(?:^|[\/._-])(?:auth|backend|collaboration|forms?|pdf|voice)(?=[\/._-]|$)/i,
       allowsEditorSource: (path) => phaseFourEditorSource.test(path),
       allowsDeferredPath: (path) => phaseFourPdfSource.test(path),
+      allowsSemanticForm: () => false,
     }
   }
   if (phase === 5) {
@@ -653,6 +658,7 @@ function boundaryPolicy(options) {
         /(?:^|[\/._-])(?:auth|backend|collaboration|forms?|pdf|voice)(?=[\/._-]|$)/i,
       allowsEditorSource: (path) => phaseFourEditorSource.test(path),
       allowsDeferredPath: (path) => phaseFourPdfSource.test(path) || phaseFiveFormSource.test(path),
+      allowsSemanticForm: (path) => phaseFiveFormEditorSource.test(path),
     }
   }
   throw new RangeError(`unsupported boundary policy phase ${phase}`)
@@ -795,7 +801,7 @@ function validateTypeScript(path, source, diagnostics, capabilities, policy) {
       if (policy.phase < 2 || !policy.allowsEditorSource(path)) {
         diagnostics.push(`${path}: JSX/React editor surface is deferred`)
       } else {
-        validateJsxElement(path, node, diagnostics)
+        validateJsxElement(path, node, diagnostics, policy)
       }
     }
     if (hasDeclarationName(node) && semanticOwnerName.test(node.name.text)) {
@@ -818,11 +824,15 @@ function validateTypeScript(path, source, diagnostics, capabilities, policy) {
   visit(source)
 }
 
-function validateJsxElement(path, node, diagnostics) {
+function validateJsxElement(path, node, diagnostics, policy) {
   const tagName = ts.isJsxElement(node)
     ? node.openingElement.tagName
     : ts.isJsxSelfClosingElement(node) ? node.tagName : undefined
-  if (tagName && ts.isIdentifier(tagName) && /^(?:canvas|form)$/.test(tagName.text)) {
+  if (
+    tagName &&
+    ts.isIdentifier(tagName) &&
+    (tagName.text === 'canvas' || (tagName.text === 'form' && !policy.allowsSemanticForm(path)))
+  ) {
     diagnostics.push(`${path}: deferred ${tagName.text} UI surface`)
   }
   const attributes =
