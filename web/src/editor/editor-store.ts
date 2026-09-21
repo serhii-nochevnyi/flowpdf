@@ -4,6 +4,7 @@ import type {
   LogicalPositionDto,
 } from '../../persistence/indexeddb-store.js'
 import type { LayoutSchedulerSnapshotDto } from '../layout/layout-protocol.js'
+import type { PdfExportSchedulerSnapshotDto } from '../pdf/pdf-protocol.js'
 
 export type EditorLocale = 'uk' | 'en'
 
@@ -308,6 +309,7 @@ export interface EditorAppSnapshot {
   readonly phase: EditorAppPhase
   readonly accepted: EditorAcceptedSnapshot | null
   readonly layout: LayoutSchedulerSnapshotDto
+  readonly pdf: PdfExportSchedulerSnapshotDto
   readonly status: string
   readonly errorCode: string | null
 }
@@ -316,6 +318,7 @@ export class EditorStore {
   private readonly listeners = new Set<() => void>()
   private acceptedValue: EditorAcceptedSnapshot | null = null
   private layoutValue: LayoutSchedulerSnapshotDto = emptyLayoutSnapshot()
+  private pdfValue: PdfExportSchedulerSnapshotDto = emptyPdfSnapshot()
   private snapshotValue: EditorAppSnapshot
 
   constructor(initialStatus: string) {
@@ -323,6 +326,7 @@ export class EditorStore {
       phase: 'loading',
       accepted: null,
       layout: this.layoutValue,
+      pdf: this.pdfValue,
       status: initialStatus,
       errorCode: null,
     })
@@ -346,6 +350,7 @@ export class EditorStore {
       phase: 'pending',
       accepted: this.acceptedValue,
       layout: this.layoutValue,
+      pdf: this.pdfValue,
       status,
       errorCode: null,
     })
@@ -354,10 +359,12 @@ export class EditorStore {
   publishEmpty(): void {
     this.acceptedValue = null
     this.layoutValue = emptyLayoutSnapshot()
+    this.pdfValue = emptyPdfSnapshot()
     this.publish({
       phase: 'empty',
       accepted: null,
       layout: this.layoutValue,
+      pdf: this.pdfValue,
       status: '',
       errorCode: null,
     })
@@ -369,6 +376,7 @@ export class EditorStore {
       phase: 'ready',
       accepted: this.acceptedValue,
       layout: this.layoutValue,
+      pdf: this.pdfValue,
       status,
       errorCode: null,
     })
@@ -379,6 +387,7 @@ export class EditorStore {
       phase: 'error',
       accepted: this.acceptedValue,
       layout: this.layoutValue,
+      pdf: this.pdfValue,
       status: '',
       errorCode,
     })
@@ -387,6 +396,11 @@ export class EditorStore {
   publishLayout(layout: LayoutSchedulerSnapshotDto): void {
     this.layoutValue = Object.freeze({ ...layout })
     this.publish({ ...this.snapshotValue, layout: this.layoutValue })
+  }
+
+  publishPdf(pdf: PdfExportSchedulerSnapshotDto): void {
+    this.pdfValue = Object.freeze({ ...pdf })
+    this.publish({ ...this.snapshotValue, pdf: this.pdfValue })
   }
 
   dispose(): void {
@@ -400,6 +414,15 @@ export class EditorStore {
 }
 
 function emptyLayoutSnapshot(): LayoutSchedulerSnapshotDto {
+  return Object.freeze({
+    phase: 'idle',
+    accepted: null,
+    requestId: null,
+    errorCode: null,
+  })
+}
+
+function emptyPdfSnapshot(): PdfExportSchedulerSnapshotDto {
   return Object.freeze({
     phase: 'idle',
     accepted: null,

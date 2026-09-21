@@ -9,10 +9,11 @@ rust-version.workspace = true
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+blake3.workspace = true
 flow-core = { path = "../flow-core" }
 serde.workspace = true
+serde_json.workspace = true
 serde-wasm-bindgen.workspace = true
 wasm-bindgen.workspace = true
 
 [dev-dependencies]
-serde_json.workspace = true

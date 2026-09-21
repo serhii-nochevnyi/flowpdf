@@ -46,7 +46,7 @@ const MAX_PDF_NESTING: usize = 64;
 const MAX_PDF_NAME_BYTES: usize = 127;
 const MAX_PDF_STRING_BYTES: usize = 64 * 1024;
 const MAX_PDF_STREAM_BYTES: usize = 8 * 1024 * 1024;
-const MAX_PDF_OUTPUT_BYTES: usize = 64 * 1024 * 1024;
+pub const MAX_PDF_OUTPUT_BYTES: usize = 64 * 1024 * 1024;
 const MAX_PDF_PAGES: usize = 2_048;
 const MAX_IDENTITY_BYTES: usize = 128;
 

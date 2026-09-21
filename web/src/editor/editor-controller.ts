@@ -40,6 +40,12 @@ import type {
 import type {
   LayoutScheduleOutcome,
 } from '../layout/layout-worker.js'
+import type {
+  AcceptedPdfExportDto,
+  PdfExportRequestDto,
+  PdfExportSchedulerSnapshotDto,
+} from '../pdf/pdf-protocol.js'
+import type { PdfExportScheduleOutcome } from '../pdf/pdf-worker.js'
 
 export type { EditorLocale }
 
@@ -345,6 +351,9 @@ export interface WasmBoundary {
   readonly recover_document_audited: (request: unknown) => ApiResponse<AuditedRecoverResultDto>
   readonly layout_document?: (requestJson: string) => string
   readonly verify_layout_response?: (responseJson: string) => boolean
+  readonly export_pdf?: (requestJson: string) => string
+  readonly verify_pdf_export_response?: (responseJson: string) => boolean
+  readonly recover_owned_source?: (requestJson: string) => string
 }
 
 export interface EditorPersistence {
@@ -371,6 +380,12 @@ export interface EditorControllerDependencies {
   readonly layoutRequestFactory?: (
     accepted: EditorAcceptedSnapshot,
   ) => LayoutRequestDto | null
+  /** Optional background PDF export bridge; export bytes never enter editor state. */
+  readonly pdfExportScheduler?: EditorPdfExportScheduler
+  readonly pdfExportRequestFactory?: (
+    accepted: EditorAcceptedSnapshot,
+    layout: AcceptedLayoutDto,
+  ) => PdfExportRequestDto | null
 }
 
 export interface EditorLayoutScheduler {
@@ -378,6 +393,14 @@ export interface EditorLayoutScheduler {
   cancel(requestId?: string): void
   accepted(): AcceptedLayoutDto | null
   snapshot(): LayoutSchedulerSnapshotDto
+  subscribe?(listener: () => void): () => void
+}
+
+export interface EditorPdfExportScheduler {
+  request(request: PdfExportRequestDto): Promise<PdfExportScheduleOutcome>
+  cancel(requestId?: string): void
+  accepted(): AcceptedPdfExportDto | null
+  snapshot(): PdfExportSchedulerSnapshotDto
   subscribe?(listener: () => void): () => void
 }
 
@@ -494,6 +517,11 @@ export class EditorController {
     | ((accepted: EditorAcceptedSnapshot) => LayoutRequestDto | null)
     | undefined
   private readonly layoutUnsubscribe: (() => void) | undefined
+  private readonly pdfExportScheduler: EditorPdfExportScheduler | undefined
+  private readonly pdfExportRequestFactory:
+    | ((accepted: EditorAcceptedSnapshot, layout: AcceptedLayoutDto) => PdfExportRequestDto | null)
+    | undefined
+  private readonly pdfExportUnsubscribe: (() => void) | undefined
   private initialized: Promise<void> | undefined
   private pending: Promise<void> = Promise.resolve()
   private sessionPending: Promise<void> = Promise.resolve()
@@ -517,6 +545,16 @@ export class EditorController {
     })
     if (this.layoutScheduler !== undefined) {
       this.stateStore.publishLayout(this.layoutScheduler.snapshot())
+    }
+    this.pdfExportScheduler = dependencies.pdfExportScheduler
+    this.pdfExportRequestFactory = dependencies.pdfExportRequestFactory
+    this.pdfExportUnsubscribe = this.pdfExportScheduler?.subscribe?.(() => {
+      this.stateStore.publishPdf(
+        this.pdfExportScheduler?.snapshot() ?? emptyPdfSnapshot(),
+      )
+    })
+    if (this.pdfExportScheduler !== undefined) {
+      this.stateStore.publishPdf(this.pdfExportScheduler.snapshot())
     }
   }
 
@@ -571,6 +609,65 @@ export class EditorController {
 
   cancelLayout(requestId?: string): void {
     this.layoutScheduler?.cancel(requestId)
+  }
+
+  /** Returns the last complete export for the accepted source/layout identity. */
+  pdfExportSnapshot(): AcceptedPdfExportDto | null {
+    return this.pdfExportScheduler?.accepted() ?? null
+  }
+
+  /** Whether the PDF preview/export adapter is wired for this controller. */
+  hasPdfExport(): boolean {
+    return this.pdfExportScheduler !== undefined && this.pdfExportRequestFactory !== undefined
+  }
+
+  requestPdfExport(): Promise<PdfExportScheduleOutcome> {
+    const accepted = this.requireAccepted()
+    const layout = this.layoutScheduler?.accepted() ?? null
+    if (this.pdfExportScheduler === undefined || this.pdfExportRequestFactory === undefined) {
+      return Promise.resolve({
+        kind: 'failed',
+        requestId: 'pdf-export-unavailable',
+        code: 'FLOW_PDF_EXPORT_UNAVAILABLE',
+      })
+    }
+    if (layout === null) {
+      return Promise.resolve({
+        kind: 'failed',
+        requestId: 'pdf-export-layout-unavailable',
+        code: 'FLOW_PDF_LAYOUT_UNAVAILABLE',
+      })
+    }
+    const request = this.pdfExportRequestFactory(accepted, layout)
+    if (request === null) {
+      return Promise.resolve({
+        kind: 'failed',
+        requestId: 'pdf-export-request-unavailable',
+        code: 'FLOW_PDF_EXPORT_REQUEST_UNAVAILABLE',
+      })
+    }
+    if (
+      request.sourceRevision !== accepted.session.revision ||
+      request.sourceHash !== accepted.session.canonicalHash
+    ) {
+      return Promise.resolve({
+        kind: 'failed',
+        requestId: request.requestId,
+        code: 'FLOW_PDF_SOURCE_REVISION_MISMATCH',
+      })
+    }
+    if (request.layoutResultHash !== layout.result.resultHash) {
+      return Promise.resolve({
+        kind: 'failed',
+        requestId: request.requestId,
+        code: 'FLOW_PDF_LAYOUT_RESULT_MISMATCH',
+      })
+    }
+    return this.pdfExportScheduler.request(request)
+  }
+
+  cancelPdfExport(requestId?: string): void {
+    this.pdfExportScheduler?.cancel(requestId)
   }
 
   async initialize(): Promise<void> {
@@ -997,6 +1094,8 @@ export class EditorController {
   dispose(): void {
     this.layoutScheduler?.cancel()
     this.layoutUnsubscribe?.()
+    this.pdfExportScheduler?.cancel()
+    this.pdfExportUnsubscribe?.()
     if (typeof globalThis.URL?.revokeObjectURL === 'function') {
       for (const objectUrl of this.imageObjectUrls.values()) {
         globalThis.URL.revokeObjectURL(objectUrl)
@@ -1227,12 +1326,21 @@ export class EditorController {
   }
 
   private publishAccepted(result: RecoverResultDto, status: string): void {
+    const previous = this.stateStore.accepted()
     const accepted = {
       session: result.session,
       editor: result.editor,
       view: result.view,
     }
     this.stateStore.publishAccepted(accepted, status)
+    if (
+      previous !== null &&
+      (previous.session.revision !== accepted.session.revision ||
+        previous.session.canonicalHash !== accepted.session.canonicalHash)
+    ) {
+      this.pdfExportScheduler?.cancel()
+      this.stateStore.publishPdf(emptyPdfSnapshot())
+    }
     this.scheduleLayout(accepted)
   }
 
@@ -1269,6 +1377,15 @@ export class EditorController {
 }
 
 function emptyLayoutSnapshot(): LayoutSchedulerSnapshotDto {
+  return {
+    phase: 'idle',
+    accepted: null,
+    requestId: null,
+    errorCode: null,
+  }
+}
+
+function emptyPdfSnapshot(): PdfExportSchedulerSnapshotDto {
   return {
     phase: 'idle',
     accepted: null,

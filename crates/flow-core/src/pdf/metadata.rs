@@ -59,7 +59,8 @@ pub struct PdfInternalLink {
 }
 
 /// Features that the current owned writer can represent intentionally.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(rename_all = "camelCase")]
 pub enum PdfSupportedFeature {
     Text,
     Images,
@@ -70,7 +71,8 @@ pub enum PdfSupportedFeature {
 
 /// Source/PDF constructs that remain explicit non-goals for this export
 /// subset.  They are reported instead of being inferred or silently dropped.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(rename_all = "camelCase")]
 pub enum PdfUnsupportedFeature {
     FormFields,
     Actions,
@@ -101,7 +103,8 @@ impl PdfUnsupportedFeature {
 }
 
 /// Stable support matrix carried by every export result.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PdfSupportReport {
     pub supported: Vec<PdfSupportedFeature>,
     pub unsupported: Vec<PdfUnsupportedFeature>,

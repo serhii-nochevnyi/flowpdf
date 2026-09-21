@@ -203,6 +203,7 @@ dependencies = [
 name = "flow-wasm"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "flow-core",
  "serde",
  "serde-wasm-bindgen",

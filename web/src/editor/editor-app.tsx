@@ -11,6 +11,7 @@ import {
   type FormattingCommandDto,
   type EditorAppOptions,
   type EditorLayoutScheduler,
+  type EditorPdfExportScheduler,
   type SourceModality,
   type StructuralCommandDto,
 } from './editor-controller.js'
@@ -18,6 +19,7 @@ import { EditorToolbar } from './editor-toolbar.js'
 import { EditorShell } from './editor-shell.js'
 import { SemanticDocument } from './semantic-document.js'
 import { PageViewport } from '../layout/page-viewport.js'
+import { PdfPreview } from '../pdf/pdf-preview.js'
 import type {
   DirectionalSelectionDto,
   EditorAcceptedSnapshot,
@@ -37,7 +39,13 @@ import type {
 
 export { EditorController }
 export { copy as editorCopy }
-export type { EditorLayoutScheduler, FormattingCommandDto, SourceModality, StructuralCommandDto }
+export type {
+  EditorLayoutScheduler,
+  EditorPdfExportScheduler,
+  FormattingCommandDto,
+  SourceModality,
+  StructuralCommandDto,
+}
 export type {
   DirectionalSelectionDto,
   EditorAcceptedSnapshot,
@@ -215,6 +223,19 @@ export function EditorApp({ controller: suppliedController, options = {} }: Edit
             sourceRevision={accepted.session.revision}
             locale={locale}
           />
+          {controller.hasPdfExport() ? (
+            <PdfPreview
+              layout={snapshot.layout}
+              pdf={snapshot.pdf}
+              sourceRevision={accepted.session.revision}
+              sourceHash={accepted.session.canonicalHash}
+              sourceBlocks={accepted.editor.view.document.blocks}
+              selection={accepted.editor.session.selection}
+              locale={locale}
+              onExport={() => void controller.requestPdfExport()}
+              onSelectSource={(selection) => void controller.setEditorSelection(selection)}
+            />
+          ) : null}
         </>
       )}
     </EditorShell>
