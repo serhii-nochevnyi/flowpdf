@@ -73,7 +73,7 @@ coverage:
       - kind: gate
         ref: npm run check:phase2:smoke && npm run check:phase2 && npm run check:phase2
         status: pass
-        note: Smoke plus both full runs passed all 35 executable tasks; preflight remained requirements 7/7, edges 33/33, UI 108/108/0/0/0, prohibitions 3/3 flagged.
+        note: Smoke plus both full runs passed all 35 executable tasks; the Phase 2 baseline preflight was requirements 7/7, edges 33/33, UI 108/108/0/0/0, prohibitions 3/3 flagged.
   - id: T5
     description: External Edge/Windows screen-reader evidence is not fabricated or substituted by local browser evidence.
     requirement: QUAL-04
@@ -135,6 +135,9 @@ do not claim pagination, geometry, shaping, or PDF implementation.
   remains one non-recursive row.
 - Preflight: requirements `7/7`, edges `33/33`, UI `108/108/0/0/0`,
   prohibitions `3/3 flagged`.
+- The shared command catalog is now `34/34` because Phase 5 Plan 05-09 adds
+  the parity-closed `InsertField` extension; the original Phase 2 baseline
+  remains `33/33`.
 - External Edge/Windows screen-reader evidence remains
   `unavailable/outstanding`; no local Chromium or macOS evidence is promoted as
   a substitute.

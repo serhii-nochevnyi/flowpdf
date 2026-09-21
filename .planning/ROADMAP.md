@@ -171,7 +171,7 @@ compatibility, and general PDF import remain unclaimed.
   4. Exported fields and appearance states behave consistently in the target viewer matrix.
   5. Flattening is explicit, selected, validated and never silently replaces the editable source.
 
-**Plans**: 8/8 local plans executed; phase-level closure remains open
+**Plans**: 9/9 local plans executed; phase-level closure remains open
 
 - [x] 05-01-PLAN.md — Add Rust-owned field-value validation and deterministic
   display-list anchor-to-widget projection with explicit review paths.
@@ -189,16 +189,19 @@ compatibility, and general PDF import remain unclaimed.
   already-authored valid fields through the reversible Rust `SetField` path.
 - [x] 05-08-PLAN.md — Add safe accessible anchor placement for already-authored
   valid fields through the accepted Rust caret and `SetField` path.
+- [x] 05-09-PLAN.md — Add parity-closed Rust-owned default text-field insertion
+  at an accepted collapsed caret with localized accessible controls.
 
-The eight Phase 5 slices validate the existing semantic field vocabulary,
+The nine Phase 5 slices validate the existing semantic field vocabulary,
 derive revision/hash-bound fixed-point widget projections, keep explicit
 noncanonical fill overrides separate from authored defaults through to the
 derived widget, emit bounded AcroForm field/widget dictionaries from an
 accepted projection, carry accepted current values through a versioned
 Rust/WASM boundary into a guarded dedicated IndexedDB store, expose accessible
-native controls, configure descriptors, and place already-authored valid fields
-through Rust `SetField`. They do not claim field insertion, deletion, tab-order
-authoring, appearance streams, flattening, external form import, or
+native controls, configure descriptors, place already-authored valid fields
+through Rust `SetField`, and insert a typed default text field through the
+parity-catalogued Rust `InsertField` path. They do not claim field deletion,
+tab-order authoring, appearance streams, flattening, external form import, or
 target-viewer compatibility. Those remain separately planned and verified.
 **UI hint**: yes
 

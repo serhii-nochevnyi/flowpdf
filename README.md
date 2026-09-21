@@ -107,6 +107,9 @@ The current tree includes:
 - an accessible place-at-caret action for already-authored valid fields that
   uses the accepted Rust logical selection and the same reversible `SetField`
   path; non-collapsed selections and review-region fields remain fenced;
+- a Rust-owned, parity-catalogued `InsertField` transaction and localized
+  accessible action that creates one typed default text field at an accepted
+  collapsed caret, with exact undo/redo and durable recovery evidence;
 - a bounded AcroForm structure adapter that converts an accepted session-aware
   widget projection into deterministic field dictionaries, page widgets,
   values/defaults, options, flags, and catalog/page references in the owned
@@ -138,13 +141,13 @@ things:
 - a bounded PDF reader, with selectable text, reproducibility evidence,
   explicit unsupported-content reporting, and an exact owned-source round trip
   when the source payload is available;
-- semantic field insertion, deletion, and tab-order authoring; the current
-  editor can configure, place, and fill already-authored valid fields through
-  native accessible controls, while explicit AcroForm appearance streams,
-  target-viewer behavior, flattening, and external PDF form import remain
-  separately planned. The current repository contains the bounded Rust/WASM
-  transport and guarded browser persistence, but not those follow-on
-  capabilities;
+- semantic field deletion and tab-order authoring; the current editor can
+  insert, configure, place, and fill typed text and already-authored valid
+  fields through native accessible controls, while explicit AcroForm
+  appearance streams, target-viewer behavior, flattening, and external PDF
+  form import remain separately planned. The current repository contains the
+  bounded Rust/WASM transport and guarded browser persistence, but not those
+  follow-on capabilities;
 - voice dictation and commands through the same revision-checked transaction
   boundary;
 - controlled external-PDF reconstruction/OCR and later native editing of
@@ -257,6 +260,7 @@ npm run test:unit    # unit and inspector-unit suites
 npm run test:browser # pinned Chromium browser suites
 npm test             # all configured Vitest projects
 npm run check        # the full Phase 1 evidence and regression gate
+npm run check:phase2 # the full Phase 2 validation gate
 npm run check:phase3:smoke # Phase 3 manifest/diagnostic contract smoke
 npm run check:phase3       # Phase 3 local gate; runs exact rows in fixed order
 npm run check:phase4:smoke # Phase 4 manifest/diagnostic contract smoke
@@ -295,11 +299,11 @@ Phase 3, Deterministic Reflow and Pagination, has completed its six local
 implementation plans and dual-run gate. Phase 4 has completed its six local
 implementation plans and dual-run local gate; its qpdf/Poppler/target-viewer
 reference rows remain unavailable, so the phase is not marked complete. The
-Phase 5 has eight completed local slices for validation/projection,
+Phase 5 has nine completed local slices for validation/projection,
 noncanonical fill state, effective-value projection, bounded AcroForm
 field/widget structure, the Rust/WASM plus guarded IndexedDB session boundary,
-accessible controls, descriptor configuration, and safe anchor placement for
-already-authored valid fields. Field insertion/deletion, tab-order authoring,
+accessible controls, descriptor configuration, safe anchor placement, and
+Rust-owned default text-field insertion. Field deletion, tab-order authoring,
 appearance streams, flattening, viewer compatibility, and external form import
 remain unimplemented. The current implementation still makes no claim of
 complete PDF compatibility, commercial-SDK parity, or production readiness.
