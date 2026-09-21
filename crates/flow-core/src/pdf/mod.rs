@@ -11,15 +11,23 @@ use thiserror::Error;
 
 use crate::layout::{LayoutRect, LayoutUnit};
 
+mod assets;
 mod display_list;
 mod font;
+mod metadata;
 
+pub use assets::{PdfImageEncoding, PdfImageError, PdfImageResource, build_image_resources};
 pub use display_list::{
     PDF_DISPLAY_LIST_SCHEMA_VERSION, PdfDisplayDiagnostic, PdfDisplayDiagnosticCode,
-    PdfDisplayList, PdfDisplayListError, PdfDisplayPage, PdfGlyphPlacement, PdfTextItem,
-    PdfTextLine, build_display_list,
+    PdfDisplayList, PdfDisplayListError, PdfDisplayPage, PdfGlyphPlacement, PdfImageItem,
+    PdfTextItem, PdfTextLine, build_display_list,
 };
 pub use font::{PdfFontError, PdfFontResource, PdfSubsetGlyph, build_font_resources};
+pub use metadata::{
+    MAX_PDF_LINK_ENTRIES, MAX_PDF_METADATA_FIELD_BYTES, MAX_PDF_OUTLINE_ENTRIES, PdfInternalLink,
+    PdfMetadataError, PdfMetadataOptions, PdfOutlineEntry, PdfSupportReport, PdfSupportedFeature,
+    PdfUnsupportedFeature,
+};
 
 /// Version of the owned PDF export envelope.
 pub const PDF_EXPORT_SCHEMA_VERSION: u32 = 1;
@@ -173,6 +181,7 @@ struct PdfObject {
 pub struct CosDocument {
     objects: Vec<PdfObject>,
     root: Option<PdfRef>,
+    info: Option<PdfRef>,
 }
 
 impl CosDocument {
@@ -182,6 +191,7 @@ impl CosDocument {
         Self {
             objects: Vec::new(),
             root: None,
+            info: None,
         }
     }
 
@@ -208,6 +218,13 @@ impl CosDocument {
     pub fn set_root(&mut self, reference: PdfRef) -> Result<(), PdfError> {
         self.object_index(reference)?;
         self.root = Some(reference);
+        Ok(())
+    }
+
+    /// Sets the optional document information dictionary.
+    pub fn set_info(&mut self, reference: PdfRef) -> Result<(), PdfError> {
+        self.object_index(reference)?;
+        self.info = Some(reference);
         Ok(())
     }
 
@@ -244,6 +261,11 @@ impl CosDocument {
         append_ascii(&mut output, &format!(" {} ", self.objects.len() + 1))?;
         PdfName::new("Root")?.write_to(&mut output);
         append_ascii(&mut output, &format!(" {} 0 R ", root.object_number))?;
+        if let Some(info) = self.info {
+            self.object_index(info)?;
+            PdfName::new("Info")?.write_to(&mut output);
+            append_ascii(&mut output, &format!(" {} 0 R ", info.object_number))?;
+        }
         PdfName::new("ID")?.write_to(&mut output);
         let id_hex = hex_bytes(trailer_id.as_bytes());
         append_ascii(&mut output, &format!("[<{id_hex}> <{id_hex}>] >>\n"))?;
@@ -352,12 +374,18 @@ pub enum PdfPageContent {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PdfExportOptions {
     pub producer: String,
+    pub metadata: PdfMetadataOptions,
+    pub outlines: Vec<PdfOutlineEntry>,
+    pub internal_links: Vec<PdfInternalLink>,
 }
 
 impl Default for PdfExportOptions {
     fn default() -> Self {
         Self {
             producer: "FlowPDF".to_owned(),
+            metadata: PdfMetadataOptions::default(),
+            outlines: Vec::new(),
+            internal_links: Vec::new(),
         }
     }
 }
@@ -398,6 +426,12 @@ impl PdfExportRequest {
         {
             return Err(PdfError::InvalidPageGeometry);
         }
+        metadata::validate_export_metadata(
+            &options.metadata,
+            &options.outlines,
+            &options.internal_links,
+            &pages,
+        )?;
         Ok(Self {
             source_revision,
             source_hash,
@@ -416,7 +450,13 @@ impl PdfExportRequest {
                 self.source_revision, self.source_hash, self.layout_settings_fingerprint
             ),
         )?;
-        append_ascii(&mut bytes, &format!("{}\n", self.options.producer))?;
+        append_fingerprint_text(&mut bytes, &self.options.producer);
+        metadata::append_fingerprint(
+            &mut bytes,
+            &self.options.metadata,
+            &self.options.outlines,
+            &self.options.internal_links,
+        );
         for page in &self.pages {
             append_ascii(
                 &mut bytes,
@@ -440,6 +480,7 @@ pub struct PdfExportResult {
     pub layout_settings_fingerprint: String,
     pub export_fingerprint: String,
     pub byte_hash: String,
+    pub support_report: PdfSupportReport,
     pub bytes: Vec<u8>,
 }
 
@@ -480,6 +521,8 @@ pub enum PdfError {
     PageCountLimit,
     #[error("PDF serialization exceeded a numeric limit")]
     NumericLimit,
+    #[error("PDF metadata or document-structure options are invalid: {0}")]
+    Metadata(#[from] PdfMetadataError),
 }
 
 impl PdfError {
@@ -504,6 +547,7 @@ impl PdfError {
             Self::EmptyPagePlan => "FLOW_PDF_PAGE_PLAN_EMPTY",
             Self::PageCountLimit => "FLOW_PDF_PAGE_COUNT_LIMIT",
             Self::NumericLimit => "FLOW_PDF_NUMERIC_LIMIT",
+            Self::Metadata(error) => error.code(),
         }
     }
 }
@@ -511,6 +555,7 @@ impl PdfError {
 /// Writes a deterministic minimal owned PDF envelope.
 pub fn export_pdf(request: &PdfExportRequest) -> Result<PdfExportResult, PdfError> {
     let export_fingerprint = request.fingerprint()?;
+    let support_report = PdfSupportReport::current();
     let mut document = CosDocument::new();
     let pages_ref = document.add_object(CosValue::Null)?;
     let mut page_refs = Vec::with_capacity(request.pages.len());
@@ -520,6 +565,106 @@ pub fn export_pdf(request: &PdfExportRequest) -> Result<PdfExportResult, PdfErro
         let page_ref = document.add_object(CosValue::Null)?;
         page_refs.push((page_ref, content_ref, page.bounds));
     }
+
+    let mut page_annotations = vec![Vec::new(); request.pages.len()];
+    for link in metadata::ordered_links(&request.options.internal_links) {
+        let page_index = usize::try_from(link.page_index).map_err(|_| PdfError::NumericLimit)?;
+        let destination_page_index =
+            usize::try_from(link.destination_page_index).map_err(|_| PdfError::NumericLimit)?;
+        let destination = page_refs[destination_page_index].0;
+        let right = link
+            .rect
+            .x
+            .raw()
+            .checked_add(link.rect.width.raw())
+            .ok_or(PdfError::NumericLimit)?;
+        let bottom = link
+            .rect
+            .y
+            .raw()
+            .checked_add(link.rect.height.raw())
+            .ok_or(PdfError::NumericLimit)?;
+        let link_ref = document.add_object(CosValue::dictionary([
+            (
+                PdfName::new("Border")?,
+                CosValue::Array(vec![
+                    CosValue::Integer(0),
+                    CosValue::Integer(0),
+                    CosValue::Integer(0),
+                ]),
+            ),
+            (
+                PdfName::new("Dest")?,
+                CosValue::Array(vec![
+                    CosValue::Reference(destination),
+                    CosValue::name("Fit")?,
+                ]),
+            ),
+            (
+                PdfName::new("Rect")?,
+                CosValue::Array(vec![
+                    CosValue::Real(link.rect.x),
+                    CosValue::Real(link.rect.y),
+                    CosValue::Real(LayoutUnit::from_raw(right)),
+                    CosValue::Real(LayoutUnit::from_raw(bottom)),
+                ]),
+            ),
+            (PdfName::new("Subtype")?, CosValue::name("Link")?),
+            (PdfName::new("Type")?, CosValue::name("Annot")?),
+        ])?)?;
+        page_annotations[page_index].push(link_ref);
+    }
+
+    let outline_ref = if request.options.outlines.is_empty() {
+        None
+    } else {
+        let outline_root = document.add_object(CosValue::Null)?;
+        let ordered = metadata::ordered_outlines(&request.options.outlines);
+        let mut item_refs = Vec::with_capacity(ordered.len());
+        for _ in &ordered {
+            item_refs.push(document.add_object(CosValue::Null)?);
+        }
+        for (index, (item_ref, outline)) in item_refs.iter().zip(ordered.iter()).enumerate() {
+            let page_index =
+                usize::try_from(outline.page_index).map_err(|_| PdfError::NumericLimit)?;
+            let mut entries = vec![
+                (
+                    PdfName::new("Dest")?,
+                    CosValue::Array(vec![
+                        CosValue::Reference(page_refs[page_index].0),
+                        CosValue::name("Fit")?,
+                    ]),
+                ),
+                (PdfName::new("Parent")?, CosValue::Reference(outline_root)),
+                (
+                    PdfName::new("Title")?,
+                    CosValue::string(metadata::encode_pdf_text(&outline.title))?,
+                ),
+            ];
+            if let Some(next) = item_refs.get(index + 1) {
+                entries.push((PdfName::new("Next")?, CosValue::Reference(*next)));
+            }
+            document.replace_object(*item_ref, CosValue::dictionary(entries)?)?;
+        }
+        document.replace_object(
+            outline_root,
+            CosValue::dictionary([
+                (
+                    PdfName::new("Count")?,
+                    CosValue::Integer(
+                        i64::try_from(item_refs.len()).map_err(|_| PdfError::NumericLimit)?,
+                    ),
+                ),
+                (PdfName::new("First")?, CosValue::Reference(item_refs[0])),
+                (
+                    PdfName::new("Last")?,
+                    CosValue::Reference(*item_refs.last().ok_or(PdfError::NumericLimit)?),
+                ),
+                (PdfName::new("Type")?, CosValue::name("Outlines")?),
+            ])?,
+        )?;
+        Some(outline_root)
+    };
 
     let kids = page_refs
         .iter()
@@ -537,31 +682,84 @@ pub fn export_pdf(request: &PdfExportRequest) -> Result<PdfExportResult, PdfErro
         ])?,
     )?;
 
-    for (page_ref, content_ref, bounds) in page_refs {
-        document.replace_object(
-            page_ref,
-            CosValue::dictionary([
-                (PdfName::new("Contents")?, CosValue::Reference(content_ref)),
-                (
-                    PdfName::new("MediaBox")?,
-                    CosValue::Array(vec![
-                        CosValue::Real(LayoutUnit::from_raw(0)),
-                        CosValue::Real(LayoutUnit::from_raw(0)),
-                        CosValue::Real(bounds.width),
-                        CosValue::Real(bounds.height),
-                    ]),
+    for (index, (page_ref, content_ref, bounds)) in page_refs.iter().enumerate() {
+        let mut entries = vec![
+            (PdfName::new("Contents")?, CosValue::Reference(*content_ref)),
+            (
+                PdfName::new("MediaBox")?,
+                CosValue::Array(vec![
+                    CosValue::Real(LayoutUnit::from_raw(0)),
+                    CosValue::Real(LayoutUnit::from_raw(0)),
+                    CosValue::Real(bounds.width),
+                    CosValue::Real(bounds.height),
+                ]),
+            ),
+            (PdfName::new("Parent")?, CosValue::Reference(pages_ref)),
+            (PdfName::new("Resources")?, CosValue::dictionary([])?),
+            (PdfName::new("Type")?, CosValue::name("Page")?),
+        ];
+        if !page_annotations[index].is_empty() {
+            entries.push((
+                PdfName::new("Annots")?,
+                CosValue::Array(
+                    page_annotations[index]
+                        .iter()
+                        .copied()
+                        .map(CosValue::Reference)
+                        .collect(),
                 ),
-                (PdfName::new("Parent")?, CosValue::Reference(pages_ref)),
-                (PdfName::new("Resources")?, CosValue::dictionary([])?),
-                (PdfName::new("Type")?, CosValue::name("Page")?),
-            ])?,
-        )?;
+            ));
+        }
+        document.replace_object(*page_ref, CosValue::dictionary(entries)?)?;
     }
 
-    let catalog_ref = document.add_object(CosValue::dictionary([
+    let info_ref = if request.options.metadata.is_empty()
+        && request.options.producer == PdfExportOptions::default().producer
+    {
+        None
+    } else {
+        let mut entries = vec![(
+            PdfName::new("Producer")?,
+            CosValue::string(metadata::encode_pdf_text(&request.options.producer))?,
+        )];
+        if let Some(title) = &request.options.metadata.title {
+            entries.push((
+                PdfName::new("Title")?,
+                CosValue::string(metadata::encode_pdf_text(title))?,
+            ));
+        }
+        if let Some(author) = &request.options.metadata.author {
+            entries.push((
+                PdfName::new("Author")?,
+                CosValue::string(metadata::encode_pdf_text(author))?,
+            ));
+        }
+        if let Some(subject) = &request.options.metadata.subject {
+            entries.push((
+                PdfName::new("Subject")?,
+                CosValue::string(metadata::encode_pdf_text(subject))?,
+            ));
+        }
+        Some(document.add_object(CosValue::dictionary(entries)?)?)
+    };
+    if let Some(info_ref) = info_ref {
+        document.set_info(info_ref)?;
+    }
+
+    let mut catalog_entries = vec![
         (PdfName::new("Pages")?, CosValue::Reference(pages_ref)),
         (PdfName::new("Type")?, CosValue::name("Catalog")?),
-    ])?)?;
+    ];
+    if let Some(language) = &request.options.metadata.language {
+        catalog_entries.push((
+            PdfName::new("Lang")?,
+            CosValue::string(language.as_bytes().to_vec())?,
+        ));
+    }
+    if let Some(outline_ref) = outline_ref {
+        catalog_entries.push((PdfName::new("Outlines")?, CosValue::Reference(outline_ref)));
+    }
+    let catalog_ref = document.add_object(CosValue::dictionary(catalog_entries)?)?;
     document.set_root(catalog_ref)?;
     let bytes = document.write(&export_fingerprint)?;
     let byte_hash = blake3::hash(&bytes).to_hex().to_string();
@@ -572,6 +770,7 @@ pub fn export_pdf(request: &PdfExportRequest) -> Result<PdfExportResult, PdfErro
         layout_settings_fingerprint: request.layout_settings_fingerprint.clone(),
         export_fingerprint,
         byte_hash,
+        support_report,
         bytes,
     })
 }
@@ -595,12 +794,14 @@ fn validate_value_references(
     match value {
         CosValue::Array(values) => {
             for value in values {
-                validate_value_references(value, depth + 1, false, visit)?;
+                validate_value_references(value, depth + 1, allow_parent_cycle, visit)?;
             }
         }
         CosValue::Dictionary(entries) => {
             for (name, value) in entries {
-                validate_value_references(value, depth + 1, name.0 == "Parent", visit)?;
+                let allow_structural_cycle =
+                    allow_parent_cycle || matches!(name.0.as_str(), "Parent" | "Kids" | "Dest");
+                validate_value_references(value, depth + 1, allow_structural_cycle, visit)?;
             }
         }
         CosValue::Stream { dictionary, data } => {
@@ -731,6 +932,11 @@ fn append_ascii(output: &mut Vec<u8>, value: &str) -> Result<(), PdfError> {
     }
     output.extend_from_slice(value.as_bytes());
     ensure_output_size(output.len())
+}
+
+fn append_fingerprint_text(output: &mut Vec<u8>, value: &str) {
+    output.extend_from_slice(&u64::try_from(value.len()).unwrap_or(u64::MAX).to_be_bytes());
+    output.extend_from_slice(value.as_bytes());
 }
 
 fn ensure_output_size(size: usize) -> Result<(), PdfError> {

@@ -17,7 +17,9 @@ use crate::{
         PaginationResult, SourceRange, TextDirection, TextGlyphRun, TextLanguage,
         TextLayoutRequest, layout_text,
     },
-    model::{ContentNode, FlowDocument, HeaderFooterSettings, NodeId, RunLanguage},
+    model::{
+        AssetId, BlockKind, ContentNode, FlowDocument, HeaderFooterSettings, NodeId, RunLanguage,
+    },
     schema::validate_document,
 };
 
@@ -71,6 +73,20 @@ pub struct PdfTextItem {
     pub lines: Vec<PdfTextLine>,
 }
 
+/// A source-backed image placement. The physical bytes are resolved later by
+/// the bounded asset adapter; this item carries only semantic identity and
+/// fixed-point geometry.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PdfImageItem {
+    pub fragment_id: String,
+    pub source_node_id: Option<NodeId>,
+    pub asset_id: AssetId,
+    pub rect: LayoutRect,
+    pub derived: bool,
+    pub repeat_index: u16,
+}
+
 /// A visual page containing only derived display-list items.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -78,6 +94,7 @@ pub struct PdfDisplayPage {
     pub page_index: u32,
     pub bounds: LayoutRect,
     pub items: Vec<PdfTextItem>,
+    pub images: Vec<PdfImageItem>,
 }
 
 /// Privacy-safe display-list diagnostic.
@@ -88,6 +105,7 @@ pub enum PdfDisplayDiagnosticCode {
     SourceMappingMissing,
     GlyphMappingMissing,
     UnsupportedGlyph,
+    AssetMappingMissing,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -204,6 +222,7 @@ pub fn build_display_list(
     let mut diagnostics = Vec::new();
     for page in &pagination.pages {
         let mut items = Vec::new();
+        let mut images = Vec::new();
         if let Some(header) = &page.header {
             append_fragment(
                 document,
@@ -214,6 +233,7 @@ pub fn build_display_list(
                 ukrainian_hyphenation,
                 &nodes,
                 &mut items,
+                &mut images,
                 &mut diagnostics,
             )?;
         }
@@ -227,6 +247,7 @@ pub fn build_display_list(
                 ukrainian_hyphenation,
                 &nodes,
                 &mut items,
+                &mut images,
                 &mut diagnostics,
             )?;
         }
@@ -240,6 +261,7 @@ pub fn build_display_list(
                 ukrainian_hyphenation,
                 &nodes,
                 &mut items,
+                &mut images,
                 &mut diagnostics,
             )?;
         }
@@ -247,6 +269,7 @@ pub fn build_display_list(
             page_index: page.page_index,
             bounds: page.bounds,
             items,
+            images,
         });
     }
 
@@ -278,9 +301,12 @@ fn append_fragment(
     ukrainian_hyphenation: Option<&crate::layout::UkrainianHyphenation>,
     nodes: &BTreeMap<NodeId, &ContentNode>,
     items: &mut Vec<PdfTextItem>,
+    images: &mut Vec<PdfImageItem>,
     diagnostics: &mut Vec<PdfDisplayDiagnostic>,
 ) -> Result<(), PdfDisplayListError> {
-    if let Some(context) = text_context(document, page, fragment, nodes)? {
+    if fragment.kind == FragmentKind::Image {
+        append_image_item(page, fragment, nodes, images, diagnostics);
+    } else if let Some(context) = text_context(document, page, fragment, nodes)? {
         if !fragment.children.is_empty() {
             match build_text_item(
                 fragment,
@@ -317,10 +343,7 @@ fn append_fragment(
                 Err(error) => return Err(error),
             }
         }
-    } else if matches!(
-        fragment.kind,
-        FragmentKind::Image | FragmentKind::Unsupported
-    ) {
+    } else if fragment.kind == FragmentKind::Unsupported {
         diagnostics.push(PdfDisplayDiagnostic {
             code: PdfDisplayDiagnosticCode::UnsupportedFragment,
             page_index: page.page_index,
@@ -339,10 +362,55 @@ fn append_fragment(
             ukrainian_hyphenation,
             nodes,
             items,
+            images,
             diagnostics,
         )?;
     }
     Ok(())
+}
+
+fn append_image_item(
+    page: &LayoutPage,
+    fragment: &LayoutFragment,
+    nodes: &BTreeMap<NodeId, &ContentNode>,
+    images: &mut Vec<PdfImageItem>,
+    diagnostics: &mut Vec<PdfDisplayDiagnostic>,
+) {
+    let Some(source_node_id) = fragment.source_node_id.as_ref() else {
+        diagnostics.push(PdfDisplayDiagnostic {
+            code: PdfDisplayDiagnosticCode::AssetMappingMissing,
+            page_index: page.page_index,
+            fragment_id: fragment.id.clone(),
+            source_node_id: None,
+        });
+        return;
+    };
+    let Some(node) = nodes.get(source_node_id) else {
+        diagnostics.push(PdfDisplayDiagnostic {
+            code: PdfDisplayDiagnosticCode::AssetMappingMissing,
+            page_index: page.page_index,
+            fragment_id: fragment.id.clone(),
+            source_node_id: Some(source_node_id.clone()),
+        });
+        return;
+    };
+    let BlockKind::Image { asset_id, .. } = &node.body else {
+        diagnostics.push(PdfDisplayDiagnostic {
+            code: PdfDisplayDiagnosticCode::AssetMappingMissing,
+            page_index: page.page_index,
+            fragment_id: fragment.id.clone(),
+            source_node_id: Some(source_node_id.clone()),
+        });
+        return;
+    };
+    images.push(PdfImageItem {
+        fragment_id: fragment.id.clone(),
+        source_node_id: Some(source_node_id.clone()),
+        asset_id: asset_id.clone(),
+        rect: fragment.rect,
+        derived: fragment.derived,
+        repeat_index: fragment.repeat_index,
+    });
 }
 
 fn build_text_item(

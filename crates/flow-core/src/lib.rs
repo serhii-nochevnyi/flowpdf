@@ -68,11 +68,15 @@ use model::{
     SCHEMA_VERSION,
 };
 pub use pdf::{
-    CosDocument, CosValue, PDF_DISPLAY_LIST_SCHEMA_VERSION, PDF_EXPORT_SCHEMA_VERSION,
+    CosDocument, CosValue, MAX_PDF_LINK_ENTRIES, MAX_PDF_METADATA_FIELD_BYTES,
+    MAX_PDF_OUTLINE_ENTRIES, PDF_DISPLAY_LIST_SCHEMA_VERSION, PDF_EXPORT_SCHEMA_VERSION,
     PdfDisplayDiagnostic, PdfDisplayDiagnosticCode, PdfDisplayList, PdfDisplayListError,
     PdfDisplayPage, PdfError, PdfExportOptions, PdfExportRequest, PdfExportResult, PdfFontError,
-    PdfFontResource, PdfGlyphPlacement, PdfName, PdfPageContent, PdfPagePlan, PdfRef,
-    PdfSubsetGlyph, PdfTextItem, PdfTextLine, build_display_list, build_font_resources, export_pdf,
+    PdfFontResource, PdfGlyphPlacement, PdfImageEncoding, PdfImageError, PdfImageItem,
+    PdfImageResource, PdfInternalLink, PdfMetadataError, PdfMetadataOptions, PdfName,
+    PdfOutlineEntry, PdfPageContent, PdfPagePlan, PdfRef, PdfSubsetGlyph, PdfSupportReport,
+    PdfSupportedFeature, PdfTextItem, PdfTextLine, PdfUnsupportedFeature, build_display_list,
+    build_font_resources, build_image_resources, export_pdf,
 };
 use provenance::{ProvenanceError, RevisionHash, RevisionProvenance};
 use schema::{DocumentLimits, LimitKind, MigrationRegistry, MigrationReport, SchemaError};

@@ -339,7 +339,7 @@ fn validate_image_bytes(bytes: &[u8]) -> Result<(u32, u32, &'static str), AssetE
     limits.max_image_height = Some(MAX_IMAGE_DIMENSION);
     limits.max_alloc = Some(MAX_IMAGE_DECODED_BYTES);
     let mut dimension_reader = ImageReader::with_format(BufReader::new(Cursor::new(bytes)), format);
-    dimension_reader.limits(limits.clone());
+    dimension_reader.limits(Limits::no_limits());
     let dimensions = dimension_reader
         .into_dimensions()
         .map_err(|_| AssetError::DecodeFailed)?;
@@ -357,6 +357,14 @@ fn validate_image_bytes(bytes: &[u8]) -> Result<(u32, u32, &'static str), AssetE
         return Err(AssetError::DecodedAllocationLimit);
     }
     Ok((dimensions.0, dimensions.1, media_type))
+}
+
+/// Reuses the same bounded image admission path for derived PDF resources.
+/// Encoded bytes remain outside public semantic DTOs.
+pub(crate) fn validate_image_bytes_for_export(
+    bytes: &[u8],
+) -> Result<(u32, u32, &'static str), AssetError> {
+    validate_image_bytes(bytes)
 }
 
 fn check_dimensions(width: u32, height: u32) -> Result<(), AssetError> {
