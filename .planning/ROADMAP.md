@@ -135,23 +135,26 @@ Chromium/macOS evidence is not a substitute.
   4. Reopening an owned PDF restores an identical canonical FlowDocument when its source payload is available.
   5. Every export records reproducibility inputs and passes structural, extraction, visual and form validation gates.
 
-**Plans**: 5/6 executed
+**Plans**: 6/6 plans executed
 
 - [x] 04-01-PLAN.md — Establish bounded COS values and a deterministic PDF page envelope.
 - [x] 04-02-PLAN.md — Connect shaped layout to embedded fonts, Unicode mappings, and selectable text.
 - [x] 04-03-PLAN.md — Add bounded images, metadata, outlines/links, and unsupported-content reporting.
 - [x] 04-04-PLAN.md — Add reproducibility manifests and exact owned-source recovery.
 - [x] 04-05-PLAN.md — Expose revision-safe export and the accessible virtualized PDF preview.
-- [ ] 04-06-PLAN.md — Run the Phase 4 structural/extraction/visual release gate honestly.
+- [x] 04-06-PLAN.md — Run the Phase 4 structural/extraction/visual release gate honestly.
 
 Phase 4 is planned from the Phase 3 fixed-point/display-list contracts. Plans
-04-01 through 04-05 now provide the bounded syntax/page-envelope foundation,
+04-01 through 04-05 provide the bounded syntax/page-envelope foundation,
 revision-bound display list, deterministic TrueType/ToUnicode resource
 preparation, bounded PNG/JPEG resource preparation, typed metadata,
 outline/internal-link and unsupported-feature reporting, exact owned-source
-recovery, and a revision-safe browser export/preview adapter. End-to-end PDF
-text/image content streams, target-viewer compatibility, and the remaining
-structural/extraction/visual evidence remain in 04-06 and later validation.
+recovery, and a revision-safe browser export/preview adapter. Plan 04-06 adds
+the exact local/reference release gate and passes all local rows twice in the
+prepared environment; its four external PDF/reference rows remain
+`unavailable` because no checked-in fixture or matching tool/viewer is
+available. End-to-end PDF text/image content streams, target-viewer
+compatibility, and general PDF import remain unclaimed.
 **UI hint**: yes
 
 ### Phase 5: Semantic Fillable Forms
@@ -246,7 +249,7 @@ structural/extraction/visual evidence remain in 04-06 and later validation.
 | 1. Durable Flow Foundation | 6/6 | Complete    | 2026-08-25 |
 | 2. Accessible Rich-Text Editing | 18/18 | In Progress (external AT checkpoint) |  |
 | 3. Deterministic Reflow and Pagination | 6/6 | In Progress (external AT checkpoint) |  |
-| 4. Owned PDF Preview and Export | 5/6 | In Progress |  |
+| 4. Owned PDF Preview and Export | 6/6 | In Progress (reference evidence unavailable) |  |
 | 5. Semantic Fillable Forms | 0/TBD | Not started | - |
 | 6. Voice Dictation and Commands | 0/TBD | Not started | - |
 | 7. Secure PDF Reader and Scene | 0/TBD | Not started | - |

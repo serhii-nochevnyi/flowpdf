@@ -86,8 +86,10 @@ The current tree includes:
   export status; the semantic editor remains the only authored/accessibility
   surface;
 - Phase 1 and Phase 2 foundation fixtures, Unicode 17 grapheme conformance
-  data, dependency provenance checks, Rust tests, TypeScript checks, and
-  browser tests for the implemented foundation and Phase 3 layout path.
+  data, dependency provenance checks, Rust tests, TypeScript checks, browser
+  tests for the implemented foundation and Phase 3 layout path, and a Phase 4
+  local/reference validation gate that keeps unavailable external evidence
+  explicit.
 
 These capabilities provide deterministic engine contracts and an inspection
 surface; they do not yet constitute a finished rich-text editor or PDF
@@ -118,18 +120,21 @@ things:
 
 Phase 2 implementation plans and the Phase 3 local implementation gate are
 complete, but the explicitly required Microsoft Edge on Windows plus Windows
-screen-reader evidence remains outstanding. Phase 4 owned PDF preview/export
-plans are now materialized. The first five Phase 4 slices add a deterministic
-bounded Rust COS/page envelope, a revision-bound display list, compact
-TrueType/ToUnicode resource inputs, bounded PNG/JPEG resource preparation,
-typed metadata/outline/internal-link support with explicit exclusions for
-active and external actions, a private reproducibility manifest and exact
-owned-source recovery path, plus a revision-safe WASM/worker export adapter
-and visual-only virtualized preview. End-to-end PDF text/image content
-streams, production runtime catalog wiring, target-viewer validation, and
-general PDF import remain planned. Complete assistive-technology validation,
-voice control, and production hardening are not delivered by this repository
-state.
+screen-reader evidence remains outstanding. All six Phase 4 implementation
+plans are now executed: the first five slices add a deterministic bounded Rust
+COS/page envelope, a revision-bound display list, compact TrueType/ToUnicode
+resource inputs, bounded PNG/JPEG resource preparation, typed
+metadata/outline/internal-link support with explicit exclusions for active and
+external actions, a private reproducibility manifest and exact owned-source
+recovery path, plus a revision-safe WASM/worker export adapter and
+visual-only virtualized preview; the sixth adds the reproducible local/
+reference gate. The local Phase 4 gate passes its rows twice, while the four
+external PDF/reference rows are `unavailable` because this checkout has no
+Phase 4 PDF fixture or matching qpdf/Poppler/target-viewer environment. End-
+to-end PDF text/image content streams, production runtime catalog wiring,
+target-viewer validation, and general PDF import remain planned. Complete
+assistive-technology validation, voice control, and production hardening are
+not delivered by this repository state.
 See the
 [roadmap](.planning/ROADMAP.md) and [project constraints](.planning/PROJECT.md)
 for authoritative scope and sequencing.
@@ -222,6 +227,9 @@ npm test             # all configured Vitest projects
 npm run check        # the full Phase 1 evidence and regression gate
 npm run check:phase3:smoke # Phase 3 manifest/diagnostic contract smoke
 npm run check:phase3       # Phase 3 local gate; runs exact rows in fixed order
+npm run check:phase4:smoke # Phase 4 manifest/diagnostic contract smoke
+npm run check:phase4       # Phase 4 local gate plus explicit reference rows
+npm run check:phase4:smoke && npm run check:phase4 && npm run check:phase4
 ```
 
 `npm run test:browser` requires the pinned Chromium installation under
@@ -252,6 +260,8 @@ relevant plan under [`.planning/phases`](.planning/phases).
 Phase 1, Durable Flow Foundation, is complete. Phase 2 implementation plans
 are complete with external Windows/Edge/screen-reader closure still open.
 Phase 3, Deterministic Reflow and Pagination, has completed its six local
-implementation plans and dual-run gate. The current implementation still makes
-no claim of complete PDF compatibility, commercial-SDK parity, or production
-readiness.
+implementation plans and dual-run gate. Phase 4 has completed its six local
+implementation plans and dual-run local gate; its qpdf/Poppler/target-viewer
+reference rows remain unavailable, so the phase is not marked complete. The
+current implementation still makes no claim of complete PDF compatibility,
+commercial-SDK parity, or production readiness.
