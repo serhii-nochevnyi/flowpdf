@@ -103,8 +103,10 @@ The current tree includes:
 - an accessible descriptor-configuration disclosure for already-authored valid
   fields, routed through the reversible Rust `SetField` transaction while
   preserving field identity and anchors; it edits current metadata, flags,
-  typed defaults, and option metadata but does not insert, delete, or place
-  fields;
+  typed defaults, and option metadata but does not insert or delete fields;
+- an accessible place-at-caret action for already-authored valid fields that
+  uses the accepted Rust logical selection and the same reversible `SetField`
+  path; non-collapsed selections and review-region fields remain fenced;
 - a bounded AcroForm structure adapter that converts an accepted session-aware
   widget projection into deterministic field dictionaries, page widgets,
   values/defaults, options, flags, and catalog/page references in the owned
@@ -136,8 +138,8 @@ things:
 - a bounded PDF reader, with selectable text, reproducibility evidence,
   explicit unsupported-content reporting, and an exact owned-source round trip
   when the source payload is available;
-- semantic field insertion, deletion, placement, and tab-order authoring; the
-  current editor can configure and fill already-authored valid fields through
+- semantic field insertion, deletion, and tab-order authoring; the current
+  editor can configure, place, and fill already-authored valid fields through
   native accessible controls, while explicit AcroForm appearance streams,
   target-viewer behavior, flattening, and external PDF form import remain
   separately planned. The current repository contains the bounded Rust/WASM
@@ -293,11 +295,11 @@ Phase 3, Deterministic Reflow and Pagination, has completed its six local
 implementation plans and dual-run gate. Phase 4 has completed its six local
 implementation plans and dual-run local gate; its qpdf/Poppler/target-viewer
 reference rows remain unavailable, so the phase is not marked complete. The
-Phase 5 has seven completed local slices for validation/projection,
+Phase 5 has eight completed local slices for validation/projection,
 noncanonical fill state, effective-value projection, bounded AcroForm
 field/widget structure, the Rust/WASM plus guarded IndexedDB session boundary,
-accessible controls, and descriptor configuration for already-authored valid
-fields. Field insertion/deletion/placement, appearance streams, flattening,
-viewer compatibility, and external form import remain unimplemented. The
-current implementation still makes no claim of complete PDF compatibility,
-commercial-SDK parity, or production readiness.
+accessible controls, descriptor configuration, and safe anchor placement for
+already-authored valid fields. Field insertion/deletion, tab-order authoring,
+appearance streams, flattening, viewer compatibility, and external form import
+remain unimplemented. The current implementation still makes no claim of
+complete PDF compatibility, commercial-SDK parity, or production readiness.
