@@ -69,10 +69,11 @@ fn page_envelope_is_repeatable_and_has_consistent_xref() {
     assert!(first.bytes.starts_with(b"%PDF-1.7\n"));
     assert!(first.bytes.ends_with(b"%%EOF\n"));
     let text = String::from_utf8_lossy(&first.bytes);
-    assert!(text.contains("xref\n0 5\n"));
+    assert!(text.contains("xref\n0 6\n"));
     assert!(text.contains("/Type /Catalog"));
     assert!(text.contains("/Type /Pages"));
     assert!(text.contains("/Type /Page"));
+    assert!(text.contains("/FlowPDFSource"));
     assert!(text.contains("/MediaBox [0 0 595 842]"));
 }
 

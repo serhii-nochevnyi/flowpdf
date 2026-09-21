@@ -68,15 +68,19 @@ use model::{
     SCHEMA_VERSION,
 };
 pub use pdf::{
-    CosDocument, CosValue, MAX_PDF_LINK_ENTRIES, MAX_PDF_METADATA_FIELD_BYTES,
-    MAX_PDF_OUTLINE_ENTRIES, PDF_DISPLAY_LIST_SCHEMA_VERSION, PDF_EXPORT_SCHEMA_VERSION,
-    PdfDisplayDiagnostic, PdfDisplayDiagnosticCode, PdfDisplayList, PdfDisplayListError,
-    PdfDisplayPage, PdfError, PdfExportOptions, PdfExportRequest, PdfExportResult, PdfFontError,
-    PdfFontResource, PdfGlyphPlacement, PdfImageEncoding, PdfImageError, PdfImageItem,
-    PdfImageResource, PdfInternalLink, PdfMetadataError, PdfMetadataOptions, PdfName,
-    PdfOutlineEntry, PdfPageContent, PdfPagePlan, PdfRef, PdfSubsetGlyph, PdfSupportReport,
-    PdfSupportedFeature, PdfTextItem, PdfTextLine, PdfUnsupportedFeature, build_display_list,
-    build_font_resources, build_image_resources, export_pdf,
+    CosDocument, CosValue, MAX_PDF_LINK_ENTRIES, MAX_PDF_MANIFEST_BYTES,
+    MAX_PDF_METADATA_FIELD_BYTES, MAX_PDF_OUTLINE_ENTRIES, MAX_PDF_SOURCE_PAYLOAD_BYTES,
+    MAX_PDF_SOURCE_STREAM_BYTES, PDF_DISPLAY_LIST_SCHEMA_VERSION, PDF_EXPORT_SCHEMA_VERSION,
+    PDF_PROVENANCE_SCHEMA_VERSION, PdfDisplayDiagnostic, PdfDisplayDiagnosticCode, PdfDisplayList,
+    PdfDisplayListError, PdfDisplayPage, PdfError, PdfExportManifest, PdfExportOptions,
+    PdfExportRequest, PdfExportResult, PdfFontError, PdfFontManifestIdentity, PdfFontResource,
+    PdfGlyphPlacement, PdfImageEncoding, PdfImageError, PdfImageItem, PdfImageResource,
+    PdfInternalLink, PdfManifestOptions, PdfMetadataError, PdfMetadataOptions, PdfName,
+    PdfOutlineEntry, PdfPageContent, PdfPagePlan, PdfProvenanceError, PdfRecoveredSource,
+    PdfRecoveryError, PdfRecoveryExpectation, PdfRef, PdfReproducibilityInputs, PdfSubsetGlyph,
+    PdfSupportReport, PdfSupportedFeature, PdfTextItem, PdfTextLine, PdfUnsupportedFeature,
+    build_display_list, build_font_resources, build_image_resources, export_pdf,
+    recover_owned_source,
 };
 use provenance::{ProvenanceError, RevisionHash, RevisionProvenance};
 use schema::{DocumentLimits, LimitKind, MigrationRegistry, MigrationReport, SchemaError};

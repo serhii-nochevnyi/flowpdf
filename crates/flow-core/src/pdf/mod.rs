@@ -5,7 +5,7 @@
 //! PDF compatibility yet. Later adapters feed typed display-list resources
 //! into the same bounded writer.
 
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, fmt};
 
 use thiserror::Error;
 
@@ -15,6 +15,8 @@ mod assets;
 mod display_list;
 mod font;
 mod metadata;
+mod provenance;
+mod recovery;
 
 pub use assets::{PdfImageEncoding, PdfImageError, PdfImageResource, build_image_resources};
 pub use display_list::{
@@ -27,6 +29,14 @@ pub use metadata::{
     MAX_PDF_LINK_ENTRIES, MAX_PDF_METADATA_FIELD_BYTES, MAX_PDF_OUTLINE_ENTRIES, PdfInternalLink,
     PdfMetadataError, PdfMetadataOptions, PdfOutlineEntry, PdfSupportReport, PdfSupportedFeature,
     PdfUnsupportedFeature,
+};
+pub use provenance::{
+    MAX_PDF_MANIFEST_BYTES, MAX_PDF_SOURCE_PAYLOAD_BYTES, MAX_PDF_SOURCE_STREAM_BYTES,
+    PDF_PROVENANCE_SCHEMA_VERSION, PdfExportManifest, PdfFontManifestIdentity, PdfManifestOptions,
+    PdfProvenanceError, PdfReproducibilityInputs,
+};
+pub use recovery::{
+    PdfRecoveredSource, PdfRecoveryError, PdfRecoveryExpectation, recover_owned_source,
 };
 
 /// Version of the owned PDF export envelope.
@@ -391,13 +401,33 @@ impl Default for PdfExportOptions {
 }
 
 /// Immutable identity-bound request for the PDF envelope.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct PdfExportRequest {
     pub source_revision: u32,
     pub source_hash: String,
     pub layout_settings_fingerprint: String,
     pub pages: Vec<PdfPagePlan>,
     pub options: PdfExportOptions,
+    pub reproducibility: PdfReproducibilityInputs,
+    source_payload: Option<Vec<u8>>,
+}
+
+impl fmt::Debug for PdfExportRequest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PdfExportRequest")
+            .field("source_revision", &self.source_revision)
+            .field("source_hash", &self.source_hash)
+            .field(
+                "layout_settings_fingerprint",
+                &self.layout_settings_fingerprint,
+            )
+            .field("pages", &self.pages)
+            .field("options", &self.options)
+            .field("reproducibility", &self.reproducibility)
+            .field("source_payload_present", &self.source_payload.is_some())
+            .finish()
+    }
 }
 
 impl PdfExportRequest {
@@ -438,7 +468,47 @@ impl PdfExportRequest {
             layout_settings_fingerprint,
             pages,
             options,
+            reproducibility: PdfReproducibilityInputs::default(),
+            source_payload: None,
         })
+    }
+
+    /// Adds the exact derived identities that make an export reproducible.
+    pub fn with_reproducibility_inputs(
+        mut self,
+        inputs: PdfReproducibilityInputs,
+    ) -> Result<Self, PdfError> {
+        provenance::validate_reproducibility_inputs(&inputs)?;
+        self.reproducibility = inputs;
+        Ok(self)
+    }
+
+    /// Binds one canonical FlowDocument JSON payload to this export request.
+    /// The payload must already match the request's source hash and revision.
+    pub fn with_source_payload(mut self, payload: Vec<u8>) -> Result<Self, PdfError> {
+        if payload.len() > MAX_PDF_SOURCE_PAYLOAD_BYTES {
+            return Err(PdfProvenanceError::SourcePayloadLimit.into());
+        }
+        let document = crate::canonical::decode_canonical(&payload)
+            .map_err(|_| PdfProvenanceError::InvalidCanonicalPayload)?;
+        if crate::canonical::canonical_hash(&payload) != self.source_hash {
+            return Err(PdfProvenanceError::SourceHashMismatch.into());
+        }
+        if document.revision != self.source_revision {
+            return Err(PdfProvenanceError::SourceRevisionMismatch.into());
+        }
+        self.source_payload = Some(payload);
+        Ok(self)
+    }
+
+    /// Canonicalizes and binds a typed FlowDocument to this export request.
+    pub fn with_source_document(
+        self,
+        document: &crate::model::FlowDocument,
+    ) -> Result<Self, PdfError> {
+        let payload = crate::canonical::canonical_bytes(document)
+            .map_err(|_| PdfProvenanceError::InvalidCanonicalPayload)?;
+        self.with_source_payload(payload)
     }
 
     fn fingerprint(&self) -> Result<String, PdfError> {
@@ -457,6 +527,7 @@ impl PdfExportRequest {
             &self.options.outlines,
             &self.options.internal_links,
         );
+        provenance::append_inputs_fingerprint(&mut bytes, &self.reproducibility);
         for page in &self.pages {
             append_ascii(
                 &mut bytes,
@@ -472,7 +543,7 @@ impl PdfExportRequest {
 }
 
 /// Immutable PDF bytes and the identity used to produce them.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct PdfExportResult {
     pub schema_version: u32,
     pub source_revision: u32,
@@ -481,7 +552,33 @@ pub struct PdfExportResult {
     pub export_fingerprint: String,
     pub byte_hash: String,
     pub support_report: PdfSupportReport,
+    pub manifest: PdfExportManifest,
+    pub private_source_stream: Vec<u8>,
     pub bytes: Vec<u8>,
+}
+
+impl fmt::Debug for PdfExportResult {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PdfExportResult")
+            .field("schema_version", &self.schema_version)
+            .field("source_revision", &self.source_revision)
+            .field("source_hash", &self.source_hash)
+            .field(
+                "layout_settings_fingerprint",
+                &self.layout_settings_fingerprint,
+            )
+            .field("export_fingerprint", &self.export_fingerprint)
+            .field("byte_hash", &self.byte_hash)
+            .field("support_report", &self.support_report)
+            .field("manifest", &self.manifest)
+            .field(
+                "private_source_stream_bytes",
+                &self.private_source_stream.len(),
+            )
+            .field("pdf_bytes", &self.bytes.len())
+            .finish()
+    }
 }
 
 /// Stable failure taxonomy for the bounded owned writer.
@@ -523,6 +620,8 @@ pub enum PdfError {
     NumericLimit,
     #[error("PDF metadata or document-structure options are invalid: {0}")]
     Metadata(#[from] PdfMetadataError),
+    #[error("PDF provenance or source-payload validation failed: {0}")]
+    Provenance(#[from] PdfProvenanceError),
 }
 
 impl PdfError {
@@ -548,6 +647,7 @@ impl PdfError {
             Self::PageCountLimit => "FLOW_PDF_PAGE_COUNT_LIMIT",
             Self::NumericLimit => "FLOW_PDF_NUMERIC_LIMIT",
             Self::Metadata(error) => error.code(),
+            Self::Provenance(error) => error.code(),
         }
     }
 }
@@ -555,6 +655,9 @@ impl PdfError {
 /// Writes a deterministic minimal owned PDF envelope.
 pub fn export_pdf(request: &PdfExportRequest) -> Result<PdfExportResult, PdfError> {
     let export_fingerprint = request.fingerprint()?;
+    let manifest = provenance::build_manifest(request, &export_fingerprint)?;
+    let private_source_stream =
+        provenance::encode_source_envelope(&manifest, request.source_payload.as_deref())?;
     let support_report = PdfSupportReport::current();
     let mut document = CosDocument::new();
     let pages_ref = document.add_object(CosValue::Null)?;
@@ -746,9 +849,21 @@ pub fn export_pdf(request: &PdfExportRequest) -> Result<PdfExportResult, PdfErro
         document.set_info(info_ref)?;
     }
 
+    let private_source_ref = document.add_object(CosValue::stream(
+        [
+            (PdfName::new("Subtype")?, CosValue::name("FlowPDF.Source")?),
+            (PdfName::new("Type")?, CosValue::name("Metadata")?),
+        ],
+        private_source_stream.clone(),
+    )?)?;
+
     let mut catalog_entries = vec![
         (PdfName::new("Pages")?, CosValue::Reference(pages_ref)),
         (PdfName::new("Type")?, CosValue::name("Catalog")?),
+        (
+            PdfName::new("FlowPDFSource")?,
+            CosValue::Reference(private_source_ref),
+        ),
     ];
     if let Some(language) = &request.options.metadata.language {
         catalog_entries.push((
@@ -771,6 +886,8 @@ pub fn export_pdf(request: &PdfExportRequest) -> Result<PdfExportResult, PdfErro
         export_fingerprint,
         byte_hash,
         support_report,
+        manifest,
+        private_source_stream,
         bytes,
     })
 }

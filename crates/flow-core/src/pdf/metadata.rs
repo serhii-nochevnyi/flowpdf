@@ -7,6 +7,7 @@
 
 use std::collections::BTreeSet;
 
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::layout::LayoutRect;
@@ -18,7 +19,8 @@ pub const MAX_PDF_OUTLINE_ENTRIES: usize = 2_048;
 pub const MAX_PDF_LINK_ENTRIES: usize = 4_096;
 
 /// Optional bounded document metadata emitted in the PDF Info/catalog layer.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PdfMetadataOptions {
     pub title: Option<String>,
     pub author: Option<String>,
@@ -37,7 +39,8 @@ impl PdfMetadataOptions {
 }
 
 /// One deterministic bookmark destination within the exported page list.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PdfOutlineEntry {
     pub id: String,
     pub title: String,
@@ -46,7 +49,8 @@ pub struct PdfOutlineEntry {
 
 /// One bounded internal link.  External URI/file/action targets are not part
 /// of this type and therefore cannot be smuggled into the owned writer.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PdfInternalLink {
     pub id: String,
     pub page_index: u32,
