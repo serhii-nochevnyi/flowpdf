@@ -39,6 +39,7 @@ const phaseFourWasmExports = new Set([
   'recover_owned_source',
   'verify_pdf_export_response',
 ])
+const phaseFiveWasmExports = new Set(['apply_form_session', 'apply_form_session_json'])
 const forbiddenDirectPackages = new Set([
   '@vitejs/plugin-react',
   'actix-web',
@@ -84,6 +85,7 @@ const phaseTwoEditorSource = /^(?:web\/src\/main\.tsx|web\/src\/editor\/[A-Za-z0
 const phaseThreeEditorSource = /^(?:web\/src\/main\.tsx|web\/src\/(?:editor|layout)\/[A-Za-z0-9._/-]+\.(?:ts|tsx))$/
 const phaseFourPdfSource = /^web\/src\/pdf\/[A-Za-z0-9._/-]+\.(?:ts|tsx)$/
 const phaseFourEditorSource = /^(?:web\/src\/main\.tsx|web\/src\/(?:editor|layout|pdf)\/[A-Za-z0-9._/-]+\.(?:ts|tsx))$/
+const phaseFiveFormSource = /^web\/src\/forms\/[A-Za-z0-9._/-]+\.(?:ts|tsx)$/
 const phaseTwoPackagePins = new Map([
   ['react', { section: 'dependencies', version: '19.2.8' }],
   ['react-dom', { section: 'dependencies', version: '19.2.8' }],
@@ -100,7 +102,7 @@ const semanticOwnerName = /^(?:apply|canonicalize|hash|migrate|mutate|recover|re
 
 test('the checked-in workspace preserves deferred scope and Rust semantic ownership', async () => {
   const snapshot = loadWorkspaceSnapshot(projectRoot)
-  assert.deepEqual(boundaryDiagnostics(snapshot, { phase: 4 }), [])
+  assert.deepEqual(boundaryDiagnostics(snapshot, { phase: 5 }), [])
   assertPhaseTwoParityBoundary(projectRoot, snapshot)
 
   const gatePath = resolve(projectRoot, 'scripts/check-phase1.mjs')
@@ -644,6 +646,15 @@ function boundaryPolicy(options) {
       allowsDeferredPath: (path) => phaseFourPdfSource.test(path),
     }
   }
+  if (phase === 5) {
+    return {
+      phase,
+      forbiddenWebPathSegment:
+        /(?:^|[\/._-])(?:auth|backend|collaboration|forms?|pdf|voice)(?=[\/._-]|$)/i,
+      allowsEditorSource: (path) => phaseFourEditorSource.test(path),
+      allowsDeferredPath: (path) => phaseFourPdfSource.test(path) || phaseFiveFormSource.test(path),
+    }
+  }
   throw new RangeError(`unsupported boundary policy phase ${phase}`)
 }
 
@@ -1172,6 +1183,9 @@ function validateWasmBoundary(source, diagnostics, policy) {
   if (policy.phase >= 4) {
     for (const exportName of phaseFourWasmExports) allowedExports.add(exportName)
   }
+  if (policy.phase >= 5) {
+    for (const exportName of phaseFiveWasmExports) allowedExports.add(exportName)
+  }
   const items = rustWasmItems(source)
   const exports = []
   for (const item of items) {
@@ -1341,6 +1355,13 @@ function hasTypedWasmSignature(item) {
       parameters.join('') === 'response_json:String' &&
       tokens[parametersEnd + 1] === '->' &&
       tokens.slice(parametersEnd + 2).join('') === 'bool'
+    )
+  }
+  if (item.exportName === 'apply_form_session_json') {
+    return (
+      parameters.join('') === 'request_json:String' &&
+      tokens[parametersEnd + 1] === '->' &&
+      tokens.slice(parametersEnd + 2).join('') === 'String'
     )
   }
   if (
