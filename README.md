@@ -23,6 +23,7 @@ FlowDocument
     -> Rust-owned fixed-point layout, pagination, and derived fragments
     -> versioned WASM boundary and revision-safe Web Worker scheduling
     -> browser page viewport plus synchronized semantic accessibility DOM
+    -> Rust-owned semantic form validation and derived widget projection
     -> owned fixed-layout PDF objects, export, and visual preview adapter
 ```
 
@@ -85,6 +86,10 @@ The current tree includes:
   navigation, source-backed search, selection projection, and announced
   export status; the semantic editor remains the only authored/accessibility
   surface;
+- Rust-owned validation for the current semantic field vocabulary and a
+  revision/hash-bound anchor-to-widget projection over accepted fixed-point
+  display lists, including deterministic identities/tab order and explicit
+  review entries for invalid, deleted, or unmapped anchors;
 - Phase 1 and Phase 2 foundation fixtures, Unicode 17 grapheme conformance
   data, dependency provenance checks, Rust tests, TypeScript checks, browser
   tests for the implemented foundation and Phase 3 layout path, and a Phase 4
@@ -112,7 +117,9 @@ things:
 - a bounded PDF reader, with selectable text, reproducibility evidence,
   explicit unsupported-content reporting, and an exact owned-source round trip
   when the source payload is available;
-- semantic fields that become interoperable PDF form widgets after layout;
+- field authoring/fill UI and a separate durable current-value contract,
+  followed by interoperable AcroForm dictionaries/appearances after layout;
+  the current repository only contains the validated derived projection;
 - voice dictation and commands through the same revision-checked transaction
   boundary;
 - controlled external-PDF reconstruction/OCR and later native editing of
@@ -263,5 +270,7 @@ Phase 3, Deterministic Reflow and Pagination, has completed its six local
 implementation plans and dual-run gate. Phase 4 has completed its six local
 implementation plans and dual-run local gate; its qpdf/Poppler/target-viewer
 reference rows remain unavailable, so the phase is not marked complete. The
-current implementation still makes no claim of complete PDF compatibility,
+Phase 5 has started with one local Rust validation/projection plan; field
+authoring, durable fill values, AcroForm emission, flattening, and viewer
+compatibility remain unimplemented. The current implementation still makes no claim of complete PDF compatibility,
 commercial-SDK parity, or production readiness.

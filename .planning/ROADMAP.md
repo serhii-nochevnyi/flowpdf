@@ -171,7 +171,16 @@ compatibility, and general PDF import remain unclaimed.
   4. Exported fields and appearance states behave consistently in the target viewer matrix.
   5. Flattening is explicit, selected, validated and never silently replaces the editable source.
 
-**Plans**: TBD
+**Plans**: 1 plan executed; follow-on plans remain to be decomposed
+
+- [x] 05-01-PLAN.md — Add Rust-owned field-value validation and deterministic
+  display-list anchor-to-widget projection with explicit review paths.
+
+The first Phase 5 slice validates the existing semantic field vocabulary and
+derives revision/hash-bound fixed-point widget projections. It does not claim
+field authoring/fill UI, a separate durable current-value record, AcroForm
+dictionaries/appearances, flattening, external form import, or target-viewer
+compatibility. Those remain separately planned and verified.
 **UI hint**: yes
 
 ### Phase 6: Voice Dictation and Commands
@@ -250,7 +259,7 @@ compatibility, and general PDF import remain unclaimed.
 | 2. Accessible Rich-Text Editing | 18/18 | In Progress (external AT checkpoint) |  |
 | 3. Deterministic Reflow and Pagination | 6/6 | In Progress (external AT checkpoint) |  |
 | 4. Owned PDF Preview and Export | 6/6 | In Progress (reference evidence unavailable) |  |
-| 5. Semantic Fillable Forms | 0/TBD | Not started | - |
+| 5. Semantic Fillable Forms | 1/1 executed (follow-on TBD) | In Progress (Rust projection slice) |  |
 | 6. Voice Dictation and Commands | 0/TBD | Not started | - |
 | 7. Secure PDF Reader and Scene | 0/TBD | Not started | - |
 | 8. External Reconstruction and OCR | 0/TBD | Not started | - |
