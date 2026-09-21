@@ -13,3 +13,6 @@ flow-core = { path = "../flow-core" }
 serde.workspace = true
 serde-wasm-bindgen.workspace = true
 wasm-bindgen.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

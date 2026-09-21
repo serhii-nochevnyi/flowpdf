@@ -177,6 +177,22 @@ pub fn recover_document_audited(request: JsValue) -> JsValue {
     serialize_response(&response)
 }
 
+/// Runs one bounded, immutable layout request. The browser/worker exchanges
+/// JSON only; Rust owns canonical decoding, font/data admission, pagination,
+/// diagnostics, and result hashing. No mutable layout handle or raw font
+/// bytes are returned to JavaScript.
+#[wasm_bindgen]
+pub fn layout_document(request_json: String) -> String {
+    flow_core::layout_wasm_response_json(&request_json)
+}
+
+/// Verifies the Rust-owned result hash and response envelope before a worker
+/// may publish a layout result.
+#[wasm_bindgen]
+pub fn verify_layout_response(response_json: String) -> bool {
+    flow_core::verify_layout_wasm_response_json(&response_json)
+}
+
 #[derive(Clone, Copy)]
 enum HistoryCommand {
     Undo,

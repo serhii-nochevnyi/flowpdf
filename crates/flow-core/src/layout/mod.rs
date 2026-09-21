@@ -34,6 +34,19 @@ const MAX_FONT_FACE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_TEXT_BYTES: usize = 512 * 1024;
 const MAX_REQUEST_HASH_BYTES: usize = 128;
 const MAX_PAGINATION_PAGES: u32 = 2_048;
+/// Version of the closed serialized layout contract consumed by the WASM
+/// boundary. It is intentionally independent of the semantic schema version.
+pub const LAYOUT_WASM_SCHEMA_VERSION: u32 = 1;
+/// Aggregate serialized request budget. This covers canonical document JSON,
+/// explicit font bytes, and the bounded request envelope before execution.
+pub const MAX_LAYOUT_WASM_REQUEST_BYTES: usize = 96 * 1024 * 1024;
+/// Aggregate explicit font/data budget admitted by one layout request.
+pub const MAX_LAYOUT_WASM_FONT_DATA_BYTES: usize = 32 * 1024 * 1024;
+/// Maximum serialized response budget. A response is rejected before it can
+/// become an accepted worker result when the derived page tree is too large.
+pub const MAX_LAYOUT_WASM_RESULT_BYTES: usize = 64 * 1024 * 1024;
+const MAX_LAYOUT_WASM_REQUEST_ID_BYTES: usize = 128;
+const MAX_LAYOUT_WASM_VIEWPORT_PAGES: u32 = 256;
 const MAX_STATIC_LINES: usize = 64;
 const DEFAULT_LINE_HEIGHT_NUMERATOR: u32 = 6;
 const DEFAULT_LINE_HEIGHT_DENOMINATOR: u32 = 5;
@@ -167,8 +180,10 @@ impl TextLanguage {
     }
 }
 
-/// Stable identity for an admitted font face. Font bytes are intentionally
-/// kept out of serializable layout requests and results.
+/// Stable identity for an admitted font face. The ordinary text-layout DTO
+/// carries this identity only; the closed WASM ingress has a separate,
+/// bounded byte field that is consumed into a request-local catalog and never
+/// returned in derived results.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct FontFaceIdentity {
@@ -615,6 +630,296 @@ impl PaginationResult {
     pub fn result_hash(&self) -> &str {
         &self.result_hash
     }
+}
+
+/// One explicit font face admitted by the serialized WASM request. Bytes are
+/// ingress-only data: they are consumed into a request-local `FontCatalog` and
+/// are never copied into a layout result or diagnostic.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LayoutWasmFontInput {
+    pub id: String,
+    pub family: String,
+    pub face_index: u32,
+    pub bytes: Vec<u8>,
+}
+
+/// Explicit Ukrainian dictionary data admitted by the serialized WASM
+/// request. Its identity is checked against the decoded bytes before layout.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LayoutWasmHyphenationInput {
+    pub identity: String,
+    pub bytes: Vec<u8>,
+}
+
+/// A bounded viewport hint. Pagination remains a full Rust-owned derivation;
+/// the hint lets the worker request a bounded interactive window without
+/// allowing an unbounded page-range value across the boundary.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LayoutWasmViewport {
+    pub first_page: u32,
+    pub page_count: u32,
+}
+
+/// Closed, versioned request DTO for the Rust/WASM layout boundary.
+///
+/// `canonical_json` is the only authored document payload admitted here. All
+/// other fields are explicit identities, bounds, or request-local byte data;
+/// no mutable Rust handle, system-font lookup, or browser layout object is
+/// represented by this contract.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LayoutWasmRequest {
+    pub schema_version: u32,
+    pub request_id: String,
+    pub canonical_json: String,
+    pub source_revision: u32,
+    pub source_hash: String,
+    pub max_pages: u32,
+    pub viewport: LayoutWasmViewport,
+    pub font_catalog_identity: String,
+    pub hyphenation_data_identity: Option<String>,
+    pub expected_layout_settings_fingerprint: Option<String>,
+    pub fonts: Vec<LayoutWasmFontInput>,
+    pub ukrainian_hyphenation: Option<LayoutWasmHyphenationInput>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LayoutWasmError {
+    pub code: String,
+}
+
+/// Closed, privacy-safe response DTO. The nested result contains only derived
+/// page/fragment geometry, source ranges, stable IDs, bounded numeric context,
+/// and allowlisted diagnostic codes. Authored text, font bytes, and system
+/// state are deliberately absent.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LayoutWasmResponse {
+    pub schema_version: u32,
+    pub request_id: String,
+    pub ok: bool,
+    pub source_revision: Option<u32>,
+    pub source_hash: Option<String>,
+    pub layout_settings_fingerprint: Option<String>,
+    pub font_catalog_identity: Option<String>,
+    pub hyphenation_data_identity: Option<String>,
+    pub result_hash: Option<String>,
+    pub result: Option<PaginationResult>,
+    pub error: Option<LayoutWasmError>,
+}
+
+impl LayoutWasmResponse {
+    fn failure(request_id: impl Into<String>, code: impl Into<String>) -> Self {
+        Self {
+            schema_version: LAYOUT_WASM_SCHEMA_VERSION,
+            request_id: request_id.into(),
+            ok: false,
+            source_revision: None,
+            source_hash: None,
+            layout_settings_fingerprint: None,
+            font_catalog_identity: None,
+            hyphenation_data_identity: None,
+            result_hash: None,
+            result: None,
+            error: Some(LayoutWasmError { code: code.into() }),
+        }
+    }
+
+    fn success(request_id: String, result: PaginationResult) -> Self {
+        Self {
+            schema_version: LAYOUT_WASM_SCHEMA_VERSION,
+            request_id,
+            ok: true,
+            source_revision: Some(result.source_revision),
+            source_hash: Some(result.source_hash.clone()),
+            layout_settings_fingerprint: Some(result.layout_settings_fingerprint.clone()),
+            font_catalog_identity: Some(result.font_catalog_identity.clone()),
+            hyphenation_data_identity: result.hyphenation_data_identity.clone(),
+            result_hash: Some(result.result_hash.clone()),
+            result: Some(result),
+            error: None,
+        }
+    }
+}
+
+/// Executes one serialized, immutable layout request. Every failure is
+/// represented by a stable code and no partial page tree is returned.
+pub fn execute_layout_wasm_json(input: &str) -> LayoutWasmResponse {
+    if input.len() > MAX_LAYOUT_WASM_REQUEST_BYTES {
+        return LayoutWasmResponse::failure("", "FLOW_LAYOUT_WASM_REQUEST_SIZE_LIMIT");
+    }
+
+    let request = match serde_json::from_str::<LayoutWasmRequest>(input) {
+        Ok(request) => request,
+        Err(_) => return LayoutWasmResponse::failure("", "FLOW_LAYOUT_WASM_REQUEST_DECODE"),
+    };
+    if request.schema_version != LAYOUT_WASM_SCHEMA_VERSION {
+        return LayoutWasmResponse::failure(
+            request.request_id,
+            "FLOW_LAYOUT_WASM_VERSION_UNSUPPORTED",
+        );
+    }
+    let request_id = request.request_id.clone();
+    if request_id.trim().is_empty() || request_id.len() > MAX_LAYOUT_WASM_REQUEST_ID_BYTES {
+        return LayoutWasmResponse::failure(request_id, "FLOW_LAYOUT_WASM_REQUEST_ID_INVALID");
+    }
+    if request.font_catalog_identity.trim().is_empty()
+        || request
+            .expected_layout_settings_fingerprint
+            .as_ref()
+            .is_some_and(|value| value.trim().is_empty())
+    {
+        return LayoutWasmResponse::failure(request_id, "FLOW_LAYOUT_WASM_REQUEST_INVALID");
+    }
+    if request.viewport.page_count == 0
+        || request.viewport.page_count > MAX_LAYOUT_WASM_VIEWPORT_PAGES
+        || request.viewport.first_page >= request.max_pages
+        || request
+            .viewport
+            .first_page
+            .checked_add(request.viewport.page_count)
+            .is_none_or(|end| end > request.max_pages)
+    {
+        return LayoutWasmResponse::failure(request_id, "FLOW_LAYOUT_WASM_VIEWPORT_INVALID");
+    }
+
+    let mut explicit_data_bytes = 0_usize;
+    for bytes in request.fonts.iter().map(|font| font.bytes.len()) {
+        explicit_data_bytes = match explicit_data_bytes.checked_add(bytes) {
+            Some(total) if total <= MAX_LAYOUT_WASM_FONT_DATA_BYTES => total,
+            _ => {
+                return LayoutWasmResponse::failure(request_id, "FLOW_LAYOUT_WASM_FONT_DATA_LIMIT");
+            }
+        };
+    }
+    if let Some(data) = request.ukrainian_hyphenation.as_ref() {
+        explicit_data_bytes = match explicit_data_bytes.checked_add(data.bytes.len()) {
+            Some(total) if total <= MAX_LAYOUT_WASM_FONT_DATA_BYTES => total,
+            _ => {
+                return LayoutWasmResponse::failure(request_id, "FLOW_LAYOUT_WASM_FONT_DATA_LIMIT");
+            }
+        };
+    }
+    if explicit_data_bytes > MAX_LAYOUT_WASM_FONT_DATA_BYTES {
+        return LayoutWasmResponse::failure(request_id, "FLOW_LAYOUT_WASM_FONT_DATA_LIMIT");
+    }
+
+    let canonical_bytes = request.canonical_json.as_bytes();
+    if crate::canonical::preflight_canonical_bytes(canonical_bytes).is_err() {
+        return LayoutWasmResponse::failure(request_id, "FLOW_LAYOUT_WASM_DOCUMENT_INVALID");
+    }
+    let document = match crate::canonical::decode_canonical(canonical_bytes) {
+        Ok(document) => document,
+        Err(_) => {
+            return LayoutWasmResponse::failure(request_id, "FLOW_LAYOUT_WASM_DOCUMENT_INVALID");
+        }
+    };
+
+    let faces = match request
+        .fonts
+        .into_iter()
+        .map(|font| FontFace::new(font.id, font.family, font.face_index, font.bytes))
+        .collect::<Result<Vec<_>, _>>()
+    {
+        Ok(faces) => faces,
+        Err(error) => return LayoutWasmResponse::failure(request_id, error.code()),
+    };
+    let catalog = match FontCatalog::new(faces) {
+        Ok(catalog) => catalog,
+        Err(error) => return LayoutWasmResponse::failure(request_id, error.code()),
+    };
+    if catalog.identity() != request.font_catalog_identity {
+        return LayoutWasmResponse::failure(request_id, "FLOW_LAYOUT_WASM_IDENTITY_MISMATCH");
+    }
+
+    let hyphenation = match request.ukrainian_hyphenation {
+        Some(data) => match UkrainianHyphenation::from_bincode(data.identity, &data.bytes) {
+            Ok(data) => Some(data),
+            Err(error) => return LayoutWasmResponse::failure(request_id, error.code()),
+        },
+        None => None,
+    };
+    let actual_hyphenation_identity = hyphenation.as_ref().map(|data| data.identity().to_owned());
+    if actual_hyphenation_identity != request.hyphenation_data_identity {
+        return LayoutWasmResponse::failure(request_id, "FLOW_LAYOUT_WASM_IDENTITY_MISMATCH");
+    }
+
+    let pagination_request = match PaginationRequest::new(
+        request.source_revision,
+        request.source_hash,
+        request.max_pages,
+    ) {
+        Ok(request) => request,
+        Err(error) => return LayoutWasmResponse::failure(request_id, error.code()),
+    };
+    let result = match paginate_document(
+        &document,
+        &pagination_request,
+        &catalog,
+        hyphenation.as_ref(),
+    ) {
+        Ok(result) => result,
+        Err(error) => return LayoutWasmResponse::failure(request_id, error.code()),
+    };
+    if request
+        .expected_layout_settings_fingerprint
+        .is_some_and(|expected| expected != result.layout_settings_fingerprint)
+    {
+        return LayoutWasmResponse::failure(request_id, "FLOW_LAYOUT_WASM_IDENTITY_MISMATCH");
+    }
+
+    let response = LayoutWasmResponse::success(request_id, result);
+    let serialized_size = serde_json::to_vec(&response)
+        .map(|bytes| bytes.len())
+        .unwrap_or(MAX_LAYOUT_WASM_RESULT_BYTES.saturating_add(1));
+    if serialized_size > MAX_LAYOUT_WASM_RESULT_BYTES {
+        return LayoutWasmResponse::failure(
+            response.request_id,
+            "FLOW_LAYOUT_WASM_RESULT_SIZE_LIMIT",
+        );
+    }
+    response
+}
+
+/// Serializes one boundary response without exposing a serializer-specific
+/// `JsValue` shape to the Rust core.
+pub fn layout_wasm_response_json(input: &str) -> String {
+    serde_json::to_string(&execute_layout_wasm_json(input))
+        .expect("the closed layout response must serialize")
+}
+
+/// Recomputes the Rust-owned result hash for a complete response. The worker
+/// uses this narrow boolean check before an otherwise valid result can be
+/// published; malformed or partial responses fail closed.
+pub fn verify_layout_wasm_response_json(input: &str) -> bool {
+    let Ok(response) = serde_json::from_str::<LayoutWasmResponse>(input) else {
+        return false;
+    };
+    if response.schema_version != LAYOUT_WASM_SCHEMA_VERSION
+        || !response.ok
+        || response.error.is_some()
+        || response.result.is_none()
+    {
+        return false;
+    }
+    let Some(result) = response.result else {
+        return false;
+    };
+    let Ok(expected_hash) = pagination_result_hash(&result) else {
+        return false;
+    };
+    response.result_hash.as_deref() == Some(expected_hash.as_str())
+        && result.result_hash == expected_hash
+        && response.source_revision == Some(result.source_revision)
+        && response.source_hash.as_deref() == Some(result.source_hash.as_str())
+        && response.layout_settings_fingerprint.as_deref()
+            == Some(result.layout_settings_fingerprint.as_str())
+        && response.font_catalog_identity.as_deref() == Some(result.font_catalog_identity.as_str())
+        && response.hyphenation_data_identity == result.hyphenation_data_identity
 }
 
 /// Stable, non-content-bearing layout failures.

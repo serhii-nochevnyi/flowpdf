@@ -32,6 +32,13 @@ import {
   type ImageAccessibilityDto,
   type ImageBlockViewDto,
 } from './editor-store.js'
+import type {
+  AcceptedLayoutDto,
+  LayoutRequestDto,
+} from '../layout/layout-protocol.js'
+import type {
+  LayoutScheduleOutcome,
+} from '../layout/layout-worker.js'
 
 export type { EditorLocale }
 
@@ -335,6 +342,8 @@ export interface WasmBoundary {
   readonly query_document: (request: RecoveryRecordsDto) => ApiResponse<RecoverResultDto>
   readonly query_editor_view: (request: unknown) => ApiResponse<EditorViewDto>
   readonly recover_document_audited: (request: unknown) => ApiResponse<AuditedRecoverResultDto>
+  readonly layout_document?: (requestJson: string) => string
+  readonly verify_layout_response?: (responseJson: string) => boolean
 }
 
 export interface EditorPersistence {
@@ -356,6 +365,18 @@ export interface EditorControllerDependencies {
   readonly documentStore?: EditorPersistence
   readonly store?: EditorStore
   readonly wasm?: Promise<WasmBoundary>
+  /** Optional background layout bridge; semantic editor state does not depend on its completion. */
+  readonly layoutScheduler?: EditorLayoutScheduler
+  readonly layoutRequestFactory?: (
+    accepted: EditorAcceptedSnapshot,
+  ) => LayoutRequestDto | null
+}
+
+export interface EditorLayoutScheduler {
+  request(request: LayoutRequestDto): Promise<LayoutScheduleOutcome>
+  cancel(requestId?: string): void
+  accepted(): AcceptedLayoutDto | null
+  subscribe?(listener: () => void): () => void
 }
 
 export const editorCopy = {
@@ -466,6 +487,10 @@ export class EditorController {
   private readonly clock: () => Date
   private readonly wasm: Promise<WasmBoundary>
   private readonly stateStore: EditorStore
+  private readonly layoutScheduler: EditorLayoutScheduler | undefined
+  private readonly layoutRequestFactory:
+    | ((accepted: EditorAcceptedSnapshot) => LayoutRequestDto | null)
+    | undefined
   private initialized: Promise<void> | undefined
   private pending: Promise<void> = Promise.resolve()
   private sessionPending: Promise<void> = Promise.resolve()
@@ -482,6 +507,8 @@ export class EditorController {
       dependencies.documentStore ?? new IndexedDbDocumentStore(options.databaseName)
     this.stateStore = dependencies.store ?? new EditorStore(copy(this.locale).loading)
     this.wasm = dependencies.wasm ?? loadWasm()
+    this.layoutScheduler = dependencies.layoutScheduler
+    this.layoutRequestFactory = dependencies.layoutRequestFactory
   }
 
   readonly subscribe = (listener: () => void): (() => void) =>
@@ -491,6 +518,50 @@ export class EditorController {
 
   snapshot() {
     return this.stateStore.getSnapshot()
+  }
+
+  /** Returns the last complete layout projection, if background layout is configured. */
+  layoutSnapshot(): AcceptedLayoutDto | null {
+    return this.layoutScheduler?.accepted() ?? null
+  }
+
+  /** Subscribes to complete layout publications without coupling editor input to the worker. */
+  readonly subscribeLayout = (listener: () => void): (() => void) =>
+    this.layoutScheduler?.subscribe?.(listener) ?? (() => undefined)
+
+  /** Requests layout for the current accepted revision and returns immediately to the caller. */
+  requestLayout(): Promise<LayoutScheduleOutcome> {
+    const accepted = this.requireAccepted()
+    if (this.layoutScheduler === undefined || this.layoutRequestFactory === undefined) {
+      return Promise.resolve({
+        kind: 'failed',
+        requestId: 'layout-unavailable',
+        code: 'FLOW_LAYOUT_UNAVAILABLE',
+      })
+    }
+    const request = this.layoutRequestFactory(accepted)
+    if (request === null) {
+      return Promise.resolve({
+        kind: 'failed',
+        requestId: 'layout-unavailable',
+        code: 'FLOW_LAYOUT_REQUEST_UNAVAILABLE',
+      })
+    }
+    if (
+      request.sourceRevision !== accepted.session.revision ||
+      request.sourceHash !== accepted.session.canonicalHash
+    ) {
+      return Promise.resolve({
+        kind: 'failed',
+        requestId: request.requestId,
+        code: 'FLOW_LAYOUT_SOURCE_REVISION_MISMATCH',
+      })
+    }
+    return this.layoutScheduler.request(request)
+  }
+
+  cancelLayout(requestId?: string): void {
+    this.layoutScheduler?.cancel(requestId)
   }
 
   async initialize(): Promise<void> {
@@ -915,6 +986,7 @@ export class EditorController {
   }
 
   dispose(): void {
+    this.layoutScheduler?.cancel()
     if (typeof globalThis.URL?.revokeObjectURL === 'function') {
       for (const objectUrl of this.imageObjectUrls.values()) {
         globalThis.URL.revokeObjectURL(objectUrl)
@@ -1145,14 +1217,13 @@ export class EditorController {
   }
 
   private publishAccepted(result: RecoverResultDto, status: string): void {
-    this.stateStore.publishAccepted(
-      {
-        session: result.session,
-        editor: result.editor,
-        view: result.view,
-      },
-      status,
-    )
+    const accepted = {
+      session: result.session,
+      editor: result.editor,
+      view: result.view,
+    }
+    this.stateStore.publishAccepted(accepted, status)
+    this.scheduleLayout(accepted)
   }
 
   private publishEditorSession(result: EditorSessionResponseDto): void {
@@ -1169,6 +1240,21 @@ export class EditorController {
 
   private publishError(error: unknown): void {
     this.stateStore.publishError(errorCode(error))
+  }
+
+  private scheduleLayout(accepted: EditorAcceptedSnapshot): void {
+    if (this.layoutScheduler === undefined || this.layoutRequestFactory === undefined) return
+    const request = this.layoutRequestFactory(accepted)
+    if (
+      request === null ||
+      request.sourceRevision !== accepted.session.revision ||
+      request.sourceHash !== accepted.session.canonicalHash
+    ) {
+      return
+    }
+    // Layout is a derived background projection. A slow worker must never
+    // extend the command/session barrier or block active IME/editor input.
+    void this.layoutScheduler.request(request)
   }
 }
 

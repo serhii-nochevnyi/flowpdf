@@ -54,9 +54,13 @@ pub use invalidation::{
 };
 pub use layout::{
     BreakKind, BreakReason, FontCatalog, FontFace, FragmentKind, IncrementalPaginationResult,
-    LayoutDiagnostic, LayoutDiagnosticCode, LayoutError, LayoutFragment, LayoutPage, LayoutRect,
-    LayoutUnit, PaginationRequest, PaginationResult, UkrainianHyphenation, paginate_document,
-    paginate_incremental_document,
+    LAYOUT_WASM_SCHEMA_VERSION, LayoutDiagnostic, LayoutDiagnosticCode, LayoutError,
+    LayoutFragment, LayoutPage, LayoutRect, LayoutUnit, LayoutWasmError, LayoutWasmFontInput,
+    LayoutWasmHyphenationInput, LayoutWasmRequest, LayoutWasmResponse, LayoutWasmViewport,
+    MAX_LAYOUT_WASM_FONT_DATA_BYTES, MAX_LAYOUT_WASM_REQUEST_BYTES, MAX_LAYOUT_WASM_RESULT_BYTES,
+    PaginationRequest, PaginationResult, UkrainianHyphenation, execute_layout_wasm_json,
+    layout_wasm_response_json, paginate_document, paginate_incremental_document,
+    verify_layout_wasm_response_json,
 };
 use model::{
     Affinity, CommandId, DocumentId, FlowDocument, LogicalPosition, MigrationHop, Provenance,
