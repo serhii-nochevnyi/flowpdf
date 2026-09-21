@@ -171,7 +171,7 @@ compatibility, and general PDF import remain unclaimed.
   4. Exported fields and appearance states behave consistently in the target viewer matrix.
   5. Flattening is explicit, selected, validated and never silently replaces the editable source.
 
-**Plans**: 4/4 local plans executed; phase-level closure remains open
+**Plans**: 5/5 local plans executed; phase-level closure remains open
 
 - [x] 05-01-PLAN.md — Add Rust-owned field-value validation and deterministic
   display-list anchor-to-widget projection with explicit review paths.
@@ -181,15 +181,17 @@ compatibility, and general PDF import remain unclaimed.
   session-aware widget projection while preserving authored defaults.
 - [x] 05-04-PLAN.md — Emit bounded deterministic AcroForm field/widget
   structure through the owned PDF COS writer without appearance claims.
+- [x] 05-05-PLAN.md — Expose the Rust/WASM form-session protocol and persist
+  accepted current values in a guarded dedicated IndexedDB store.
 
-The first four Phase 5 slices validate the existing semantic field vocabulary,
+The first five Phase 5 slices validate the existing semantic field vocabulary,
 derive revision/hash-bound fixed-point widget projections, keep explicit
 noncanonical fill overrides separate from authored defaults through to the
-derived widget, and emit bounded AcroForm field/widget dictionaries from an
-accepted projection. They do not claim browser/WASM transport, durable
-current-value persistence, appearance streams, flattening, external form
-import, or target-viewer compatibility. Those remain separately planned and
-verified.
+derived widget, emit bounded AcroForm field/widget dictionaries from an
+accepted projection, and carry accepted current values through a versioned
+Rust/WASM boundary into a guarded dedicated IndexedDB store. They do not claim
+field authoring UI, appearance streams, flattening, external form import, or
+target-viewer compatibility. Those remain separately planned and verified.
 **UI hint**: yes
 
 ### Phase 6: Voice Dictation and Commands
