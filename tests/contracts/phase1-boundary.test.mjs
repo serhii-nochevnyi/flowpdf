@@ -34,6 +34,11 @@ const allowedWasmExports = new Set([
   'undo',
 ])
 const phaseThreeWasmExports = new Set(['layout_document', 'verify_layout_response'])
+const phaseFourWasmExports = new Set([
+  'export_pdf',
+  'recover_owned_source',
+  'verify_pdf_export_response',
+])
 const forbiddenDirectPackages = new Set([
   '@vitejs/plugin-react',
   'actix-web',
@@ -77,6 +82,8 @@ const forbiddenPhaseOneWebPathSegment = /(?:^|[\/._-])(?:auth|backend|collaborat
 const forbiddenPhaseTwoWebPathSegment = /(?:^|[\/._-])(?:auth|backend|collaboration|forms?|layout|pdf|voice)(?=[\/._-]|$)/i
 const phaseTwoEditorSource = /^(?:web\/src\/main\.tsx|web\/src\/editor\/[A-Za-z0-9._/-]+\.(?:ts|tsx))$/
 const phaseThreeEditorSource = /^(?:web\/src\/main\.tsx|web\/src\/(?:editor|layout)\/[A-Za-z0-9._/-]+\.(?:ts|tsx))$/
+const phaseFourPdfSource = /^web\/src\/pdf\/[A-Za-z0-9._/-]+\.(?:ts|tsx)$/
+const phaseFourEditorSource = /^(?:web\/src\/main\.tsx|web\/src\/(?:editor|layout|pdf)\/[A-Za-z0-9._/-]+\.(?:ts|tsx))$/
 const phaseTwoPackagePins = new Map([
   ['react', { section: 'dependencies', version: '19.2.8' }],
   ['react-dom', { section: 'dependencies', version: '19.2.8' }],
@@ -93,7 +100,7 @@ const semanticOwnerName = /^(?:apply|canonicalize|hash|migrate|mutate|recover|re
 
 test('the checked-in workspace preserves deferred scope and Rust semantic ownership', async () => {
   const snapshot = loadWorkspaceSnapshot(projectRoot)
-  assert.deepEqual(boundaryDiagnostics(snapshot, { phase: 3 }), [])
+  assert.deepEqual(boundaryDiagnostics(snapshot, { phase: 4 }), [])
   assertPhaseTwoParityBoundary(projectRoot, snapshot)
 
   const gatePath = resolve(projectRoot, 'scripts/check-phase1.mjs')
@@ -316,6 +323,37 @@ test('Phase 2 rejects deferred filename tokens nested under the editor allowance
   assert.match(diagnostics, /backend\.client\.ts: deferred web path/i)
 })
 
+test('Phase 4 admits only the owned PDF projection path and typed PDF WASM exports', () => {
+  const fixture = validFixture()
+  fixture.typescript.set(
+    'web/src/pdf/pdf-preview.tsx',
+    `
+      import React from 'react'
+      export function PdfPreview({ label }) {
+        return <section aria-label={label}><p>{label}</p></section>
+      }
+    `,
+  )
+  fixture.wasmSource = [
+    ...allowedWasmExports,
+    ...phaseThreeWasmExports,
+    ...phaseFourWasmExports,
+  ]
+    .map((name) => wasmFixtureFunction(name))
+    .join('\n')
+
+  assert.deepEqual(boundaryDiagnostics(fixture, { phase: 4 }), [])
+
+  fixture.typescript.set(
+    'web/src/editor/pdf-export.ts',
+    'export const deferredSurface = true',
+  )
+  assert.match(
+    boundaryDiagnostics(fixture, { phase: 4 }).join('\n'),
+    /editor\/pdf-export\.ts: deferred web path/i,
+  )
+})
+
 test('WASM size report rejects forged measurements, stale inputs, and either exceeded budget', async () => {
   const { validateWasmSizeReport, WASM_SIZE_LIMITS } = await import('../../scripts/verify-wasm-size.mjs')
   const validReport = wasmSizeReportFixture(WASM_SIZE_LIMITS)
@@ -517,13 +555,22 @@ function validFixture() {
       ],
     ]),
     wasmSource: [...allowedWasmExports]
-      .map((name) =>
-        name === 'stage_asset'
-          ? '#[wasm_bindgen]\npub fn stage_asset(bytes: &[u8], request: JsValue) -> JsValue { request }'
-          : `#[wasm_bindgen]\npub fn ${name}(request: JsValue) -> JsValue { request }`,
-      )
+      .map((name) => wasmFixtureFunction(name))
       .join('\n'),
   }
+}
+
+function wasmFixtureFunction(name) {
+  if (name === 'stage_asset') {
+    return '#[wasm_bindgen]\npub fn stage_asset(bytes: &[u8], request: JsValue) -> JsValue { request }'
+  }
+  if (name === 'layout_document' || name === 'export_pdf' || name === 'recover_owned_source') {
+    return `#[wasm_bindgen]\npub fn ${name}(request_json: String) -> String { request_json }`
+  }
+  if (name === 'verify_layout_response' || name === 'verify_pdf_export_response') {
+    return `#[wasm_bindgen]\npub fn ${name}(response_json: String) -> bool { !response_json.is_empty() }`
+  }
+  return `#[wasm_bindgen]\npub fn ${name}(request: JsValue) -> JsValue { request }`
 }
 
 export function boundaryDiagnostics(snapshot, options = {}) {
@@ -543,7 +590,10 @@ export function boundaryDiagnostics(snapshot, options = {}) {
     typescriptProgram.checker,
   )
   for (const [path] of snapshot.typescript) {
-    if (policy.forbiddenWebPathSegment.test(path)) {
+    if (
+      policy.forbiddenWebPathSegment.test(path) &&
+      !policy.allowsDeferredPath(path)
+    ) {
       diagnostics.push(`${path}: deferred web path entered Phase 1`)
     }
     validateTypeScript(
@@ -565,6 +615,7 @@ function boundaryPolicy(options) {
       phase,
       forbiddenWebPathSegment: forbiddenPhaseOneWebPathSegment,
       allowsEditorSource: () => false,
+      allowsDeferredPath: () => false,
     }
   }
   if (phase === 2) {
@@ -572,6 +623,7 @@ function boundaryPolicy(options) {
       phase,
       forbiddenWebPathSegment: forbiddenPhaseTwoWebPathSegment,
       allowsEditorSource: (path) => phaseTwoEditorSource.test(path),
+      allowsDeferredPath: () => false,
     }
   }
   if (phase === 3) {
@@ -580,6 +632,16 @@ function boundaryPolicy(options) {
       forbiddenWebPathSegment:
         /(?:^|[\/._-])(?:auth|backend|collaboration|forms?|pdf|voice)(?=[\/._-]|$)/i,
       allowsEditorSource: (path) => phaseThreeEditorSource.test(path),
+      allowsDeferredPath: () => false,
+    }
+  }
+  if (phase === 4) {
+    return {
+      phase,
+      forbiddenWebPathSegment:
+        /(?:^|[\/._-])(?:auth|backend|collaboration|forms?|pdf|voice)(?=[\/._-]|$)/i,
+      allowsEditorSource: (path) => phaseFourEditorSource.test(path),
+      allowsDeferredPath: (path) => phaseFourPdfSource.test(path),
     }
   }
   throw new RangeError(`unsupported boundary policy phase ${phase}`)
@@ -1107,6 +1169,9 @@ function validateWasmBoundary(source, diagnostics, policy) {
   if (policy.phase >= 3) {
     for (const exportName of phaseThreeWasmExports) allowedExports.add(exportName)
   }
+  if (policy.phase >= 4) {
+    for (const exportName of phaseFourWasmExports) allowedExports.add(exportName)
+  }
   const items = rustWasmItems(source)
   const exports = []
   for (const item of items) {
@@ -1255,6 +1320,23 @@ function hasTypedWasmSignature(item) {
     )
   }
   if (item.exportName === 'verify_layout_response') {
+    return (
+      parameters.join('') === 'response_json:String' &&
+      tokens[parametersEnd + 1] === '->' &&
+      tokens.slice(parametersEnd + 2).join('') === 'bool'
+    )
+  }
+  if (
+    item.exportName === 'export_pdf' ||
+    item.exportName === 'recover_owned_source'
+  ) {
+    return (
+      parameters.join('') === 'request_json:String' &&
+      tokens[parametersEnd + 1] === '->' &&
+      tokens.slice(parametersEnd + 2).join('') === 'String'
+    )
+  }
+  if (item.exportName === 'verify_pdf_export_response') {
     return (
       parameters.join('') === 'response_json:String' &&
       tokens[parametersEnd + 1] === '->' &&

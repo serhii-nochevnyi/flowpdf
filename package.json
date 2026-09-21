@@ -22,6 +22,8 @@
     "check:phase2": "node scripts/check-phase2.mjs",
     "check:phase3:smoke": "node --test tests/contracts/phase3-gate.test.mjs",
     "check:phase3": "node scripts/check-phase3.mjs",
+    "check:phase4:smoke": "node --test tests/contracts/phase4-gate.test.mjs",
+    "check:phase4": "node scripts/check-phase4.mjs",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
