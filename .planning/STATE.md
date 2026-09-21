@@ -4,16 +4,16 @@ milestone: v1.0
 current_phase: 4
 current_phase_name: Owned PDF Preview and Export
 status: executing
-stopped_at: Completed 04-04-PLAN.md; reproducibility manifest, private source envelope, and exact owned-source recovery are green, ready to execute 04-05 while Phase 2/3 external AT closure remains outstanding
-last_updated: "2026-09-21T18:07:05Z"
+stopped_at: Completed 04-05-PLAN.md; revision-safe WASM/worker export, exact recovery adapter, and visual-only virtualized preview are green, ready to execute 04-06 while Phase 2/3 external AT closure remains outstanding
+last_updated: "2026-09-21T18:43:55Z"
 last_activity: 2026-09-21
-last_activity_desc: Completed Phase 4 Plan 04-04 versioned reproducibility manifest, private canonical source envelope, exact owned-source recovery, and adversarial recovery classifications; browser export/preview remain later plans
-state_head: e1a117c
+last_activity_desc: Completed Phase 4 Plan 04-05 revision-safe WASM/worker export and recovery protocol, virtualized visual-only PDF preview, browser evidence, and stale-result invalidation
+state_head: a3cf24e
 progress:
   total_phases: 9
   completed_phases: 1
   total_plans: 36
-  completed_plans: 34
+  completed_plans: 35
 milestone_name: milestone
 ---
 
@@ -29,11 +29,11 @@ See: .planning/PROJECT.md (updated 2026-08-25)
 ## Current Position
 
 Phase: 4 (Owned PDF Preview and Export) — EXECUTING
-Plan: 4 of 6
-Status: 04-04 complete; deterministic bounded COS/page envelope, revision-bound display list, TrueType subset resources, bounded PNG/JPEG resources, typed metadata/outline/internal-link structure, reproducibility manifest, and exact owned-source recovery are green. Plans 04-05 through 04-06 remain. Phase 2/3 external Edge/Windows screen-reader evidence remains outstanding.
-Last activity: 2026-09-21 — Phase 4 Plan 04-04 reproducibility manifest, private canonical source envelope, exact recovery, and adversarial diagnostics completed
+Plan: 5 of 6
+Status: 04-05 complete; deterministic bounded COS/page envelope, revision-bound display list, TrueType subset resources, bounded PNG/JPEG resources, typed metadata/outline/internal-link structure, reproducibility manifest, exact owned-source recovery, revision-safe WASM/worker export, and the visual-only virtualized preview are green. Plan 04-06 remains. Phase 2/3 external Edge/Windows screen-reader evidence remains outstanding.
+Last activity: 2026-09-21 — Phase 4 Plan 04-05 revision-safe WASM/worker export, exact recovery adapter, virtualized preview, browser evidence, and stale-result invalidation completed
 
-Progress: Phase 2 — 18/18 implementation plans complete; Phase 3 — 6/6 local implementation plans executed; Phase 4 — 4/6 plans executed and 6/6 planned. Phase 2/3 phase-level closure remains honest about inherited external AT evidence.
+Progress: Phase 2 — 18/18 implementation plans complete; Phase 3 — 6/6 local implementation plans executed; Phase 4 — 5/6 plans executed and 6/6 planned. Phase 2/3 phase-level closure remains honest about inherited external AT evidence.
 
 ## Performance Metrics
 
@@ -89,6 +89,7 @@ Progress: Phase 2 — 18/18 implementation plans complete; Phase 3 — 6/6 local
 | Phase FLOWPDF-04 P02 | same session | 2 tasks | 7 files |
 | Phase FLOWPDF-04 P03 | same session | 2 tasks | 7 files |
 | Phase FLOWPDF-04 P04 | same session | 2 tasks | 7 files |
+| Phase FLOWPDF-04 P05 | same session | 2 tasks | 16 files |
 
 ## Accumulated Context
 
@@ -151,6 +152,8 @@ Decisions are logged in `.planning/PROJECT.md`.
 - [Phase 4]: PDF image resources reuse revision-owned asset hashes and admission limits, deduplicate by stable content identity, and carry fixed-point display-list rectangles without copying bytes into semantic DTOs or diagnostics.
 - [Phase 4]: Export structure is a closed typed subset: escaped metadata, deterministic internal outlines/links, and an explicit support report; JavaScript, launch/external actions, arbitrary annotations/paths, fields, and encryption are not inferred or emitted.
 - [Phase 4]: Every owned export carries a versioned manifest and bounded private canonical-source envelope; exact recovery requires payload, canonical hash, source identity, revision, schema, and manifest checks, while external PDFs remain unavailable rather than best-effort exact.
+- [Phase 4]: Browser PDF export is a string-only, bounded, single-flight derived protocol; request/source/layout/manifest identities and Rust byte verification must pass before immutable download state is published, and text revisions cancel/clear stale exports.
+- [Phase 4]: The PDF preview is a visual-only projection of accepted Rust page geometry with a bounded virtualization window, source-backed search, selection projection, and status announcements; semantic DOM/input remains the sole authoring and accessibility surface.
 
 ### Pending Todos
 
@@ -171,6 +174,6 @@ Decisions are logged in `.planning/PROJECT.md`.
 
 ## Session Continuity
 
-Last session: 2026-09-21T18:07:05Z
-Stopped at: Completed 04-04-PLAN.md; focused/full Rust PDF recovery/resource/structure gates are green and the inherited Phase 2/3 external AT checkpoint remains outstanding
+Last session: 2026-09-21T18:43:55Z
+Stopped at: Completed 04-05-PLAN.md; focused Rust/WASM, TypeScript, unit, and Chromium preview gates are green and the inherited Phase 2/3 external AT checkpoint remains outstanding
 Resume file: None
