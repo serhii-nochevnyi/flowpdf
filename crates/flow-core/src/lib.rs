@@ -10,6 +10,7 @@ pub mod audit;
 pub mod canonical;
 pub mod capability;
 pub mod editor_view;
+pub mod forms;
 pub mod invalidation;
 pub mod layout;
 pub mod model;
@@ -48,6 +49,11 @@ pub use editor_view::{
     EditorSessionState, EditorTextSpanDto, EditorViewDto, EditorViewRequest,
     FormattingProjectionDto, FormattingState, ImageBlockViewDto, ImageLimitsDto,
     StructuralPlacementDto, TableCellFocusDto, TableLimitsDto,
+};
+pub use forms::{
+    FORM_PROJECTION_SCHEMA_VERSION, FormProjectionError, FormValueErrorCode, FormWidget,
+    FormWidgetProjection, FormWidgetReview, FormWidgetReviewReason, resolve_form_widgets,
+    validate_field_value,
 };
 pub use invalidation::{
     CarrySignature, ChangeKind, ChangeSet, IncrementalLayoutCache, InvalidationPlan,
