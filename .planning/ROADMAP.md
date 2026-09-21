@@ -171,7 +171,7 @@ compatibility, and general PDF import remain unclaimed.
   4. Exported fields and appearance states behave consistently in the target viewer matrix.
   5. Flattening is explicit, selected, validated and never silently replaces the editable source.
 
-**Plans**: 3 plans executed; follow-on plans remain to be decomposed
+**Plans**: 4/4 local plans executed; phase-level closure remains open
 
 - [x] 05-01-PLAN.md — Add Rust-owned field-value validation and deterministic
   display-list anchor-to-widget projection with explicit review paths.
@@ -179,14 +179,17 @@ compatibility, and general PDF import remain unclaimed.
   session with immutable fill, clear, and effective-value operations.
 - [x] 05-03-PLAN.md — Connect validated session values to a versioned
   session-aware widget projection while preserving authored defaults.
+- [x] 05-04-PLAN.md — Emit bounded deterministic AcroForm field/widget
+  structure through the owned PDF COS writer without appearance claims.
 
-The first three Phase 5 slices validate the existing semantic field vocabulary,
-derive revision/hash-bound fixed-point widget projections, and keep explicit
+The first four Phase 5 slices validate the existing semantic field vocabulary,
+derive revision/hash-bound fixed-point widget projections, keep explicit
 noncanonical fill overrides separate from authored defaults through to the
-derived widget. They do not claim
-browser/WASM transport, durable current-value persistence, AcroForm
-dictionaries/appearances, flattening, external form import, or target-viewer
-compatibility. Those remain separately planned and verified.
+derived widget, and emit bounded AcroForm field/widget dictionaries from an
+accepted projection. They do not claim browser/WASM transport, durable
+current-value persistence, appearance streams, flattening, external form
+import, or target-viewer compatibility. Those remain separately planned and
+verified.
 **UI hint**: yes
 
 ### Phase 6: Voice Dictation and Commands
