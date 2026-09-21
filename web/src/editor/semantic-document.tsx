@@ -185,6 +185,7 @@ export function SemanticDocument({
         fields={view.document.fields}
         fieldReview={view.document.fieldReview}
         locale={locale}
+        controller={controller}
         canonicalJson={canonicalJson}
         formSession={formSession}
         formSessionSnapshot={formSessionSnapshot}

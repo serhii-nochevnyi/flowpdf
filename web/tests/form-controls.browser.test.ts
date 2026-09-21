@@ -112,4 +112,91 @@ for (const locale of ['uk', 'en'] as const) {
     expect(text.value).toBe('Тест')
     expect(controller.snapshot().accepted?.session.revision).toBe(initialRevision)
   })
+
+  test(`descriptor configuration stays Rust-owned in ${locale}`, async () => {
+    const { root, controller } = await openFormEditor(locale)
+    const initial = controller.snapshot().accepted
+    if (initial === null) throw new Error('accepted editor state is required')
+    expect(root.querySelectorAll('[data-field-editor]')).toHaveLength(
+      initial.editor.view.document.fields.length,
+    )
+
+    const textCard = root.querySelector<HTMLElement>('[data-form-control-kind="text"]')?.closest(
+      '[data-field-id]',
+    )
+    const textEditor = textCard?.querySelector<HTMLDetailsElement>('[data-field-editor]')
+    if (textEditor === undefined || textEditor === null) throw new Error('text editor is required')
+    textEditor.querySelector<HTMLElement>('summary')?.click()
+    const label = textEditor.querySelector<HTMLInputElement>('[data-field-editor-label]')
+    const defaultValue = textEditor.querySelector<HTMLInputElement>('[data-field-editor-default]')
+    const save = textEditor.querySelector<HTMLButtonElement>('[data-action="editor-field-save"]')
+    if (label === null || defaultValue === null || save === null) {
+      throw new Error('text descriptor controls are required')
+    }
+    setInputValue(label, 'Заповнювач / Placeholder')
+    setInputValue(defaultValue, 'Автор')
+    save.click()
+    await settle(controller)
+    await settleForm(root, controller)
+
+    const accepted = controller.snapshot().accepted
+    if (accepted === null) throw new Error('accepted descriptor edit is required')
+    expect(accepted.session.revision).toBe(initial.session.revision + 1)
+    const updated = accepted.editor.view.document.fields.find(
+      (field) => field.descriptor.id === initial.editor.view.document.fields[0]?.descriptor.id,
+    )
+    if (updated === undefined) throw new Error('updated text descriptor is required')
+    expect(updated.descriptor.label).toBe('Заповнювач / Placeholder')
+    expect(updated.descriptor.defaultValue).toEqual({ type: 'text', value: 'Автор' })
+    expect(updated.descriptor.anchor).toEqual(
+      initial.editor.view.document.fields[0]?.descriptor.anchor,
+    )
+    expect(root.querySelector<HTMLInputElement>('[data-form-control-kind="text"] input')?.value).toBe(
+      'Автор',
+    )
+
+    const radioCard = root
+      .querySelector<HTMLElement>('[data-form-control-kind="radioGroup"]')
+      ?.closest('[data-field-id]')
+    const radioEditor = radioCard?.querySelector<HTMLDetailsElement>('[data-field-editor]')
+    if (radioEditor === undefined || radioEditor === null) throw new Error('radio editor is required')
+    radioEditor.querySelector<HTMLElement>('summary')?.click()
+    const optionLabel = radioEditor.querySelector<HTMLInputElement>('[data-field-editor-option-label]')
+    const radioSave = radioEditor.querySelector<HTMLButtonElement>('[data-action="editor-field-save"]')
+    if (optionLabel === null || radioSave === null) throw new Error('radio option editor is required')
+    setInputValue(optionLabel, 'Так / Yes')
+    radioSave.click()
+    await settle(controller)
+    const afterOptionEdit = controller.snapshot().accepted
+    if (afterOptionEdit === null) throw new Error('accepted option edit is required')
+    const radio = afterOptionEdit.editor.view.document.fields.find(
+      (field) => field.descriptor.kind.type === 'radioGroup',
+    )
+    expect(radio?.descriptor.options[0]?.label).toBe('Так / Yes')
+    expect(afterOptionEdit.session.revision).toBe(initial.session.revision + 2)
+  })
+
+  test(`invalid descriptor drafts remain canonical no-ops in ${locale}`, async () => {
+    const { root, controller } = await openFormEditor(locale)
+    const initial = controller.snapshot().accepted
+    if (initial === null) throw new Error('accepted editor state is required')
+    const textEditor = root
+      .querySelector<HTMLElement>('[data-form-control-kind="text"]')
+      ?.closest('[data-field-id]')
+      ?.querySelector<HTMLDetailsElement>('[data-field-editor]')
+    if (textEditor === undefined || textEditor === null) throw new Error('text editor is required')
+    textEditor.querySelector<HTMLElement>('summary')?.click()
+    const name = textEditor.querySelector<HTMLInputElement>('[data-field-editor-name]')
+    const save = textEditor.querySelector<HTMLButtonElement>('[data-action="editor-field-save"]')
+    if (name === null || save === null) throw new Error('name editor is required')
+    setInputValue(name, '')
+    save.click()
+    await settle(controller)
+    expect(controller.snapshot().accepted?.session.revision).toBe(initial.session.revision)
+    expect(controller.snapshot().accepted?.editor.view.document.fields[0]?.descriptor.name).toBe(
+      initial.editor.view.document.fields[0]?.descriptor.name,
+    )
+    expect(controller.snapshot().errorCode).toBe('FLOW_INVALID_DOCUMENT')
+    expect(root.querySelector('[data-editor-error]')?.textContent).toContain('FLOW_INVALID_DOCUMENT')
+  })
 }

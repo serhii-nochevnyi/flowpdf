@@ -1,3 +1,5 @@
+import { useEffect, useState, type FormEvent } from 'react'
+
 import type {
   EditorFieldReviewDto,
   EditorFieldReviewStatusDto,
@@ -5,8 +7,10 @@ import type {
   EditorFieldViewDto,
   EditorLocale,
   FieldDescriptorDto,
+  FieldOptionDto,
 } from './editor-store.js'
 import { editorMessages } from './editor-messages.js'
+import type { InputCommandTarget } from './input-adapter.js'
 import type { FormSessionValueDto } from '../../persistence/indexeddb-store.js'
 import type {
   FormSessionCoordinator,
@@ -17,6 +21,7 @@ export interface FieldNavigationProps {
   readonly fields: readonly EditorFieldViewDto[]
   readonly fieldReview: readonly EditorFieldReviewDto[]
   readonly locale: EditorLocale
+  readonly controller?: InputCommandTarget | undefined
   readonly canonicalJson?: string | undefined
   readonly formSession?: FormSessionCoordinator | undefined
   readonly formSessionSnapshot?: FormSessionCoordinatorSnapshot | undefined
@@ -26,6 +31,7 @@ export function FieldNavigation({
   fields,
   fieldReview,
   locale,
+  controller,
   canonicalJson,
   formSession,
   formSessionSnapshot,
@@ -53,6 +59,7 @@ export function FieldNavigation({
                 key={field.descriptor.id}
                 field={field}
                 locale={locale}
+                controller={controller}
                 canonicalJson={canonicalJson}
                 formSession={formSession}
                 formSessionSnapshot={formSessionSnapshot}
@@ -87,6 +94,7 @@ export function FieldNavigation({
 interface FieldCardProps {
   readonly field: EditorFieldViewDto
   readonly locale: EditorLocale
+  readonly controller?: InputCommandTarget | undefined
   readonly canonicalJson?: string | undefined
   readonly formSession?: FormSessionCoordinator | undefined
   readonly formSessionSnapshot?: FormSessionCoordinatorSnapshot | undefined
@@ -95,6 +103,7 @@ interface FieldCardProps {
 function FieldCard({
   field,
   locale,
+  controller,
   canonicalJson,
   formSession,
   formSessionSnapshot,
@@ -147,6 +156,13 @@ function FieldCard({
         {labels.fieldRequired}: {booleanLabel(field.descriptor.required, locale)} ·{' '}
         {labels.fieldReadOnly}: {booleanLabel(field.descriptor.readOnly, locale)}
       </p>
+      {controller === undefined ? null : (
+        <FieldDescriptorEditor
+          field={field.descriptor}
+          locale={locale}
+          controller={controller}
+        />
+      )}
       {formSession === undefined ? null : (
         <FieldControl
           field={field.descriptor}
@@ -161,6 +177,449 @@ function FieldCard({
       )}
     </article>
   )
+}
+
+interface FieldDraft {
+  readonly name: string
+  readonly label: string
+  readonly kind: FieldDescriptorDto['kind']
+  readonly required: boolean
+  readonly readOnly: boolean
+  readonly defaultValue: FieldDescriptorDto['defaultValue']
+  readonly options: readonly FieldOptionDto[]
+}
+
+function FieldDescriptorEditor({
+  field,
+  locale,
+  controller,
+}: {
+  readonly field: FieldDescriptorDto
+  readonly locale: EditorLocale
+  readonly controller: InputCommandTarget
+}) {
+  const labels = editorMessages[locale]
+  const [draft, setDraft] = useState<FieldDraft>(() => createFieldDraft(field))
+
+  useEffect(() => {
+    setDraft(createFieldDraft(field))
+  }, [field])
+
+  const updateOption = (index: number, patch: Partial<FieldOptionDto>): void => {
+    setDraft((current) => ({
+      ...current,
+      options: current.options.map((option, optionIndex) =>
+        optionIndex === index ? { ...option, ...patch } : option,
+      ),
+    }))
+  }
+  const removeOption = (index: number): void => {
+    setDraft((current) => {
+      const options = current.options.filter((_, optionIndex) => optionIndex !== index)
+      return {
+        ...current,
+        options,
+        defaultValue: normalizeDefaultValue(current.kind, current.defaultValue, options),
+      }
+    })
+  }
+  const addOption = (): void => {
+    setDraft((current) => {
+      const number = current.options.length + 1
+      const option: FieldOptionDto = {
+        id: globalThis.crypto.randomUUID(),
+        label: `${labels.fieldOption} ${number}`,
+        exportValue: `option-${number}`,
+      }
+      return { ...current, options: [...current.options, option] }
+    })
+  }
+  const changeKind = (type: string): void => {
+    setDraft((current) => {
+      const kind = fieldKindFor(type, current.kind)
+      const options = kind.type === 'radioGroup' || kind.type === 'select' ? current.options : []
+      return {
+        ...current,
+        kind,
+        options,
+        defaultValue: normalizeDefaultValue(kind, current.defaultValue, options),
+      }
+    })
+  }
+  const submit = (event: FormEvent<HTMLFormElement>): void => {
+    event.preventDefault()
+    const next: FieldDescriptorDto = {
+      ...field,
+      name: draft.name,
+      label: draft.label.trim() === '' ? null : draft.label,
+      kind: draft.kind,
+      required: draft.required,
+      readOnly: draft.readOnly,
+      defaultValue: normalizeDefaultValue(draft.kind, draft.defaultValue, draft.options),
+      options: draft.options,
+    }
+    void controller.structuralCommand(
+      { type: 'setField', fieldId: field.id, field: next },
+      'ui',
+    )
+  }
+
+  return (
+    <details className="editor-field-editor" data-field-editor="">
+      <summary data-action="editor-field-configure">{labels.fieldConfigure}</summary>
+      <form aria-label={labels.fieldConfigure} data-field-editor-form="" onSubmit={submit}>
+        <p className="editor-field-editor-description">{labels.fieldConfigureDescription}</p>
+        <label htmlFor={`flowpdf-field-name-${field.id}`}>
+          {labels.fieldName}
+          <input
+            id={`flowpdf-field-name-${field.id}`}
+            data-field-editor-name=""
+            value={draft.name}
+            onChange={(event) => setDraft((current) => ({ ...current, name: event.currentTarget.value }))}
+          />
+        </label>
+        <label htmlFor={`flowpdf-field-label-${field.id}`}>
+          {labels.fieldLabel}
+          <input
+            id={`flowpdf-field-label-${field.id}`}
+            data-field-editor-label=""
+            value={draft.label}
+            onChange={(event) => setDraft((current) => ({ ...current, label: event.currentTarget.value }))}
+          />
+        </label>
+        <label htmlFor={`flowpdf-field-kind-${field.id}`}>
+          {labels.fieldKind}
+          <select
+            id={`flowpdf-field-kind-${field.id}`}
+            data-field-editor-kind=""
+            value={draft.kind.type}
+            onChange={(event) => changeKind(event.currentTarget.value)}
+          >
+            <option value="text">{labels.fieldText}</option>
+            <option value="checkbox">{labels.fieldCheckbox}</option>
+            <option value="radioGroup">{labels.fieldRadioGroup}</option>
+            <option value="select">{labels.fieldSelect}</option>
+            <option value="signature">{labels.fieldSignature}</option>
+            <option value="button">{labels.fieldButton}</option>
+          </select>
+        </label>
+        <div className="editor-field-editor-checks">
+          <label>
+            <input
+              type="checkbox"
+              data-field-editor-required=""
+              checked={draft.required}
+              onChange={(event) => setDraft((current) => ({ ...current, required: event.currentTarget.checked }))}
+            />{' '}
+            {labels.fieldRequired}
+          </label>
+          <label>
+            <input
+              type="checkbox"
+              data-field-editor-readonly=""
+              checked={draft.readOnly}
+              onChange={(event) => setDraft((current) => ({ ...current, readOnly: event.currentTarget.checked }))}
+            />{' '}
+            {labels.fieldReadOnly}
+          </label>
+        </div>
+        {draft.kind.type === 'text' ? (
+          <fieldset>
+            <legend>{labels.fieldText}</legend>
+            <label htmlFor={`flowpdf-field-hint-${field.id}`}>
+              {labels.fieldInputHint}
+              <select
+                id={`flowpdf-field-hint-${field.id}`}
+                data-field-editor-hint=""
+                value={draft.kind.inputHint}
+                onChange={(event) =>
+                  setDraft((current) => ({
+                    ...current,
+                    kind:
+                      current.kind.type === 'text'
+                        ? {
+                            ...current.kind,
+                            inputHint: event.currentTarget.value as
+                              | 'plain'
+                              | 'date'
+                              | 'number'
+                              | 'email',
+                          }
+                        : current.kind,
+                  }))
+                }
+              >
+                <option value="plain">{labels.fieldHintPlain}</option>
+                <option value="date">{labels.fieldHintDate}</option>
+                <option value="number">{labels.fieldHintNumber}</option>
+                <option value="email">{labels.fieldHintEmail}</option>
+              </select>
+            </label>
+            <label>
+              <input
+                type="checkbox"
+                data-field-editor-multiline=""
+                checked={draft.kind.multiline}
+                onChange={(event) =>
+                  setDraft((current) => ({
+                    ...current,
+                    kind:
+                      current.kind.type === 'text'
+                        ? { ...current.kind, multiline: event.currentTarget.checked }
+                        : current.kind,
+                  }))
+                }
+              />{' '}
+              {labels.fieldMultiline}
+            </label>
+          </fieldset>
+        ) : null}
+        {draft.kind.type === 'select' ? (
+          <label>
+            <input
+              type="checkbox"
+              data-field-editor-multiple=""
+              checked={draft.kind.multiple}
+              onChange={(event) =>
+                setDraft((current) => ({
+                  ...current,
+                  kind:
+                    current.kind.type === 'select'
+                      ? { ...current.kind, multiple: event.currentTarget.checked }
+                      : current.kind,
+                  defaultValue: normalizeDefaultValue(
+                    current.kind.type === 'select'
+                      ? { ...current.kind, multiple: event.currentTarget.checked }
+                      : current.kind,
+                    current.defaultValue,
+                    current.options,
+                  ),
+                }))
+              }
+            />{' '}
+            {labels.fieldMultiple}
+          </label>
+        ) : null}
+        <FieldDefaultEditor
+          fieldId={field.id}
+          kind={draft.kind}
+          options={draft.options}
+          value={draft.defaultValue}
+          locale={locale}
+          onChange={(defaultValue) => setDraft((current) => ({ ...current, defaultValue }))}
+        />
+        {draft.kind.type === 'radioGroup' || draft.kind.type === 'select' ? (
+          <fieldset className="editor-field-editor-options" data-field-editor-options="">
+            <legend>{labels.fieldOptions}</legend>
+            {draft.options.map((option, index) => (
+              <div className="editor-field-editor-option" data-field-editor-option="" key={option.id}>
+                <label>
+                  {labels.fieldOptionLabel}
+                  <input
+                    data-field-editor-option-label=""
+                    value={option.label}
+                    onChange={(event) => updateOption(index, { label: event.currentTarget.value })}
+                  />
+                </label>
+                <label>
+                  {labels.fieldExportValue}
+                  <input
+                    data-field-editor-option-export=""
+                    value={option.exportValue}
+                    onChange={(event) => updateOption(index, { exportValue: event.currentTarget.value })}
+                  />
+                </label>
+                <button
+                  type="button"
+                  data-action="editor-field-option-remove"
+                  onClick={() => removeOption(index)}
+                >
+                  {labels.fieldRemoveOption}
+                </button>
+              </div>
+            ))}
+            <button type="button" data-action="editor-field-option-add" onClick={addOption}>
+              {labels.fieldAddOption}
+            </button>
+          </fieldset>
+        ) : null}
+        <button type="submit" data-action="editor-field-save">
+          {labels.fieldSave}
+        </button>
+      </form>
+    </details>
+  )
+}
+
+function FieldDefaultEditor({
+  fieldId,
+  kind,
+  options,
+  value,
+  locale,
+  onChange,
+}: {
+  readonly fieldId: string
+  readonly kind: FieldDescriptorDto['kind']
+  readonly options: readonly FieldOptionDto[]
+  readonly value: FieldDescriptorDto['defaultValue']
+  readonly locale: EditorLocale
+  readonly onChange: (value: FieldDescriptorDto['defaultValue']) => void
+}) {
+  const labels = editorMessages[locale]
+  const id = `flowpdf-field-default-${fieldId}`
+  switch (kind.type) {
+    case 'text': {
+      const inputType =
+        kind.inputHint === 'date'
+          ? 'date'
+          : kind.inputHint === 'number'
+            ? 'number'
+            : kind.inputHint === 'email'
+              ? 'email'
+              : 'text'
+      return (
+        <label htmlFor={id}>
+          {labels.fieldDefault}
+          {kind.multiline ? (
+            <textarea
+              id={id}
+              data-field-editor-default=""
+              value={value.type === 'text' ? value.value : ''}
+              onChange={(event) => onChange({ type: 'text', value: event.currentTarget.value })}
+              rows={3}
+            />
+          ) : (
+            <input
+              id={id}
+              type={inputType}
+              data-field-editor-default=""
+              value={value.type === 'text' ? value.value : ''}
+              onChange={(event) => onChange({ type: 'text', value: event.currentTarget.value })}
+            />
+          )}
+        </label>
+      )
+    }
+    case 'checkbox':
+      return (
+        <label>
+          {labels.fieldDefault}
+          <input
+            type="checkbox"
+            data-field-editor-default=""
+            checked={value.type === 'checked' && value.value}
+            onChange={(event) => onChange({ type: 'checked', value: event.currentTarget.checked })}
+          />
+        </label>
+      )
+    case 'radioGroup':
+    case 'select': {
+      const selected = value.type === 'selected' ? value.optionIds : []
+      const multiple = kind.type === 'select' && kind.multiple
+      return (
+        <label htmlFor={id}>
+          {labels.fieldDefault}
+          <select
+            id={id}
+            data-field-editor-default=""
+            multiple={multiple}
+            value={multiple ? selected : selected[0] ?? ''}
+            onChange={(event) =>
+              onChange({
+                type: 'selected',
+                optionIds: multiple
+                  ? Array.from(event.currentTarget.selectedOptions, (option) => option.value)
+                  : event.currentTarget.value === ''
+                    ? []
+                    : [event.currentTarget.value],
+              })
+            }
+          >
+            <option value="">{labels.clearValue}</option>
+            {options.map((option) => (
+              <option value={option.id} key={option.id}>
+                {option.label}
+              </option>
+            ))}
+          </select>
+        </label>
+      )
+    }
+    case 'signature':
+    case 'button':
+      return <p className="editor-field-editor-default-status" role="status">{labels.fieldEmpty}</p>
+  }
+}
+
+function createFieldDraft(field: FieldDescriptorDto): FieldDraft {
+  return {
+    name: field.name,
+    label: field.label ?? '',
+    kind: field.kind,
+    required: field.required,
+    readOnly: field.readOnly,
+    defaultValue: field.defaultValue,
+    options: field.options,
+  }
+}
+
+function fieldKindFor(
+  type: string,
+  previous: FieldDescriptorDto['kind'],
+): FieldDescriptorDto['kind'] {
+  switch (type) {
+    case 'text':
+      return previous.type === 'text' ? previous : { type: 'text', multiline: false, inputHint: 'plain' }
+    case 'checkbox':
+      return { type: 'checkbox' }
+    case 'radioGroup':
+      return { type: 'radioGroup' }
+    case 'select':
+      return previous.type === 'select' ? previous : { type: 'select', multiple: false }
+    case 'signature':
+      return { type: 'signature' }
+    case 'button':
+      return { type: 'button' }
+    default:
+      return previous
+  }
+}
+
+function normalizeDefaultValue(
+  kind: FieldDescriptorDto['kind'],
+  value: FieldDescriptorDto['defaultValue'],
+  options: readonly FieldOptionDto[],
+): FieldDescriptorDto['defaultValue'] {
+  switch (kind.type) {
+    case 'text':
+      return value.type === 'text' || value.type === 'empty' ? value : { type: 'empty' }
+    case 'checkbox':
+      return value.type === 'checked' || value.type === 'empty' ? value : { type: 'empty' }
+    case 'radioGroup':
+      return selectedDefault(value, options, 1)
+    case 'select':
+      return selectedDefault(value, options, kind.multiple ? Number.POSITIVE_INFINITY : 1)
+    case 'signature':
+    case 'button':
+      return { type: 'empty' }
+  }
+}
+
+function selectedDefault(
+  value: FieldDescriptorDto['defaultValue'],
+  options: readonly FieldOptionDto[],
+  maximum: number,
+): FieldDescriptorDto['defaultValue'] {
+  if (value.type === 'empty') return value
+  if (value.type !== 'selected') return { type: 'empty' }
+  const available = new Set(options.map((option) => option.id))
+  const optionIds = value.optionIds.filter(
+    (optionId, index, all) => available.has(optionId) && all.indexOf(optionId) === index,
+  )
+  return optionIds.length > maximum
+    ? { type: 'selected', optionIds: optionIds.slice(0, maximum) }
+    : { type: 'selected', optionIds }
 }
 
 function FormSessionStatus({

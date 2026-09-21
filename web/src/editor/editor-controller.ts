@@ -18,6 +18,7 @@ import {
   type EditorAcceptedSnapshot,
   type EditorBlockViewDto,
   type EditorLocale,
+  type FieldDescriptorDto,
   type EditorSessionResponseDto,
   type EditorSessionStateDto,
   type EditorViewDto,
@@ -108,6 +109,11 @@ export type StructuralCommandDto =
       readonly type: 'removeTable'
       readonly tableId: string
       readonly confirmed: boolean
+    }
+  | {
+      readonly type: 'setField'
+      readonly fieldId: string
+      readonly field: FieldDescriptorDto
     }
   | {
       readonly type: 'insertImage'

@@ -363,6 +363,111 @@
   resize: vertical;
 }
 
+.editor-field-editor {
+  margin-top: 12px;
+  border-top: 1px solid var(--border-default);
+  padding-top: 8px;
+}
+
+.editor-field-editor summary {
+  min-height: 44px;
+  padding: 8px 0;
+  color: var(--text-primary);
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.editor-field-editor form {
+  display: grid;
+  gap: 10px;
+  margin-top: 8px;
+}
+
+.editor-field-editor label,
+.editor-field-editor legend {
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
+.editor-field-editor input:not([type='checkbox']),
+.editor-field-editor select,
+.editor-field-editor textarea {
+  box-sizing: border-box;
+  display: block;
+  width: 100%;
+  min-height: 44px;
+  margin-top: 4px;
+  padding: 8px;
+  border: 1px solid var(--border-default);
+  border-radius: 4px;
+  background: var(--surface-app);
+  color: var(--text-primary);
+  font: inherit;
+}
+
+.editor-field-editor textarea {
+  min-height: 88px;
+  resize: vertical;
+}
+
+.editor-field-editor input[type='checkbox'] {
+  inline-size: 44px;
+  block-size: 44px;
+  vertical-align: middle;
+}
+
+.editor-field-editor-checks {
+  display: grid;
+  gap: 4px;
+}
+
+.editor-field-editor fieldset {
+  min-width: 0;
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 8px;
+  border: 1px solid var(--border-default);
+  border-radius: 4px;
+}
+
+.editor-field-editor-option {
+  display: grid;
+  gap: 8px;
+  padding-block: 8px;
+  border-bottom: 1px solid var(--border-default);
+}
+
+.editor-field-editor-option:last-of-type {
+  border-bottom: 0;
+}
+
+.editor-field-editor button {
+  justify-self: start;
+  min-height: 44px;
+  padding: 8px 12px;
+  border: 1px solid var(--border-default);
+  border-radius: 4px;
+  background: var(--surface-card);
+  color: var(--text-primary);
+  font: inherit;
+}
+
+.editor-field-editor-description,
+.editor-field-editor-default-status {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.editor-field-editor button:focus-visible,
+.editor-field-editor summary:focus-visible,
+.editor-field-editor input:focus-visible,
+.editor-field-editor select:focus-visible,
+.editor-field-editor textarea:focus-visible {
+  outline: 3px solid var(--accent);
+  outline-offset: 2px;
+}
+
 .editor-field-control fieldset {
   min-width: 0;
   padding: 8px;

@@ -83,17 +83,19 @@ for (const locale of ['uk', 'en'] as const) {
               : descriptor.kind.type === 'select'
                 ? 1
                 : 0
-      expect(card.querySelectorAll('input, select, textarea, button')).toHaveLength(
+      expect(card.querySelector('[data-field-editor]')).not.toBeNull()
+      expect(
+        card.querySelector('[data-form-control-kind]')?.querySelectorAll('input, select, textarea, button') ?? [],
+      ).toHaveLength(
         nativeControlCount + (descriptor.kind.type === 'signature' || descriptor.kind.type === 'button' ? 0 : 1),
       )
       expect(getComputedStyle(card).minHeight).toBe('44px')
     }
     expect(fieldsRegion.querySelectorAll('[data-field-option-id]').length).toBeGreaterThan(0)
 
-    const fieldActions = [...root.querySelectorAll<HTMLElement>('[data-action]')]
-      .map((element) => element.dataset.action ?? '')
-      .filter((action) => /field|fill|form/i.test(action))
-    expect(fieldActions).toEqual([])
+    expect(root.querySelectorAll('[data-field-editor]')).toHaveLength(
+      accepted.editor.view.document.fields.length,
+    )
     expect(root.querySelector('[data-field-review]')).toBeNull()
 
     const first = accepted.editor.view.document.fields[0]
@@ -140,6 +142,7 @@ for (const locale of ['uk', 'en'] as const) {
     expect(reviewRoot.querySelector('[data-field-review]')).not.toBeNull()
     expect(reviewRoot.querySelectorAll('[data-field-review] [data-field-id]')).toHaveLength(2)
     expect(reviewRoot.querySelectorAll('[data-field-review] [tabindex="0"]')).toHaveLength(2)
+    expect(reviewRoot.querySelectorAll('[data-field-review] [data-field-editor]')).toHaveLength(0)
     expect(reviewRoot.textContent).toContain(
       locale === 'uk' ? 'Старий якір поля потребує перегляду' : 'Legacy field anchor needs review',
     )
