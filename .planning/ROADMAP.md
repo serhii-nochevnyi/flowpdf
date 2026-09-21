@@ -104,14 +104,14 @@ Chromium/macOS evidence is not a substitute.
   4. Incremental reflow is structurally and visually identical to full reflow for the same revision.
   5. User can continue working on the active viewport while later pages paginate in a worker.
 
-**Plans**: 3/6 plans executed (6/6 planned)
+**Plans**: 4/6 plans executed (6/6 planned)
 
 Plans:
 
 - [x] 03-01-PLAN.md — Build the deterministic fixed-point text-layout tracer.
 - [x] 03-02-PLAN.md — Admit schema-v3 sections and static header/footer settings.
 - [x] 03-03-PLAN.md — Build fragment-tree pagination and bounded constraints.
-- [ ] 03-04-PLAN.md — Prove incremental/full reflow equivalence.
+- [x] 03-04-PLAN.md — Prove incremental/full reflow equivalence.
 - [ ] 03-05-PLAN.md — Expose revision-safe WASM and worker layout scheduling.
 - [ ] 03-06-PLAN.md — Deliver the accessible page viewport and Phase 3 gate.
 **UI hint**: yes
@@ -224,7 +224,7 @@ Plans:
 |-------|----------------|--------|-----------|
 | 1. Durable Flow Foundation | 6/6 | Complete    | 2026-08-25 |
 | 2. Accessible Rich-Text Editing | 18/18 | In Progress (external AT checkpoint) |  |
-| 3. Deterministic Reflow and Pagination | 3/6 | In Progress |  |
+| 3. Deterministic Reflow and Pagination | 4/6 | In Progress |  |
 | 4. Owned PDF Preview and Export | 0/TBD | Not started | - |
 | 5. Semantic Fillable Forms | 0/TBD | Not started | - |
 | 6. Voice Dictation and Commands | 0/TBD | Not started | - |
