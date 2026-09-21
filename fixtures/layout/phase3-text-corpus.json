@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 1,
+  "cases": [
+    {
+      "id": "ukrainian-contract",
+      "language": "ukrainian",
+      "direction": "auto",
+      "text": "Договір набирає чинності після підписання сторонами.",
+      "assertions": ["preserve-source-bytes", "grapheme-safe-breaks", "ukrainian-hyphenation"]
+    },
+    {
+      "id": "english-decomposed-emoji",
+      "language": "english",
+      "direction": "auto",
+      "text": "Cafe\u0301 review — family 👩‍💻 and flags 🇺🇦.",
+      "assertions": ["preserve-source-bytes", "grapheme-safe-breaks", "stable-clusters"]
+    },
+    {
+      "id": "forced-direction",
+      "language": "english",
+      "direction": "rightToLeft",
+      "text": "FlowPDF 2026",
+      "assertions": ["explicit-direction", "stable-glyph-order"]
+    }
+  ]
+}

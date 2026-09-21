@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "fonts": [
+    {
+      "id": "noto-sans-regular",
+      "family": "Noto Sans",
+      "faceIndex": 0,
+      "source": "https://github.com/notofonts/noto-fonts",
+      "license": "SIL Open Font License 1.1",
+      "sha256": "b85c38ecea8a7cfb39c24e395a4007474fa5a4fc864f6ee33309eb4948d232d5"
+    }
+  ],
+  "hyphenation": {
+    "id": "hyphenation-0.8.4-uk-standard",
+    "source": "hyphenation 0.8.4 bundled Ukrainian standard dictionary",
+    "license": "Apache-2.0 OR MIT; bundled TeX hyph-utf8 data retains its source license",
+    "sha256": "a2e86a564a215c84bf4d86fab02a05a3e9af3ef7671194cc5319b7f4e5960bee"
+  }
+}

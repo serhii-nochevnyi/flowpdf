@@ -10,6 +10,7 @@ pub mod audit;
 pub mod canonical;
 pub mod capability;
 pub mod editor_view;
+pub mod layout;
 pub mod model;
 pub mod provenance;
 pub mod schema;
