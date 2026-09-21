@@ -171,7 +171,7 @@ compatibility, and general PDF import remain unclaimed.
   4. Exported fields and appearance states behave consistently in the target viewer matrix.
   5. Flattening is explicit, selected, validated and never silently replaces the editable source.
 
-**Plans**: 6/6 local plans executed; phase-level closure remains open
+**Plans**: 7/7 local plans executed; phase-level closure remains open
 
 - [x] 05-01-PLAN.md — Add Rust-owned field-value validation and deterministic
   display-list anchor-to-widget projection with explicit review paths.
@@ -185,16 +185,20 @@ compatibility, and general PDF import remain unclaimed.
   accepted current values in a guarded dedicated IndexedDB store.
 - [x] 05-06-PLAN.md — Add accessible native controls for already-authored valid
   fields through the Rust-owned session coordinator.
+- [x] 05-07-PLAN.md — Expose accessible descriptor configuration for
+  already-authored valid fields through the reversible Rust `SetField` path.
 
-The six Phase 5 slices validate the existing semantic field vocabulary, derive
-revision/hash-bound fixed-point widget projections, keep explicit noncanonical
-fill overrides separate from authored defaults through to the derived widget,
-emit bounded AcroForm field/widget dictionaries from an accepted projection,
-carry accepted current values through a versioned Rust/WASM boundary into a
-guarded dedicated IndexedDB store, and expose accessible native controls for
-already-authored valid fields. They do not claim field authoring UI or
-descriptor insertion, appearance streams, flattening, external form import,
-or target-viewer compatibility. Those remain separately planned and verified.
+The seven Phase 5 slices validate the existing semantic field vocabulary,
+derive revision/hash-bound fixed-point widget projections, keep explicit
+noncanonical fill overrides separate from authored defaults through to the
+derived widget, emit bounded AcroForm field/widget dictionaries from an
+accepted projection, carry accepted current values through a versioned
+Rust/WASM boundary into a guarded dedicated IndexedDB store, expose accessible
+native controls, and configure descriptors for already-authored valid fields
+through Rust `SetField`. They do not claim field insertion, deletion,
+placement or tab-order authoring, appearance streams, flattening, external
+form import, or target-viewer compatibility. Those remain separately planned
+and verified.
 **UI hint**: yes
 
 ### Phase 6: Voice Dictation and Commands
@@ -273,7 +277,7 @@ or target-viewer compatibility. Those remain separately planned and verified.
 | 2. Accessible Rich-Text Editing | 18/18 | In Progress (external AT checkpoint) |  |
 | 3. Deterministic Reflow and Pagination | 6/6 | In Progress (external AT checkpoint) |  |
 | 4. Owned PDF Preview and Export | 6/6 | In Progress (reference evidence unavailable) |  |
-| 5. Semantic Fillable Forms | 3/3 executed (follow-on TBD) | In Progress (Rust core slices) |  |
+| 5. Semantic Fillable Forms | 7/7 executed (follow-on TBD) | In Progress (Rust core slices) |  |
 | 6. Voice Dictation and Commands | 0/TBD | Not started | - |
 | 7. Secure PDF Reader and Scene | 0/TBD | Not started | - |
 | 8. External Reconstruction and OCR | 0/TBD | Not started | - |
