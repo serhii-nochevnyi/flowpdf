@@ -90,6 +90,9 @@ The current tree includes:
   revision/hash-bound anchor-to-widget projection over accepted fixed-point
   display lists, including deterministic identities/tab order and explicit
   review entries for invalid, deleted, or unmapped anchors;
+- a noncanonical Rust form session bound to document identity/revision/hash,
+  with immutable fill/clear operations, explicit value overrides separate from
+  authored defaults, read-only enforcement, and deterministic serialization;
 - Phase 1 and Phase 2 foundation fixtures, Unicode 17 grapheme conformance
   data, dependency provenance checks, Rust tests, TypeScript checks, browser
   tests for the implemented foundation and Phase 3 layout path, and a Phase 4
@@ -117,9 +120,10 @@ things:
 - a bounded PDF reader, with selectable text, reproducibility evidence,
   explicit unsupported-content reporting, and an exact owned-source round trip
   when the source payload is available;
-- field authoring/fill UI and a separate durable current-value contract,
-  followed by interoperable AcroForm dictionaries/appearances after layout;
-  the current repository only contains the validated derived projection;
+- browser/WASM field transport and durable current-value persistence, followed
+  by interoperable AcroForm dictionaries/appearances after layout; the current
+  repository contains only the validated derived projection and noncanonical
+  Rust session;
 - voice dictation and commands through the same revision-checked transaction
   boundary;
 - controlled external-PDF reconstruction/OCR and later native editing of
@@ -270,7 +274,8 @@ Phase 3, Deterministic Reflow and Pagination, has completed its six local
 implementation plans and dual-run gate. Phase 4 has completed its six local
 implementation plans and dual-run local gate; its qpdf/Poppler/target-viewer
 reference rows remain unavailable, so the phase is not marked complete. The
-Phase 5 has started with one local Rust validation/projection plan; field
-authoring, durable fill values, AcroForm emission, flattening, and viewer
-compatibility remain unimplemented. The current implementation still makes no claim of complete PDF compatibility,
+Phase 5 has two completed local Rust slices for validation/projection and a
+noncanonical fill session; browser transport, durable fill values, AcroForm
+emission, flattening, and viewer compatibility remain unimplemented. The
+current implementation still makes no claim of complete PDF compatibility,
 commercial-SDK parity, or production readiness.

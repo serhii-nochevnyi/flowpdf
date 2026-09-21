@@ -25,8 +25,8 @@
 ## Verification
 
 - `cargo fmt --all` — passed.
-- `cargo test --locked -p flow-core --test forms -- --nocapture` — 4 tests
-  passed.
+- `cargo test --locked -p flow-core --test forms -- --nocapture` — 5 tests
+  passed, including the required-empty-authored-default regression.
 - `cargo clippy --locked -p flow-core --all-targets -- -D warnings` — passed.
 - `cargo test --locked -p flow-core` — passed, including the preserved
   `grapheme_conformance.rs` suite (9 tests).
