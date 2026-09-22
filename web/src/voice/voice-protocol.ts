@@ -56,20 +56,20 @@ export interface AcceptedVoiceIntentDto extends VoiceIntentDto {
   readonly sourceHash: string
 }
 
-export interface VoiceCommandCaptureDto {
-  readonly locale: VoiceLocaleDto
-  readonly transcript: string
+export interface VoiceSourceCaptureDto {
   readonly sourceRevision: number
   readonly sourceHash: string
   readonly selection: DirectionalSelectionDto
+}
+
+export interface VoiceCommandCaptureDto extends VoiceSourceCaptureDto {
+  readonly locale: VoiceLocaleDto
+  readonly transcript: string
   readonly activeFieldId?: string
 }
 
-export interface VoiceDictationCaptureDto {
+export interface VoiceDictationCaptureDto extends VoiceSourceCaptureDto {
   readonly text: string
-  readonly sourceRevision: number
-  readonly sourceHash: string
-  readonly selection: DirectionalSelectionDto
 }
 
 export interface VoiceResolverResponseDto {
