@@ -18,7 +18,7 @@ FlowPDF progresses through nine dependency-ordered vertical capabilities. The ro
 - [x] **Phase 5: Semantic Fillable Forms** - Local implementation complete 2026-09-22; target-viewer and external form-import evidence remain explicit release inputs.
 - [x] **Phase 6: Voice Dictation and Commands** - Users can dictate and invoke safe, undoable document commands through explicit voice modes. (local implementation complete 2026-09-22; speech-service and external AT evidence remain explicit release inputs)
 - [x] **Phase 7: Secure PDF Reader and Scene** - Users can open the controlled PDF subset through a bounded parser and inspect supported page content and warnings. (local implementation complete 2026-09-22; external reference/AT evidence remains an explicit release input)
-- [ ] **Phase 8: External Reconstruction and OCR** - Users can review and accept confidence-scored FlowDocument reconstruction while preserving the original and opaque content. (planning complete; 3/4 plans executed 2026-09-22)
+- [x] **Phase 8: External Reconstruction and OCR** - Users can review and accept confidence-scored FlowDocument reconstruction while preserving the original and opaque content. (local implementation complete 2026-09-22; external OCR/provider/reference/viewer/AT evidence remains an explicit release input)
 - [ ] **Phase 9: Controlled Native PDF Editing** - Users can edit supported PDF scene islands, page objects, annotations and forms with secure rewrite/redaction behavior.
 
 ## Phase Details
@@ -363,13 +363,13 @@ represented as local compatibility or accessibility passes.
   3. User can compare original and reconstructed documents side by side and review OCR or semantic uncertainty before accepting it.
   4. The original PDF remains immutable and the UI never labels lossy reconstruction as exact.
 
-**Plans**: 4 planned; 3/4 executed; execution in progress
+**Plans**: 4 planned; 4/4 executed; complete locally with external evidence pending
 
 Plans:
 - [x] 08-01-PLAN.md — Rust-owned reconstruction candidate, provenance, mappings, and opaque islands
 - [x] 08-02-PLAN.md — verified WASM/OCR worker boundary
 - [x] 08-03-PLAN.md — immutable source store and side-by-side review
-- [ ] 08-04-PLAN.md — local gates and evidence closure
+- [x] 08-04-PLAN.md — local gates and evidence closure
 **UI hint**: yes
 
 ### Phase 9: Controlled Native PDF Editing
@@ -401,5 +401,5 @@ Plans:
 | 5. Semantic Fillable Forms | 26/26 executed | Complete locally (release evidence pending) | 2026-09-22 |
 | 6. Voice Dictation and Commands | 6/6 executed | Complete locally (release evidence pending) | 2026-09-22 |
 | 7. Secure PDF Reader and Scene | 4/4 | Complete locally (release evidence pending) | 2026-09-22 |
-| 8. External Reconstruction and OCR | 3/4 | In Progress (bounded reconstruction/OCR adapter) |  |
+| 8. External Reconstruction and OCR | 4/4 | Complete locally (release evidence pending) | 2026-09-22 |
 | 9. Controlled Native PDF Editing | 0/TBD | Not started | - |

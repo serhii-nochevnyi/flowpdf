@@ -13,7 +13,7 @@ const projectRoot = resolve(import.meta.dirname, '../..')
 
 test('Phase 2 contract remains compatible with the current checked-in workspace', () => {
   const snapshot = loadWorkspaceSnapshot(projectRoot)
-  assert.deepEqual(boundaryDiagnostics(snapshot, { phase: 7 }), [])
+  assert.deepEqual(boundaryDiagnostics(snapshot, { phase: 8 }), [])
   assertPhaseTwoParityBoundary(projectRoot, snapshot)
 })
 

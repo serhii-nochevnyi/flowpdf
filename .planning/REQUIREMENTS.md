@@ -77,11 +77,11 @@
 - [x] **PDFI-01**: User can open a valid unencrypted PDF from the supported subset without loading the full object graph eagerly.
 - [x] **PDFI-02**: User can view supported text, images, paths, transforms, clipping, forms, links, and annotations through the internal PDF scene.
 - [x] **PDFI-03**: User can extract mapped Unicode text with glyph positions and source object/operator provenance where the PDF provides enough information.
-- [ ] **PDFI-04**: User can convert supported single-column PDF pages into FlowDocument blocks with per-node confidence and source mapping.
+- [x] **PDFI-04**: User can convert supported single-column PDF pages into FlowDocument blocks with per-node confidence and source mapping (complete locally for the bounded reconstruction subset; external reference evidence remains pending).
 - [x] **PDFI-05**: User receives an explicit report for uncertain reading order, missing Unicode mapping, unsupported operators, fonts, filters, forms, and active content.
-- [ ] **PDFI-06**: User sees unsupported visual content preserved as an immutable opaque island when safe preservation is possible.
-- [ ] **PDFI-07**: User can compare the original PDF and reconstructed FlowDocument side by side before accepting the conversion.
-- [ ] **PDFI-08**: User can submit scanned pages through an OCR adapter and review low-confidence recognized text before it becomes editable content.
+- [x] **PDFI-06**: User sees unsupported visual content preserved as an immutable opaque island when safe preservation is possible (complete locally for the bounded scene subset; external reference evidence remains pending).
+- [x] **PDFI-07**: User can compare the original PDF and reconstructed FlowDocument side by side before accepting the conversion (complete locally; external viewer/accessibility evidence remains pending).
+- [x] **PDFI-08**: User can submit scanned pages through an OCR adapter and review low-confidence recognized text before it becomes editable content (adapter contract complete locally; no OCR provider quality claim).
 
 ### Native PDF Editing
 
@@ -93,8 +93,8 @@
 
 ### Safety, Accessibility and Operability
 
-- [ ] **QUAL-01**: User's original imported PDF remains immutable and available as the source for every derived document.
-- [ ] **QUAL-02**: User is never told a lossy external reconstruction is exact and can inspect all conversion warnings before editing.
+- [x] **QUAL-01**: User's original imported PDF remains immutable and available as the source for every derived document (complete locally for the browser source store; external storage/recovery evidence remains pending).
+- [x] **QUAL-02**: User is never told a lossy external reconstruction is exact and can inspect all conversion warnings before editing (complete locally for the bounded best-effort lane; external quality evidence remains pending).
 - [ ] **QUAL-03**: User can operate every document mutation available by voice through keyboard and visible UI controls.
 - [ ] **QUAL-04**: Screen-reader users can navigate semantic document content, fields, status changes, errors, and confirmation prompts.
 - [x] **QUAL-05**: User receives bounded failure instead of a hung tab or service when a PDF exceeds object, depth, decoded-byte, image, page, memory, or time limits.
@@ -201,18 +201,18 @@ A v1 requirement is complete only when implementation, automated tests, relevant
 | PDFI-01 | Phase 7 | Complete locally (controlled subset; external reference evidence pending) |
 | PDFI-02 | Phase 7 | Complete locally (controlled subset; external reference evidence pending) |
 | PDFI-03 | Phase 7 | Complete locally (controlled subset; external reference evidence pending) |
-| PDFI-04 | Phase 8 | Pending |
+| PDFI-04 | Phase 8 | Complete locally (bounded reconstruction subset; external reference evidence pending) |
 | PDFI-05 | Phase 7 | Complete locally (controlled subset; external reference evidence pending) |
-| PDFI-06 | Phase 8 | Pending |
-| PDFI-07 | Phase 8 | Pending |
-| PDFI-08 | Phase 8 | Pending |
+| PDFI-06 | Phase 8 | Complete locally (bounded opaque-island subset; external reference evidence pending) |
+| PDFI-07 | Phase 8 | Complete locally (side-by-side review; external viewer/AT evidence pending) |
+| PDFI-08 | Phase 8 | Complete locally (OCR adapter contract; provider quality evidence pending) |
 | NPDF-01 | Phase 9 | Pending |
 | NPDF-02 | Phase 9 | Pending |
 | NPDF-03 | Phase 9 | Pending |
 | NPDF-04 | Phase 9 | Pending |
 | NPDF-05 | Phase 9 | Pending |
-| QUAL-01 | Phase 8 | Pending |
-| QUAL-02 | Phase 8 | Pending |
+| QUAL-01 | Phase 8 | Complete locally (immutable browser source lane; external evidence pending) |
+| QUAL-02 | Phase 8 | Complete locally (best-effort/review labeling; external evidence pending) |
 | QUAL-03 | Phase 2 | Pending |
 | QUAL-04 | Phase 2 | Pending |
 | QUAL-05 | Phase 7 | Complete locally (controlled subset; external reference evidence pending) |

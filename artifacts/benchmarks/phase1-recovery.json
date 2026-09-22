@@ -5,7 +5,7 @@
   "sourceManifest": {
     "formatVersion": 1,
     "algorithm": "sha256",
-    "fileCount": 35,
+    "fileCount": 36,
     "files": [
       {
         "path": "Cargo.lock",
@@ -61,11 +61,11 @@
       },
       {
         "path": "crates/flow-core/src/lib.rs",
-        "sha256": "sha256:0267c8906ad5bb590bb9ae3b7468784ba69d487138f4ac79d6113adcef0fbe67"
+        "sha256": "sha256:978b64011f299f82280363bc601d311c5e88deb9fa3830aaf91e96e0273a2ca0"
       },
       {
         "path": "crates/flow-core/src/model/mod.rs",
-        "sha256": "sha256:91ae684bbe20fa878512880ff495781f1d245fb61199b49c2f39b6f1735d9fc8"
+        "sha256": "sha256:431c6c17ad83d6b51398c29ab9bcd3a74b275139b75db176cceebb02fbaedcf1"
       },
       {
         "path": "crates/flow-core/src/pdf/assets.rs",
@@ -89,7 +89,7 @@
       },
       {
         "path": "crates/flow-core/src/pdf/mod.rs",
-        "sha256": "sha256:4149144b20853e8d42fed9ecf6cf1da872fcfae030f22e8b0b29dc78fea2538b"
+        "sha256": "sha256:cf99bb0bc3aa3a7a5399415078e71b537b083519e3d7ad3f51e0e0d5609a5cb6"
       },
       {
         "path": "crates/flow-core/src/pdf/provenance.rs",
@@ -98,6 +98,10 @@
       {
         "path": "crates/flow-core/src/pdf/reader.rs",
         "sha256": "sha256:6d103a3a7de182410afab58b3d0c96367062aaea7e19c546f4f03729a6d825d7"
+      },
+      {
+        "path": "crates/flow-core/src/pdf/reconstruction.rs",
+        "sha256": "sha256:d1583fe18a22b6ac61d0593e1934dbb299a68c099f04a16db9be6bdd115df129"
       },
       {
         "path": "crates/flow-core/src/pdf/recovery.rs",
@@ -109,7 +113,7 @@
       },
       {
         "path": "crates/flow-core/src/provenance/mod.rs",
-        "sha256": "sha256:8cf41e7873cc3ae417536c1f1a7870cbb300e585c99a092f9890138477e755fc"
+        "sha256": "sha256:05f593bfa83456de6f8986667cb34a2b789726e328f8de69522c2e399b967d40"
       },
       {
         "path": "crates/flow-core/src/schema/legacy.rs",
@@ -121,7 +125,7 @@
       },
       {
         "path": "crates/flow-core/src/schema/mod.rs",
-        "sha256": "sha256:9aae6a1d2e72fd5a66a9c4f9fd73389f9b3cdca821ef6700c4d76433848d53c4"
+        "sha256": "sha256:80a5023ec356489a5593d086c484fc93fd0907e1ff0f7affb0f66f5c75be24b7"
       },
       {
         "path": "crates/flow-core/src/store/mod.rs",
@@ -148,7 +152,7 @@
         "sha256": "sha256:9d50a6f28923fc94c0d56dccc9038a12a8ff040f764a8ff048fa6d5a9eba722c"
       }
     ],
-    "digest": "sha256:9d1ea6a60563e82eb9d128d072eb492a66a7d05699afcb6ff4ac073563885819"
+    "digest": "sha256:57edfffe7009f441be7be8499bfbc94c3dea4856f9c6b88f4e65a59c0d770459"
   },
   "toolchain": {
     "node": "v24.10.0",
@@ -193,37 +197,37 @@
         "plannedTransactionCount": 1000
       },
       "durationsMilliseconds": [
-        540.56525,
-        556.921958,
-        544.022042,
-        546.675459,
-        547.430917,
-        547.914833,
-        540.158583,
-        544.1631249999999,
-        543.310792,
-        542.981625,
-        540.2665420000001,
-        541.777292,
-        537.2776660000001,
-        541.960542,
-        538.0985000000001,
-        543.72075,
-        552.37575,
-        554.8267500000001,
-        537.402791,
-        538.422583
+        525.389541,
+        527.299416,
+        530.21325,
+        520.987459,
+        523.087,
+        522.897666,
+        520.250792,
+        523.004375,
+        524.096208,
+        525.3288339999999,
+        526.5196669999999,
+        521.9474160000001,
+        522.07475,
+        522.26775,
+        525.889292,
+        518.3312500000001,
+        524.021,
+        522.337917,
+        521.380542,
+        521.365833
       ],
-      "p50Milliseconds": 542.981625,
-      "p95Milliseconds": 554.8267500000001
+      "p50Milliseconds": 522.897666,
+      "p95Milliseconds": 527.299416
     }
   ],
   "selectedPolicy": {
     "transactionInterval": 100,
     "byteInterval": 4194304
   },
-  "p50Milliseconds": 542.981625,
-  "p95Milliseconds": 554.8267500000001,
+  "p50Milliseconds": 522.897666,
+  "p95Milliseconds": 527.299416,
   "p95TargetMilliseconds": 2000,
   "passed": true,
   "blocked": false

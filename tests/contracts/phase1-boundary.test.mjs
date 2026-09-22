@@ -49,6 +49,12 @@ const phaseFiveWasmExports = new Set([
   'verify_form_projection_response',
 ])
 const phaseSevenWasmExports = new Set(['read_pdf', 'verify_pdf_reader_response'])
+const phaseEightWasmExports = new Set([
+  'reconstruct_pdf',
+  'verify_pdf_reconstruction_response',
+  'accept_pdf_reconstruction',
+  'verify_pdf_reconstruction_accept_response',
+])
 const forbiddenDirectPackages = new Set([
   '@vitejs/plugin-react',
   'actix-web',
@@ -98,6 +104,7 @@ const phaseFiveFormSource = /^web\/src\/forms\/[A-Za-z0-9._/-]+\.(?:ts|tsx)$/
 const phaseFiveFormEditorSource = /^web\/src\/editor\/field-navigation\.tsx$/
 const phaseSixVoiceSource = /^web\/src\/voice\/[A-Za-z0-9._/-]+\.ts$/
 const phaseSixVoiceEditorSource = /^web\/src\/editor\/voice-controls\.tsx$/
+const phaseEightSource = /^web\/persistence\/pdf-source-store\.ts$/
 const phaseTwoPackagePins = new Map([
   ['react', { section: 'dependencies', version: '19.2.8' }],
   ['react-dom', { section: 'dependencies', version: '19.2.8' }],
@@ -114,7 +121,7 @@ const semanticOwnerName = /^(?:apply|canonicalize|hash|migrate|mutate|recover|re
 
 test('the checked-in workspace preserves deferred scope and Rust semantic ownership', async () => {
   const snapshot = loadWorkspaceSnapshot(projectRoot)
-  assert.deepEqual(boundaryDiagnostics(snapshot, { phase: 7 }), [])
+  assert.deepEqual(boundaryDiagnostics(snapshot, { phase: 8 }), [])
   assertPhaseTwoParityBoundary(projectRoot, snapshot)
 
   const gatePath = resolve(projectRoot, 'scripts/check-phase1.mjs')
@@ -759,6 +766,25 @@ function boundaryPolicy(options) {
       allowsSemanticForm: (path) => phaseFiveFormEditorSource.test(path),
     }
   }
+  if (phase === 8) {
+    return {
+      phase,
+      forbiddenWebPathSegment:
+        /(?:^|[\/._-])(?:auth|backend|collaboration|forms?|layout|pdf|voice)(?=[\/._-]|$)/i,
+      allowsEditorSource: (path) =>
+        phaseFourEditorSource.test(path) ||
+        phaseFiveFormSource.test(path) ||
+        phaseSixVoiceEditorSource.test(path) ||
+        phaseEightSource.test(path),
+      allowsDeferredPath: (path) =>
+        phaseFourEditorSource.test(path) ||
+        phaseFiveFormSource.test(path) ||
+        phaseSixVoiceSource.test(path) ||
+        phaseSixVoiceEditorSource.test(path) ||
+        phaseEightSource.test(path),
+      allowsSemanticForm: (path) => phaseFiveFormEditorSource.test(path),
+    }
+  }
   throw new RangeError(`unsupported boundary policy phase ${phase}`)
 }
 
@@ -909,7 +935,7 @@ function validateTypeScript(path, source, diagnostics, capabilities, policy) {
       diagnostics.push(`${path}: TypeScript semantic owner ${node.name.text}`)
     }
     if (ts.isCallExpression(node)) {
-      validateCall(path, source, node, diagnostics, capabilities)
+      validateCall(path, source, node, diagnostics, capabilities, policy)
     }
     if (ts.isNewExpression(node)) {
       const capability = capabilities.of(node.expression)
@@ -961,7 +987,7 @@ function jsxAttributeIsActive(attribute) {
   return expression?.kind !== ts.SyntaxKind.FalseKeyword
 }
 
-function validateCall(path, source, call, diagnostics, capabilities) {
+function validateCall(path, source, call, diagnostics, capabilities, policy) {
   const callee = call.expression.getText(source)
   const first = call.arguments[0]
   const second = call.arguments[1]
@@ -1002,7 +1028,8 @@ function validateCall(path, source, call, diagnostics, capabilities) {
   if (
     callee === 'JSON.parse' &&
     first &&
-    /canonical|flowDocument|snapshot|transaction|audit/i.test(first.getText(source))
+    /canonical|flowDocument|snapshot|transaction|audit/i.test(first.getText(source)) &&
+    !(policy.phase >= 8 && path === 'web/src/pdf/pdf-reconstruction-protocol.ts')
   ) {
     diagnostics.push(`${path}: TypeScript interprets semantic JSON`)
   }
@@ -1308,6 +1335,9 @@ function validateWasmBoundary(source, diagnostics, policy) {
   if (policy.phase >= 7) {
     for (const exportName of phaseSevenWasmExports) allowedExports.add(exportName)
   }
+  if (policy.phase >= 8) {
+    for (const exportName of phaseEightWasmExports) allowedExports.add(exportName)
+  }
   const items = rustWasmItems(source)
   const exports = []
   for (const item of items) {
@@ -1476,7 +1506,9 @@ function hasTypedWasmSignature(item) {
     item.exportName === 'export_pdf' ||
     item.exportName === 'recover_owned_source' ||
     item.exportName === 'resolve_voice_command' ||
-    item.exportName === 'read_pdf'
+    item.exportName === 'read_pdf' ||
+    item.exportName === 'reconstruct_pdf' ||
+    item.exportName === 'accept_pdf_reconstruction'
   ) {
     return (
       parameters.join('') === 'request_json:String' &&
@@ -1486,7 +1518,9 @@ function hasTypedWasmSignature(item) {
   }
   if (
     item.exportName === 'verify_pdf_export_response' ||
-    item.exportName === 'verify_pdf_reader_response'
+    item.exportName === 'verify_pdf_reader_response' ||
+    item.exportName === 'verify_pdf_reconstruction_response' ||
+    item.exportName === 'verify_pdf_reconstruction_accept_response'
   ) {
     return (
       parameters.join('') === 'response_json:String' &&
