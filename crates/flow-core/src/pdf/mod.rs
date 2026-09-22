@@ -17,7 +17,9 @@ mod font;
 mod forms;
 mod metadata;
 mod provenance;
+mod reader;
 mod recovery;
+mod scene;
 
 pub use assets::{PdfImageEncoding, PdfImageError, PdfImageResource, build_image_resources};
 pub use display_list::{
@@ -40,8 +42,19 @@ pub use provenance::{
     PDF_PROVENANCE_SCHEMA_VERSION, PdfExportManifest, PdfFontManifestIdentity, PdfManifestOptions,
     PdfProvenanceError, PdfReproducibilityInputs,
 };
+pub use reader::{
+    PDF_READER_SCHEMA_VERSION, PdfDocumentSummary, PdfObjectRef, PdfReadDiagnostic,
+    PdfReadDiagnosticCode, PdfReadError, PdfReadReport, PdfReadSeverity, PdfReader,
+    PdfReaderLimits, open_pdf,
+};
 pub use recovery::{
     PdfRecoveredSource, PdfRecoveryError, PdfRecoveryExpectation, recover_owned_source,
+};
+pub use scene::{
+    PDF_SCENE_SCHEMA_VERSION, PdfAnnotationElement, PdfAnnotationKind, PdfClipElement,
+    PdfFormElement, PdfGlyph, PdfImageElement, PdfLinkElement, PdfPathCommand, PdfPathElement,
+    PdfScene, PdfSceneElement, PdfScenePage, PdfSceneRequest, PdfSourceProvenance, PdfTextElement,
+    PdfTextMapping, read_pdf_scene,
 };
 
 /// Version of the owned PDF export envelope.

@@ -188,6 +188,7 @@ dependencies = [
  "hyphenation",
  "icu_segmenter",
  "image",
+ "miniz_oxide 0.8.9",
  "proptest",
  "rustybuzz",
  "serde",
