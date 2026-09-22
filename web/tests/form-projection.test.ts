@@ -5,8 +5,10 @@ import {
   FORM_PROJECTION_PROTOCOL_VERSION,
   FormProjectionWorkerError,
   RevisionAwareFormProjectionScheduler,
+  createFormProjectionSelection,
   createFormProjectionRequest,
   createWasmFormProjectionEngine,
+  validateFormProjectionSelection,
   type FormProjectionRequestDto,
   type FormProjectionResultDto,
 } from '../src/forms/form-projection.js'
@@ -149,6 +151,50 @@ function deferred<T>(): {
 }
 
 describe('Rust/WASM form projection browser boundary', () => {
+  it('normalizes only verified plan fields into a source-bound flatten selection', () => {
+    const sourceRequest = request()
+    const base = result(sourceRequest)
+    if (base.formPlan === null) throw new Error('fixture plan is required')
+    const projectionResult = result(sourceRequest, {
+      formPlan: {
+        ...base.formPlan,
+        fields: [planField('field-1', 0), planField('field-2', 1)],
+      },
+    })
+
+    const selection = createFormProjectionSelection(projectionResult, ['field-2', 'field-1'])
+    expect(selection?.flattenedFieldIds).toEqual(['field-1', 'field-2'])
+    expect(selection && validateFormProjectionSelection(selection)).toBeNull()
+    expect(createFormProjectionSelection(projectionResult, ['missing-field'])).toBeNull()
+    expect(createFormProjectionSelection(projectionResult, ['field-1', 'field-1'])).toBeNull()
+
+    if (selection === null) throw new Error('selection is required')
+    expect(
+      validateFormProjectionSelection({ ...selection, sourceHash: 'stale-source' }),
+    ).toBe('FLOW_FORM_PROJECTION_SELECTION_PLAN_IDENTITY_INVALID')
+    expect(
+      validateFormProjectionSelection({
+        ...selection,
+        flattenedFieldIds: ['field-1', 'field-1'],
+      }),
+    ).toBe('FLOW_FORM_PROJECTION_SELECTION_FIELD_ID_DUPLICATE')
+
+    const reviewResult = result(sourceRequest, {
+      formPlan: null,
+      projection: {
+        ...projectionResult.projection,
+        review: [
+          {
+            fieldId: 'field-1',
+            sourceNodeId: 'node-missing',
+            reason: { kind: 'targetMissing' },
+          },
+        ],
+      },
+    })
+    expect(createFormProjectionSelection(reviewResult, [])).toBeNull()
+  })
+
   it('serializes the opaque layout/session request and requires Rust verification', async () => {
     const sourceRequest = request()
     const expected = result(sourceRequest)
@@ -299,3 +345,20 @@ describe('Rust/WASM form projection browser boundary', () => {
     expect(scheduler.accepted()?.result.formPlan).toBeNull()
   })
 })
+
+function planField(fieldId: string, tabOrder: number) {
+  return {
+    fieldId,
+    widgetId: `widget-${fieldId}`,
+    name: fieldId,
+    label: fieldId,
+    fieldType: 'text' as const,
+    flags: 0,
+    defaultValue: { type: 'empty' as const },
+    value: { type: 'text' as const, value: fieldId },
+    tabOrder,
+    options: [],
+    pageIndex: 0,
+    rect: { x: 64, y: 128, width: 256, height: 32 },
+  }
+}

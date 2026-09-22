@@ -220,6 +220,19 @@ test('editor renders current Rust form widgets visually and reports projection r
   expect(root.querySelectorAll('[data-form-widget-overlay]')).toHaveLength(1)
   expect(root.querySelector('[data-form-widget-overlays]')?.getAttribute('aria-hidden')).toBe('true')
   expect(root.querySelector('[data-form-projection-review]')).toBeNull()
+  expect(root.querySelector('[data-form-projection-selection]')).not.toBeNull()
+  const fieldSelection = root.querySelector<HTMLInputElement>('[data-form-projection-field-selection]')
+  if (fieldSelection === null) throw new Error('field selection control is required')
+  expect(fieldSelection.checked).toBe(false)
+  fieldSelection.click()
+  await tick()
+  expect(root.querySelector('[data-form-projection-selection-count]')?.textContent).toContain('1 / 1')
+  root.querySelector<HTMLButtonElement>('[data-form-projection-clear-selection]')?.click()
+  await tick()
+  expect(root.querySelector('[data-form-projection-selection-count]')?.textContent).toContain('0 / 1')
+  root.querySelector<HTMLButtonElement>('[data-form-projection-select-all]')?.click()
+  await tick()
+  expect(root.querySelector('[data-form-projection-selection-count]')?.textContent).toContain('1 / 1')
 
   const reviewRequest = { ...projectionRequest, requestId: `${projectionRequest.requestId}-review` }
   void projection.request(reviewRequest)
@@ -283,11 +296,15 @@ test('source change removes stale form geometry until a matching layout/projecti
   projection.publish(firstProjection, projectionResult(firstProjection, false))
   await tick()
   expect(root.querySelectorAll('[data-form-widget-overlay]')).toHaveLength(1)
+  root.querySelector<HTMLInputElement>('[data-form-projection-field-selection]')?.click()
+  await tick()
+  expect(root.querySelector('[data-form-projection-selection-count]')?.textContent).toContain('1 / 1')
 
   await controller.replaceSelection()
   await settle(controller)
   expect(root.querySelectorAll('[data-form-widget-overlay]')).toHaveLength(0)
   expect(root.querySelector('[data-form-projection-status]')?.textContent).toContain('Waiting')
+  expect(root.querySelector('[data-form-projection-selection]')).toBeNull()
   expect(root.querySelector('[data-editor-input-host]')).not.toBeNull()
 
   reactRoot.unmount()
@@ -368,7 +385,31 @@ function projectionResult(
         : [],
       resultHash: `projection-${request.sourceRevision}-${review ? 'review' : 'ready'}`,
     },
-    formPlan: null,
+    formPlan: review
+      ? null
+      : {
+          schemaVersion: 1,
+          sourceRevision: request.sourceRevision,
+          sourceHash: request.sourceHash,
+          displayListHash: `display-${request.sourceRevision}`,
+          fields: [
+            {
+              fieldId: 'field-1',
+              widgetId: 'widget-1',
+              name: 'name',
+              label: 'Name',
+              fieldType: 'text',
+              flags: 0,
+              defaultValue: { type: 'text', value: 'Тест' },
+              value: { type: 'text', value: 'Тест' },
+              tabOrder: 0,
+              options: [],
+              pageIndex: 0,
+              rect: { x: 320, y: 480, width: 800, height: 64 },
+            },
+          ],
+          resultHash: `plan-${request.sourceRevision}`,
+        },
   }
 }
 

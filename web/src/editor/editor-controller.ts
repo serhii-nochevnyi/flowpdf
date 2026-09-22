@@ -48,7 +48,11 @@ import type {
 } from '../pdf/pdf-protocol.js'
 import type { PdfExportScheduleOutcome } from '../pdf/pdf-worker.js'
 import type { FormSessionWasmBoundary } from '../forms/form-session.js'
-import type { FormProjectionWasmBoundary } from '../forms/form-projection.js'
+import {
+  type FormProjectionSelectionDto,
+  type FormProjectionWasmBoundary,
+  validateFormProjectionSelection,
+} from '../forms/form-projection.js'
 
 export type { EditorLocale }
 
@@ -411,6 +415,7 @@ export interface EditorControllerDependencies {
   readonly pdfExportRequestFactory?: (
     accepted: EditorAcceptedSnapshot,
     layout: AcceptedLayoutDto,
+    formSelection: FormProjectionSelectionDto | null,
   ) => PdfExportRequestDto | null
 }
 
@@ -545,7 +550,11 @@ export class EditorController {
   private readonly layoutUnsubscribe: (() => void) | undefined
   private readonly pdfExportScheduler: EditorPdfExportScheduler | undefined
   private readonly pdfExportRequestFactory:
-    | ((accepted: EditorAcceptedSnapshot, layout: AcceptedLayoutDto) => PdfExportRequestDto | null)
+    | ((
+        accepted: EditorAcceptedSnapshot,
+        layout: AcceptedLayoutDto,
+        formSelection: FormProjectionSelectionDto | null,
+      ) => PdfExportRequestDto | null)
     | undefined
   private readonly pdfExportUnsubscribe: (() => void) | undefined
   private initialized: Promise<void> | undefined
@@ -647,7 +656,9 @@ export class EditorController {
     return this.pdfExportScheduler !== undefined && this.pdfExportRequestFactory !== undefined
   }
 
-  requestPdfExport(): Promise<PdfExportScheduleOutcome> {
+  requestPdfExport(
+    formSelection: FormProjectionSelectionDto | null = null,
+  ): Promise<PdfExportScheduleOutcome> {
     const accepted = this.requireAccepted()
     const layout = this.layoutScheduler?.accepted() ?? null
     if (this.pdfExportScheduler === undefined || this.pdfExportRequestFactory === undefined) {
@@ -664,7 +675,27 @@ export class EditorController {
         code: 'FLOW_PDF_LAYOUT_UNAVAILABLE',
       })
     }
-    const request = this.pdfExportRequestFactory(accepted, layout)
+    if (formSelection !== null) {
+      const selectionError = validateFormProjectionSelection(formSelection)
+      if (selectionError !== null) {
+        return Promise.resolve({
+          kind: 'failed',
+          requestId: 'pdf-export-selection-invalid',
+          code: selectionError,
+        })
+      }
+      if (
+        formSelection.sourceRevision !== accepted.session.revision ||
+        formSelection.sourceHash !== accepted.session.canonicalHash
+      ) {
+        return Promise.resolve({
+          kind: 'failed',
+          requestId: 'pdf-export-selection-stale',
+          code: 'FLOW_PDF_FORM_SELECTION_SOURCE_MISMATCH',
+        })
+      }
+    }
+    const request = this.pdfExportRequestFactory(accepted, layout, formSelection)
     if (request === null) {
       return Promise.resolve({
         kind: 'failed',

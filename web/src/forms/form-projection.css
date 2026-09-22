@@ -68,6 +68,53 @@
   font-size: 15px;
 }
 
+.form-projection-selection {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 12px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 4px;
+}
+
+.form-projection-selection legend {
+  padding-inline: 4px;
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
+.form-projection-selection-status,
+.form-projection-selection-unavailable,
+.form-projection-selection-empty {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 14px;
+}
+
+.form-projection-selection-unavailable {
+  padding: 8px;
+  border: 1px dashed var(--border-subtle);
+}
+
+.form-projection-selection-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.form-projection-selection-list {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding-inline-start: 24px;
+}
+
+.form-projection-selection-item label {
+  display: inline-flex;
+  gap: 8px;
+  align-items: baseline;
+}
+
 .form-widget-overlay {
   position: absolute;
   min-width: 2px;

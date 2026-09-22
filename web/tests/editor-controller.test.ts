@@ -20,6 +20,12 @@ import {
   MAX_PASTE_UTF8_BYTES,
   validateInputPayload,
 } from '../src/editor/input-adapter.js'
+import {
+  FORM_PROJECTION_SELECTION_PROTOCOL_VERSION,
+  type FormProjectionSelectionDto,
+} from '../src/forms/form-projection.js'
+import type { AcceptedLayoutDto } from '../src/layout/layout-protocol.js'
+import { PDF_PROTOCOL_VERSION, type PdfExportRequestDto } from '../src/pdf/pdf-protocol.js'
 
 const emptyRecords: RecoveryRecordsDto = {
   snapshots: [],
@@ -128,7 +134,124 @@ describe('editor external store and controller publication', () => {
     const malformed = String.fromCharCode(0xd800)
     expect(validateInputPayload(malformed, 'paste')).toBe('FLOW_INVALID_UTF16_BOUNDARY')
   })
+
+  it('passes a valid form selection to export and fences a stale source selection', async () => {
+    const stateStore = new EditorStore('loading')
+    stateStore.publishAccepted(acceptedFixture(), 'ready')
+    const acceptedLayout = layoutFixture()
+    let seenSelection: FormProjectionSelectionDto | null | undefined
+    let scheduled = 0
+    const layoutScheduler: NonNullable<EditorControllerDependencies['layoutScheduler']> = {
+      request: async (request) => ({
+        kind: 'failed' as const,
+        requestId: request.requestId,
+        code: 'TEST_LAYOUT_UNUSED',
+      }),
+      cancel: () => undefined,
+      accepted: () => acceptedLayout,
+      snapshot: () => ({
+        phase: 'ready',
+        accepted: acceptedLayout,
+        requestId: null,
+        errorCode: null,
+      }),
+    }
+    const pdfScheduler: NonNullable<EditorControllerDependencies['pdfExportScheduler']> = {
+      request: async (request) => {
+        scheduled += 1
+        return { kind: 'failed' as const, requestId: request.requestId, code: 'TEST_PDF_UNUSED' }
+      },
+      cancel: () => undefined,
+      accepted: () => null,
+      snapshot: () => ({ phase: 'idle', accepted: null, requestId: null, errorCode: null }),
+    }
+    const selection = selectionFixture()
+    const controller = new EditorController({}, {
+      store: stateStore,
+      wasm: Promise.resolve(wasmFixture([])),
+      layoutScheduler,
+      pdfExportScheduler: pdfScheduler,
+      pdfExportRequestFactory: (accepted, layout, formSelection) => {
+        seenSelection = formSelection
+        const request: PdfExportRequestDto = {
+          protocolVersion: PDF_PROTOCOL_VERSION,
+          requestId: 'pdf-selection-test',
+          sourceRevision: accepted.session.revision,
+          sourceHash: accepted.session.canonicalHash,
+          layoutSettingsFingerprint: 'settings-v1',
+          layoutResultHash: layout.result.resultHash,
+          serializedRequest: '{}',
+        }
+        return request
+      },
+    })
+
+    expect(await controller.requestPdfExport(selection)).toMatchObject({
+      kind: 'failed',
+      code: 'TEST_PDF_UNUSED',
+    })
+    expect(seenSelection).toBe(selection)
+    expect(scheduled).toBe(1)
+
+    const staleSelection: FormProjectionSelectionDto = {
+      ...selection,
+      sourceHash: 'stale-source',
+      formPlan: { ...selection.formPlan, sourceHash: 'stale-source' },
+    }
+    expect(await controller.requestPdfExport(staleSelection)).toMatchObject({
+      kind: 'failed',
+      code: 'FLOW_PDF_FORM_SELECTION_SOURCE_MISMATCH',
+    })
+    expect(scheduled).toBe(1)
+  })
 })
+
+function layoutFixture(): AcceptedLayoutDto {
+  return {
+    request: {
+      protocolVersion: 1,
+      requestId: 'layout-selection-test',
+      sourceRevision: 1,
+      sourceHash: 'hash-1',
+      expectedLayoutSettingsFingerprint: 'settings-v1',
+      fontCatalogIdentity: 'fonts-v1',
+      hyphenationDataIdentity: null,
+      viewport: { firstPage: 0, pageCount: 1 },
+      serializedRequest: '{}',
+    },
+    result: {
+      protocolVersion: 1,
+      requestId: 'layout-selection-test',
+      sourceRevision: 1,
+      sourceHash: 'hash-1',
+      layoutSettingsFingerprint: 'settings-v1',
+      fontCatalogIdentity: 'fonts-v1',
+      hyphenationDataIdentity: null,
+      pages: [],
+      diagnostics: [],
+      resultHash: 'layout-selection-result',
+    },
+  }
+}
+
+function selectionFixture(): FormProjectionSelectionDto {
+  return {
+    protocolVersion: FORM_PROJECTION_SELECTION_PROTOCOL_VERSION,
+    sourceRevision: 1,
+    sourceHash: 'hash-1',
+    displayListHash: 'display-selection',
+    formPlanResultHash: 'plan-selection',
+    formPlan: {
+      schemaVersion: 1,
+      sourceRevision: 1,
+      sourceHash: 'hash-1',
+      displayListHash: 'display-selection',
+      fields: [],
+      resultHash: 'plan-selection',
+    },
+    flattenedFieldIds: [],
+  }
+}
 
 function acceptedFixture(): EditorAcceptedSnapshot {
   const anchor = {

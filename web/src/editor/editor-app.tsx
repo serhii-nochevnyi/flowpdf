@@ -1,5 +1,5 @@
 import { createRoot } from 'react-dom/client'
-import { useEffect, useRef, useState, useSyncExternalStore } from 'react'
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 
 import { IndexedDbDocumentStore } from '../../persistence/indexeddb-store.js'
 import {
@@ -25,12 +25,14 @@ import { PdfPreview } from '../pdf/pdf-preview.js'
 import { FormSessionCoordinator, requireFormSessionWasm } from '../forms/form-session.js'
 import { FormProjectionViewport } from '../forms/form-projection-viewport.js'
 import {
+  createFormProjectionSelection,
   createFormProjectionRequest,
   createWasmFormProjectionEngine,
   requireFormProjectionWasm,
   RevisionAwareFormProjectionScheduler,
   type FormProjectionRequestDto,
   type FormProjectionResultDto,
+  type FormProjectionSelectionDto,
   type FormProjectionScheduler,
 } from '../forms/form-projection.js'
 import type {
@@ -118,6 +120,34 @@ export function EditorApp({
     (listener) => formProjectionScheduler.subscribe(listener),
     () => formProjectionScheduler.snapshot(),
     () => formProjectionScheduler.snapshot(),
+  )
+  const [flattenedFieldIds, setFlattenedFieldIds] = useState<readonly string[]>([])
+  const acceptedProjection = formProjectionSnapshot.accepted?.result ?? null
+  const currentProjectionResult =
+    snapshot.accepted !== null &&
+    snapshot.layout.accepted !== null &&
+    formProjectionSnapshot.phase === 'ready' &&
+    acceptedProjection !== null &&
+    acceptedProjection.sourceRevision === snapshot.accepted.session.revision &&
+    acceptedProjection.sourceHash === snapshot.accepted.session.canonicalHash &&
+    formProjectionSnapshot.accepted?.request.sourceRevision ===
+      snapshot.accepted.session.revision &&
+    formProjectionSnapshot.accepted.request.sourceHash ===
+      snapshot.accepted.session.canonicalHash &&
+    formProjectionSnapshot.accepted.request.layoutResultHash ===
+      snapshot.layout.accepted.result.resultHash &&
+    acceptedProjection.layoutResultHash === snapshot.layout.accepted.result.resultHash
+      ? acceptedProjection
+      : null
+  const projectionIdentity = currentProjectionResult === null
+    ? 'none'
+    : `${currentProjectionResult.sourceRevision}:${currentProjectionResult.sourceHash}:${currentProjectionResult.displayListHash}:${currentProjectionResult.formPlan?.resultHash ?? 'no-plan'}`
+  useEffect(() => {
+    setFlattenedFieldIds([])
+  }, [projectionIdentity])
+  const formProjectionSelection: FormProjectionSelectionDto | null = useMemo(
+    () => createFormProjectionSelection(currentProjectionResult, flattenedFieldIds),
+    [currentProjectionResult, flattenedFieldIds],
   )
   const locale = options.locale ?? 'uk'
   const labels = copy(locale)
@@ -336,6 +366,8 @@ export function EditorApp({
               sourceRevision={accepted.session.revision}
               sourceHash={accepted.session.canonicalHash}
               locale={locale}
+              selectedFieldIds={flattenedFieldIds}
+              onSelectedFieldIdsChange={setFlattenedFieldIds}
             />
           )}
           {controller.hasPdfExport() ? (
@@ -347,7 +379,7 @@ export function EditorApp({
               sourceBlocks={accepted.editor.view.document.blocks}
               selection={accepted.editor.session.selection}
               locale={locale}
-              onExport={() => void controller.requestPdfExport()}
+              onExport={() => void controller.requestPdfExport(formProjectionSelection)}
               onSelectSource={(selection) => void controller.setEditorSelection(selection)}
             />
           ) : null}

@@ -10,6 +10,7 @@ import {
 } from '../layout/layout-protocol.js'
 
 export const FORM_PROJECTION_PROTOCOL_VERSION = 1 as const
+export const FORM_PROJECTION_SELECTION_PROTOCOL_VERSION = 1 as const
 
 export interface FormProjectionRectDto {
   readonly x: number
@@ -116,6 +117,17 @@ export interface FormProjectionResultDto {
   readonly displayListHash: string
   readonly projection: FormWidgetProjectionDto
   readonly formPlan: PdfFormPlanDto | null
+}
+
+/** Source-bound UI intent for the next PDF export. Rust remains authoritative. */
+export interface FormProjectionSelectionDto {
+  readonly protocolVersion: typeof FORM_PROJECTION_SELECTION_PROTOCOL_VERSION
+  readonly sourceRevision: number
+  readonly sourceHash: string
+  readonly displayListHash: string
+  readonly formPlanResultHash: string
+  readonly formPlan: PdfFormPlanDto
+  readonly flattenedFieldIds: readonly string[]
 }
 
 export interface AcceptedFormProjectionDto {
@@ -312,6 +324,115 @@ export function validateFormProjectionResult(
     }
   }
   return null
+}
+
+/**
+ * Validates a browser selection without accepting any browser-authored plan
+ * fields. The plan itself must have come from a verified Rust projection.
+ */
+export function validateFormProjectionSelection(
+  selection: FormProjectionSelectionDto,
+): string | null {
+  if (selection === null || typeof selection !== 'object') {
+    return 'FLOW_FORM_PROJECTION_SELECTION_INVALID'
+  }
+  if (selection.protocolVersion !== FORM_PROJECTION_SELECTION_PROTOCOL_VERSION) {
+    return 'FLOW_FORM_PROJECTION_SELECTION_PROTOCOL_VERSION'
+  }
+  if (!Number.isSafeInteger(selection.sourceRevision) || selection.sourceRevision < 0) {
+    return 'FLOW_FORM_PROJECTION_SELECTION_SOURCE_REVISION_INVALID'
+  }
+  if (typeof selection.sourceHash !== 'string' || selection.sourceHash.trim().length === 0) {
+    return 'FLOW_FORM_PROJECTION_SELECTION_SOURCE_HASH_INVALID'
+  }
+  if (
+    typeof selection.displayListHash !== 'string' ||
+    selection.displayListHash.trim().length === 0
+  ) {
+    return 'FLOW_FORM_PROJECTION_SELECTION_DISPLAY_LIST_HASH_INVALID'
+  }
+  const plan = selection.formPlan
+  if (plan === null || typeof plan !== 'object' || !Array.isArray(plan.fields)) {
+    return 'FLOW_FORM_PROJECTION_SELECTION_PLAN_INVALID'
+  }
+  if (
+    plan.sourceRevision !== selection.sourceRevision ||
+    typeof plan.sourceHash !== 'string' ||
+    plan.sourceHash !== selection.sourceHash ||
+    typeof plan.displayListHash !== 'string' ||
+    plan.displayListHash !== selection.displayListHash ||
+    typeof plan.resultHash !== 'string' ||
+    plan.resultHash !== selection.formPlanResultHash ||
+    plan.resultHash.trim().length === 0
+  ) {
+    return 'FLOW_FORM_PROJECTION_SELECTION_PLAN_IDENTITY_INVALID'
+  }
+  const planFieldIds = new Set<string>()
+  for (const field of plan.fields) {
+    if (
+      typeof field.fieldId !== 'string' ||
+      field.fieldId.trim().length === 0 ||
+      planFieldIds.has(field.fieldId)
+    ) {
+      return 'FLOW_FORM_PROJECTION_SELECTION_PLAN_INVALID'
+    }
+    planFieldIds.add(field.fieldId)
+  }
+  const selectedFieldIds = new Set<string>()
+  if (!Array.isArray(selection.flattenedFieldIds)) {
+    return 'FLOW_FORM_PROJECTION_SELECTION_FIELD_ID_INVALID'
+  }
+  for (const fieldId of selection.flattenedFieldIds) {
+    if (typeof fieldId !== 'string' || fieldId.trim().length === 0) {
+      return 'FLOW_FORM_PROJECTION_SELECTION_FIELD_ID_INVALID'
+    }
+    if (selectedFieldIds.has(fieldId)) {
+      return 'FLOW_FORM_PROJECTION_SELECTION_FIELD_ID_DUPLICATE'
+    }
+    if (!planFieldIds.has(fieldId)) {
+      return 'FLOW_FORM_PROJECTION_SELECTION_FIELD_ID_UNKNOWN'
+    }
+    selectedFieldIds.add(fieldId)
+  }
+  return null
+}
+
+/**
+ * Creates a normalized source-bound selection from a verified projection.
+ * Unknown, duplicate, or malformed IDs fail closed instead of being silently
+ * converted into an export option.
+ */
+export function createFormProjectionSelection(
+  result: FormProjectionResultDto | null,
+  selectedFieldIds: readonly string[],
+): FormProjectionSelectionDto | null {
+  if (
+    result === null ||
+    result.formPlan === null ||
+    result.projection.review.length > 0 ||
+    !Array.isArray(selectedFieldIds)
+  ) {
+    return null
+  }
+  const selected = new Set<string>()
+  for (const fieldId of selectedFieldIds) {
+    if (typeof fieldId !== 'string' || selected.has(fieldId)) return null
+    selected.add(fieldId)
+  }
+  const flattenedFieldIds = result.formPlan.fields
+    .filter((field) => selected.has(field.fieldId))
+    .map((field) => field.fieldId)
+  if (flattenedFieldIds.length !== selected.size) return null
+  const selection: FormProjectionSelectionDto = {
+    protocolVersion: FORM_PROJECTION_SELECTION_PROTOCOL_VERSION,
+    sourceRevision: result.sourceRevision,
+    sourceHash: result.sourceHash,
+    displayListHash: result.displayListHash,
+    formPlanResultHash: result.formPlan.resultHash,
+    formPlan: result.formPlan,
+    flattenedFieldIds,
+  }
+  return validateFormProjectionSelection(selection) === null ? selection : null
 }
 
 /** Adapts Rust's closed string-only projection boundary to a scheduler engine. */

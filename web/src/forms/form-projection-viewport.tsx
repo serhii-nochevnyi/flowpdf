@@ -10,6 +10,8 @@ export interface FormProjectionViewportProps {
   readonly sourceRevision: number
   readonly sourceHash: string
   readonly locale?: EditorLocale
+  readonly selectedFieldIds: readonly string[]
+  readonly onSelectedFieldIdsChange: (fieldIds: readonly string[]) => void
 }
 
 /**
@@ -22,6 +24,8 @@ export function FormProjectionViewport({
   sourceRevision,
   sourceHash,
   locale = 'uk',
+  selectedFieldIds,
+  onSelectedFieldIdsChange,
 }: FormProjectionViewportProps) {
   const accepted = projection.accepted
   const result = accepted?.result ?? null
@@ -34,6 +38,16 @@ export function FormProjectionViewport({
     accepted.request.sourceHash === sourceHash &&
     accepted.request.layoutResultHash === result.layoutResultHash
   const derived = synchronized && result !== null ? result.projection : null
+  const plan =
+    synchronized &&
+    result !== null &&
+    result.formPlan !== null &&
+    result.projection.review.length === 0
+    ? result.formPlan
+    : null
+  const selected = new Set(selectedFieldIds)
+  const selectedCount =
+    plan === null ? 0 : plan.fields.filter((field) => selected.has(field.fieldId)).length
   const labels = locale === 'uk' ? ukLabels : enLabels
   const status = projection.errorCode !== null
     ? `${labels.error} ${projection.errorCode}`
@@ -54,7 +68,9 @@ export function FormProjectionViewport({
     >
       <h2 className="form-projection-title">{labels.region}</h2>
       <p
-        className={`form-projection-status${projection.errorCode === null ? '' : ' form-projection-status-error'}`}
+        className={`form-projection-status${
+          projection.errorCode === null ? '' : ' form-projection-status-error'
+        }`}
         role={projection.errorCode === null ? 'status' : 'alert'}
         aria-live="polite"
         aria-atomic="true"
@@ -97,13 +113,90 @@ export function FormProjectionViewport({
               <h3>{labels.review}</h3>
               <ul>
                 {derived.review.map((entry) => (
-                  <li key={`${entry.fieldId}-${entry.reason.kind}`} data-form-projection-review-entry="">
+                  <li
+                    key={`${entry.fieldId}-${entry.reason.kind}`}
+                    data-form-projection-review-entry=""
+                  >
                     <span data-form-review-field-id="">{entry.fieldId}</span>{' '}
                     <span data-form-review-reason="">{entry.reason.kind}</span>
                   </li>
                 ))}
               </ul>
             </div>
+          )}
+          {plan === null ? (
+            <p
+              className="form-projection-selection-unavailable"
+              data-form-projection-selection-unavailable=""
+            >
+              {derived.review.length > 0 ? labels.selectionReview : labels.selectionUnavailable}
+            </p>
+          ) : (
+            <fieldset className="form-projection-selection" data-form-projection-selection="">
+              <legend>{labels.selection}</legend>
+              <p
+                className="form-projection-selection-status"
+                data-form-projection-selection-count=""
+              >
+                {labels.selected}: {selectedCount} / {plan.fields.length}
+              </p>
+              <div className="form-projection-selection-actions">
+                <button
+                  type="button"
+                  data-form-projection-select-all=""
+                  disabled={plan.fields.length === 0 || selectedCount === plan.fields.length}
+                  onClick={() =>
+                    onSelectedFieldIdsChange(plan.fields.map((field) => field.fieldId))
+                  }
+                >
+                  {labels.selectAll}
+                </button>
+                <button
+                  type="button"
+                  data-form-projection-clear-selection=""
+                  disabled={selectedCount === 0}
+                  onClick={() => onSelectedFieldIdsChange([])}
+                >
+                  {labels.clear}
+                </button>
+              </div>
+              {plan.fields.length === 0 ? (
+                <p
+                  className="form-projection-selection-empty"
+                  data-form-projection-selection-empty=""
+                >
+                  {labels.noSelectableFields}
+                </p>
+              ) : (
+                <ol className="form-projection-selection-list">
+                  {plan.fields.map((field) => (
+                    <li key={field.fieldId} className="form-projection-selection-item">
+                      <label>
+                        <input
+                          type="checkbox"
+                          checked={selected.has(field.fieldId)}
+                          data-form-projection-field-selection=""
+                          data-field-id={field.fieldId}
+                          onChange={(event) => {
+                            const next = new Set(selected)
+                            if (event.target.checked) next.add(field.fieldId)
+                            else next.delete(field.fieldId)
+                            onSelectedFieldIdsChange(
+                              plan.fields
+                                .filter((candidate) => next.has(candidate.fieldId))
+                                .map((candidate) => candidate.fieldId),
+                            )
+                          }}
+                        />
+                        <span>
+                          {field.label ?? field.name} · {labels.page} {field.pageIndex + 1}
+                        </span>
+                      </label>
+                    </li>
+                  ))}
+                </ol>
+              )}
+            </fieldset>
           )}
           <p className="form-projection-derived-note" data-form-projection-derived-note="">
             {labels.derived}
@@ -130,6 +223,13 @@ const ukLabels = {
   widgets: 'Віджети',
   page: 'сторінка',
   review: 'Потребують перевірки',
+  selection: 'Явне сплощення під час PDF-експорту',
+  selectionReview: 'Вибір сплощення недоступний: спочатку потрібно перевірити проєкцію полів.',
+  selectionUnavailable: 'Вибір сплощення недоступний для цієї проєкції.',
+  selected: 'Обрано',
+  selectAll: 'Обрати всі',
+  clear: 'Очистити вибір',
+  noSelectableFields: 'Немає полів, доступних для сплощення.',
   derived: 'Це похідні дані; семантичні поля та редагування залишаються в редакторі документа.',
 } as const
 
@@ -142,5 +242,12 @@ const enLabels = {
   widgets: 'Widgets',
   page: 'page',
   review: 'Needs review',
+  selection: 'Explicit flattening for PDF export',
+  selectionReview: 'Flatten selection is unavailable: review the field projection first.',
+  selectionUnavailable: 'Flatten selection is unavailable for this projection.',
+  selected: 'Selected',
+  selectAll: 'Select all',
+  clear: 'Clear selection',
+  noSelectableFields: 'There are no fields available for flattening.',
   derived: 'This is derived data; semantic fields and editing remain in the document editor.',
 } as const
