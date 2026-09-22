@@ -39,7 +39,12 @@ const phaseFourWasmExports = new Set([
   'recover_owned_source',
   'verify_pdf_export_response',
 ])
-const phaseFiveWasmExports = new Set(['apply_form_session', 'apply_form_session_json'])
+const phaseFiveWasmExports = new Set([
+  'apply_form_session',
+  'apply_form_session_json',
+  'project_form_widgets',
+  'verify_form_projection_response',
+])
 const forbiddenDirectPackages = new Set([
   '@vitejs/plugin-react',
   'actix-web',
@@ -571,6 +576,12 @@ function wasmFixtureFunction(name) {
     return `#[wasm_bindgen]\npub fn ${name}(request_json: String) -> String { request_json }`
   }
   if (name === 'verify_layout_response' || name === 'verify_pdf_export_response') {
+    return `#[wasm_bindgen]\npub fn ${name}(response_json: String) -> bool { !response_json.is_empty() }`
+  }
+  if (name === 'project_form_widgets') {
+    return `#[wasm_bindgen]\npub fn ${name}(request_json: String) -> String { request_json }`
+  }
+  if (name === 'verify_form_projection_response') {
     return `#[wasm_bindgen]\npub fn ${name}(response_json: String) -> bool { !response_json.is_empty() }`
   }
   return `#[wasm_bindgen]\npub fn ${name}(request: JsValue) -> JsValue { request }`
@@ -1375,6 +1386,20 @@ function hasTypedWasmSignature(item) {
       parameters.join('') === 'request_json:String' &&
       tokens[parametersEnd + 1] === '->' &&
       tokens.slice(parametersEnd + 2).join('') === 'String'
+    )
+  }
+  if (item.exportName === 'project_form_widgets') {
+    return (
+      parameters.join('') === 'request_json:String' &&
+      tokens[parametersEnd + 1] === '->' &&
+      tokens.slice(parametersEnd + 2).join('') === 'String'
+    )
+  }
+  if (item.exportName === 'verify_form_projection_response') {
+    return (
+      parameters.join('') === 'response_json:String' &&
+      tokens[parametersEnd + 1] === '->' &&
+      tokens.slice(parametersEnd + 2).join('') === 'bool'
     )
   }
   if (
