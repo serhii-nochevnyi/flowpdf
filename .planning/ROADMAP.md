@@ -363,7 +363,13 @@ represented as local compatibility or accessibility passes.
   3. User can compare original and reconstructed documents side by side and review OCR or semantic uncertainty before accepting it.
   4. The original PDF remains immutable and the UI never labels lossy reconstruction as exact.
 
-**Plans**: 4 planned; execution in progress
+**Plans**: 4 planned; 1/4 executed; execution in progress
+
+Plans:
+- [x] 08-01-PLAN.md — Rust-owned reconstruction candidate, provenance, mappings, and opaque islands
+- [ ] 08-02-PLAN.md — verified WASM/OCR worker boundary
+- [ ] 08-03-PLAN.md — immutable source store and side-by-side review
+- [ ] 08-04-PLAN.md — local gates and evidence closure
 **UI hint**: yes
 
 ### Phase 9: Controlled Native PDF Editing

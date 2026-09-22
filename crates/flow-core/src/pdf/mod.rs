@@ -18,6 +18,7 @@ mod forms;
 mod metadata;
 mod provenance;
 mod reader;
+mod reconstruction;
 mod recovery;
 mod scene;
 
@@ -46,6 +47,13 @@ pub use reader::{
     PDF_READER_SCHEMA_VERSION, PdfDocumentSummary, PdfObjectRef, PdfReadDiagnostic,
     PdfReadDiagnosticCode, PdfReadError, PdfReadReport, PdfReadSeverity, PdfReader,
     PdfReaderLimits, open_pdf,
+};
+pub use reconstruction::{
+    PDF_EXTERNAL_SOURCE_HASH_PREFIX, PDF_RECONSTRUCTION_SCHEMA_VERSION, PdfDocumentCandidate,
+    PdfMappingOrigin, PdfOcrCandidate, PdfOpaqueIsland, PdfOpaqueIslandKind, PdfReconstructedBlock,
+    PdfReconstructionDiagnostic, PdfReconstructionDiagnosticCode, PdfReconstructionError,
+    PdfReconstructionReport, PdfReconstructionRequest, PdfReconstructionResult, PdfReviewAction,
+    PdfReviewDecision, PdfSourceMapping, accept_pdf_reconstruction, reconstruct_pdf_scene,
 };
 pub use recovery::{
     PdfRecoveredSource, PdfRecoveryError, PdfRecoveryExpectation, recover_owned_source,

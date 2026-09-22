@@ -169,6 +169,38 @@ fn source_hashes_are_never_invented_and_explicit_values_remain_bounded() {
 }
 
 #[test]
+fn external_reconstruction_provenance_is_source_bound_and_not_an_exact_round_trip() {
+    let mut document = FlowDocument::deterministic_sample("uk-UA").expect("sample");
+    let source_hash = format!("pdf:blake3:v1:{}", "a".repeat(64));
+    document.provenance = Provenance::ExternalReconstruction {
+        source_hash: source_hash.clone(),
+        reconstruction_schema_version: 1,
+    };
+    let bytes = canonical_bytes(&document).expect("external candidate is canonical");
+    let hash = canonical_hash(&bytes);
+    let provenance =
+        RevisionProvenance::from_document(&document, hash).expect("external revision provenance");
+    assert!(matches!(
+        provenance.lineage(),
+        RevisionLineage::ExternalReconstructed {
+            source_hash: actual,
+            reconstruction_schema_version: 1,
+        } if actual == &source_hash
+    ));
+
+    document.provenance = Provenance::ExternalReconstruction {
+        source_hash: "not-a-pdf-hash".to_owned(),
+        reconstruction_schema_version: 1,
+    };
+    assert_eq!(
+        canonical_bytes(&document)
+            .expect_err("unbound external source")
+            .code(),
+        "FLOW_INVALID_DOCUMENT"
+    );
+}
+
+#[test]
 fn revision_hash_rejects_unversioned_or_malformed_values() {
     assert!(RevisionHash::parse("blake3:abc").is_err());
     assert!(RevisionHash::parse("flowpdf:blake3:v1:not-hex").is_err());

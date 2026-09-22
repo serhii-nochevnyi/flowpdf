@@ -118,6 +118,10 @@ pub enum RevisionLineage {
     Created {
         created_at: ProvenanceTimestamp,
     },
+    ExternalReconstructed {
+        source_hash: String,
+        reconstruction_schema_version: u32,
+    },
     Migrated {
         source_schema_version: u32,
         current_schema_version: u32,
@@ -192,6 +196,13 @@ impl RevisionProvenance {
             Provenance::LocalSample { created_at } => RevisionLineage::Created {
                 created_at: ProvenanceTimestamp::parse(created_at)?,
             },
+            Provenance::ExternalReconstruction {
+                source_hash,
+                reconstruction_schema_version,
+            } => RevisionLineage::ExternalReconstructed {
+                source_hash: source_hash.clone(),
+                reconstruction_schema_version: *reconstruction_schema_version,
+            },
             Provenance::Migrated {
                 source_schema_version,
                 current_schema_version,
@@ -257,6 +268,11 @@ impl RevisionProvenance {
     #[must_use]
     pub fn canonical_hash(&self) -> &RevisionHash {
         &self.canonical_hash
+    }
+
+    #[must_use]
+    pub const fn lineage(&self) -> &RevisionLineage {
+        &self.lineage
     }
 
     #[must_use]

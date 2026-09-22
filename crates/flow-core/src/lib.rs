@@ -1282,6 +1282,7 @@ fn validate_snapshot(
     }
     match (&document.provenance, &snapshot.migration_boundary) {
         (Provenance::LocalSample { .. }, None) => {}
+        (Provenance::ExternalReconstruction { .. }, None) => {}
         (Provenance::Migrated { .. }, Some(boundary)) => {
             boundary.validate_against_current(&document)?;
         }

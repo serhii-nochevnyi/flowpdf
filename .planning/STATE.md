@@ -4,10 +4,10 @@ milestone: v1.0
 current_phase: 8
 current_phase_name: External Reconstruction and OCR
 status: executing
-stopped_at: Phase 8 planning complete; next Phase 8 Plan 08-01 builds the Rust-owned bounded reconstruction candidate while external OCR/reference/AT inputs remain release evidence
-last_updated: "2026-09-22T19:25:00Z"
+stopped_at: Phase 8 Plan 08-01 complete; next Phase 8 Plan 08-02 exposes reconstruction and OCR through the verified worker boundary while external OCR/reference/AT inputs remain release evidence
+last_updated: "2026-09-22T19:45:00Z"
 last_activity: 2026-09-22
-last_activity_desc: Planned Phase 8 bounded reconstruction, immutable source, opaque-island, OCR-adapter, comparison, and gate slices
+last_activity_desc: Completed Phase 8 Plan 08-01 Rust reconstruction candidate, external provenance, mappings, confidence, review, and opaque-island sidecar
 state_head: 08
 progress:
   total_phases: 9
@@ -29,11 +29,11 @@ See: .planning/PROJECT.md (updated 2026-08-25)
 ## Current Position
 
 Phase: 8 (External Reconstruction and OCR) — EXECUTING
-Plan: Phase 8 Plan 08-01 — build the Rust-owned bounded reconstruction candidate
-Status: Phase 7 remains locally complete for the controlled reader subset. Phase 8 now owns confidence-scored single-column reconstruction, immutable source retention, opaque-island preservation, OCR adapter review, and side-by-side acceptance. External OCR provider, qpdf/Poppler, target-viewer, and AT evidence remain explicitly unavailable/outstanding.
-Last activity: 2026-09-22 — Phase 8 planning complete; Plan 08-01 next
+Plan: Phase 8 Plan 08-02 — expose reconstruction and OCR through the verified worker boundary
+Status: Phase 7 remains locally complete for the controlled reader subset. Phase 8 Plan 08-01 now owns a Rust confidence-scored single-column candidate with external provenance, source mappings, and opaque-island preservation. External OCR provider, qpdf/Poppler, target-viewer, and AT evidence remain explicitly unavailable/outstanding.
+Last activity: 2026-09-22 — Phase 8 Plan 08-01 completed locally; Plan 08-02 next
 
-Progress: Phase 2 — 18/18 implementation plans complete; Phase 3 — 6/6 local implementation plans executed; Phase 4 — 6/6 plans executed; Phase 5 — 26/26 local plans executed and locally gated, with target-viewer/import evidence explicitly pending; Phase 6 — 6/6 local plans executed and gated, with speech-service and external AT evidence explicitly pending; Phase 7 — 4/4 plans executed and complete locally for the controlled reader subset, with qpdf/Poppler/target-viewer/AT evidence explicitly unavailable; Phase 8 — 0/4 plans executed, planning complete and implementation starting. Phase 2/3 phase-level closure remains honest about inherited external AT evidence, and Phase 4/5 remain open for unavailable external PDF/reference evidence.
+Progress: Phase 2 — 18/18 implementation plans complete; Phase 3 — 6/6 local implementation plans executed; Phase 4 — 6/6 plans executed; Phase 5 — 26/26 local plans executed and locally gated, with target-viewer/import evidence explicitly pending; Phase 6 — 6/6 local plans executed and gated, with speech-service and external AT evidence explicitly pending; Phase 7 — 4/4 plans executed and complete locally for the controlled reader subset, with qpdf/Poppler/target-viewer/AT evidence explicitly unavailable; Phase 8 — 1/4 plans executed, with the Rust reconstruction candidate complete locally and worker/UI/gate plans remaining. Phase 2/3 phase-level closure remains honest about inherited external AT evidence, and Phase 4/5 remain open for unavailable external PDF/reference evidence.
 
 ## Performance Metrics
 

@@ -885,6 +885,14 @@ fn validate_provenance_version(provenance: &Provenance, version: u32) -> Result<
                 return Err(SchemaError::invalid_document());
             }
         }
+        Provenance::ExternalReconstruction {
+            source_hash,
+            reconstruction_schema_version,
+        } => {
+            if *reconstruction_schema_version == 0 || !is_external_source_hash(source_hash) {
+                return Err(SchemaError::invalid_document());
+            }
+        }
         Provenance::Migrated {
             source_schema_version,
             current_schema_version,
@@ -915,6 +923,17 @@ fn validate_provenance_version(provenance: &Provenance, version: u32) -> Result<
         }
     }
     Ok(())
+}
+
+fn is_external_source_hash(value: &str) -> bool {
+    const PREFIX: &str = "pdf:blake3:v1:";
+    let Some(hex) = value.strip_prefix(PREFIX) else {
+        return false;
+    };
+    hex.len() == 64
+        && hex
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 pub(crate) fn is_compact_utc_timestamp(value: &str) -> bool {
@@ -1396,6 +1415,9 @@ fn convert_v1(source: &legacy::LegacyFlowDocumentV1) -> Result<FlowDocument, Sch
                 hops,
             }
         }
+        Provenance::ExternalReconstruction { .. } => {
+            return Err(SchemaError::unsupported_schema());
+        }
     };
     let document = FlowDocument {
         schema_version: 2,
@@ -1479,6 +1501,9 @@ fn migrate_provenance_v2_to_v3(provenance: Provenance) -> Result<Provenance, Sch
                 source_created_at,
                 hops,
             }
+        }
+        Provenance::ExternalReconstruction { .. } => {
+            return Err(SchemaError::unsupported_schema());
         }
     })
 }

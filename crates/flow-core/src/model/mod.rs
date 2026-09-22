@@ -677,6 +677,10 @@ pub enum Provenance {
     LocalSample {
         created_at: String,
     },
+    ExternalReconstruction {
+        source_hash: String,
+        reconstruction_schema_version: u32,
+    },
     Migrated {
         source_schema_version: u32,
         current_schema_version: u32,
