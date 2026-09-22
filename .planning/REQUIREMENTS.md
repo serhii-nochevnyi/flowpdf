@@ -65,12 +65,12 @@
 
 ### Voice Interaction
 
-- [ ] **VOIC-01**: User can explicitly start and stop push-to-talk dictation and see a persistent microphone-state indicator.
-- [ ] **VOIC-02**: User sees interim recognition as non-document ghost text and only final recognition becomes one undoable insert transaction.
-- [ ] **VOIC-03**: User can switch explicitly between dictation mode and command mode so spoken document text is not executed as a command.
-- [ ] **VOIC-04**: User can invoke allowlisted navigation, formatting, editing, undo/redo, and field commands through structured intents.
-- [ ] **VOIC-05**: User must preview or confirm destructive, ambiguous, export, flatten, and signing-related voice operations according to risk policy.
-- [ ] **VOIC-06**: User receives visible, accessible, and optional spoken feedback when a voice command succeeds, fails, or needs disambiguation.
+- [x] **VOIC-01**: User can explicitly start and stop push-to-talk dictation and see a persistent microphone-state indicator.
+- [x] **VOIC-02**: User sees interim recognition as non-document ghost text and only final recognition becomes one undoable insert transaction.
+- [x] **VOIC-03**: User can switch explicitly between dictation mode and command mode so spoken document text is not executed as a command.
+- [x] **VOIC-04**: User can invoke allowlisted navigation, formatting, editing, undo/redo, and field commands through structured intents.
+- [x] **VOIC-05**: User must preview or confirm destructive, ambiguous, export, flatten, and signing-related voice operations according to risk policy.
+- [x] **VOIC-06**: User receives visible, accessible, and optional spoken feedback when a voice command succeeds, fails, or needs disambiguation.
 
 ### Controlled PDF Import
 
@@ -192,12 +192,12 @@ A v1 requirement is complete only when implementation, automated tests, relevant
 | FORM-05 | Phase 5 | Pending |
 | FORM-06 | Phase 5 | Pending |
 | FORM-07 | Phase 5 | Pending |
-| VOIC-01 | Phase 6 | Pending |
-| VOIC-02 | Phase 6 | Pending |
-| VOIC-03 | Phase 6 | Pending |
-| VOIC-04 | Phase 6 | Pending |
-| VOIC-05 | Phase 6 | Pending |
-| VOIC-06 | Phase 6 | Pending |
+| VOIC-01 | Phase 6 | Complete |
+| VOIC-02 | Phase 6 | Complete |
+| VOIC-03 | Phase 6 | Complete |
+| VOIC-04 | Phase 6 | Complete |
+| VOIC-05 | Phase 6 | Complete |
+| VOIC-06 | Phase 6 | Complete |
 | PDFI-01 | Phase 7 | Pending |
 | PDFI-02 | Phase 7 | Pending |
 | PDFI-03 | Phase 7 | Pending |

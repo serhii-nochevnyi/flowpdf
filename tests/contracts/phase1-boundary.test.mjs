@@ -95,6 +95,8 @@ const phaseFourPdfSource = /^web\/src\/pdf\/[A-Za-z0-9._/-]+\.(?:ts|tsx)$/
 const phaseFourEditorSource = /^(?:web\/src\/main\.tsx|web\/src\/(?:editor|layout|pdf)\/[A-Za-z0-9._/-]+\.(?:ts|tsx))$/
 const phaseFiveFormSource = /^web\/src\/forms\/[A-Za-z0-9._/-]+\.(?:ts|tsx)$/
 const phaseFiveFormEditorSource = /^web\/src\/editor\/field-navigation\.tsx$/
+const phaseSixVoiceSource = /^web\/src\/voice\/[A-Za-z0-9._/-]+\.ts$/
+const phaseSixVoiceEditorSource = /^web\/src\/editor\/voice-controls\.tsx$/
 const phaseTwoPackagePins = new Map([
   ['react', { section: 'dependencies', version: '19.2.8' }],
   ['react-dom', { section: 'dependencies', version: '19.2.8' }],
@@ -111,7 +113,7 @@ const semanticOwnerName = /^(?:apply|canonicalize|hash|migrate|mutate|recover|re
 
 test('the checked-in workspace preserves deferred scope and Rust semantic ownership', async () => {
   const snapshot = loadWorkspaceSnapshot(projectRoot)
-  assert.deepEqual(boundaryDiagnostics(snapshot, { phase: 5 }), [])
+  assert.deepEqual(boundaryDiagnostics(snapshot, { phase: 6 }), [])
   assertPhaseTwoParityBoundary(projectRoot, snapshot)
 
   const gatePath = resolve(projectRoot, 'scripts/check-phase1.mjs')
@@ -152,6 +154,43 @@ test('boundary fixture rejects representative editor, canvas, voice, and backend
   const diagnostics = boundaryDiagnostics(fixture).join('\n')
   assert.match(diagnostics, /react/i)
   assert.match(diagnostics, /deferred web path|canvas|contenteditable|voice|backend/i)
+})
+
+test('Phase 6 admits only the typed voice adapter/UI paths and rejects unsafe voice I/O', () => {
+  const fixture = validFixture()
+  fixture.typescript.set(
+    'web/src/voice/unsafe-voice.ts',
+    `
+      export function unsafeVoice() {
+        fetch('/voice')
+        navigator.mediaDevices.getUserMedia({ audio: true })
+        localStorage.setItem('transcript', 'raw speech')
+        analytics.track('voice', { transcript: 'raw speech' })
+      }
+    `,
+  )
+  const diagnostics = boundaryDiagnostics(fixture, { phase: 6 }).join('\n')
+  assert.match(diagnostics, /deferred backend runtime surface/i)
+  assert.match(diagnostics, /deferred voice runtime surface/i)
+  assert.doesNotMatch(diagnostics, /deferred web path entered Phase 1/i)
+})
+
+test('Phase 6 rejects semantic JSON ownership inside the voice UI boundary', () => {
+  const fixture = validFixture()
+  fixture.typescript.set(
+    'web/src/editor/voice-controls.tsx',
+    `
+      export function VoiceControls({ canonicalJson }) {
+        const documentState = JSON.parse(canonicalJson)
+        documentState.revision += 1
+        return documentState
+      }
+    `,
+  )
+  assert.match(
+    boundaryDiagnostics(fixture, { phase: 6 }).join('\n'),
+    /TypeScript interprets semantic JSON|semantic state/i,
+  )
 })
 
 test('boundary fixture rejects Rust deferred dependencies and mutable WASM exports', () => {
@@ -547,7 +586,7 @@ export function loadWorkspaceSnapshot(root) {
   }
 }
 
-function validFixture() {
+export function validFixture() {
   return {
     packageJson: { scripts: {}, dependencies: {}, devDependencies: { typescript: '5.9.3' } },
     cargoManifests: new Map([
@@ -673,6 +712,23 @@ function boundaryPolicy(options) {
       allowsEditorSource: (path) =>
         phaseFourEditorSource.test(path) || phaseFiveFormSource.test(path),
       allowsDeferredPath: (path) => phaseFourPdfSource.test(path) || phaseFiveFormSource.test(path),
+      allowsSemanticForm: (path) => phaseFiveFormEditorSource.test(path),
+    }
+  }
+  if (phase === 6) {
+    return {
+      phase,
+      forbiddenWebPathSegment:
+        /(?:^|[\/._-])(?:auth|backend|collaboration|forms?|layout|pdf|voice)(?=[\/._-]|$)/i,
+      allowsEditorSource: (path) =>
+        phaseFourEditorSource.test(path) ||
+        phaseFiveFormSource.test(path) ||
+        phaseSixVoiceEditorSource.test(path),
+      allowsDeferredPath: (path) =>
+        phaseFourEditorSource.test(path) ||
+        phaseFiveFormSource.test(path) ||
+        phaseSixVoiceSource.test(path) ||
+        phaseSixVoiceEditorSource.test(path),
       allowsSemanticForm: (path) => phaseFiveFormEditorSource.test(path),
     }
   }

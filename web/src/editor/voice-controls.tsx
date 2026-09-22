@@ -273,7 +273,6 @@ export function VoiceControls({
       <p
         className="voice-status"
         role="status"
-        aria-live="polite"
         aria-atomic="true"
         data-voice-status=""
       >

@@ -36,6 +36,8 @@
     "check:phase4:release": "node scripts/check-phase4.mjs --strict-external",
     "check:phase5:smoke": "node --test tests/contracts/phase5-gate.test.mjs",
     "check:phase5": "node scripts/check-phase5.mjs",
+    "check:phase6:smoke": "node --test tests/contracts/phase6-gate.test.mjs tests/contracts/phase1-boundary.test.mjs",
+    "check:phase6": "node scripts/check-phase6.mjs",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

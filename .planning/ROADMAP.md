@@ -16,7 +16,7 @@ FlowPDF progresses through nine dependency-ordered vertical capabilities. The ro
 - [ ] **Phase 3: Deterministic Reflow and Pagination** - Document edits reshape, fragment, and repaginate predictably with incremental/full equivalence.
 - [ ] **Phase 4: Owned PDF Preview and Export** - Users can preview and export selectable, reproducible PDFs and recover the exact owned source.
 - [x] **Phase 5: Semantic Fillable Forms** - Local implementation complete 2026-09-22; target-viewer and external form-import evidence remain explicit release inputs.
-- [ ] **Phase 6: Voice Dictation and Commands** - Users can dictate and invoke safe, undoable document commands through explicit voice modes.
+- [x] **Phase 6: Voice Dictation and Commands** - Users can dictate and invoke safe, undoable document commands through explicit voice modes. (local implementation complete 2026-09-22; speech-service and external AT evidence remain explicit release inputs)
 - [ ] **Phase 7: Secure PDF Reader and Scene** - Users can open the controlled PDF subset through a bounded parser and inspect supported page content and warnings.
 - [ ] **Phase 8: External Reconstruction and OCR** - Users can review and accept confidence-scored FlowDocument reconstruction while preserving the original and opaque content.
 - [ ] **Phase 9: Controlled Native PDF Editing** - Users can edit supported PDF scene islands, page objects, annotations and forms with secure rewrite/redaction behavior.
@@ -302,7 +302,7 @@ external form import remains outside the implemented local scope.
   4. Ambiguous or high-risk operations require the configured preview/confirmation and provide visible and accessible feedback.
   5. Stopping voice input ends microphone capture and default telemetry retains no raw audio or sensitive transcript text.
 
-**Plans**: 5/6 executed; 1 remaining
+**Plans**: 6/6 local plans executed; local gate passed; phase-level external evidence remains explicit release input
 
 - [x] 06-01-PLAN.md — Add the Rust-owned bounded voice-intent boundary.
 - [x] 06-02-PLAN.md — Route final dictation through one revision-safe
@@ -312,7 +312,14 @@ external form import remains outside the implemented local scope.
   history, and fields.
 - [x] 06-05-PLAN.md — Expose accessible voice controls, preview, confirmation,
   and feedback.
-- [ ] 06-06-PLAN.md — Close the voice phase with privacy and regression gates.
+- [x] 06-06-PLAN.md — Close the voice phase with privacy and regression gates.
+
+All six Phase 6 plans and the two-run local gate are complete. The typed Rust/
+WASM resolver, source-bound controller/form seams, ephemeral recognition,
+localized accessible controls, confirmation preview, and privacy boundary are
+covered locally. Real browser speech-service permission/recognition and
+external screen-reader observation remain unavailable and are not substituted
+by fake recognition or local DOM assertions; see `06-CLOSURE.md`.
 **UI hint**: yes
 
 ### Phase 7: Secure PDF Reader and Scene
