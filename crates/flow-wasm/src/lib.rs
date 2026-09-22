@@ -7,7 +7,7 @@ use flow_core::{
     AuditedRecoverResult, CommandKind, CreateSampleRequest, EditorSessionRequest,
     EditorSessionResponse, EditorViewDto, EditorViewRequest, FormSessionRequest,
     FormSessionResponse, MigrateDocumentRequest, MigrateDocumentResult, OperationResult,
-    PdfExportManifest, PdfExportOptions, PdfExportRequest, PdfFontManifestIdentity,
+    PdfExportManifest, PdfExportOptions, PdfExportRequest, PdfFontManifestIdentity, PdfFormPlan,
     PdfInternalLink, PdfMetadataOptions, PdfOutlineEntry, PdfPagePlan, PdfRecoveryExpectation,
     PdfReproducibilityInputs, PlanPersistenceCommitRequest, PlanStandaloneAuditRequest,
     RecoverRequest, RecoverResult, export_pdf as core_export_pdf,
@@ -53,6 +53,10 @@ struct PdfExportWireRequest {
     outlines: Vec<PdfOutlineEntry>,
     #[serde(default)]
     internal_links: Vec<PdfInternalLink>,
+    #[serde(default)]
+    form_plan: Option<PdfFormPlan>,
+    #[serde(default)]
+    flattened_field_ids: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -458,6 +462,9 @@ fn execute_pdf_export(request: PdfExportWireRequest) -> Result<PdfExportWireResu
     if request.pages.is_empty() {
         return Err("FLOW_PDF_PAGE_PLAN_EMPTY".to_owned());
     }
+    let form_plan = request.form_plan;
+    let flattened_field_ids = request.flattened_field_ids;
+    let canonical_json = request.canonical_json;
     let pages = request
         .pages
         .into_iter()
@@ -471,7 +478,7 @@ fn execute_pdf_export(request: PdfExportWireRequest) -> Result<PdfExportWireResu
         metadata: request.metadata.unwrap_or_default(),
         outlines: request.outlines,
         internal_links: request.internal_links,
-        flattened_field_ids: Vec::new(),
+        flattened_field_ids,
     };
     let inputs = PdfReproducibilityInputs {
         layout_result_hash: request.layout_result_hash,
@@ -488,8 +495,15 @@ fn execute_pdf_export(request: PdfExportWireRequest) -> Result<PdfExportWireResu
     )
     .map_err(|error| error.code().to_owned())?
     .with_reproducibility_inputs(inputs)
-    .map_err(|error| error.code().to_owned())?
-    .with_source_payload(request.canonical_json.into_bytes())
+    .map_err(|error| error.code().to_owned())?;
+    let request = if let Some(form_plan) = form_plan {
+        request
+            .with_form_plan(form_plan)
+            .map_err(|error| error.code().to_owned())?
+    } else {
+        request
+    }
+    .with_source_payload(canonical_json.into_bytes())
     .map_err(|error| error.code().to_owned())?;
     let result = core_export_pdf(&request).map_err(|error| error.code().to_owned())?;
     Ok(PdfExportWireResult {
