@@ -138,6 +138,10 @@ The current tree includes:
   `PdfFormPlan` with a Rust verifier; this transport is available to a later
   browser adapter, but browser-side projection and selection controls are not
   yet wired;
+- a typed revision-safe browser adapter and single-flight scheduler for that
+  projection endpoint, bound to the accepted layout result hash and optional
+  source session; it publishes only Rust-verified derived responses, while
+  browser overlays and selection/flattening controls are still not wired;
 - Phase 1 and Phase 2 foundation fixtures, Unicode 17 grapheme conformance
   data, dependency provenance checks, Rust tests, TypeScript checks, browser
   tests for the implemented foundation and Phase 3 layout path, and a Phase 4
@@ -165,12 +169,12 @@ things:
 - a bounded PDF reader, with selectable text, reproducibility evidence,
   explicit unsupported-content reporting, and an exact owned-source round trip
   when the source payload is available;
-- browser-side form projection and accessible selection controls over the new
-  verified Rust/WASM projection response, target-viewer behavior, and external
-  PDF form import; the core and Rust/WASM envelope can now explicitly flatten
-  selected accepted fields into derived page content while retaining
-  unselected widgets and the recoverable source, but this does not claim
-  general text/image flattening or target-viewer compatibility;
+- browser-side form projection overlays and accessible selection/flattening
+  controls over the new verified Rust/WASM projection response, target-viewer
+  behavior, and external PDF form import; the core and Rust/WASM envelope can
+  now explicitly flatten selected accepted fields into derived page content
+  while retaining unselected widgets and the recoverable source, but this does
+  not claim general text/image flattening or target-viewer compatibility;
 - voice dictation and commands through the same revision-checked transaction
   boundary;
 - controlled external-PDF reconstruction/OCR and later native editing of
@@ -322,7 +326,7 @@ Phase 3, Deterministic Reflow and Pagination, has completed its six local
 implementation plans and dual-run gate. Phase 4 has completed its six local
 implementation plans and dual-run local gate; its qpdf/Poppler/target-viewer
 reference rows remain unavailable, so the phase is not marked complete. Phase
-5 has fifteen completed local slices for validation/projection,
+5 has sixteen completed local slices for validation/projection,
 noncanonical fill state, effective-value projection, bounded AcroForm
 field/widget structure, the Rust/WASM plus guarded IndexedDB session boundary,
 accessible controls, descriptor configuration, safe anchor placement,
@@ -330,7 +334,8 @@ Rust-owned default text-field insertion, semantic field removal, and canonical
 tab-order authoring, bounded derived AcroForm appearance resources and state
 streams, explicit core export-time flattening of selected fields, and the
 source-bound Rust/WASM form-plan/selection and display-list-backed projection
-envelopes. Browser-side projection and flattening controls, target-viewer
+envelopes, plus a typed revision-safe browser projection adapter/scheduler.
+Browser-side projection overlays, selection/flattening controls, target-viewer
 behavior, and external form import remain unimplemented; the current
 implementation still makes no claim of complete Unicode/PDF compatibility,
 commercial-SDK parity, or production readiness.
