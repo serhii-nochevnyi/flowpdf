@@ -1,14 +1,14 @@
 ---
 gsd_state_version: "1.0"
 milestone: v1.0
-current_phase: 7
-current_phase_name: Secure PDF Reader and Scene
-status: complete
-stopped_at: Phase 7 Plan 07-04 complete locally; next Phase 8 requires explicit reconstruction/OCR planning while external PDF/reference and AT checkpoints remain release inputs
-last_updated: "2026-09-22T18:30:00Z"
+current_phase: 8
+current_phase_name: External Reconstruction and OCR
+status: executing
+stopped_at: Phase 8 planning complete; next Phase 8 Plan 08-01 builds the Rust-owned bounded reconstruction candidate while external OCR/reference/AT inputs remain release evidence
+last_updated: "2026-09-22T19:25:00Z"
 last_activity: 2026-09-22
-last_activity_desc: Completed Phase 7 Plan 07-04 with the two-pass local gate contract, refreshed derived evidence, and honest controlled-subset closure
-state_head: 07
+last_activity_desc: Planned Phase 8 bounded reconstruction, immutable source, opaque-island, OCR-adapter, comparison, and gate slices
+state_head: 08
 progress:
   total_phases: 9
   completed_phases: 1
@@ -24,16 +24,16 @@ milestone_name: milestone
 See: .planning/PROJECT.md (updated 2026-08-25)
 
 **Core value:** A user can edit semantic document text naturally, repaginate following content, and export a visually consistent, selectable, form-capable PDF.
-**Current focus:** Phase 7 — Secure PDF Reader and Scene (complete locally; Phase 8 planning is next, with external PDF/reference and AT inputs preserved)
+**Current focus:** Phase 8 — External Reconstruction and OCR (planning complete; executing bounded reconstruction with external OCR/reference and AT inputs preserved)
 
 ## Current Position
 
-Phase: 7 (Secure PDF Reader and Scene) — COMPLETE LOCALLY
-Plan: Phase 7 Plan 07-04 — run local gates and close evidence honestly
-Status: The bounded reader, fixed-point scene, verified Rust/WASM boundary, dedicated worker, report-first panel, full local Rust/WASM suites, and retained Phase 4–6 regression chain are complete for the controlled subset. Real browser speech-service behavior, target-viewer AcroForm behavior, external form/PDF reference evidence, Phase 7 qpdf/Poppler/target-viewer rows, and inherited Phase 2/3 Edge/Windows screen-reader evidence remain explicitly unavailable/outstanding; see `07-CLOSURE.md`, `06-CLOSURE.md`, and `05-CLOSURE.md`.
-Last activity: 2026-09-22 — Phase 7 Plan 07-04 completed locally; Phase 8 planning is next
+Phase: 8 (External Reconstruction and OCR) — EXECUTING
+Plan: Phase 8 Plan 08-01 — build the Rust-owned bounded reconstruction candidate
+Status: Phase 7 remains locally complete for the controlled reader subset. Phase 8 now owns confidence-scored single-column reconstruction, immutable source retention, opaque-island preservation, OCR adapter review, and side-by-side acceptance. External OCR provider, qpdf/Poppler, target-viewer, and AT evidence remain explicitly unavailable/outstanding.
+Last activity: 2026-09-22 — Phase 8 planning complete; Plan 08-01 next
 
-Progress: Phase 2 — 18/18 implementation plans complete; Phase 3 — 6/6 local implementation plans executed; Phase 4 — 6/6 plans executed; Phase 5 — 26/26 local plans executed and locally gated, with target-viewer/import evidence explicitly pending; Phase 6 — 6/6 local plans executed and gated, with speech-service and external AT evidence explicitly pending; Phase 7 — 4/4 plans executed and complete locally for the controlled reader subset, with qpdf/Poppler/target-viewer/AT evidence explicitly unavailable. Phase 2/3 phase-level closure remains honest about inherited external AT evidence, and Phase 4/5 remain open for unavailable external PDF/reference evidence.
+Progress: Phase 2 — 18/18 implementation plans complete; Phase 3 — 6/6 local implementation plans executed; Phase 4 — 6/6 plans executed; Phase 5 — 26/26 local plans executed and locally gated, with target-viewer/import evidence explicitly pending; Phase 6 — 6/6 local plans executed and gated, with speech-service and external AT evidence explicitly pending; Phase 7 — 4/4 plans executed and complete locally for the controlled reader subset, with qpdf/Poppler/target-viewer/AT evidence explicitly unavailable; Phase 8 — 0/4 plans executed, planning complete and implementation starting. Phase 2/3 phase-level closure remains honest about inherited external AT evidence, and Phase 4/5 remain open for unavailable external PDF/reference evidence.
 
 ## Performance Metrics
 

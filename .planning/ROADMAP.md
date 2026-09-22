@@ -18,7 +18,7 @@ FlowPDF progresses through nine dependency-ordered vertical capabilities. The ro
 - [x] **Phase 5: Semantic Fillable Forms** - Local implementation complete 2026-09-22; target-viewer and external form-import evidence remain explicit release inputs.
 - [x] **Phase 6: Voice Dictation and Commands** - Users can dictate and invoke safe, undoable document commands through explicit voice modes. (local implementation complete 2026-09-22; speech-service and external AT evidence remain explicit release inputs)
 - [x] **Phase 7: Secure PDF Reader and Scene** - Users can open the controlled PDF subset through a bounded parser and inspect supported page content and warnings. (local implementation complete 2026-09-22; external reference/AT evidence remains an explicit release input)
-- [ ] **Phase 8: External Reconstruction and OCR** - Users can review and accept confidence-scored FlowDocument reconstruction while preserving the original and opaque content.
+- [ ] **Phase 8: External Reconstruction and OCR** - Users can review and accept confidence-scored FlowDocument reconstruction while preserving the original and opaque content. (planning complete; execution started 2026-09-22)
 - [ ] **Phase 9: Controlled Native PDF Editing** - Users can edit supported PDF scene islands, page objects, annotations and forms with secure rewrite/redaction behavior.
 
 ## Phase Details
@@ -363,7 +363,7 @@ represented as local compatibility or accessibility passes.
   3. User can compare original and reconstructed documents side by side and review OCR or semantic uncertainty before accepting it.
   4. The original PDF remains immutable and the UI never labels lossy reconstruction as exact.
 
-**Plans**: TBD
+**Plans**: 4 planned; execution in progress
 **UI hint**: yes
 
 ### Phase 9: Controlled Native PDF Editing
@@ -395,5 +395,5 @@ represented as local compatibility or accessibility passes.
 | 5. Semantic Fillable Forms | 26/26 executed | Complete locally (release evidence pending) | 2026-09-22 |
 | 6. Voice Dictation and Commands | 6/6 executed | Complete locally (release evidence pending) | 2026-09-22 |
 | 7. Secure PDF Reader and Scene | 4/4 | Complete locally (release evidence pending) | 2026-09-22 |
-| 8. External Reconstruction and OCR | 0/TBD | Not started | - |
+| 8. External Reconstruction and OCR | 0/4 | In Progress (bounded reconstruction/OCR adapter) |  |
 | 9. Controlled Native PDF Editing | 0/TBD | Not started | - |
