@@ -1,7 +1,7 @@
 {
   "formatVersion": 1,
   "phase": "FLOWPDF-02-accessible-rich-text-editing",
-  "mutationCount": 34,
+  "mutationCount": 35,
   "commands": [
     {
       "family": "insertText",
@@ -681,6 +681,26 @@
       "futureVoice": {
         "intent": "editor.intent.setField",
         "commandType": "setField"
+      }
+    },
+    {
+      "family": "removeField",
+      "commandType": "removeField",
+      "intent": "editor.intent.removeField",
+      "risk": "destructive",
+      "confirmation": "explicit",
+      "undo": "reversible",
+      "visible": {
+        "labelKey": "editor.parity.visible.removeField",
+        "route": "editor.fields"
+      },
+      "keyboard": {
+        "labelKey": "editor.parity.keyboard.removeField",
+        "route": "keyboard.deleteField"
+      },
+      "futureVoice": {
+        "intent": "editor.intent.removeField",
+        "commandType": "removeField"
       }
     }
   ]

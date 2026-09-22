@@ -183,6 +183,10 @@ pub enum CommandKind {
         field_id: FieldId,
         field: FieldDescriptor,
     },
+    RemoveField {
+        field_id: FieldId,
+        confirmed: bool,
+    },
     Batch {
         mutations: Vec<Mutation>,
     },
@@ -326,6 +330,10 @@ pub enum Mutation {
     SetField {
         field_id: FieldId,
         field: FieldDescriptor,
+    },
+    RemoveField {
+        field_id: FieldId,
+        confirmed: bool,
     },
 }
 
@@ -1292,6 +1300,13 @@ fn command_mutations(kind: &CommandKind) -> Result<Vec<Mutation>, CommandError> 
         CommandKind::InsertField { field } => Ok(vec![Mutation::InsertField {
             field: field.clone(),
         }]),
+        CommandKind::RemoveField {
+            field_id,
+            confirmed,
+        } => Ok(vec![Mutation::RemoveField {
+            field_id: field_id.clone(),
+            confirmed: *confirmed,
+        }]),
         CommandKind::Undo | CommandKind::Redo => Err(CommandError::BrokenInvariant),
     }
 }
@@ -1540,6 +1555,31 @@ fn derive_operation(
                     index,
                     expected_field: Box::new(field.clone()),
                     field: Box::new(current.clone()),
+                },
+            ))
+        }
+        Mutation::RemoveField {
+            field_id,
+            confirmed,
+        } => {
+            if !confirmed {
+                return Err(CommandError::ConfirmationRequired);
+            }
+            let (index, field) = document
+                .fields
+                .iter()
+                .enumerate()
+                .find(|(_, current)| current.id == *field_id)
+                .ok_or(CommandError::InvalidTarget)?;
+            let index = u32::try_from(index).map_err(|_| CommandError::InvalidRange)?;
+            Ok((
+                Operation::RemoveField {
+                    index,
+                    field: Box::new(field.clone()),
+                },
+                Operation::InsertField {
+                    index,
+                    field: Box::new(field.clone()),
                 },
             ))
         }
@@ -4761,7 +4801,7 @@ fn apply_operation(
         }
         Operation::InsertField { index, field } => {
             let index = usize::try_from(*index).map_err(|_| CommandError::InvalidRange)?;
-            if index != document.fields.len()
+            if index > document.fields.len()
                 || document.fields.iter().any(|current| current.id == field.id)
             {
                 return Err(CommandError::HistoryConflict);
@@ -4902,6 +4942,7 @@ fn command_type(kind: &CommandKind) -> &'static str {
         CommandKind::RemoveTable { .. } => "removeTable",
         CommandKind::InsertField { .. } => "insertField",
         CommandKind::SetField { .. } => "setField",
+        CommandKind::RemoveField { .. } => "removeField",
         CommandKind::Batch { .. } => "batch",
         CommandKind::Undo => "undo",
         CommandKind::Redo => "redo",

@@ -1,4 +1,4 @@
-import { useEffect, useState, type FormEvent } from 'react'
+import { useEffect, useRef, useState, type FormEvent } from 'react'
 
 import type {
   EditorFieldReviewDto,
@@ -157,11 +157,18 @@ function FieldCard({
         {labels.fieldReadOnly}: {booleanLabel(field.descriptor.readOnly, locale)}
       </p>
       {controller === undefined ? null : (
-        <FieldDescriptorEditor
-          field={field.descriptor}
-          locale={locale}
-          controller={controller}
-        />
+        <>
+          <FieldRemovalAction
+            fieldId={field.descriptor.id}
+            locale={locale}
+            controller={controller}
+          />
+          <FieldDescriptorEditor
+            field={field.descriptor}
+            locale={locale}
+            controller={controller}
+          />
+        </>
       )}
       {formSession === undefined ? null : (
         <FieldControl
@@ -176,6 +183,91 @@ function FieldCard({
         />
       )}
     </article>
+  )
+}
+
+function FieldRemovalAction({
+  fieldId,
+  locale,
+  controller,
+}: {
+  readonly fieldId: string
+  readonly locale: EditorLocale
+  readonly controller: InputCommandTarget
+}) {
+  const labels = editorMessages[locale]
+  const [open, setOpen] = useState(false)
+  const cancelRef = useRef<HTMLButtonElement>(null)
+  const busy = controller.snapshot().phase === 'pending'
+
+  useEffect(() => {
+    if (open) cancelRef.current?.focus()
+  }, [open])
+
+  const focusEditor = (): void => {
+    document.querySelector<HTMLTextAreaElement>('[data-editor-input-host]')?.focus()
+  }
+  const close = (): void => {
+    setOpen(false)
+    focusEditor()
+  }
+  const confirm = (): void => {
+    setOpen(false)
+    void controller
+      .structuralCommand({ type: 'removeField', fieldId, confirmed: true }, 'ui')
+      .finally(focusEditor)
+  }
+
+  return (
+    <div className="editor-field-actions" data-field-actions="">
+      <button
+        type="button"
+        className="editor-destructive-action"
+        data-action="editor-field-remove"
+        disabled={busy}
+        onMouseDown={(event) => event.preventDefault()}
+        onClick={() => setOpen(true)}
+      >
+        {labels.fieldRemove}
+      </button>
+      {open ? (
+        <dialog
+          open
+          role="alertdialog"
+          aria-modal="true"
+          aria-labelledby={`flowpdf-field-remove-heading-${fieldId}`}
+          aria-describedby={`flowpdf-field-remove-description-${fieldId}`}
+          className="editor-dialog editor-confirm-dialog"
+          data-field-remove-dialog=""
+          onKeyDown={(event) => {
+            if (event.key !== 'Escape') return
+            event.preventDefault()
+            close()
+          }}
+        >
+          <h2 id={`flowpdf-field-remove-heading-${fieldId}`}>{labels.fieldRemoveHeading}</h2>
+          <p id={`flowpdf-field-remove-description-${fieldId}`}>{labels.fieldRemoveBody}</p>
+          <div className="editor-dialog-actions">
+            <button
+              ref={cancelRef}
+              type="button"
+              data-action="editor-field-remove-cancel"
+              onClick={close}
+            >
+              {labels.fieldRemoveCancel}
+            </button>
+            <button
+              type="button"
+              className="editor-destructive-action"
+              data-action="editor-field-remove-confirm"
+              onClick={confirm}
+            >
+              {labels.fieldRemoveConfirm}
+            </button>
+          </div>
+        </dialog>
+      ) : null}
+    </div>
   )
 }
 

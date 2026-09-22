@@ -46,10 +46,11 @@ pub enum MutationFamily {
     RemoveTable,
     InsertField,
     SetField,
+    RemoveField,
 }
 
 impl MutationFamily {
-    pub const ALL: [Self; 34] = [
+    pub const ALL: [Self; 35] = [
         Self::InsertText,
         Self::ReplaceText,
         Self::ReplaceSelection,
@@ -84,6 +85,7 @@ impl MutationFamily {
         Self::RemoveTable,
         Self::InsertField,
         Self::SetField,
+        Self::RemoveField,
     ];
 
     #[must_use]
@@ -123,6 +125,7 @@ impl MutationFamily {
             Self::RemoveTable => "removeTable",
             Self::InsertField => "insertField",
             Self::SetField => "setField",
+            Self::RemoveField => "removeField",
         }
     }
 
@@ -163,6 +166,7 @@ impl MutationFamily {
             Mutation::RemoveTable { .. } => Self::RemoveTable,
             Mutation::InsertField { .. } => Self::InsertField,
             Mutation::SetField { .. } => Self::SetField,
+            Mutation::RemoveField { .. } => Self::RemoveField,
         }
     }
 
@@ -203,6 +207,7 @@ impl MutationFamily {
             CommandKind::RemoveTable { .. } => Some(Self::RemoveTable),
             CommandKind::InsertField { .. } => Some(Self::InsertField),
             CommandKind::SetField { .. } => Some(Self::SetField),
+            CommandKind::RemoveField { .. } => Some(Self::RemoveField),
             CommandKind::Batch { .. } | CommandKind::Undo | CommandKind::Redo => None,
         }
     }
@@ -304,7 +309,7 @@ const fn capability(
     }
 }
 
-pub static COMMAND_CAPABILITIES: [CommandCapability; 34] = [
+pub static COMMAND_CAPABILITIES: [CommandCapability; 35] = [
     capability(
         MutationFamily::InsertText,
         "editor.intent.insertText",
@@ -645,6 +650,16 @@ pub static COMMAND_CAPABILITIES: [CommandCapability; 34] = [
         "editor.parity.keyboard.setField",
         "keyboard.fieldReview",
     ),
+    capability(
+        MutationFamily::RemoveField,
+        "editor.intent.removeField",
+        RiskLevel::Destructive,
+        ConfirmationPolicy::Explicit,
+        "editor.parity.visible.removeField",
+        "editor.fields",
+        "editor.parity.keyboard.removeField",
+        "keyboard.deleteField",
+    ),
 ];
 
 #[must_use]
@@ -728,5 +743,6 @@ const fn family_index(family: MutationFamily) -> usize {
         MutationFamily::RemoveTable => 31,
         MutationFamily::InsertField => 32,
         MutationFamily::SetField => 33,
+        MutationFamily::RemoveField => 34,
     }
 }

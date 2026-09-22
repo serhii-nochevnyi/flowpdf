@@ -47,7 +47,7 @@
       },
       {
         "path": "crates/flow-core/src/audit/mod.rs",
-        "sha256": "sha256:7343e5176c9491104ce6577ae14f351ab3c34916f272d7290c88c6616872aa59"
+        "sha256": "sha256:da0669a1257253e358b67148ae5daa30ea7eb427220c7a1ba2128f9481c8363a"
       },
       {
         "path": "crates/flow-core/src/canonical/mod.rs",
@@ -55,7 +55,7 @@
       },
       {
         "path": "crates/flow-core/src/capability/mod.rs",
-        "sha256": "sha256:d67734f4063b5b16000d837bb33fb59b5599a0bb0699702c8fd2dc65852eb71b"
+        "sha256": "sha256:34416b5b5b88dc4435e32dd43420586d7e5d7dcdef473a6ad71e877782f3774a"
       },
       {
         "path": "crates/flow-core/src/editor_view/mod.rs",
@@ -75,7 +75,7 @@
       },
       {
         "path": "crates/flow-core/src/lib.rs",
-        "sha256": "sha256:1e0b89926cd404df4abeaa0d5767623318801d655d1e144f79f1eed91010985a"
+        "sha256": "sha256:838c88f18b00883f222585591f20d803612f1d4c5eff6704c39cfa04cf34d571"
       },
       {
         "path": "crates/flow-core/src/model/mod.rs",
@@ -135,7 +135,7 @@
       },
       {
         "path": "crates/flow-core/src/transaction/mod.rs",
-        "sha256": "sha256:44fe98168c69a36ac212ab306179ce776622f68db64d6a9a2889170918d297b7"
+        "sha256": "sha256:f4a95412d4c663a8f4c2efe07325e82643093a071557f1cb58d6614365fbb8c8"
       },
       {
         "path": "crates/flow-wasm/Cargo.toml",
@@ -162,7 +162,7 @@
         "sha256": "sha256:b463785a7146dfcc598ceac280c04febf6f90677369253acbc50ea44f18440d3"
       }
     ],
-    "digest": "sha256:125c4de678d7aea8b927be3503e748a3fbd80470b4ae092127e0a195b6c0d2bd"
+    "digest": "sha256:d0d888b2ed848d9e5b70ac1be69440de610f43284d9a62caee56231ebec0ca98"
   },
   "toolchain": {
     "cargoVersion": "cargo 1.97.1 (c980f4866 2026-06-30)",
@@ -230,21 +230,21 @@
   },
   "baseline": {
     "label": "phase2-production",
-    "rawBytes": 5251757,
-    "gzipBytes": 1289240,
-    "sha256": "sha256:99c423f0945ea89a7ff3e7572bb1bdc7617f18b560af41a430ae827c0b0645ae",
-    "gzipSha256": "sha256:aeced90d02f2bf21aecac0ac11885e91c4c8a197a90ffcfc575ec056d3456c18"
+    "rawBytes": 5266493,
+    "gzipBytes": 1290964,
+    "sha256": "sha256:a41753c1e35fb41e57dd1045587318dcf83df632a45e6d046fa0b1684d044487",
+    "gzipSha256": "sha256:4a3f37b86e8934b5c683e8c1ac1853470f4dbb431c10f36945e34c4b90682b2d"
   },
   "candidate": {
     "label": "phase2-production-with-icu-probe",
-    "rawBytes": 5264446,
-    "gzipBytes": 1292940,
-    "sha256": "sha256:a1a9af650b22c545f813024d9330f94a515c8cc463298fa6308355457eaebeb3",
-    "gzipSha256": "sha256:ad8dc593a607045b0ca4df251c2608e5445f26cfcef2e43c9652dc85c3ea8055"
+    "rawBytes": 5279182,
+    "gzipBytes": 1295386,
+    "sha256": "sha256:b97bce2dfe3696f68e8ede687f6124c766f9b4e7935cb1b4fab82e1285e4cf96",
+    "gzipSha256": "sha256:7410773c85ee88d3ef622a5323f7535ebf8c61e2e0483bfc2ac26f1dcce0b2e7"
   },
   "delta": {
     "rawBytes": 12689,
-    "gzipBytes": 3700
+    "gzipBytes": 4422
   },
   "passed": true,
   "blocked": false

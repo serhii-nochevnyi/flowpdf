@@ -120,6 +120,11 @@ export type StructuralCommandDto =
       readonly field: FieldDescriptorDto
     }
   | {
+      readonly type: 'removeField'
+      readonly fieldId: string
+      readonly confirmed: boolean
+    }
+  | {
       readonly type: 'insertImage'
       readonly placement: StructuralPlacementDto
       readonly sessionId: string

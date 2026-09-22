@@ -344,4 +344,91 @@ for (const locale of ['uk', 'en'] as const) {
       beforeNoOp.editor.view.document.fields.length,
     )
   })
+
+  test(`field removal is confirmed, reversible, and source-bound in ${locale}`, async () => {
+    const { root, controller } = await openFormEditor(locale)
+    const initial = controller.snapshot().accepted
+    if (initial === null) throw new Error('accepted editor state is required')
+    const textField = initial.editor.view.document.fields.find(
+      (field) => field.descriptor.kind.type === 'text',
+    )
+    if (textField === undefined) throw new Error('text field is required')
+    const card = root.querySelector<HTMLElement>(`[data-field-id="${textField.descriptor.id}"]`)
+    const text = card?.querySelector<HTMLInputElement>('[data-form-control-kind="text"] input')
+    const remove = card?.querySelector<HTMLButtonElement>('[data-action="editor-field-remove"]')
+    if (
+      card === null ||
+      card === undefined ||
+      text === null ||
+      text === undefined ||
+      remove === null ||
+      remove === undefined
+    ) {
+      throw new Error('field removal controls are required')
+    }
+
+    setInputValue(text, 'Перед видаленням')
+    for (let attempt = 0; attempt < 40 && text.value !== 'Перед видаленням'; attempt += 1) {
+      await settle(controller)
+    }
+    expect(text.value).toBe('Перед видаленням')
+    await settleForm(root, controller)
+    const beforeRemoval = controller.snapshot().accepted
+    if (beforeRemoval === null) throw new Error('accepted pre-removal state is required')
+
+    remove.click()
+    await settle(controller)
+    const dialog = root.querySelector<HTMLDialogElement>('[data-field-remove-dialog]')
+    expect(dialog?.getAttribute('role')).toBe('alertdialog')
+    expect(dialog?.textContent).toContain(locale === 'uk' ? 'Видалити поле?' : 'Remove field?')
+
+    dialog
+      ?.querySelector<HTMLButtonElement>('[data-action="editor-field-remove-cancel"]')
+      ?.click()
+    await settle(controller)
+    expect(controller.snapshot().accepted?.session.revision).toBe(beforeRemoval.session.revision)
+    expect(root.querySelector(`[data-field-id="${textField.descriptor.id}"]`)).not.toBeNull()
+
+    root
+      .querySelector<HTMLButtonElement>(
+        `[data-field-id="${textField.descriptor.id}"] [data-action="editor-field-remove"]`,
+      )
+      ?.click()
+    await settle(controller)
+    root.querySelector<HTMLButtonElement>('[data-action="editor-field-remove-confirm"]')?.click()
+    await settle(controller)
+    await settleForm(root, controller)
+
+    const removed = controller.snapshot().accepted
+    if (removed === null) throw new Error('accepted removed state is required')
+    expect(removed.session.revision).toBe(beforeRemoval.session.revision + 1)
+    expect(removed.editor.view.document.fields).toHaveLength(
+      beforeRemoval.editor.view.document.fields.length - 1,
+    )
+    expect(root.querySelector(`[data-field-id="${textField.descriptor.id}"]`)).toBeNull()
+
+    await controller.undo()
+    await settle(controller)
+    await settleForm(root, controller)
+    const restored = controller.snapshot().accepted
+    if (restored === null) throw new Error('accepted restored state is required')
+    expect(
+      restored.editor.view.document.fields.some(
+        (field) => field.descriptor.id === textField.descriptor.id,
+      ),
+    ).toBe(true)
+    expect(
+      root.querySelector<HTMLInputElement>(
+        `[data-field-id="${textField.descriptor.id}"] [data-form-control-kind="text"] input`,
+      )?.value,
+    ).toBe('Тест')
+
+    await controller.redo()
+    await settle(controller)
+    await settleForm(root, controller)
+    expect(controller.snapshot().accepted?.editor.view.document.fields).toHaveLength(
+      beforeRemoval.editor.view.document.fields.length - 1,
+    )
+    expect(root.querySelector(`[data-field-id="${textField.descriptor.id}"]`)).toBeNull()
+  })
 }

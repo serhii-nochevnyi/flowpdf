@@ -30,7 +30,7 @@ test('direct Vitest validation steps use the checked-in Playwright browser cache
 test('Phase 2 gate preflight retains exact coverage and honest external status', () => {
   assert.deepEqual(phaseTwoCoverageSummary, {
     requirements: '7/7',
-    edges: '34/34',
+    edges: '35/35',
     ui: '108/108/0/0/0',
     prohibitions: '3/3 flagged',
     externalAt: 'unavailable/outstanding',
