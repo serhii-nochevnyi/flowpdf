@@ -163,6 +163,8 @@ The current tree includes:
 - a `createWasmPdfExportScheduler` composition helper that joins the existing
   Rust-verifying WASM adapter to the revision-aware scheduler while preserving
   caller-owned worker and font-catalog decisions;
+- unit evidence for the closed PDF worker scope message loop, including
+  accepted-result and cooperative-cancellation routing without stale publish;
 - Phase 1 and Phase 2 foundation fixtures, Unicode 17 grapheme conformance
   data, dependency provenance checks, Rust tests, TypeScript checks, browser
   tests for the implemented foundation and Phase 3 layout path, and a Phase 4
@@ -370,6 +372,8 @@ The editor shell exposes the same caller-owned controller dependencies through
 workers or font catalogs.
 The generated-WASM smoke now crosses the complete request-builder,
 WASM-adapter, scheduler, and accepted-result path through this helper.
+The worker message loop is covered separately with a fake scope; it is not yet
+connected to the active application entry.
 The latest slice also verifies an ordinary request against the generated
 Rust/WASM `export_pdf` and response verifier.
 Target-viewer behavior and external form import remain unimplemented; the

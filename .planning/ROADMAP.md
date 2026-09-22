@@ -171,7 +171,7 @@ compatibility, and general PDF import remain unclaimed.
   4. Exported fields and appearance states behave consistently in the target viewer matrix.
   5. Flattening is explicit, selected, validated and never silently replaces the editable source.
 
-**Plans**: 24/24 local plans executed; phase-level closure remains open
+**Plans**: 25/25 local plans executed; phase-level closure remains open
 
 - [x] 05-01-PLAN.md — Add Rust-owned field-value validation and deterministic
   display-list anchor-to-widget projection with explicit review paths.
@@ -222,8 +222,10 @@ compatibility, and general PDF import remain unclaimed.
   editor shell boundary.
 - [x] 05-24-PLAN.md — Compose the WASM PDF engine and scheduler at one
   caller-owned seam.
+- [x] 05-25-PLAN.md — Verify the PDF worker message loop at its scope
+  boundary.
 
-The twenty-four Phase 5 slices validate the existing semantic field vocabulary,
+The twenty-five Phase 5 slices validate the existing semantic field vocabulary,
 derive revision/hash-bound fixed-point widget projections, keep explicit
 noncanonical fill overrides separate from authored defaults through to the
 derived widget, emit bounded AcroForm field/widget dictionaries from an
@@ -273,6 +275,8 @@ production workers or font catalogs.
 The WASM composition slice adds a small helper that joins the existing
 Rust-verifying adapter to the revision-aware scheduler, and the generated-WASM
 smoke now covers the complete request-to-accepted-result path.
+The worker-boundary slice verifies accepted and cooperative-cancelled outbound
+messages with a fake scope without activating a production worker entry.
 **UI hint**: yes
 
 ### Phase 6: Voice Dictation and Commands
@@ -351,7 +355,7 @@ smoke now covers the complete request-to-accepted-result path.
 | 2. Accessible Rich-Text Editing | 18/18 | In Progress (external AT checkpoint) |  |
 | 3. Deterministic Reflow and Pagination | 6/6 | In Progress (external AT checkpoint) |  |
 | 4. Owned PDF Preview and Export | 6/6 | In Progress (reference evidence unavailable) |  |
-| 5. Semantic Fillable Forms | 24/24 executed | In Progress (target-viewer/import evidence) |  |
+| 5. Semantic Fillable Forms | 25/25 executed | In Progress (target-viewer/import evidence) |  |
 | 6. Voice Dictation and Commands | 0/TBD | Not started | - |
 | 7. Secure PDF Reader and Scene | 0/TBD | Not started | - |
 | 8. External Reconstruction and OCR | 0/TBD | Not started | - |
