@@ -19,6 +19,7 @@ import {
   type PdfExportRequestDto,
   type PdfExportWorkerResultDto,
 } from '../src/pdf/pdf-protocol.js'
+import { createPdfExportRequest } from '../src/pdf/pdf-request.js'
 import { RevisionAwarePdfExportScheduler } from '../src/pdf/pdf-worker.js'
 
 test('PDF preview stays visual-only, searchable, virtualized, and revision-safe', async () => {
@@ -70,26 +71,12 @@ test('PDF preview stays visual-only, searchable, virtualized, and revision-safe'
         }
       },
       pdfExportScheduler: pdfScheduler,
-      pdfExportRequestFactory: (accepted, layout) => {
-        const request: PdfExportRequestDto = {
-          protocolVersion: PDF_PROTOCOL_VERSION,
+      pdfExportRequestFactory: (accepted, layout, formSelection) => {
+        const request = createPdfExportRequest(accepted, layout, {
           requestId: `browser-pdf-${++pdfRequestNumber}`,
-          sourceRevision: accepted.session.revision,
-          sourceHash: accepted.session.canonicalHash,
-          layoutSettingsFingerprint:
-            layout.request.expectedLayoutSettingsFingerprint ?? 'browser-settings',
-          layoutResultHash: layout.result.resultHash,
-          serializedRequest: JSON.stringify({
-            protocolVersion: PDF_PROTOCOL_VERSION,
-            requestId: `browser-pdf-${pdfRequestNumber}`,
-            sourceRevision: accepted.session.revision,
-            sourceHash: accepted.session.canonicalHash,
-            layoutSettingsFingerprint: 'browser-settings',
-            layoutResultHash: layout.result.resultHash,
-            canonicalJson: accepted.session.canonicalJson,
-            pages: layout.result.pages.map((pageValue) => ({ bounds: pageValue.bounds })),
-          }),
-        }
+          formSelection,
+        })
+        if (request === null) throw new Error('PDF request is required')
         lastPdfRequest = request
         return request
       },
