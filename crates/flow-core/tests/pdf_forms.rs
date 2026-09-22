@@ -1,6 +1,6 @@
 use flow_core::{
-    FormSessionState, PdfError, PdfFormError, PdfFormPlan, PdfPagePlan, PdfSupportReport,
-    build_display_list, build_pdf_form_plan,
+    FormSessionState, FormValueErrorCode, PdfError, PdfFormError, PdfFormPlan, PdfPagePlan,
+    PdfSupportReport, build_display_list, build_pdf_form_plan,
     canonical::{canonical_bytes, canonical_hash},
     export_pdf,
     layout::{FontCatalog, FontFace, LayoutUnit, PaginationRequest},
@@ -168,7 +168,16 @@ fn form_plan_maps_all_current_field_kinds_and_export_is_deterministic() {
     assert!(pdf.contains("/FT"));
     assert!(pdf.contains("/T"));
     assert!(pdf.contains("sample-name"));
-    assert!(!pdf.contains("/AP"));
+    assert_eq!(pdf.matches("/AP").count(), 6);
+    assert!(pdf.contains("/NeedAppearances false"));
+    assert!(pdf.contains("/DA"));
+    assert!(pdf.contains("/DR"));
+    assert!(pdf.contains("/Subtype /Form"));
+    assert!(pdf.contains("/BaseFont /Helvetica"));
+    assert!(pdf.contains("/Off"));
+    assert!(pdf.contains("/Yes"));
+    assert!(pdf.contains("/flow-option-"));
+    assert!(pdf.contains("<FEFF"));
 }
 
 #[test]
@@ -249,6 +258,17 @@ fn form_export_rejects_review_mismatch_and_page_geometry_before_publish() {
     assert_eq!(
         bare_request(&document, 1).with_form_plan(forged),
         Err(PdfError::Forms(PdfFormError::Serialization))
+    );
+
+    let mut oversized = valid_plan.clone();
+    oversized.fields[0].value = flow_core::PdfFormValue::Text {
+        value: "x".repeat(64 * 1024 + 1),
+    };
+    assert_eq!(
+        bare_request(&document, 1).with_form_plan(rehash_plan(oversized)),
+        Err(PdfError::Forms(PdfFormError::InvalidValue(
+            FormValueErrorCode::TextSizeLimit,
+        )))
     );
 
     let mut too_many_fields = valid_plan.clone();

@@ -35,6 +35,8 @@ const FIELD_FLAG_RADIO: u32 = 1 << 15;
 const FIELD_FLAG_PUSH_BUTTON: u32 = 1 << 16;
 const FIELD_FLAG_COMBO: u32 = 1 << 17;
 const FIELD_FLAG_MULTI_SELECT: u32 = 1 << 20;
+const APPEARANCE_FONT_RESOURCE: &str = "Helv";
+const APPEARANCE_FONT_SIZE: &str = "10";
 
 /// The PDF field type emitted by the bounded form adapter.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
@@ -319,6 +321,8 @@ pub(crate) fn validate_pdf_form_plan(plan: &PdfFormPlan) -> Result<(), PdfFormEr
         }
         validate_pdf_value(field.field_type, &field.default_value)?;
         validate_pdf_value(field.field_type, &field.value)?;
+        validate_admitted_value(field, &field.default_value)?;
+        validate_admitted_value(field, &field.value)?;
     }
     if tab_orders.len() != plan.fields.len()
         || !(0..u32::try_from(plan.fields.len()).map_err(|_| PdfFormError::FieldLimit)?)
@@ -385,6 +389,47 @@ fn validate_pdf_value(
             Ok(())
         }
     }
+}
+
+fn validate_admitted_value(field: &PdfFormField, value: &PdfFormValue) -> Result<(), PdfFormError> {
+    let unsupported = || PdfFormError::InvalidValue(FormValueErrorCode::OptionSetInvalid);
+    match field.field_type {
+        PdfFormFieldType::Button if field.flags & FIELD_FLAG_PUSH_BUTTON != 0 => {
+            if !matches!(value, PdfFormValue::Empty) {
+                return Err(unsupported());
+            }
+        }
+        PdfFormFieldType::Button if field.flags & FIELD_FLAG_RADIO != 0 => {
+            if let PdfFormValue::Name { value } = value
+                && !field.options.iter().any(|option| option.name == *value)
+            {
+                return Err(unsupported());
+            }
+        }
+        PdfFormFieldType::Button => {
+            if !matches!(value, PdfFormValue::Name { value } if value == "Off" || value == "Yes") {
+                return Err(unsupported());
+            }
+        }
+        PdfFormFieldType::Choice => match value {
+            PdfFormValue::Name { value } => {
+                if !field.options.iter().any(|option| option.name == *value) {
+                    return Err(unsupported());
+                }
+            }
+            PdfFormValue::Names { values } => {
+                if values
+                    .iter()
+                    .any(|value| !field.options.iter().any(|option| option.name == *value))
+                {
+                    return Err(unsupported());
+                }
+            }
+            PdfFormValue::Empty | PdfFormValue::Text { .. } => {}
+        },
+        PdfFormFieldType::Text | PdfFormFieldType::Signature => {}
+    }
+    Ok(())
 }
 
 fn field_type_and_options(
@@ -509,6 +554,7 @@ pub(crate) fn emit_form_objects(
     let mut page_widgets = vec![Vec::new(); pages.len()];
     let mut ordered_fields = plan.fields.iter().collect::<Vec<_>>();
     ordered_fields.sort_by_key(|field| field.tab_order);
+    let appearance_font_ref = emit_appearance_font(document)?;
     let mut field_refs = Vec::with_capacity(ordered_fields.len());
     let mut widget_refs = Vec::with_capacity(ordered_fields.len());
     for field in &ordered_fields {
@@ -571,12 +617,14 @@ pub(crate) fn emit_form_objects(
         }
         document.replace_object(field_ref, CosValue::dictionary(field_entries)?)?;
 
+        let appearance = emit_field_appearance(document, field, appearance_font_ref)?;
         let mut widget_entries = vec![
             (PdfName::new("Parent")?, CosValue::Reference(field_ref)),
             (PdfName::new("P")?, CosValue::Reference(page_ref)),
             (PdfName::new("Rect")?, rect_to_cos(field.rect)?),
             (PdfName::new("Subtype")?, CosValue::name("Widget")?),
             (PdfName::new("Type")?, CosValue::name("Annot")?),
+            (PdfName::new("AP")?, appearance),
         ];
         if let Some(appearance_state) = appearance_state(&field.value) {
             widget_entries.push((PdfName::new("AS")?, CosValue::name(appearance_state)?));
@@ -585,14 +633,197 @@ pub(crate) fn emit_form_objects(
         page_widgets[page_index].push(widget_ref);
     }
 
-    let acro_form_ref = document.add_object(CosValue::dictionary([(
-        PdfName::new("Fields")?,
-        CosValue::Array(field_refs.into_iter().map(CosValue::Reference).collect()),
-    )])?)?;
+    let acro_form_ref = document.add_object(CosValue::dictionary([
+        (
+            PdfName::new("DA")?,
+            pdf_string(&format!(
+                "/{APPEARANCE_FONT_RESOURCE} {APPEARANCE_FONT_SIZE} Tf 0 g"
+            ))?,
+        ),
+        (
+            PdfName::new("DR")?,
+            CosValue::dictionary([(
+                PdfName::new("Font")?,
+                CosValue::dictionary([(
+                    PdfName::new(APPEARANCE_FONT_RESOURCE)?,
+                    CosValue::Reference(appearance_font_ref),
+                )])?,
+            )])?,
+        ),
+        (
+            PdfName::new("Fields")?,
+            CosValue::Array(field_refs.into_iter().map(CosValue::Reference).collect()),
+        ),
+        (PdfName::new("NeedAppearances")?, CosValue::Boolean(false)),
+    ])?)?;
     Ok(PdfFormEmission {
         acro_form_ref,
         page_widgets,
     })
+}
+
+fn emit_appearance_font(document: &mut CosDocument) -> Result<PdfRef, PdfError> {
+    document.add_object(CosValue::dictionary([
+        (PdfName::new("BaseFont")?, CosValue::name("Helvetica")?),
+        (
+            PdfName::new("Encoding")?,
+            CosValue::name("WinAnsiEncoding")?,
+        ),
+        (PdfName::new("Subtype")?, CosValue::name("Type1")?),
+        (PdfName::new("Type")?, CosValue::name("Font")?),
+    ])?)
+}
+
+fn emit_field_appearance(
+    document: &mut CosDocument,
+    field: &PdfFormField,
+    font_ref: PdfRef,
+) -> Result<CosValue, PdfError> {
+    if field.field_type == PdfFormFieldType::Button && field.flags & FIELD_FLAG_PUSH_BUTTON == 0 {
+        let mut states = vec!["Off".to_owned()];
+        if field.flags & FIELD_FLAG_RADIO != 0 {
+            states.extend(field.options.iter().map(|option| option.name.clone()));
+            if states.len() == 1 {
+                states.push("Yes".to_owned());
+            }
+        } else {
+            states.push("Yes".to_owned());
+        }
+        let normal_states = states
+            .iter()
+            .map(|state| {
+                Ok::<(PdfName, CosValue), PdfError>((
+                    PdfName::new(state.clone())?,
+                    CosValue::Reference(emit_normal_appearance(
+                        document,
+                        field,
+                        font_ref,
+                        Some(state),
+                    )?),
+                ))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        return CosValue::dictionary([(PdfName::new("N")?, CosValue::dictionary(normal_states)?)]);
+    }
+
+    let normal_ref = emit_normal_appearance(document, field, font_ref, None)?;
+    CosValue::dictionary([(PdfName::new("N")?, CosValue::Reference(normal_ref))])
+}
+
+fn emit_normal_appearance(
+    document: &mut CosDocument,
+    field: &PdfFormField,
+    font_ref: PdfRef,
+    state: Option<&str>,
+) -> Result<PdfRef, PdfError> {
+    let data = appearance_stream_data(field, state)?;
+    document.add_object(CosValue::stream(
+        [
+            (PdfName::new("BBox")?, appearance_bbox(field.rect)?),
+            (PdfName::new("FormType")?, CosValue::Integer(1)),
+            (PdfName::new("Resources")?, appearance_resources(font_ref)?),
+            (PdfName::new("Subtype")?, CosValue::name("Form")?),
+        ],
+        data,
+    )?)
+}
+
+fn appearance_bbox(rect: LayoutRect) -> Result<CosValue, PdfError> {
+    if rect.width.raw() <= 0 || rect.height.raw() <= 0 {
+        return Err(PdfError::InvalidPageGeometry);
+    }
+    Ok(CosValue::Array(vec![
+        CosValue::Real(LayoutUnit::from_raw(0)),
+        CosValue::Real(LayoutUnit::from_raw(0)),
+        CosValue::Real(rect.width),
+        CosValue::Real(rect.height),
+    ]))
+}
+
+fn appearance_resources(font_ref: PdfRef) -> Result<CosValue, PdfError> {
+    CosValue::dictionary([(
+        PdfName::new("Font")?,
+        CosValue::dictionary([(
+            PdfName::new(APPEARANCE_FONT_RESOURCE)?,
+            CosValue::Reference(font_ref),
+        )])?,
+    )])
+}
+
+fn appearance_stream_data(field: &PdfFormField, state: Option<&str>) -> Result<Vec<u8>, PdfError> {
+    let width = super::format_layout_unit(field.rect.width);
+    let height = super::format_layout_unit(field.rect.height);
+    let mut data = Vec::new();
+    super::append_ascii(
+        &mut data,
+        &format!(
+            "q\n0.95 0.95 0.95 rg\n0 0 {width} {height} re\nf\n0 0 0 RG\n1 w\n0 0 {width} {height} re\nS\nQ\n"
+        ),
+    )?;
+
+    if let Some(state) = state {
+        if state != "Off" {
+            if field.flags & FIELD_FLAG_RADIO != 0 {
+                super::append_ascii(
+                    &mut data,
+                    &format!(
+                        "q\n0 0 0 rg\n{} {} {} {} re\nf\nQ\n",
+                        super::format_layout_unit(LayoutUnit::from_raw(4 * 64)),
+                        super::format_layout_unit(LayoutUnit::from_raw(4 * 64)),
+                        super::format_layout_unit(LayoutUnit::from_raw(
+                            field.rect.width.raw().saturating_sub(8 * 64).max(1),
+                        )),
+                        super::format_layout_unit(LayoutUnit::from_raw(
+                            field.rect.height.raw().saturating_sub(8 * 64).max(1),
+                        )),
+                    ),
+                )?;
+            } else {
+                super::append_ascii(
+                    &mut data,
+                    &format!("0 0 m\n{width} {height} l\n0 {height} m\n{width} 0 l\nS\n"),
+                )?;
+            }
+        }
+    } else if let Some(value) = appearance_text(field) {
+        let encoded = appearance_text_hex(&value)?;
+        let baseline = field
+            .rect
+            .height
+            .raw()
+            .checked_sub(14 * 64)
+            .unwrap_or(4 * 64)
+            .max(4 * 64);
+        super::append_ascii(
+            &mut data,
+            &format!(
+                "BT\n/{APPEARANCE_FONT_RESOURCE} {APPEARANCE_FONT_SIZE} Tf\n0 0 0 rg\n2 {} Td\n<{encoded}> Tj\nET\n",
+                super::format_layout_unit(LayoutUnit::from_raw(baseline)),
+            ),
+        )?;
+    }
+
+    Ok(data)
+}
+
+fn appearance_text(field: &PdfFormField) -> Option<String> {
+    match &field.value {
+        PdfFormValue::Text { value } | PdfFormValue::Name { value } => Some(value.clone()),
+        PdfFormValue::Names { values } => Some(values.join(", ")),
+        PdfFormValue::Empty => None,
+    }
+}
+
+fn appearance_text_hex(value: &str) -> Result<String, PdfError> {
+    if value.len() > MAX_PDF_FORM_TEXT_BYTES {
+        return Err(PdfError::StringSizeLimit);
+    }
+    let mut bytes = Vec::with_capacity(value.len().saturating_mul(2).saturating_add(2));
+    bytes.extend_from_slice(&[0xFE, 0xFF]);
+    for unit in value.encode_utf16() {
+        bytes.extend_from_slice(&unit.to_be_bytes());
+    }
+    Ok(super::hex_bytes(&bytes))
 }
 
 fn field_type_name(field_type: PdfFormFieldType) -> &'static str {
