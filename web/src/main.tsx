@@ -42,6 +42,7 @@ async function start(): Promise<void> {
         layoutRequestFactory: runtime.layoutRequestFactory,
         pdfExportScheduler: runtime.pdfExportScheduler,
         pdfExportRequestFactory: runtime.pdfExportRequestFactory,
+        pdfReaderScheduler: runtime.pdfReaderScheduler,
       },
     )
   } catch (error: unknown) {

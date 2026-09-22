@@ -18,6 +18,11 @@ import {
   type RevisionAwarePdfExportScheduler,
 } from '../pdf/pdf-worker.js'
 import type { PdfExportRequestDto } from '../pdf/pdf-protocol.js'
+import {
+  createWorkerPdfReaderScheduler,
+  type PdfReaderWorkerPort,
+  type RevisionAwarePdfReaderScheduler,
+} from '../pdf/pdf-reader-worker.js'
 import type { RuntimeFontCatalog } from '../runtime/font-catalog.js'
 
 export type WorkerConstructor = typeof Worker
@@ -26,6 +31,7 @@ export interface DefaultWorkerRuntime {
   readonly fontCatalog: RuntimeFontCatalog
   readonly layoutScheduler: RevisionAwareLayoutScheduler
   readonly pdfExportScheduler: RevisionAwarePdfExportScheduler
+  readonly pdfReaderScheduler: RevisionAwarePdfReaderScheduler
   readonly layoutRequestFactory: NonNullable<EditorControllerDependencies['layoutRequestFactory']>
   readonly pdfExportRequestFactory: NonNullable<EditorControllerDependencies['pdfExportRequestFactory']>
   dispose(): void
@@ -44,8 +50,13 @@ export function createDefaultWorkerRuntime(
     new URL('../pdf/pdf-worker-entry.ts', import.meta.url),
     { type: 'module' },
   ) as unknown as PdfWorkerPort
+  const pdfReaderWorker = new workerConstructor(
+    new URL('../pdf/pdf-reader-worker-entry.ts', import.meta.url),
+    { type: 'module' },
+  ) as unknown as PdfReaderWorkerPort
   const layoutScheduler = createWorkerLayoutScheduler(layoutWorker)
   const pdfExportScheduler = createWorkerPdfExportScheduler(pdfWorker)
+  const pdfReaderScheduler = createWorkerPdfReaderScheduler(pdfReaderWorker)
   let layoutRequestNumber = 0
   const layoutRequestFactory = (accepted: EditorAcceptedSnapshot): LayoutRequestDto => {
     layoutRequestNumber += 1
@@ -100,13 +111,16 @@ export function createDefaultWorkerRuntime(
     fontCatalog,
     layoutScheduler,
     pdfExportScheduler,
+    pdfReaderScheduler,
     layoutRequestFactory,
     pdfExportRequestFactory,
     dispose() {
       layoutScheduler.dispose()
       pdfExportScheduler.dispose()
+      pdfReaderScheduler.dispose()
       layoutWorker.terminate()
       pdfWorker.terminate()
+      pdfReaderWorker.terminate()
     },
   }
 }

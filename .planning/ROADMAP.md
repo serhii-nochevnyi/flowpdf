@@ -340,7 +340,7 @@ by fake recognition or local DOM assertions; see `06-CLOSURE.md`.
 
 - [x] 07-01-PLAN.md — bounded lazy PDF syntax reader
 - [x] 07-02-PLAN.md — provenance-rich PDF scene
-- [ ] 07-03-PLAN.md — WASM/worker/browser reader surface
+- [x] 07-03-PLAN.md — WASM/worker/browser reader surface
 - [ ] 07-04-PLAN.md — local gates and evidence closure
 **UI hint**: yes
 
@@ -388,6 +388,6 @@ by fake recognition or local DOM assertions; see `06-CLOSURE.md`.
 | 4. Owned PDF Preview and Export | 6/6 | In Progress (reference evidence unavailable) |  |
 | 5. Semantic Fillable Forms | 26/26 executed | Complete locally (release evidence pending) | 2026-09-22 |
 | 6. Voice Dictation and Commands | 6/6 executed | Complete locally (release evidence pending) | 2026-09-22 |
-| 7. Secure PDF Reader and Scene | 2/4 | In Progress |  |
+| 7. Secure PDF Reader and Scene | 3/4 | In Progress |  |
 | 8. External Reconstruction and OCR | 0/TBD | Not started | - |
 | 9. Controlled Native PDF Editing | 0/TBD | Not started | - |

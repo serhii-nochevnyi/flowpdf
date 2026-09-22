@@ -48,6 +48,12 @@ import type {
   PdfExportSchedulerSnapshotDto,
 } from '../pdf/pdf-protocol.js'
 import type { PdfExportScheduleOutcome } from '../pdf/pdf-worker.js'
+import type {
+  AcceptedPdfReaderDto,
+  PdfReaderRequestDto,
+  PdfReaderSchedulerSnapshotDto,
+} from '../pdf/pdf-protocol.js'
+import type { PdfReaderScheduleOutcome } from '../pdf/pdf-reader-worker.js'
 import { createPdfExportRequest } from '../pdf/pdf-request.js'
 import {
   resolveVoiceFieldTarget,
@@ -438,6 +444,8 @@ export interface EditorControllerDependencies {
     layout: AcceptedLayoutDto,
     formSelection: FormProjectionSelectionDto | null,
   ) => PdfExportRequestDto | null
+  /** Optional controlled PDF reader bridge; imported scenes remain read-only. */
+  readonly pdfReaderScheduler?: EditorPdfReaderScheduler
   /** Optional caller-owned source-bound noncanonical field session for voice. */
   readonly voiceFormSession?: VoiceFormSessionTarget
 }
@@ -455,6 +463,14 @@ export interface EditorPdfExportScheduler {
   cancel(requestId?: string): void
   accepted(): AcceptedPdfExportDto | null
   snapshot(): PdfExportSchedulerSnapshotDto
+  subscribe?(listener: () => void): () => void
+}
+
+export interface EditorPdfReaderScheduler {
+  request(request: PdfReaderRequestDto): Promise<PdfReaderScheduleOutcome>
+  cancel(requestId?: string): void
+  accepted(): AcceptedPdfReaderDto | null
+  snapshot(): PdfReaderSchedulerSnapshotDto
   subscribe?(listener: () => void): () => void
 }
 

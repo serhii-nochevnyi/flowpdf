@@ -7,12 +7,13 @@ use flow_core::{
     AuditedRecoverResult, CommandKind, CreateSampleRequest, EditorSessionRequest,
     EditorSessionResponse, EditorViewDto, EditorViewRequest, FontCatalog, FontFace,
     FontFaceIdentity, FormSessionRequest, FormSessionResponse, LayoutWasmFontInput,
-    MigrateDocumentRequest, MigrateDocumentResult, OperationResult, PdfExportManifest,
-    PdfExportOptions, PdfExportRequest, PdfFontManifestIdentity, PdfFormPlan, PdfInternalLink,
-    PdfMetadataOptions, PdfOutlineEntry, PdfPagePlan, PdfRecoveryExpectation,
-    PdfReproducibilityInputs, PlanPersistenceCommitRequest, PlanStandaloneAuditRequest,
-    RecoverRequest, RecoverResult, UkrainianHyphenation, VOICE_PROTOCOL_VERSION,
-    VoiceCommandRequest, VoiceIntent, export_pdf as core_export_pdf,
+    MigrateDocumentRequest, MigrateDocumentResult, OperationResult, PdfDocumentSummary,
+    PdfExportManifest, PdfExportOptions, PdfExportRequest, PdfFontManifestIdentity, PdfFormPlan,
+    PdfInternalLink, PdfMetadataOptions, PdfOutlineEntry, PdfPagePlan, PdfReaderLimits,
+    PdfRecoveryExpectation, PdfReproducibilityInputs, PdfScene, PdfSceneRequest,
+    PlanPersistenceCommitRequest, PlanStandaloneAuditRequest, RecoverRequest, RecoverResult,
+    UkrainianHyphenation, VOICE_PROTOCOL_VERSION, VoiceCommandRequest, VoiceIntent,
+    export_pdf as core_export_pdf, open_pdf, read_pdf_scene,
     recover_owned_source as core_recover_owned_source, store::PlannedPersistenceCommit,
 };
 use serde::{Deserialize, Serialize};
@@ -22,6 +23,9 @@ const SUPPORTED_OLDER_FIXTURE: &str = include_str!("../../../fixtures/flowdoc/ol
 const PDF_PROTOCOL_VERSION: u32 = 1;
 const MAX_PDF_PROTOCOL_REQUEST_BYTES: usize = 96 * 1024 * 1024;
 const MAX_PDF_PROTOCOL_HEX_BYTES: usize = flow_core::MAX_PDF_SOURCE_STREAM_BYTES;
+const PDF_READER_PROTOCOL_VERSION: u32 = 1;
+const MAX_PDF_READER_PROTOCOL_REQUEST_BYTES: usize = 136 * 1024 * 1024;
+const MAX_PDF_READER_INPUT_BYTES: usize = 64 * 1024 * 1024;
 const FONT_CATALOG_PROTOCOL_VERSION: u32 = 1;
 const MAX_FONT_CATALOG_PROTOCOL_REQUEST_BYTES: usize = flow_core::MAX_LAYOUT_WASM_REQUEST_BYTES;
 const HYPHENATION_PROTOCOL_VERSION: u32 = 1;
@@ -161,6 +165,26 @@ struct PdfRecoveryWireResult {
     document_id: String,
     revision: u32,
     manifest: PdfExportManifest,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PdfReaderWireRequest {
+    protocol_version: u32,
+    request_id: String,
+    bytes_hex: String,
+    first_page: u32,
+    page_count: u32,
+    #[serde(default)]
+    limits: Option<PdfReaderLimits>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PdfReaderWireResult {
+    summary: PdfDocumentSummary,
+    scene: PdfScene,
+    result_hash: String,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -663,6 +687,92 @@ pub fn verify_pdf_export_response(response_json: String) -> bool {
         && result.source_hash == result.manifest.source_hash
 }
 
+/// Reads a bounded page window through the string-only WASM boundary. The
+/// browser supplies only hexadecimal PDF bytes and a request window; Rust
+/// owns parsing, limits, provenance, and the derived scene.
+#[wasm_bindgen]
+pub fn read_pdf(request_json: String) -> String {
+    if request_json.len() > MAX_PDF_READER_PROTOCOL_REQUEST_BYTES {
+        return serialize_pdf_reader_response(PdfProtocolResponse::<PdfReaderWireResult> {
+            protocol_version: PDF_READER_PROTOCOL_VERSION,
+            request_id: "size-limit".to_owned(),
+            ok: false,
+            result: None,
+            error: Some(PdfProtocolError {
+                code: "FLOW_PDF_READER_REQUEST_SIZE_LIMIT".to_owned(),
+            }),
+        });
+    }
+    let request = match serde_json::from_str::<PdfReaderWireRequest>(&request_json) {
+        Ok(request) => request,
+        Err(_) => {
+            return serialize_pdf_reader_response(PdfProtocolResponse::<PdfReaderWireResult> {
+                protocol_version: PDF_READER_PROTOCOL_VERSION,
+                request_id: "decode-error".to_owned(),
+                ok: false,
+                result: None,
+                error: Some(PdfProtocolError {
+                    code: "FLOW_PDF_READER_REQUEST_DECODE".to_owned(),
+                }),
+            });
+        }
+    };
+    let request_id = request.request_id.clone();
+    match execute_pdf_reader(request) {
+        Ok(result) => serialize_pdf_reader_response(PdfProtocolResponse {
+            protocol_version: PDF_READER_PROTOCOL_VERSION,
+            request_id,
+            ok: true,
+            result: Some(result),
+            error: None,
+        }),
+        Err(code) => serialize_pdf_reader_response(PdfProtocolResponse::<PdfReaderWireResult> {
+            protocol_version: PDF_READER_PROTOCOL_VERSION,
+            request_id,
+            ok: false,
+            result: None,
+            error: Some(PdfProtocolError { code }),
+        }),
+    }
+}
+
+/// Recomputes the scene hash and checks the duplicated summary identities
+/// before a worker or browser panel publishes a reader result.
+#[wasm_bindgen]
+pub fn verify_pdf_reader_response(response_json: String) -> bool {
+    let Ok(response) =
+        serde_json::from_str::<PdfProtocolResponse<PdfReaderWireResult>>(&response_json)
+    else {
+        return false;
+    };
+    if response.protocol_version != PDF_READER_PROTOCOL_VERSION
+        || !response.ok
+        || response.error.is_some()
+    {
+        return false;
+    }
+    let Some(result) = response.result else {
+        return false;
+    };
+    if result.result_hash.trim().is_empty()
+        || result.result_hash != result.scene.result_hash
+        || result.summary.source_hash != result.scene.source_hash
+        || result.summary.page_count != result.scene.page_count
+        || result.scene.schema_version != flow_core::PDF_SCENE_SCHEMA_VERSION
+        || result.summary.schema_version != flow_core::PDF_READER_SCHEMA_VERSION
+        || result.scene.pages.len() > result.summary.page_count as usize
+        || result.scene.first_page > result.summary.page_count
+    {
+        return false;
+    }
+    let mut unhashed_scene = result.scene;
+    unhashed_scene.result_hash.clear();
+    let Ok(bytes) = serde_json::to_vec(&unhashed_scene) else {
+        return false;
+    };
+    blake3::hash(&bytes).to_hex().as_str() == result.result_hash
+}
+
 /// Recovers an exact owned source through a bounded string-only request.
 #[wasm_bindgen]
 pub fn recover_owned_source(request_json: String) -> String {
@@ -778,6 +888,40 @@ fn execute_pdf_export(request: PdfExportWireRequest) -> Result<PdfExportWireResu
     })
 }
 
+fn execute_pdf_reader(request: PdfReaderWireRequest) -> Result<PdfReaderWireResult, String> {
+    if request.protocol_version != PDF_READER_PROTOCOL_VERSION {
+        return Err("FLOW_PDF_READER_PROTOCOL_VERSION".to_owned());
+    }
+    if request.request_id.trim().is_empty() || request.request_id.len() > 128 {
+        return Err("FLOW_PDF_REQUEST_ID_INVALID".to_owned());
+    }
+    if request.page_count == 0 {
+        return Err("FLOW_PDF_READER_PAGE_WINDOW_INVALID".to_owned());
+    }
+    let limits = request.limits.unwrap_or_default();
+    if limits.max_input_bytes > MAX_PDF_READER_INPUT_BYTES {
+        return Err("FLOW_PDF_READER_INPUT_LIMIT_INVALID".to_owned());
+    }
+    let bytes = decode_hex(
+        &request.bytes_hex,
+        limits.max_input_bytes.min(MAX_PDF_READER_INPUT_BYTES),
+    )
+    .map_err(|_| "FLOW_PDF_READER_BYTES_INVALID".to_owned())?;
+    let reader = open_pdf(&bytes, limits).map_err(|error| error.code().to_owned())?;
+    let summary = reader.summary().map_err(|error| error.code().to_owned())?;
+    let scene_request = PdfSceneRequest {
+        first_page: request.first_page,
+        page_count: request.page_count,
+    };
+    let scene = read_pdf_scene(&reader, &scene_request).map_err(|error| error.code().to_owned())?;
+    let result_hash = scene.result_hash.clone();
+    Ok(PdfReaderWireResult {
+        summary,
+        scene,
+        result_hash,
+    })
+}
+
 fn execute_pdf_recovery(request: PdfRecoveryWireRequest) -> Result<PdfRecoveryWireResult, String> {
     if request.protocol_version != PDF_PROTOCOL_VERSION {
         return Err("FLOW_PDF_PROTOCOL_VERSION".to_owned());
@@ -819,6 +963,10 @@ fn execute_pdf_recovery(request: PdfRecoveryWireRequest) -> Result<PdfRecoveryWi
 
 fn serialize_pdf_response<T: Serialize>(response: PdfProtocolResponse<T>) -> String {
     serde_json::to_string(&response).expect("serializing a closed PDF protocol cannot fail")
+}
+
+fn serialize_pdf_reader_response(response: PdfProtocolResponse<PdfReaderWireResult>) -> String {
+    serde_json::to_string(&response).expect("serializing a closed PDF reader protocol cannot fail")
 }
 
 fn serialize_font_catalog_response(response: FontCatalogWireResponse) -> String {

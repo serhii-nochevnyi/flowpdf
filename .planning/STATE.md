@@ -4,16 +4,16 @@ milestone: v1.0
 current_phase: 7
 current_phase_name: Secure PDF Reader and Scene
 status: executing
-stopped_at: Phase 7 Plans 07-01 and 07-02 complete; continue with WASM/worker/browser reader surface while external PDF/reference and AT checkpoints remain explicit release inputs
-last_updated: "2026-09-22T15:00:00Z"
+stopped_at: Phase 7 Plan 07-03 complete; continue with local gates and evidence closure while external PDF/reference and AT checkpoints remain explicit release inputs
+last_updated: "2026-09-22T15:40:00Z"
 last_activity: 2026-09-22
-last_activity_desc: Completed Phase 7 Plans 07-01 and 07-02 with bounded lazy syntax reading, fixed-point scene interpretation, provenance, and active-content reports
-state_head: 46
+last_activity_desc: Completed Phase 7 Plan 07-03 with the verified Rust/WASM reader boundary, dedicated worker, and report-first read-only browser panel
+state_head: 07
 progress:
   total_phases: 9
   completed_phases: 1
 total_plans: 72
-completed_plans: 70
+completed_plans: 71
 milestone_name: milestone
 ---
 
@@ -24,16 +24,16 @@ milestone_name: milestone
 See: .planning/PROJECT.md (updated 2026-08-25)
 
 **Core value:** A user can edit semantic document text naturally, repaginate following content, and export a visually consistent, selectable, form-capable PDF.
-**Current focus:** Phase 7 — Secure PDF Reader and Scene (planning; Phase 6 local implementation is closed with external speech/AT inputs preserved)
+**Current focus:** Phase 7 — Secure PDF Reader and Scene (executing local gates; Phase 6 local implementation is closed with external speech/AT inputs preserved)
 
 ## Current Position
 
-Phase: 7 (Secure PDF Reader and Scene) — PLANNING
-Plan: Phase 7 Plan 07-03 — expose the reader through WASM, worker, and browser panel
+Phase: 7 (Secure PDF Reader and Scene) — EXECUTING
+Plan: Phase 7 Plan 07-04 — run local gates and close evidence honestly
 Status: Phase 6 Plans 06-01 through 06-06 are complete locally. Rust resolves bounded command-mode phrases, the typed browser bridge binds intents to captured source identity, final dictation reaches the existing Rust transaction path exactly once with `modality: voice`, the browser recognition lifecycle keeps interim/final speech ephemeral until one final capture, field navigation/clear route through accepted Rust/editor/form-session seams, the editor exposes localized accessible controls plus confirmation preview/feedback, and the Phase 6 privacy gate rejects backend, storage, analytics, independent audio-capture, and browser-side semantic ownership. Phase 5 local implementation remains complete through Plan 05-26. Real browser speech-service behavior, target-viewer AcroForm behavior, external PDF form-value import, Phase 4 external PDF/reference rows, and the inherited Phase 2/3 Edge/Windows screen-reader evidence remain explicitly unavailable/outstanding; see `06-CLOSURE.md` and `05-CLOSURE.md`.
-Last activity: 2026-09-22 — Phase 7 Plans 07-01 and 07-02 completed; Plan 07-03 is next
+Last activity: 2026-09-22 — Phase 7 Plan 07-03 completed; Plan 07-04 is next
 
-Progress: Phase 2 — 18/18 implementation plans complete; Phase 3 — 6/6 local implementation plans executed; Phase 4 — 6/6 plans executed; Phase 5 — 26/26 local plans executed and locally gated, with target-viewer/import evidence explicitly pending; Phase 6 — 6/6 local plans executed and gated, with speech-service and external AT evidence explicitly pending; Phase 7 — 2/4 plans executed, with the bounded reader and scene complete and the WASM/browser surface next. Phase 2/3 phase-level closure remains honest about inherited external AT evidence, and Phase 4/5 remain open for unavailable external PDF/reference evidence.
+Progress: Phase 2 — 18/18 implementation plans complete; Phase 3 — 6/6 local implementation plans executed; Phase 4 — 6/6 plans executed; Phase 5 — 26/26 local plans executed and locally gated, with target-viewer/import evidence explicitly pending; Phase 6 — 6/6 local plans executed and gated, with speech-service and external AT evidence explicitly pending; Phase 7 — 3/4 plans executed, with the bounded reader, scene, and WASM/browser surface complete and the local gate next. Phase 2/3 phase-level closure remains honest about inherited external AT evidence, and Phase 4/5 remain open for unavailable external PDF/reference evidence.
 
 ## Performance Metrics
 
@@ -54,7 +54,7 @@ Progress: Phase 2 — 18/18 implementation plans complete; Phase 3 — 6/6 local
 | 5 | 26 | same session | - |
 | 6 | 6 | same session | - |
 
-**Recent Trend:** Schema-v2 tree, lossless migration, editor accessibility, exact UI coverage, deterministic semantic scale, and the dual-run release gates remain green. Phase 2 still records 18/18 implementation plans with Edge/Windows screen-reader UAT outstanding. Phase 3 has all six local plans complete and retains the inherited external AT boundary. Phase 4 has all six local plans complete while structural/extraction/raster/target-viewer evidence remains unavailable. Phase 5 has all 26 local plans complete while target-viewer and external form-import evidence remain open. Phase 6 now has all six local plans complete, two passing full gates, a privacy/ownership contract, and explicit unavailable speech-service/external AT evidence. Phase 7 has four executable plans; the first two are complete and the browser boundary is next.
+**Recent Trend:** Schema-v2 tree, lossless migration, editor accessibility, exact UI coverage, deterministic semantic scale, and the dual-run release gates remain green. Phase 2 still records 18/18 implementation plans with Edge/Windows screen-reader UAT outstanding. Phase 3 has all six local plans complete and retains the inherited external AT boundary. Phase 4 has all six local plans complete while structural/extraction/raster/target-viewer evidence remains unavailable. Phase 5 has all 26 local plans complete while target-viewer and external form-import evidence remain open. Phase 6 now has all six local plans complete, two passing full gates, a privacy/ownership contract, and explicit unavailable speech-service/external AT evidence. Phase 7 has four executable plans; the first three are complete and the local gate is next.
 **Per-Plan Metrics:**
 
 | Plan | Duration | Tasks | Files |
