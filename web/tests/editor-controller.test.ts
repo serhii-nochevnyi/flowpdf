@@ -204,6 +204,63 @@ describe('editor external store and controller publication', () => {
     })
     expect(scheduled).toBe(1)
   })
+
+  it('uses the shared request builder when export has no custom factory', async () => {
+    const stateStore = new EditorStore('loading')
+    stateStore.publishAccepted(acceptedFixture(), 'ready')
+    const acceptedLayout = layoutFixture()
+    const seenRequests: PdfExportRequestDto[] = []
+    const layoutScheduler: NonNullable<EditorControllerDependencies['layoutScheduler']> = {
+      request: async (request) => ({
+        kind: 'failed' as const,
+        requestId: request.requestId,
+        code: 'TEST_LAYOUT_UNUSED',
+      }),
+      cancel: () => undefined,
+      accepted: () => acceptedLayout,
+      snapshot: () => ({
+        phase: 'ready',
+        accepted: acceptedLayout,
+        requestId: null,
+        errorCode: null,
+      }),
+    }
+    const pdfScheduler: NonNullable<EditorControllerDependencies['pdfExportScheduler']> = {
+      request: async (request) => {
+        seenRequests.push(request)
+        return { kind: 'failed' as const, requestId: request.requestId, code: 'TEST_PDF_DEFAULT' }
+      },
+      cancel: () => undefined,
+      accepted: () => null,
+      snapshot: () => ({ phase: 'idle', accepted: null, requestId: null, errorCode: null }),
+    }
+    const controller = new EditorController({}, {
+      store: stateStore,
+      wasm: Promise.resolve(wasmFixture([])),
+      layoutScheduler,
+      pdfExportScheduler: pdfScheduler,
+    })
+
+    expect(controller.hasPdfExport()).toBe(true)
+    expect(await controller.requestPdfExport(selectionFixture())).toMatchObject({
+      kind: 'failed',
+      code: 'TEST_PDF_DEFAULT',
+    })
+    expect(seenRequests).toHaveLength(1)
+    const seenRequest = seenRequests[0] as PdfExportRequestDto
+    expect(seenRequest.requestId).toBe('editor-pdf-1')
+    expect(seenRequest.sourceRevision).toBe(1)
+    expect(seenRequest.sourceHash).toBe('hash-1')
+    expect(seenRequest.layoutResultHash).toBe('layout-selection-result')
+    const serialized = JSON.parse(seenRequest.serializedRequest) as {
+      readonly formPlan: { readonly resultHash: string } | null
+      readonly flattenedFieldIds: readonly string[]
+      readonly pages: readonly unknown[]
+    }
+    expect(serialized.formPlan?.resultHash).toBe('plan-selection')
+    expect(serialized.flattenedFieldIds).toEqual([])
+    expect(serialized.pages).toHaveLength(1)
+  })
 })
 
 function layoutFixture(): AcceptedLayoutDto {
@@ -227,7 +284,19 @@ function layoutFixture(): AcceptedLayoutDto {
       layoutSettingsFingerprint: 'settings-v1',
       fontCatalogIdentity: 'fonts-v1',
       hyphenationDataIdentity: null,
-      pages: [],
+      pages: [
+        {
+          pageIndex: 0,
+          sectionId: '00000000-0000-4000-8000-000000000701',
+          pageSettings: {},
+          bounds: { x: 0, y: 0, width: 4_800, height: 6_400 },
+          contentRect: { x: 320, y: 320, width: 4_160, height: 5_760 },
+          startReason: 'documentStart',
+          header: null,
+          footer: null,
+          fragments: [],
+        },
+      ],
       diagnostics: [],
       resultHash: 'layout-selection-result',
     },

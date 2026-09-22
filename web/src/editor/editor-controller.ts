@@ -47,6 +47,7 @@ import type {
   PdfExportSchedulerSnapshotDto,
 } from '../pdf/pdf-protocol.js'
 import type { PdfExportScheduleOutcome } from '../pdf/pdf-worker.js'
+import { createPdfExportRequest } from '../pdf/pdf-request.js'
 import type { FormSessionWasmBoundary } from '../forms/form-session.js'
 import {
   type FormProjectionSelectionDto,
@@ -557,6 +558,7 @@ export class EditorController {
       ) => PdfExportRequestDto | null)
     | undefined
   private readonly pdfExportUnsubscribe: (() => void) | undefined
+  private pdfRequestNumber = 0
   private initialized: Promise<void> | undefined
   private pending: Promise<void> = Promise.resolve()
   private sessionPending: Promise<void> = Promise.resolve()
@@ -582,7 +584,15 @@ export class EditorController {
       this.stateStore.publishLayout(this.layoutScheduler.snapshot())
     }
     this.pdfExportScheduler = dependencies.pdfExportScheduler
-    this.pdfExportRequestFactory = dependencies.pdfExportRequestFactory
+    this.pdfExportRequestFactory =
+      dependencies.pdfExportRequestFactory ??
+      (this.pdfExportScheduler === undefined
+        ? undefined
+        : (accepted, layout, formSelection) =>
+            createPdfExportRequest(accepted, layout, {
+              requestId: this.nextPdfRequestId(),
+              formSelection,
+            }))
     this.pdfExportUnsubscribe = this.pdfExportScheduler?.subscribe?.(() => {
       this.stateStore.publishPdf(
         this.pdfExportScheduler?.snapshot() ?? emptyPdfSnapshot(),
@@ -725,6 +735,11 @@ export class EditorController {
 
   cancelPdfExport(requestId?: string): void {
     this.pdfExportScheduler?.cancel(requestId)
+  }
+
+  private nextPdfRequestId(): string {
+    this.pdfRequestNumber += 1
+    return `editor-pdf-${this.pdfRequestNumber}`
   }
 
   async initialize(): Promise<void> {
