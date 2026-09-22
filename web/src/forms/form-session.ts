@@ -60,6 +60,67 @@ export interface FormSessionCoordinatorSnapshot {
   readonly errorCode: string | null
 }
 
+/** Minimal source-bound seam a voice dispatcher may use for field values. */
+export interface VoiceFormSessionTarget {
+  readonly getSnapshot: () => FormSessionCoordinatorSnapshot
+  clearValue(
+    canonicalJson: string,
+    identity: FormSessionIdentityDto,
+    fieldId: string,
+  ): Promise<void>
+}
+
+export interface VoiceFieldTargetDto {
+  readonly fieldId: string
+  readonly tabOrder: number
+}
+
+export type VoiceFieldNavigationDirection = 'next' | 'previous'
+
+export type VoiceFieldTargetResolution =
+  | { readonly kind: 'resolved'; readonly fieldId: string }
+  | { readonly kind: 'rejected'; readonly code: string }
+
+/** Resolves only the accepted Rust-projected valid-field list. */
+export function resolveVoiceFieldTarget(
+  fields: readonly VoiceFieldTargetDto[],
+  activeFieldId: string | undefined,
+  direction: VoiceFieldNavigationDirection,
+): VoiceFieldTargetResolution {
+  const ordered = [...fields].sort((left, right) => left.tabOrder - right.tabOrder)
+  const seenFieldIds = new Set<string>()
+  for (const [index, field] of ordered.entries()) {
+    if (
+      field.fieldId.trim().length === 0 ||
+      seenFieldIds.has(field.fieldId) ||
+      !Number.isSafeInteger(field.tabOrder) ||
+      field.tabOrder < 0 ||
+      field.tabOrder !== index
+    ) {
+      return { kind: 'rejected', code: 'FLOW_VOICE_FIELD_TARGET_INVALID' }
+    }
+    seenFieldIds.add(field.fieldId)
+  }
+  if (ordered.length === 0) {
+    return { kind: 'rejected', code: 'FLOW_VOICE_FIELD_NOT_FOUND' }
+  }
+  const currentIndex =
+    activeFieldId === undefined
+      ? direction === 'next'
+        ? -1
+        : ordered.length
+      : ordered.findIndex((field) => field.fieldId === activeFieldId)
+  if (activeFieldId !== undefined && currentIndex < 0) {
+    return { kind: 'rejected', code: 'FLOW_VOICE_FIELD_NOT_FOUND' }
+  }
+  const targetIndex = direction === 'next' ? currentIndex + 1 : currentIndex - 1
+  const target = ordered[targetIndex]
+  if (target === undefined) {
+    return { kind: 'rejected', code: 'FLOW_VOICE_FIELD_NAVIGATION_EDGE' }
+  }
+  return { kind: 'resolved', fieldId: target.fieldId }
+}
+
 export interface OptionalFormSessionWasmBoundary {
   readonly apply_form_session?: FormSessionWasmBoundary['apply_form_session']
 }

@@ -4,6 +4,7 @@ import {
   type AuditRecordDto,
   type AssetRecordDto,
   type DocumentHeadDto,
+  type FormSessionIdentityDto,
   type HistoryStateDto,
   type LogicalPositionDto,
   type MigrationPersistenceCommitDto,
@@ -48,7 +49,11 @@ import type {
 } from '../pdf/pdf-protocol.js'
 import type { PdfExportScheduleOutcome } from '../pdf/pdf-worker.js'
 import { createPdfExportRequest } from '../pdf/pdf-request.js'
-import type { FormSessionWasmBoundary } from '../forms/form-session.js'
+import {
+  resolveVoiceFieldTarget,
+  type FormSessionWasmBoundary,
+  type VoiceFormSessionTarget,
+} from '../forms/form-session.js'
 import {
   type FormProjectionSelectionDto,
   type FormProjectionWasmBoundary,
@@ -433,6 +438,8 @@ export interface EditorControllerDependencies {
     layout: AcceptedLayoutDto,
     formSelection: FormProjectionSelectionDto | null,
   ) => PdfExportRequestDto | null
+  /** Optional caller-owned source-bound noncanonical field session for voice. */
+  readonly voiceFormSession?: VoiceFormSessionTarget
 }
 
 export interface EditorLayoutScheduler {
@@ -576,6 +583,7 @@ export class EditorController {
         formSelection: FormProjectionSelectionDto | null,
       ) => PdfExportRequestDto | null)
     | undefined
+  private voiceFormSession: VoiceFormSessionTarget | undefined
   private readonly pdfExportUnsubscribe: (() => void) | undefined
   private pdfRequestNumber = 0
   private initialized: Promise<void> | undefined
@@ -612,6 +620,7 @@ export class EditorController {
               requestId: this.nextPdfRequestId(),
               formSelection,
             }))
+    this.voiceFormSession = dependencies.voiceFormSession
     this.pdfExportUnsubscribe = this.pdfExportScheduler?.subscribe?.(() => {
       this.stateStore.publishPdf(
         this.pdfExportScheduler?.snapshot() ?? emptyPdfSnapshot(),
@@ -629,6 +638,11 @@ export class EditorController {
 
   snapshot() {
     return this.stateStore.getSnapshot()
+  }
+
+  /** Installs the caller-owned form session without replacing an explicit seam. */
+  setVoiceFormSession(target: VoiceFormSessionTarget): void {
+    this.voiceFormSession ??= target
   }
 
   /** Returns the last complete layout projection, if background layout is configured. */
@@ -963,9 +977,21 @@ export class EditorController {
         case 'removePageBreak':
           kind = { type: 'removePageBreak', pageBreakId: intent.action.pageBreakId }
           break
-        case 'navigateField':
+        case 'navigateField': {
+          const fieldId = this.resolveVoiceFieldId(accepted, intent.activeFieldId, intent.action.direction)
+          const field = accepted.editor.view.document.fields.find(
+            (candidate) => candidate.descriptor.id === fieldId,
+          )
+          if (field === undefined) throw new EditorError('FLOW_VOICE_FIELD_NOT_FOUND')
+          const point = field.descriptor.anchor.original
+          const result = await this.applyVoiceEditorSession({
+            type: 'setSelection',
+            selection: { anchor: point, focus: point },
+          })
+          return this.voiceSessionCommitted(accepted, result.session.sessionGeneration)
+        }
         case 'clearField':
-          throw new EditorError('FLOW_VOICE_ACTION_DEFERRED')
+          return this.clearVoiceField(accepted, intent.action.fieldId)
       }
       if (kind === undefined) throw new EditorError('FLOW_VOICE_ACTION_INVALID')
       const session = await this.applyVoiceCommand(kind, copy(this.locale).voiceCommand)
@@ -1407,6 +1433,92 @@ export class EditorController {
     return outcome
   }
 
+  private voiceSessionCommitted(
+    accepted: EditorAcceptedSnapshot,
+    sessionGeneration: number,
+  ): VoiceDispatchOutcome {
+    const outcome: VoiceDispatchOutcome = {
+      kind: 'sessionCommitted',
+      revision: accepted.session.revision,
+      canonicalHash: accepted.session.canonicalHash,
+      sessionGeneration,
+    }
+    this.stateStore.publishVoice({
+      phase: 'committed',
+      revision: accepted.session.revision,
+      errorCode: null,
+    })
+    return outcome
+  }
+
+  private resolveVoiceFieldId(
+    accepted: EditorAcceptedSnapshot,
+    activeFieldId: string | undefined,
+    direction: 'next' | 'previous',
+  ): string {
+    if (
+      activeFieldId !== undefined &&
+      accepted.editor.view.document.fieldReview.some(
+        (field) => field.descriptor.id === activeFieldId,
+      )
+    ) {
+      throw new EditorError('FLOW_VOICE_FIELD_REVIEW_REQUIRED')
+    }
+    const resolution = resolveVoiceFieldTarget(
+      accepted.editor.view.document.fields.map((field) => ({
+        fieldId: field.descriptor.id,
+        tabOrder: field.tabOrder,
+      })),
+      activeFieldId,
+      direction,
+    )
+    if (resolution.kind === 'rejected') throw new EditorError(resolution.code)
+    return resolution.fieldId
+  }
+
+  private async clearVoiceField(
+    accepted: EditorAcceptedSnapshot,
+    fieldId: string,
+  ): Promise<VoiceDispatchOutcome> {
+    const field = accepted.editor.view.document.fields.find(
+      (candidate) => candidate.descriptor.id === fieldId,
+    )
+    if (field === undefined) {
+      if (
+        accepted.editor.view.document.fieldReview.some(
+          (candidate) => candidate.descriptor.id === fieldId,
+        )
+      ) {
+        throw new EditorError('FLOW_VOICE_FIELD_REVIEW_REQUIRED')
+      }
+      throw new EditorError('FLOW_VOICE_FIELD_NOT_FOUND')
+    }
+    if (field.descriptor.readOnly) throw new EditorError('FLOW_VOICE_FIELD_READ_ONLY')
+    const formSession = this.voiceFormSession
+    if (formSession === undefined) {
+      throw new EditorError('FLOW_VOICE_FORM_SESSION_UNAVAILABLE')
+    }
+    const identity = formSessionIdentity(accepted)
+    const before = formSession.getSnapshot()
+    if (
+      before.phase !== 'ready' ||
+      before.session === null ||
+      !sameFormSessionIdentity(before.identity, identity)
+    ) {
+      throw new EditorError('FLOW_VOICE_FORM_SESSION_NOT_READY')
+    }
+    await formSession.clearValue(accepted.session.canonicalJson, identity, fieldId)
+    const after = formSession.getSnapshot()
+    if (
+      after.phase !== 'ready' ||
+      after.session === null ||
+      !sameFormSessionIdentity(after.identity, identity)
+    ) {
+      throw new EditorError('FLOW_VOICE_FORM_SESSION_SOURCE_STALE')
+    }
+    return this.voiceSessionCommitted(accepted, after.session.generation)
+  }
+
   private rejectVoice(code: string): Promise<VoiceDispatchOutcome> {
     this.publishError(new EditorError(code))
     this.stateStore.publishVoice({ phase: 'error', revision: null, errorCode: code })
@@ -1456,6 +1568,26 @@ export class EditorController {
       () => undefined,
     )
     return task
+  }
+
+  private async applyVoiceEditorSession(
+    action: EditorSessionActionDto,
+  ): Promise<EditorSessionResponseDto> {
+    await this.sessionPending
+    const accepted = this.requireAccepted()
+    const wasm = await this.wasm
+    if (wasm.apply_editor_session === undefined) {
+      throw new EditorError('FLOW_EDITOR_SESSION_UNAVAILABLE')
+    }
+    const result = unwrap(
+      wasm.apply_editor_session({
+        canonicalJson: accepted.session.canonicalJson,
+        session: accepted.editor.session,
+        action,
+      }),
+    )
+    this.publishEditorSession(result)
+    return result
   }
 
   private enqueue(operation: () => Promise<void>): Promise<void> {
@@ -1720,6 +1852,26 @@ function sameSelection(
     left.focus.nodeId === right.focus.nodeId &&
     left.focus.utf16Offset === right.focus.utf16Offset &&
     left.focus.affinity === right.focus.affinity
+  )
+}
+
+function formSessionIdentity(accepted: EditorAcceptedSnapshot): FormSessionIdentityDto {
+  return {
+    documentId: accepted.session.documentId,
+    sourceRevision: accepted.session.revision,
+    sourceHash: accepted.session.canonicalHash,
+  }
+}
+
+function sameFormSessionIdentity(
+  left: FormSessionIdentityDto | null,
+  right: FormSessionIdentityDto,
+): boolean {
+  return (
+    left !== null &&
+    left.documentId === right.documentId &&
+    left.sourceRevision === right.sourceRevision &&
+    left.sourceHash === right.sourceHash
   )
 }
 

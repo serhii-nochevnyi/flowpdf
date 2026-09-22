@@ -139,6 +139,86 @@ fn resolver_covers_history_selection_structure_and_field_actions() {
 }
 
 #[test]
+fn every_initial_locale_phrase_family_remains_exact_and_allowlisted() {
+    for phrase in ["redo", "redo action"] {
+        assert_eq!(
+            resolve_voice_command(request(VoiceLocale::EnUs, phrase))
+                .expect("English redo")
+                .action,
+            VoiceAction::Redo
+        );
+    }
+    for phrase in ["повторити", "повторити дію"] {
+        assert_eq!(
+            resolve_voice_command(request(VoiceLocale::UkUa, phrase))
+                .expect("Ukrainian redo")
+                .action,
+            VoiceAction::Redo
+        );
+    }
+
+    for (locale, phrase, expected) in [
+        (
+            VoiceLocale::EnUs,
+            "italic",
+            InlineMark::Italic { value: true },
+        ),
+        (
+            VoiceLocale::EnUs,
+            "make underline",
+            InlineMark::Underline { value: true },
+        ),
+        (
+            VoiceLocale::UkUa,
+            "курсив",
+            InlineMark::Italic { value: true },
+        ),
+        (
+            VoiceLocale::UkUa,
+            "підкреслити",
+            InlineMark::Underline { value: true },
+        ),
+    ] {
+        assert_eq!(
+            resolve_voice_command(request(locale, phrase))
+                .expect("formatting phrase")
+                .action,
+            VoiceAction::SetInlineMark { mark: expected }
+        );
+    }
+
+    for (locale, phrase, direction) in [
+        (
+            VoiceLocale::EnUs,
+            "previous field",
+            FieldNavigationDirection::Previous,
+        ),
+        (
+            VoiceLocale::UkUa,
+            "наступне поле",
+            FieldNavigationDirection::Next,
+        ),
+    ] {
+        let mut field_request = request(locale, phrase);
+        field_request.selection = None;
+        assert_eq!(
+            resolve_voice_command(field_request)
+                .expect("field navigation phrase")
+                .action,
+            VoiceAction::NavigateField { direction }
+        );
+    }
+
+    let mut clear_request = request(VoiceLocale::EnUs, "clear field");
+    clear_request.selection = None;
+    clear_request.active_field_id =
+        Some(FieldId::new("00000000-0000-4000-8000-000000000501").expect("field id"));
+    let clear = resolve_voice_command(clear_request).expect("English clear field");
+    assert!(matches!(clear.action, VoiceAction::ClearField { .. }));
+    assert_eq!(clear.capability.confirmation, ConfirmationPolicy::Explicit);
+}
+
+#[test]
 fn bounded_failures_are_stable_and_privacy_safe() {
     let cases = [
         ("", VoiceError::TranscriptEmpty),

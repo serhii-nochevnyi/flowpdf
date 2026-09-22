@@ -4,6 +4,7 @@ import {
   FormSessionBridgeError,
   FormSessionCoordinator,
   RustFormSessionBridge,
+  resolveVoiceFieldTarget,
   type FormSessionApiResponse,
   type FormSessionPersistence,
   type FormSessionRequestDto,
@@ -239,5 +240,57 @@ describe('FormSessionCoordinator', () => {
       identity: otherIdentity,
       session: { sourceRevision: 4 },
     })
+  })
+
+  it('resolves next and previous voice targets only from the ordered valid-field projection', () => {
+    const fields = [
+      { fieldId: 'field-b', tabOrder: 1 },
+      { fieldId: 'field-a', tabOrder: 0 },
+      { fieldId: 'field-c', tabOrder: 2 },
+    ]
+    expect(resolveVoiceFieldTarget(fields, 'field-a', 'next')).toEqual({
+      kind: 'resolved',
+      fieldId: 'field-b',
+    })
+    expect(resolveVoiceFieldTarget(fields, 'field-b', 'previous')).toEqual({
+      kind: 'resolved',
+      fieldId: 'field-a',
+    })
+    expect(resolveVoiceFieldTarget(fields, undefined, 'next')).toEqual({
+      kind: 'resolved',
+      fieldId: 'field-a',
+    })
+    expect(resolveVoiceFieldTarget(fields, undefined, 'previous')).toEqual({
+      kind: 'resolved',
+      fieldId: 'field-c',
+    })
+    expect(resolveVoiceFieldTarget(fields, 'field-c', 'next')).toEqual({
+      kind: 'rejected',
+      code: 'FLOW_VOICE_FIELD_NAVIGATION_EDGE',
+    })
+    expect(resolveVoiceFieldTarget(fields, 'review-field', 'next')).toEqual({
+      kind: 'rejected',
+      code: 'FLOW_VOICE_FIELD_NOT_FOUND',
+    })
+    expect(resolveVoiceFieldTarget([], undefined, 'next')).toEqual({
+      kind: 'rejected',
+      code: 'FLOW_VOICE_FIELD_NOT_FOUND',
+    })
+  })
+
+  it('rejects forged or ambiguous projected field order before selecting a target', () => {
+    expect(
+      resolveVoiceFieldTarget(
+        [
+          { fieldId: 'field-a', tabOrder: 0 },
+          { fieldId: 'field-b', tabOrder: 0 },
+        ],
+        undefined,
+        'next',
+      ),
+    ).toEqual({ kind: 'rejected', code: 'FLOW_VOICE_FIELD_TARGET_INVALID' })
+    expect(
+      resolveVoiceFieldTarget([{ fieldId: '', tabOrder: 0 }], undefined, 'next'),
+    ).toEqual({ kind: 'rejected', code: 'FLOW_VOICE_FIELD_TARGET_INVALID' })
   })
 })

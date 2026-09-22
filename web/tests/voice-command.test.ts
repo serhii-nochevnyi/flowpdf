@@ -5,6 +5,7 @@ import {
   createVoiceCommandCapture,
   createVoiceDictationCapture,
   resolveVoiceCommand,
+  validateAcceptedVoiceIntent,
   validateVoiceDictationCapture,
   VoiceBridgeError,
   type VoiceCommandWasmBoundary,
@@ -132,6 +133,51 @@ describe('Rust voice command bridge', () => {
     }
     expect(error).toEqual(new VoiceBridgeError('FLOW_VOICE_COMMAND_UNSUPPORTED'))
     expect(String(error)).not.toContain(transcript)
+  })
+
+  it('retains only the captured active-field identity for clear-field routing', () => {
+    const activeFieldId = 'field-a'
+    const capture = createVoiceCommandCapture(
+      accepted(),
+      'en-US',
+      'clear current field',
+      selection,
+      activeFieldId,
+    )
+    const clearResponse = intent({
+      action: { type: 'clearField', fieldId: activeFieldId },
+      capability: {
+        family: 'setField',
+        commandType: 'setField',
+        intent: 'editor.intent.setField',
+        risk: 'compatibility',
+        confirmation: 'explicit',
+        undo: 'reversible',
+      },
+    })
+    const resolved = resolveVoiceCommand(
+      boundary({ protocolVersion: 1, ok: true, intent: clearResponse, error: null }),
+      capture,
+    )
+    expect(resolved.activeFieldId).toBe(activeFieldId)
+    expect(validateAcceptedVoiceIntent(resolved)).toBeNull()
+
+    const mismatched = intent({
+      action: { type: 'clearField', fieldId: 'field-b' },
+      capability: clearResponse.capability,
+    })
+    expect(() =>
+      resolveVoiceCommand(
+        boundary({ protocolVersion: 1, ok: true, intent: mismatched, error: null }),
+        capture,
+      ),
+    ).toThrowError(new VoiceBridgeError('FLOW_VOICE_FIELD_SOURCE_MISMATCH'))
+    expect(
+      validateAcceptedVoiceIntent({
+        ...resolved,
+        action: { type: 'clearField', fieldId: 'field-b' },
+      }),
+    ).toBe('FLOW_VOICE_FIELD_SOURCE_MISMATCH')
   })
 
   it('keeps dictation bounded by the existing input host limits', () => {

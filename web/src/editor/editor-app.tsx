@@ -107,6 +107,9 @@ export function EditorApp({
         persistence: new IndexedDbDocumentStore(options.databaseName),
       }),
   )
+  useEffect(() => {
+    controller.setVoiceFormSession(formSession)
+  }, [controller, formSession])
   const [formProjectionScheduler] = useState<FormProjectionScheduler>(
     () => suppliedFormProjectionScheduler ?? createDefaultFormProjectionScheduler(),
   )

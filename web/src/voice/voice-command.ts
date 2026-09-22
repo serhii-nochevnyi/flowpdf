@@ -125,7 +125,17 @@ export function resolveVoiceCommand(
   }
   const intentError = validateIntentShape(intent)
   if (intentError !== null) throw new VoiceBridgeError(intentError)
-  return { ...intent, sourceHash: capture.sourceHash }
+  if (
+    intent.action.type === 'clearField' &&
+    (capture.activeFieldId === undefined || intent.action.fieldId !== capture.activeFieldId)
+  ) {
+    throw new VoiceBridgeError('FLOW_VOICE_FIELD_SOURCE_MISMATCH')
+  }
+  return {
+    ...intent,
+    sourceHash: capture.sourceHash,
+    ...(capture.activeFieldId === undefined ? {} : { activeFieldId: capture.activeFieldId }),
+  }
 }
 
 /** Revalidates a typed intent before a controller dispatch from browser code. */
@@ -133,6 +143,19 @@ export function validateAcceptedVoiceIntent(
   intent: AcceptedVoiceIntentDto,
 ): string | null {
   if (intent.sourceHash.trim().length === 0) return 'FLOW_VOICE_SOURCE_INVALID'
+  if (
+    intent.activeFieldId !== undefined &&
+    (typeof intent.activeFieldId !== 'string' || intent.activeFieldId.trim().length === 0)
+  ) {
+    return 'FLOW_VOICE_FIELD_SOURCE_INVALID'
+  }
+  if (
+    intent.action.type === 'clearField' &&
+    intent.activeFieldId !== undefined &&
+    intent.action.fieldId !== intent.activeFieldId
+  ) {
+    return 'FLOW_VOICE_FIELD_SOURCE_MISMATCH'
+  }
   return validateIntentShape(intent)
 }
 
@@ -153,6 +176,12 @@ function validateIntentShape(intent: VoiceIntentDto): string | null {
 function validateCommandCapture(capture: VoiceCommandCaptureDto): void {
   if (!isSafeRevision(capture.sourceRevision) || capture.sourceHash.trim().length === 0) {
     throw new VoiceBridgeError('FLOW_VOICE_SOURCE_INVALID')
+  }
+  if (
+    capture.activeFieldId !== undefined &&
+    (typeof capture.activeFieldId !== 'string' || capture.activeFieldId.trim().length === 0)
+  ) {
+    throw new VoiceBridgeError('FLOW_VOICE_FIELD_SOURCE_INVALID')
   }
   if (!isSelection(capture.selection)) {
     throw new VoiceBridgeError('FLOW_VOICE_SELECTION_INVALID')

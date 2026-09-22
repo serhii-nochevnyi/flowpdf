@@ -9,9 +9,14 @@ import {
 import {
   EditorStore,
   type EditorAcceptedSnapshot,
+  type EditorFieldReviewDto,
+  type EditorFieldViewDto,
+  type FieldDescriptorDto,
 } from '../src/editor/editor-store.js'
 import {
   StorageError,
+  type FormSessionIdentityDto,
+  type FormSessionStateDto,
   type RecoveryRecordsDto,
 } from '../persistence/indexeddb-store.js'
 import {
@@ -26,6 +31,10 @@ import {
 } from '../src/forms/form-projection.js'
 import type { AcceptedLayoutDto } from '../src/layout/layout-protocol.js'
 import { PDF_PROTOCOL_VERSION, type PdfExportRequestDto } from '../src/pdf/pdf-protocol.js'
+import type {
+  FormSessionCoordinatorSnapshot,
+  VoiceFormSessionTarget,
+} from '../src/forms/form-session.js'
 import { createVoiceDictationCapture } from '../src/voice/voice-command.js'
 import type { AcceptedVoiceIntentDto } from '../src/voice/voice-protocol.js'
 
@@ -263,6 +272,155 @@ describe('editor external store and controller publication', () => {
           mark: { kind: 'bold', value: true },
         },
       },
+    })
+  })
+
+  it('navigates only accepted valid fields through the Rust editor-session seam', async () => {
+    const accepted = acceptedWithVoiceFields()
+    const stateStore = new EditorStore('loading')
+    stateStore.publishAccepted(accepted, 'ready')
+    const requests: unknown[] = []
+    const controller = new EditorController({}, {
+      store: stateStore,
+      wasm: Promise.resolve(fieldVoiceWasm(requests, accepted)),
+      documentStore: successfulPersistence(),
+    })
+    const intent: AcceptedVoiceIntentDto = {
+      protocolVersion: 1,
+      locale: 'en-US',
+      sourceRevision: accepted.session.revision,
+      sourceHash: accepted.session.canonicalHash,
+      selection: accepted.editor.session.selection,
+      activeFieldId: 'field-a',
+      action: { type: 'navigateField', direction: 'next' },
+      capability: {
+        family: null,
+        commandType: 'navigateField',
+        intent: 'editor.intent.navigateField',
+        risk: 'text',
+        confirmation: 'none',
+        undo: null,
+      },
+    }
+
+    await expect(controller.dispatchVoiceCommand(intent)).resolves.toEqual({
+      kind: 'sessionCommitted',
+      revision: 1,
+      canonicalHash: 'hash-1',
+      sessionGeneration: 1,
+    })
+    expect(requests).toHaveLength(1)
+    expect(requests[0]).toMatchObject({
+      action: {
+        type: 'setSelection',
+        selection: {
+          anchor: { nodeId: accepted.editor.view.document.blocks[0]?.nodeId, utf16Offset: 3 },
+          focus: { nodeId: accepted.editor.view.document.blocks[0]?.nodeId, utf16Offset: 3 },
+        },
+      },
+    })
+  })
+
+  it('routes clear-field voice actions through the source-bound form session', async () => {
+    const accepted = acceptedWithVoiceFields()
+    const stateStore = new EditorStore('loading')
+    stateStore.publishAccepted(accepted, 'ready')
+    const requests: unknown[] = []
+    const formSession = voiceFormSessionFixture(accepted)
+    const controller = new EditorController({}, {
+      store: stateStore,
+      wasm: Promise.resolve(fieldVoiceWasm(requests, accepted)),
+      documentStore: successfulPersistence(),
+      voiceFormSession: formSession,
+    })
+    const intent: AcceptedVoiceIntentDto = {
+      protocolVersion: 1,
+      locale: 'en-US',
+      sourceRevision: accepted.session.revision,
+      sourceHash: accepted.session.canonicalHash,
+      selection: accepted.editor.session.selection,
+      activeFieldId: 'field-a',
+      action: { type: 'clearField', fieldId: 'field-a' },
+      capability: {
+        family: 'setField',
+        commandType: 'setField',
+        intent: 'editor.intent.setField',
+        risk: 'compatibility',
+        confirmation: 'explicit',
+        undo: 'reversible',
+      },
+    }
+
+    await expect(controller.dispatchVoiceCommand(intent)).resolves.toEqual({
+      kind: 'sessionCommitted',
+      revision: 1,
+      canonicalHash: 'hash-1',
+      sessionGeneration: 1,
+    })
+    expect(formSession.clearCalls).toEqual([
+      {
+        canonicalJson: '{}',
+        identity: {
+          documentId: accepted.session.documentId,
+          sourceRevision: 1,
+          sourceHash: 'hash-1',
+        },
+        fieldId: 'field-a',
+      },
+    ])
+    expect(requests).toHaveLength(0)
+  })
+
+  it('fails closed for review, read-only, missing, and stale form-session field targets', async () => {
+    const accepted = acceptedWithVoiceFields()
+    const makeController = (
+      formSession?: VoiceFormSessionTarget,
+    ): EditorController => {
+      const stateStore = new EditorStore('loading')
+      stateStore.publishAccepted(accepted, 'ready')
+      return new EditorController({}, {
+        store: stateStore,
+        wasm: Promise.resolve(fieldVoiceWasm([], accepted)),
+        documentStore: successfulPersistence(),
+        ...(formSession === undefined ? {} : { voiceFormSession: formSession }),
+      })
+    }
+    const intent = (fieldId: string): AcceptedVoiceIntentDto => ({
+      protocolVersion: 1,
+      locale: 'en-US',
+      sourceRevision: accepted.session.revision,
+      sourceHash: accepted.session.canonicalHash,
+      selection: accepted.editor.session.selection,
+      activeFieldId: fieldId,
+      action: { type: 'clearField', fieldId },
+      capability: {
+        family: 'setField',
+        commandType: 'setField',
+        intent: 'editor.intent.setField',
+        risk: 'compatibility',
+        confirmation: 'explicit',
+        undo: 'reversible',
+      },
+    })
+
+    await expect(makeController(voiceFormSessionFixture(accepted)).dispatchVoiceCommand(intent('review-field'))).resolves.toEqual({
+      kind: 'rejected',
+      code: 'FLOW_VOICE_FIELD_REVIEW_REQUIRED',
+    })
+    await expect(makeController(voiceFormSessionFixture(accepted)).dispatchVoiceCommand(intent('read-only-field'))).resolves.toEqual({
+      kind: 'rejected',
+      code: 'FLOW_VOICE_FIELD_READ_ONLY',
+    })
+    await expect(makeController(voiceFormSessionFixture(accepted)).dispatchVoiceCommand(intent('missing-field'))).resolves.toEqual({
+      kind: 'rejected',
+      code: 'FLOW_VOICE_FIELD_NOT_FOUND',
+    })
+    const stale = voiceFormSessionFixture(accepted, {
+      identity: { documentId: accepted.session.documentId, sourceRevision: 2, sourceHash: 'hash-2' },
+    })
+    await expect(makeController(stale).dispatchVoiceCommand(intent('field-a'))).resolves.toEqual({
+      kind: 'rejected',
+      code: 'FLOW_VOICE_FORM_SESSION_NOT_READY',
     })
   })
 
@@ -573,6 +731,144 @@ function acceptedFixture(): EditorAcceptedSnapshot {
         previewExportProvenance: '',
       },
       audit: [],
+    },
+  }
+}
+
+function acceptedWithVoiceFields(): EditorAcceptedSnapshot {
+  const accepted = acceptedFixture()
+  const nodeId = accepted.editor.view.document.blocks[0]?.nodeId
+  if (nodeId === undefined) throw new Error('field fixture needs a text block')
+  const fieldView = (
+    id: string,
+    offset: number,
+    tabOrder: number,
+    readOnly = false,
+  ): EditorFieldViewDto => ({
+    descriptor: fieldDescriptor(id, nodeId, offset, readOnly),
+    valueSummary: { kind: 'text', value: 'current value' },
+    tabOrder,
+  })
+  const reviewField: EditorFieldReviewDto = {
+    descriptor: fieldDescriptor('review-field', nodeId, 6),
+    valueSummary: { kind: 'text', value: 'review value' },
+    status: { kind: 'graphemeSafePositionInvalid' },
+  }
+  const fields = [
+    fieldView('field-a', 1, 0),
+    fieldView('field-b', 3, 1),
+    fieldView('read-only-field', 4, 2, true),
+  ]
+  const editorView = {
+    ...accepted.editor.view,
+    document: {
+      ...accepted.editor.view.document,
+      fields,
+      fieldReview: [reviewField],
+    },
+  }
+  return {
+    ...accepted,
+    editor: { ...accepted.editor, view: editorView },
+    view: { ...accepted.view, fieldCount: fields.length + 1 },
+  }
+}
+
+function fieldDescriptor(
+  id: string,
+  nodeId: string,
+  offset: number,
+  readOnly = false,
+): FieldDescriptorDto {
+  return {
+    id,
+    name: id,
+    label: id,
+    anchor: {
+      status: 'graphemeSafe',
+      original: { nodeId, utf16Offset: offset, affinity: 'forward' },
+    },
+    kind: { type: 'text', multiline: false, inputHint: 'plain' },
+    required: false,
+    readOnly,
+    defaultValue: { type: 'text', value: 'default value' },
+    options: [],
+  }
+}
+
+function fieldVoiceWasm(
+  requests: unknown[],
+  accepted: EditorAcceptedSnapshot,
+): WasmBoundary {
+  const base = successfulVoiceWasm(requests, accepted)
+  return {
+    ...base,
+    apply_editor_session: (request: unknown) => {
+      requests.push(request)
+      const action = (request as {
+        readonly action?: { readonly type?: string; readonly selection?: EditorAcceptedSnapshot['editor']['session']['selection'] }
+      }).action
+      if (action?.type !== 'setSelection' || action.selection === undefined) {
+        return { ok: false, value: null, error: { code: 'FLOW_TEST_SESSION_ACTION' } }
+      }
+      const generation = accepted.editor.session.sessionGeneration + 1
+      const session = {
+        ...accepted.editor.session,
+        sessionGeneration: generation,
+        selection: action.selection,
+      }
+      return {
+        ok: true,
+        value: {
+          session,
+          view: { ...accepted.editor.view, sessionGeneration: generation, selection: action.selection },
+        },
+        error: null,
+      }
+    },
+  } as WasmBoundary
+}
+
+function voiceFormSessionFixture(
+  accepted: EditorAcceptedSnapshot,
+  options: { readonly identity?: FormSessionIdentityDto } = {},
+): VoiceFormSessionTarget & {
+  readonly clearCalls: Array<{
+    readonly canonicalJson: string
+    readonly identity: FormSessionIdentityDto
+    readonly fieldId: string
+  }>
+} {
+  const identity = options.identity ?? {
+    documentId: accepted.session.documentId,
+    sourceRevision: accepted.session.revision,
+    sourceHash: accepted.session.canonicalHash,
+  }
+  let session: FormSessionStateDto = {
+    ...identity,
+    schemaVersion: 1,
+    generation: 0,
+    overrides: { 'field-a': { type: 'text', value: 'filled value' } },
+  }
+  let snapshot: FormSessionCoordinatorSnapshot = {
+    phase: 'ready',
+    identity,
+    session,
+    errorCode: null,
+  }
+  const clearCalls: Array<{
+    readonly canonicalJson: string
+    readonly identity: FormSessionIdentityDto
+    readonly fieldId: string
+  }> = []
+  return {
+    clearCalls,
+    getSnapshot: () => snapshot,
+    clearValue: async (canonicalJson, nextIdentity, fieldId) => {
+      clearCalls.push({ canonicalJson, identity: nextIdentity, fieldId })
+      const { [fieldId]: _removed, ...overrides } = session.overrides
+      session = { ...session, generation: session.generation + 1, overrides }
+      snapshot = { phase: 'ready', identity: nextIdentity, session, errorCode: null }
     },
   }
 }

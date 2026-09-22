@@ -54,6 +54,8 @@ export interface VoiceIntentDto {
 export interface AcceptedVoiceIntentDto extends VoiceIntentDto {
   /** The source hash is retained by the browser capture, never spoken back by Rust. */
   readonly sourceHash: string
+  /** The active field is browser source context used only to route navigation. */
+  readonly activeFieldId?: string
 }
 
 export interface VoiceSourceCaptureDto {
@@ -84,5 +86,11 @@ export type VoiceDispatchOutcome =
       readonly kind: 'committed'
       readonly revision: number
       readonly canonicalHash: string
+    }
+  | {
+      readonly kind: 'sessionCommitted'
+      readonly revision: number
+      readonly canonicalHash: string
+      readonly sessionGeneration: number
     }
   | { readonly kind: 'rejected'; readonly code: string }
