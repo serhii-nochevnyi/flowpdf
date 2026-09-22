@@ -154,6 +154,9 @@ The current tree includes:
 - an `EditorController` default that uses this builder when a caller provides
   a PDF scheduler without a custom factory; explicit factories remain
   authoritative, and worker/font-catalog ownership remains with the caller;
+- a real-Chromium PDF preview smoke that exercises that controller default,
+  validates the captured source/layout-bound request, and retains stale export
+  suppression;
 - Phase 1 and Phase 2 foundation fixtures, Unicode 17 grapheme conformance
   data, dependency provenance checks, Rust tests, TypeScript checks, browser
   tests for the implemented foundation and Phase 3 layout path, and a Phase 4
@@ -354,6 +357,8 @@ worker wiring.
 The controller now uses that builder by default when a PDF scheduler is
 provided without a custom factory, while preserving the explicit custom-factory
 path.
+The real-Chromium PDF preview smoke now exercises that default path and checks
+the captured source/layout-bound request before the fixture scheduler runs.
 The latest slice also verifies an ordinary request against the generated
 Rust/WASM `export_pdf` and response verifier.
 Target-viewer behavior and external form import remain unimplemented; the
