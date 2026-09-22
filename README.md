@@ -334,7 +334,7 @@ Phase 3, Deterministic Reflow and Pagination, has completed its six local
 implementation plans and dual-run gate. Phase 4 has completed its six local
 implementation plans and dual-run local gate; its qpdf/Poppler/target-viewer
 reference rows remain unavailable, so the phase is not marked complete. Phase
-5 has nineteen completed local slices for validation/projection,
+5 has twenty completed local slices for validation/projection,
 noncanonical fill state, effective-value projection, bounded AcroForm
 field/widget structure, the Rust/WASM plus guarded IndexedDB session boundary,
 accessible controls, descriptor configuration, safe anchor placement,
@@ -348,6 +348,8 @@ source-bound selection controls propagated to the PDF export factory.
 The latest slice centralizes that callback payload construction in a tested
 Rust-compatible builder; it does not activate production font-catalog or
 worker wiring.
+The latest slice also verifies an ordinary request against the generated
+Rust/WASM `export_pdf` and response verifier.
 Target-viewer behavior and external form import remain unimplemented; the
 current implementation still makes no claim of complete Unicode/PDF
 compatibility, commercial-SDK parity, or production readiness.

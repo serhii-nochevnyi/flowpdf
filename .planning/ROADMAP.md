@@ -171,7 +171,7 @@ compatibility, and general PDF import remain unclaimed.
   4. Exported fields and appearance states behave consistently in the target viewer matrix.
   5. Flattening is explicit, selected, validated and never silently replaces the editable source.
 
-**Plans**: 19/19 local plans executed; phase-level closure remains open
+**Plans**: 20/20 local plans executed; phase-level closure remains open
 
 - [x] 05-01-PLAN.md — Add Rust-owned field-value validation and deterministic
   display-list anchor-to-widget projection with explicit review paths.
@@ -212,8 +212,10 @@ compatibility, and general PDF import remain unclaimed.
   carry the source-bound selection to the PDF export factory.
 - [x] 05-19-PLAN.md — Centralize the Rust-compatible browser PDF request
   builder and prove form-plan/flatten-selection payload propagation.
+- [x] 05-20-PLAN.md — Prove the ordinary shared PDF request builder against
+  the generated Rust/WASM export and response verifier.
 
-The nineteen Phase 5 slices validate the existing semantic field vocabulary,
+The twenty Phase 5 slices validate the existing semantic field vocabulary,
 derive revision/hash-bound fixed-point widget projections, keep explicit
 noncanonical fill overrides separate from authored defaults through to the
 derived widget, emit bounded AcroForm field/widget dictionaries from an
@@ -249,6 +251,8 @@ The request-construction slice then centralizes the exact Rust-compatible
 opaque payload, including accepted page bounds, reproducibility identities, and
 verified form-plan/flatten-selection data, while leaving production font and
 worker wiring caller-owned.
+The next smoke executes the ordinary builder output through generated WASM
+`export_pdf` and verifies the Rust-produced response identity.
 **UI hint**: yes
 
 ### Phase 6: Voice Dictation and Commands
@@ -327,7 +331,7 @@ worker wiring caller-owned.
 | 2. Accessible Rich-Text Editing | 18/18 | In Progress (external AT checkpoint) |  |
 | 3. Deterministic Reflow and Pagination | 6/6 | In Progress (external AT checkpoint) |  |
 | 4. Owned PDF Preview and Export | 6/6 | In Progress (reference evidence unavailable) |  |
-| 5. Semantic Fillable Forms | 19/19 executed | In Progress (target-viewer/import evidence) |  |
+| 5. Semantic Fillable Forms | 20/20 executed | In Progress (target-viewer/import evidence) |  |
 | 6. Voice Dictation and Commands | 0/TBD | Not started | - |
 | 7. Secure PDF Reader and Scene | 0/TBD | Not started | - |
 | 8. External Reconstruction and OCR | 0/TBD | Not started | - |
