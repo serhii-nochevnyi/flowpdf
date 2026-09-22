@@ -13,9 +13,12 @@ import {
   RevisionAwarePdfExportScheduler,
   createWasmPdfExportEngine,
   createWasmPdfExportScheduler,
+  installPdfWorker,
   recoverWithWasm,
   type PdfExportEngine,
+  type PdfWorkerScope,
 } from '../src/pdf/pdf-worker.js'
+import type { PdfWorkerOutboundMessage } from '../src/pdf/pdf-protocol.js'
 
 function request(revision: number, id = `pdf-request-${revision}`): PdfExportRequestDto {
   return {
@@ -237,6 +240,54 @@ describe('revision-aware PDF worker scheduling', () => {
     scheduler.dispose()
   })
 
+  it('routes accepted and cancelled results through the worker scope', async () => {
+    const acceptedMessages: PdfWorkerOutboundMessage[] = []
+    const acceptedScope: PdfWorkerScope = {
+      onmessage: null,
+      postMessage: (message) => acceptedMessages.push(message),
+    }
+    const acceptedWorker = installPdfWorker(
+      acceptedScope,
+      async (sourceRequest) => result(sourceRequest),
+      () => true,
+    )
+    const acceptedRequest = request(1, 'worker-accepted')
+    if (acceptedScope.onmessage === null) throw new Error('worker handler is required')
+    acceptedScope.onmessage({ data: { type: 'export', request: acceptedRequest } })
+    await tick()
+    expect(acceptedMessages).toHaveLength(1)
+    expect(acceptedMessages[0]).toMatchObject({
+      type: 'accepted',
+      requestId: acceptedRequest.requestId,
+    })
+    acceptedWorker.dispose()
+
+    const pending = deferred<PdfExportWorkerResultDto>()
+    const cancelledMessages: PdfWorkerOutboundMessage[] = []
+    const cancelledScope: PdfWorkerScope = {
+      onmessage: null,
+      postMessage: (message) => cancelledMessages.push(message),
+    }
+    const cancelledWorker = installPdfWorker(
+      cancelledScope,
+      async () => pending.promise,
+      () => true,
+    )
+    const cancelledRequest = request(1, 'worker-cancelled')
+    if (cancelledScope.onmessage === null) throw new Error('worker handler is required')
+    cancelledScope.onmessage({ data: { type: 'export', request: cancelledRequest } })
+    cancelledScope.onmessage({
+      data: { type: 'cancel', requestId: cancelledRequest.requestId },
+    })
+    pending.resolve(result(cancelledRequest))
+    await tick()
+    expect(cancelledMessages).toEqual([
+      { type: 'cancelled', requestId: cancelledRequest.requestId },
+    ])
+    expect(cancelledWorker.accepted()).toBeNull()
+    cancelledWorker.dispose()
+  })
+
   it('adapts export responses and classifies exact recovery failures', async () => {
     const sourceRequest = request(1, 'wasm-request')
     const expected = result(sourceRequest)
@@ -325,3 +376,7 @@ describe('revision-aware PDF worker scheduling', () => {
     ).toThrowError('FLOW_PDF_RECOVERY_PAYLOAD_MISSING')
   })
 })
+
+async function tick(): Promise<void> {
+  await new Promise<void>((resolve) => setTimeout(resolve, 0))
+}
