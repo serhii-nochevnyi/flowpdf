@@ -51,11 +51,15 @@ pub use editor_view::{
     StructuralPlacementDto, TableCellFocusDto, TableLimitsDto,
 };
 pub use forms::{
-    FORM_PROJECTION_SCHEMA_VERSION, FORM_SESSION_PROTOCOL_VERSION, FORM_SESSION_SCHEMA_VERSION,
-    FormProjectionError, FormSessionAction, FormSessionError, FormSessionRequest,
+    FORM_PROJECTION_SCHEMA_VERSION, FORM_PROJECTION_WASM_SCHEMA_VERSION,
+    FORM_SESSION_PROTOCOL_VERSION, FORM_SESSION_SCHEMA_VERSION, FormProjectionError,
+    FormProjectionWasmError, FormProjectionWasmRequest, FormProjectionWasmResponse,
+    FormProjectionWasmResult, FormSessionAction, FormSessionError, FormSessionRequest,
     FormSessionResponse, FormSessionState, FormValueErrorCode, FormWidget, FormWidgetProjection,
-    FormWidgetReview, FormWidgetReviewReason, resolve_form_widgets,
-    resolve_form_widgets_with_session, validate_field_value,
+    FormWidgetReview, FormWidgetReviewReason, MAX_FORM_PROJECTION_WASM_REQUEST_BYTES,
+    MAX_FORM_PROJECTION_WASM_RESULT_BYTES, execute_form_projection_wasm_json,
+    form_projection_wasm_response_json, resolve_form_widgets, resolve_form_widgets_with_session,
+    validate_field_value, verify_form_projection_wasm_response_json,
 };
 pub use invalidation::{
     CarrySignature, ChangeKind, ChangeSet, IncrementalLayoutCache, InvalidationPlan,

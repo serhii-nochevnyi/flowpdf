@@ -323,6 +323,20 @@ pub fn verify_layout_response(response_json: String) -> bool {
     flow_core::verify_layout_wasm_response_json(&response_json)
 }
 
+/// Derives a revision/hash-bound form projection from an opaque Rust layout
+/// request. The browser supplies no page coordinates or display-list data.
+#[wasm_bindgen]
+pub fn project_form_widgets(request_json: String) -> String {
+    flow_core::form_projection_wasm_response_json(&request_json)
+}
+
+/// Verifies the complete Rust-owned form projection response before browser
+/// code may publish widget geometry or carry its optional plan to export.
+#[wasm_bindgen]
+pub fn verify_form_projection_response(response_json: String) -> bool {
+    flow_core::verify_form_projection_wasm_response_json(&response_json)
+}
+
 /// Runs a bounded PDF export request through a string-only JSON boundary.
 /// PDF bytes and the private source stream are hex-encoded only at this final
 /// adapter; Rust remains the sole owner of PDF construction and validation.

@@ -13,13 +13,16 @@ use thiserror::Error;
 use crate::{
     anchor::NodePositionMap,
     canonical::{canonical_bytes, canonical_hash},
-    layout::{LayoutRect, LayoutUnit},
+    layout::{LayoutRect, LayoutUnit, LayoutWasmRequest, execute_layout_wasm_request},
     model::{
         Affinity, ContentNode, DocumentId, FieldAnchorState, FieldDescriptor, FieldId, FieldKind,
         FieldOptionId, FieldValue, FlowDocument, LegacyAnchorReason, LogicalPosition, NodeId,
         TextInputHint,
     },
-    pdf::{PdfDisplayList, PdfGlyphPlacement, PdfTextLine},
+    pdf::{
+        PdfDisplayList, PdfFormError, PdfFormPlan, PdfGlyphPlacement, PdfTextLine,
+        build_display_list, build_pdf_form_plan,
+    },
     schema::validate_document,
 };
 
@@ -36,6 +39,14 @@ const SELECT_WIDGET_WIDTH: i64 = 144 * 64;
 const SIGNATURE_WIDGET_WIDTH: i64 = 180 * 64;
 const BUTTON_WIDGET_WIDTH: i64 = 72 * 64;
 const CHECKBOX_WIDGET_SIZE: i64 = 14 * 64;
+/// Version of the closed Rust/WASM form-projection protocol.
+pub const FORM_PROJECTION_WASM_SCHEMA_VERSION: u32 = 1;
+/// Aggregate request budget for the outer projection envelope and nested
+/// layout request. The nested layout helper retains its own limits.
+pub const MAX_FORM_PROJECTION_WASM_REQUEST_BYTES: usize = 96 * 1024 * 1024;
+/// Maximum serialized projection response admitted by the boundary.
+pub const MAX_FORM_PROJECTION_WASM_RESULT_BYTES: usize = 64 * 1024 * 1024;
+const MAX_FORM_PROJECTION_WASM_REQUEST_ID_BYTES: usize = 128;
 
 /// Stable, privacy-safe validation codes for one proposed field value.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
@@ -562,6 +573,85 @@ pub struct FormWidgetProjection {
     pub result_hash: String,
 }
 
+/// Closed request for deriving a Rust-owned form projection from one accepted
+/// layout request. The nested layout JSON remains opaque to browser code.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FormProjectionWasmRequest {
+    pub schema_version: u32,
+    pub request_id: String,
+    pub layout_request_json: String,
+    pub session: Option<FormSessionState>,
+}
+
+/// Derived projection and optional export plan returned by the Rust boundary.
+/// Review-bearing projections remain useful to the browser but cannot produce
+/// an export plan until their fields are repaired or intentionally removed.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FormProjectionWasmResult {
+    pub source_revision: u32,
+    pub source_hash: String,
+    pub layout_result_hash: String,
+    pub display_list_hash: String,
+    pub projection: FormWidgetProjection,
+    pub form_plan: Option<PdfFormPlan>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FormProjectionWasmError {
+    pub code: String,
+}
+
+/// Closed response for one form-projection request.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FormProjectionWasmResponse {
+    pub schema_version: u32,
+    pub request_id: String,
+    pub ok: bool,
+    pub source_revision: Option<u32>,
+    pub source_hash: Option<String>,
+    pub layout_result_hash: Option<String>,
+    pub display_list_hash: Option<String>,
+    pub result_hash: Option<String>,
+    pub result: Option<FormProjectionWasmResult>,
+    pub error: Option<FormProjectionWasmError>,
+}
+
+impl FormProjectionWasmResponse {
+    fn failure(request_id: impl Into<String>, code: impl Into<String>) -> Self {
+        Self {
+            schema_version: FORM_PROJECTION_WASM_SCHEMA_VERSION,
+            request_id: request_id.into(),
+            ok: false,
+            source_revision: None,
+            source_hash: None,
+            layout_result_hash: None,
+            display_list_hash: None,
+            result_hash: None,
+            result: None,
+            error: Some(FormProjectionWasmError { code: code.into() }),
+        }
+    }
+
+    fn success(request_id: String, result: FormProjectionWasmResult, result_hash: String) -> Self {
+        Self {
+            schema_version: FORM_PROJECTION_WASM_SCHEMA_VERSION,
+            request_id,
+            ok: true,
+            source_revision: Some(result.source_revision),
+            source_hash: Some(result.source_hash.clone()),
+            layout_result_hash: Some(result.layout_result_hash.clone()),
+            display_list_hash: Some(result.display_list_hash.clone()),
+            result_hash: Some(result_hash),
+            result: Some(result),
+            error: None,
+        }
+    }
+}
+
 /// Failure before a form projection can be published.
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum FormProjectionError {
@@ -598,6 +688,193 @@ impl FormProjectionError {
             Self::Serialization => "FLOW_FORM_SERIALIZATION",
         }
     }
+}
+
+/// Executes one closed JSON form-projection request. The nested layout request
+/// is decoded and executed only by Rust, so page rectangles and source ranges
+/// cannot be supplied by a browser caller.
+pub fn execute_form_projection_wasm_json(input: &str) -> FormProjectionWasmResponse {
+    if input.len() > MAX_FORM_PROJECTION_WASM_REQUEST_BYTES {
+        return FormProjectionWasmResponse::failure(
+            "size-limit",
+            "FLOW_FORM_PROJECTION_WASM_REQUEST_SIZE_LIMIT",
+        );
+    }
+    let request = match serde_json::from_str::<FormProjectionWasmRequest>(input) {
+        Ok(request) => request,
+        Err(_) => {
+            return FormProjectionWasmResponse::failure(
+                "decode-error",
+                "FLOW_FORM_PROJECTION_WASM_REQUEST_DECODE",
+            );
+        }
+    };
+    if request.schema_version != FORM_PROJECTION_WASM_SCHEMA_VERSION {
+        return FormProjectionWasmResponse::failure(
+            request.request_id,
+            "FLOW_FORM_PROJECTION_WASM_VERSION_UNSUPPORTED",
+        );
+    }
+    let request_id = request.request_id.clone();
+    if request_id.trim().is_empty() || request_id.len() > MAX_FORM_PROJECTION_WASM_REQUEST_ID_BYTES
+    {
+        return FormProjectionWasmResponse::failure(
+            request_id,
+            "FLOW_FORM_PROJECTION_WASM_REQUEST_ID_INVALID",
+        );
+    }
+    let FormProjectionWasmRequest {
+        layout_request_json,
+        session,
+        ..
+    } = request;
+    let layout_request = match serde_json::from_str::<LayoutWasmRequest>(&layout_request_json) {
+        Ok(request) => request,
+        Err(_) => {
+            return FormProjectionWasmResponse::failure(
+                request_id,
+                "FLOW_FORM_PROJECTION_LAYOUT_REQUEST_DECODE",
+            );
+        }
+    };
+    let execution = match execute_layout_wasm_request(layout_request) {
+        Ok(execution) => execution,
+        Err(error) => {
+            return FormProjectionWasmResponse::failure(request_id, error.code);
+        }
+    };
+    let display_list = match build_display_list(
+        &execution.document,
+        &execution.pagination,
+        &execution.catalog,
+        execution.hyphenation.as_ref(),
+    ) {
+        Ok(display_list) => display_list,
+        Err(error) => return FormProjectionWasmResponse::failure(request_id, error.code()),
+    };
+    let projection_result = match session.as_ref() {
+        Some(session) => {
+            resolve_form_widgets_with_session(&execution.document, &display_list, session)
+        }
+        None => resolve_form_widgets(&execution.document, &display_list),
+    };
+    let projection = match projection_result {
+        Ok(projection) => projection,
+        Err(error) => return FormProjectionWasmResponse::failure(request_id, error.code()),
+    };
+    let form_plan = match build_pdf_form_plan(&execution.document, &projection) {
+        Ok(plan) => Some(plan),
+        Err(PdfFormError::ReviewRequired) => None,
+        Err(error) => return FormProjectionWasmResponse::failure(request_id, error.code()),
+    };
+    let result = FormProjectionWasmResult {
+        source_revision: execution.pagination.source_revision,
+        source_hash: execution.pagination.source_hash.clone(),
+        layout_result_hash: execution.pagination.result_hash.clone(),
+        display_list_hash: display_list.result_hash.clone(),
+        projection,
+        form_plan,
+    };
+    let result_hash = match form_projection_wasm_result_hash(&result) {
+        Ok(hash) => hash,
+        Err(error) => return FormProjectionWasmResponse::failure(request_id, error.code()),
+    };
+    let response = FormProjectionWasmResponse::success(request_id, result, result_hash);
+    let serialized_size = serde_json::to_vec(&response)
+        .map(|bytes| bytes.len())
+        .unwrap_or(MAX_FORM_PROJECTION_WASM_RESULT_BYTES.saturating_add(1));
+    if serialized_size > MAX_FORM_PROJECTION_WASM_RESULT_BYTES {
+        return FormProjectionWasmResponse::failure(
+            response.request_id,
+            "FLOW_FORM_PROJECTION_WASM_RESULT_SIZE_LIMIT",
+        );
+    }
+    response
+}
+
+/// Serializes one closed form-projection response for the string-only WASM
+/// adapter.
+pub fn form_projection_wasm_response_json(input: &str) -> String {
+    serde_json::to_string(&execute_form_projection_wasm_json(input))
+        .expect("the closed form projection response must serialize")
+}
+
+/// Verifies the complete derived response before a browser worker publishes it.
+pub fn verify_form_projection_wasm_response_json(input: &str) -> bool {
+    let Ok(response) = serde_json::from_str::<FormProjectionWasmResponse>(input) else {
+        return false;
+    };
+    if response.schema_version != FORM_PROJECTION_WASM_SCHEMA_VERSION
+        || !response.ok
+        || response.error.is_some()
+        || response.result.is_none()
+    {
+        return false;
+    }
+    let Some(result) = response.result else {
+        return false;
+    };
+    if response.source_revision != Some(result.source_revision)
+        || response.source_hash.as_deref() != Some(result.source_hash.as_str())
+        || response.layout_result_hash.as_deref() != Some(result.layout_result_hash.as_str())
+        || response.display_list_hash.as_deref() != Some(result.display_list_hash.as_str())
+        || result.projection.source_revision != result.source_revision
+        || result.projection.source_hash != result.source_hash
+        || result.projection.display_list_hash != result.display_list_hash
+    {
+        return false;
+    }
+    let Ok(projection_hash) = form_widget_projection_hash(&result.projection) else {
+        return false;
+    };
+    if result.projection.result_hash != projection_hash {
+        return false;
+    }
+    if let Some(plan) = result.form_plan.as_ref() {
+        if !result.projection.review.is_empty()
+            || plan.source_revision != result.source_revision
+            || plan.source_hash != result.source_hash
+            || plan.display_list_hash != result.display_list_hash
+        {
+            return false;
+        }
+        let Ok(plan_hash) = pdf_form_plan_hash(plan) else {
+            return false;
+        };
+        if plan.result_hash != plan_hash {
+            return false;
+        }
+    }
+    let Ok(result_hash) = form_projection_wasm_result_hash(&result) else {
+        return false;
+    };
+    response.result_hash.as_deref() == Some(result_hash.as_str())
+}
+
+fn form_projection_wasm_result_hash(
+    result: &FormProjectionWasmResult,
+) -> Result<String, FormProjectionError> {
+    serde_json::to_vec(result)
+        .map(|bytes| blake3::hash(&bytes).to_hex().to_string())
+        .map_err(|_| FormProjectionError::Serialization)
+}
+
+fn form_widget_projection_hash(
+    projection: &FormWidgetProjection,
+) -> Result<String, FormProjectionError> {
+    let mut unsigned = projection.clone();
+    unsigned.result_hash.clear();
+    serde_json::to_vec(&unsigned)
+        .map(|bytes| blake3::hash(&bytes).to_hex().to_string())
+        .map_err(|_| FormProjectionError::Serialization)
+}
+
+fn pdf_form_plan_hash(plan: &PdfFormPlan) -> Result<String, FormProjectionError> {
+    let mut unsigned = plan.clone();
+    unsigned.result_hash.clear();
+    serde_json::to_vec(&unsigned)
+        .map(|bytes| blake3::hash(&bytes).to_hex().to_string())
+        .map_err(|_| FormProjectionError::Serialization)
 }
 
 /// Resolves semantic fields against one accepted PDF display list.

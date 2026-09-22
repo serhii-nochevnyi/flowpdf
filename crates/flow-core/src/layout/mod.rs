@@ -775,6 +775,32 @@ impl LayoutWasmResponse {
     }
 }
 
+/// Fully validated execution context shared by serialized layout consumers.
+///
+/// The pagination response intentionally omits font bytes and shaped glyphs,
+/// but later Rust-owned projections need the same admitted catalog and
+/// hyphenation data to derive display-list geometry. This context never crosses
+/// the WASM boundary; it only prevents those consumers from reimplementing the
+/// layout request validation path.
+pub(crate) struct LayoutWasmExecution {
+    pub request_id: String,
+    pub document: FlowDocument,
+    pub catalog: FontCatalog,
+    pub hyphenation: Option<UkrainianHyphenation>,
+    pub pagination: PaginationResult,
+}
+
+pub(crate) struct LayoutWasmFailure {
+    pub request_id: String,
+    pub code: &'static str,
+}
+
+impl LayoutWasmFailure {
+    fn new(request_id: String, code: &'static str) -> Self {
+        Self { request_id, code }
+    }
+}
+
 /// Executes one serialized, immutable layout request. Every failure is
 /// represented by a stable code and no partial page tree is returned.
 pub fn execute_layout_wasm_json(input: &str) -> LayoutWasmResponse {
@@ -786,122 +812,11 @@ pub fn execute_layout_wasm_json(input: &str) -> LayoutWasmResponse {
         Ok(request) => request,
         Err(_) => return LayoutWasmResponse::failure("", "FLOW_LAYOUT_WASM_REQUEST_DECODE"),
     };
-    if request.schema_version != LAYOUT_WASM_SCHEMA_VERSION {
-        return LayoutWasmResponse::failure(
-            request.request_id,
-            "FLOW_LAYOUT_WASM_VERSION_UNSUPPORTED",
-        );
-    }
-    let request_id = request.request_id.clone();
-    if request_id.trim().is_empty() || request_id.len() > MAX_LAYOUT_WASM_REQUEST_ID_BYTES {
-        return LayoutWasmResponse::failure(request_id, "FLOW_LAYOUT_WASM_REQUEST_ID_INVALID");
-    }
-    if request.font_catalog_identity.trim().is_empty()
-        || request
-            .expected_layout_settings_fingerprint
-            .as_ref()
-            .is_some_and(|value| value.trim().is_empty())
-    {
-        return LayoutWasmResponse::failure(request_id, "FLOW_LAYOUT_WASM_REQUEST_INVALID");
-    }
-    if request.viewport.page_count == 0
-        || request.viewport.page_count > MAX_LAYOUT_WASM_VIEWPORT_PAGES
-        || request.viewport.first_page >= request.max_pages
-        || request
-            .viewport
-            .first_page
-            .checked_add(request.viewport.page_count)
-            .is_none_or(|end| end > request.max_pages)
-    {
-        return LayoutWasmResponse::failure(request_id, "FLOW_LAYOUT_WASM_VIEWPORT_INVALID");
-    }
-
-    let mut explicit_data_bytes = 0_usize;
-    for bytes in request.fonts.iter().map(|font| font.bytes.len()) {
-        explicit_data_bytes = match explicit_data_bytes.checked_add(bytes) {
-            Some(total) if total <= MAX_LAYOUT_WASM_FONT_DATA_BYTES => total,
-            _ => {
-                return LayoutWasmResponse::failure(request_id, "FLOW_LAYOUT_WASM_FONT_DATA_LIMIT");
-            }
-        };
-    }
-    if let Some(data) = request.ukrainian_hyphenation.as_ref() {
-        explicit_data_bytes = match explicit_data_bytes.checked_add(data.bytes.len()) {
-            Some(total) if total <= MAX_LAYOUT_WASM_FONT_DATA_BYTES => total,
-            _ => {
-                return LayoutWasmResponse::failure(request_id, "FLOW_LAYOUT_WASM_FONT_DATA_LIMIT");
-            }
-        };
-    }
-    if explicit_data_bytes > MAX_LAYOUT_WASM_FONT_DATA_BYTES {
-        return LayoutWasmResponse::failure(request_id, "FLOW_LAYOUT_WASM_FONT_DATA_LIMIT");
-    }
-
-    let canonical_bytes = request.canonical_json.as_bytes();
-    if crate::canonical::preflight_canonical_bytes(canonical_bytes).is_err() {
-        return LayoutWasmResponse::failure(request_id, "FLOW_LAYOUT_WASM_DOCUMENT_INVALID");
-    }
-    let document = match crate::canonical::decode_canonical(canonical_bytes) {
-        Ok(document) => document,
-        Err(_) => {
-            return LayoutWasmResponse::failure(request_id, "FLOW_LAYOUT_WASM_DOCUMENT_INVALID");
-        }
+    let execution = match execute_layout_wasm_request(request) {
+        Ok(execution) => execution,
+        Err(error) => return LayoutWasmResponse::failure(error.request_id, error.code),
     };
-
-    let faces = match request
-        .fonts
-        .into_iter()
-        .map(|font| FontFace::new(font.id, font.family, font.face_index, font.bytes))
-        .collect::<Result<Vec<_>, _>>()
-    {
-        Ok(faces) => faces,
-        Err(error) => return LayoutWasmResponse::failure(request_id, error.code()),
-    };
-    let catalog = match FontCatalog::new(faces) {
-        Ok(catalog) => catalog,
-        Err(error) => return LayoutWasmResponse::failure(request_id, error.code()),
-    };
-    if catalog.identity() != request.font_catalog_identity {
-        return LayoutWasmResponse::failure(request_id, "FLOW_LAYOUT_WASM_IDENTITY_MISMATCH");
-    }
-
-    let hyphenation = match request.ukrainian_hyphenation {
-        Some(data) => match UkrainianHyphenation::from_bincode(data.identity, &data.bytes) {
-            Ok(data) => Some(data),
-            Err(error) => return LayoutWasmResponse::failure(request_id, error.code()),
-        },
-        None => None,
-    };
-    let actual_hyphenation_identity = hyphenation.as_ref().map(|data| data.identity().to_owned());
-    if actual_hyphenation_identity != request.hyphenation_data_identity {
-        return LayoutWasmResponse::failure(request_id, "FLOW_LAYOUT_WASM_IDENTITY_MISMATCH");
-    }
-
-    let pagination_request = match PaginationRequest::new(
-        request.source_revision,
-        request.source_hash,
-        request.max_pages,
-    ) {
-        Ok(request) => request,
-        Err(error) => return LayoutWasmResponse::failure(request_id, error.code()),
-    };
-    let result = match paginate_document(
-        &document,
-        &pagination_request,
-        &catalog,
-        hyphenation.as_ref(),
-    ) {
-        Ok(result) => result,
-        Err(error) => return LayoutWasmResponse::failure(request_id, error.code()),
-    };
-    if request
-        .expected_layout_settings_fingerprint
-        .is_some_and(|expected| expected != result.layout_settings_fingerprint)
-    {
-        return LayoutWasmResponse::failure(request_id, "FLOW_LAYOUT_WASM_IDENTITY_MISMATCH");
-    }
-
-    let response = LayoutWasmResponse::success(request_id, result);
+    let response = LayoutWasmResponse::success(execution.request_id, execution.pagination);
     let serialized_size = serde_json::to_vec(&response)
         .map(|bytes| bytes.len())
         .unwrap_or(MAX_LAYOUT_WASM_RESULT_BYTES.saturating_add(1));
@@ -912,6 +827,168 @@ pub fn execute_layout_wasm_json(input: &str) -> LayoutWasmResponse {
         );
     }
     response
+}
+
+/// Executes one decoded layout request and retains the Rust-only resources
+/// required by downstream display-list projections.
+pub(crate) fn execute_layout_wasm_request(
+    request: LayoutWasmRequest,
+) -> Result<LayoutWasmExecution, LayoutWasmFailure> {
+    if request.schema_version != LAYOUT_WASM_SCHEMA_VERSION {
+        return Err(LayoutWasmFailure::new(
+            request.request_id,
+            "FLOW_LAYOUT_WASM_VERSION_UNSUPPORTED",
+        ));
+    }
+    let request_id = request.request_id.clone();
+    if request_id.trim().is_empty() || request_id.len() > MAX_LAYOUT_WASM_REQUEST_ID_BYTES {
+        return Err(LayoutWasmFailure::new(
+            request_id,
+            "FLOW_LAYOUT_WASM_REQUEST_ID_INVALID",
+        ));
+    }
+    if request.font_catalog_identity.trim().is_empty()
+        || request
+            .expected_layout_settings_fingerprint
+            .as_ref()
+            .is_some_and(|value| value.trim().is_empty())
+    {
+        return Err(LayoutWasmFailure::new(
+            request_id,
+            "FLOW_LAYOUT_WASM_REQUEST_INVALID",
+        ));
+    }
+    if request.viewport.page_count == 0
+        || request.viewport.page_count > MAX_LAYOUT_WASM_VIEWPORT_PAGES
+        || request.viewport.first_page >= request.max_pages
+        || request
+            .viewport
+            .first_page
+            .checked_add(request.viewport.page_count)
+            .is_none_or(|end| end > request.max_pages)
+    {
+        return Err(LayoutWasmFailure::new(
+            request_id,
+            "FLOW_LAYOUT_WASM_VIEWPORT_INVALID",
+        ));
+    }
+
+    let mut explicit_data_bytes = 0_usize;
+    for bytes in request.fonts.iter().map(|font| font.bytes.len()) {
+        explicit_data_bytes = match explicit_data_bytes.checked_add(bytes) {
+            Some(total) if total <= MAX_LAYOUT_WASM_FONT_DATA_BYTES => total,
+            _ => {
+                return Err(LayoutWasmFailure::new(
+                    request_id,
+                    "FLOW_LAYOUT_WASM_FONT_DATA_LIMIT",
+                ));
+            }
+        };
+    }
+    if let Some(data) = request.ukrainian_hyphenation.as_ref() {
+        explicit_data_bytes = match explicit_data_bytes.checked_add(data.bytes.len()) {
+            Some(total) if total <= MAX_LAYOUT_WASM_FONT_DATA_BYTES => total,
+            _ => {
+                return Err(LayoutWasmFailure::new(
+                    request_id,
+                    "FLOW_LAYOUT_WASM_FONT_DATA_LIMIT",
+                ));
+            }
+        };
+    }
+    if explicit_data_bytes > MAX_LAYOUT_WASM_FONT_DATA_BYTES {
+        return Err(LayoutWasmFailure::new(
+            request_id,
+            "FLOW_LAYOUT_WASM_FONT_DATA_LIMIT",
+        ));
+    }
+
+    let canonical_bytes = request.canonical_json.as_bytes();
+    if crate::canonical::preflight_canonical_bytes(canonical_bytes).is_err() {
+        return Err(LayoutWasmFailure::new(
+            request_id,
+            "FLOW_LAYOUT_WASM_DOCUMENT_INVALID",
+        ));
+    }
+    let document = match crate::canonical::decode_canonical(canonical_bytes) {
+        Ok(document) => document,
+        Err(_) => {
+            return Err(LayoutWasmFailure::new(
+                request_id,
+                "FLOW_LAYOUT_WASM_DOCUMENT_INVALID",
+            ));
+        }
+    };
+
+    let faces = match request
+        .fonts
+        .into_iter()
+        .map(|font| FontFace::new(font.id, font.family, font.face_index, font.bytes))
+        .collect::<Result<Vec<_>, _>>()
+    {
+        Ok(faces) => faces,
+        Err(error) => return Err(LayoutWasmFailure::new(request_id, error.code())),
+    };
+    let catalog = match FontCatalog::new(faces) {
+        Ok(catalog) => catalog,
+        Err(error) => return Err(LayoutWasmFailure::new(request_id, error.code())),
+    };
+    if catalog.identity() != request.font_catalog_identity {
+        return Err(LayoutWasmFailure::new(
+            request_id,
+            "FLOW_LAYOUT_WASM_IDENTITY_MISMATCH",
+        ));
+    }
+
+    let hyphenation = match request.ukrainian_hyphenation {
+        Some(data) => match UkrainianHyphenation::from_bincode(data.identity, &data.bytes) {
+            Ok(data) => Some(data),
+            Err(error) => return Err(LayoutWasmFailure::new(request_id, error.code())),
+        },
+        None => None,
+    };
+    let actual_hyphenation_identity = hyphenation.as_ref().map(|data| data.identity().to_owned());
+    if actual_hyphenation_identity != request.hyphenation_data_identity {
+        return Err(LayoutWasmFailure::new(
+            request_id,
+            "FLOW_LAYOUT_WASM_IDENTITY_MISMATCH",
+        ));
+    }
+
+    let pagination_request = match PaginationRequest::new(
+        request.source_revision,
+        request.source_hash,
+        request.max_pages,
+    ) {
+        Ok(request) => request,
+        Err(error) => return Err(LayoutWasmFailure::new(request_id, error.code())),
+    };
+    let pagination = match paginate_document(
+        &document,
+        &pagination_request,
+        &catalog,
+        hyphenation.as_ref(),
+    ) {
+        Ok(result) => result,
+        Err(error) => return Err(LayoutWasmFailure::new(request_id, error.code())),
+    };
+    if request
+        .expected_layout_settings_fingerprint
+        .is_some_and(|expected| expected != pagination.layout_settings_fingerprint)
+    {
+        return Err(LayoutWasmFailure::new(
+            request_id,
+            "FLOW_LAYOUT_WASM_IDENTITY_MISMATCH",
+        ));
+    }
+
+    Ok(LayoutWasmExecution {
+        request_id,
+        document,
+        catalog,
+        hyphenation,
+        pagination,
+    })
 }
 
 /// Serializes one boundary response without exposing a serializer-specific
