@@ -1,0 +1,58 @@
+{
+  "contract": "1.0.0",
+  "flavor": "core",
+  "milestone": "v1.0",
+  "phases": [
+    {
+      "number": "1",
+      "name": "Durable Flow Foundation",
+      "status": "complete"
+    },
+    {
+      "number": "2",
+      "name": "Accessible Rich-Text Editing",
+      "status": "in_progress"
+    },
+    {
+      "number": "3",
+      "name": "Deterministic Reflow and Pagination",
+      "status": "pending"
+    },
+    {
+      "number": "4",
+      "name": "Owned PDF Preview and Export",
+      "status": "pending"
+    },
+    {
+      "number": "5",
+      "name": "Semantic Fillable Forms",
+      "status": "pending"
+    },
+    {
+      "number": "6",
+      "name": "Voice Dictation and Commands",
+      "status": "pending"
+    },
+    {
+      "number": "7",
+      "name": "Secure PDF Reader and Scene",
+      "status": "pending"
+    },
+    {
+      "number": "8",
+      "name": "External Reconstruction and OCR",
+      "status": "pending"
+    },
+    {
+      "number": "9",
+      "name": "Controlled Native PDF Editing",
+      "status": "pending"
+    }
+  ],
+  "next": {
+    "command": "/gsd:progress --next",
+    "label": "Advance to the next step",
+    "reason": "Phase 3 of 9 · executing"
+  },
+  "updated_at": "2026-09-21T11:44:04.239Z"
+}
