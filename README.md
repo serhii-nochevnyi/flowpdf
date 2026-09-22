@@ -110,6 +110,10 @@ The current tree includes:
 - a Rust-owned, parity-catalogued `InsertField` transaction and localized
   accessible action that creates one typed default text field at an accepted
   collapsed caret, with exact undo/redo and durable recovery evidence;
+- a Rust-owned, parity-catalogued `RemoveField` transaction with explicit
+  confirmation, exact indexed undo/redo/recovery, and localized accessible
+  removal controls for valid projected fields; review-region fields remain
+  read-only;
 - a bounded AcroForm structure adapter that converts an accepted session-aware
   widget projection into deterministic field dictionaries, page widgets,
   values/defaults, options, flags, and catalog/page references in the owned
@@ -141,9 +145,9 @@ things:
 - a bounded PDF reader, with selectable text, reproducibility evidence,
   explicit unsupported-content reporting, and an exact owned-source round trip
   when the source payload is available;
-- semantic field deletion and tab-order authoring; the current editor can
-  insert, configure, place, and fill typed text and already-authored valid
-  fields through native accessible controls, while explicit AcroForm
+- semantic field tab-order authoring; the current editor can insert,
+  configure, place, fill, and explicitly remove typed and already-authored
+  valid fields through native accessible controls, while explicit AcroForm
   appearance streams, target-viewer behavior, flattening, and external PDF
   form import remain separately planned. The current repository contains the
   bounded Rust/WASM transport and guarded browser persistence, but not those

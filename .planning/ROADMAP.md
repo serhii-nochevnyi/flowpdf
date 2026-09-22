@@ -171,7 +171,7 @@ compatibility, and general PDF import remain unclaimed.
   4. Exported fields and appearance states behave consistently in the target viewer matrix.
   5. Flattening is explicit, selected, validated and never silently replaces the editable source.
 
-**Plans**: 9/9 local plans executed; phase-level closure remains open
+**Plans**: 10/10 local plans executed; phase-level closure remains open
 
 - [x] 05-01-PLAN.md — Add Rust-owned field-value validation and deterministic
   display-list anchor-to-widget projection with explicit review paths.
@@ -191,18 +191,21 @@ compatibility, and general PDF import remain unclaimed.
   valid fields through the accepted Rust caret and `SetField` path.
 - [x] 05-09-PLAN.md — Add parity-closed Rust-owned default text-field insertion
   at an accepted collapsed caret with localized accessible controls.
+- [x] 05-10-PLAN.md — Add confirmed Rust-owned semantic field removal with an
+  exact indexed inverse, accessible localized controls, and source rebind fences.
 
-The nine Phase 5 slices validate the existing semantic field vocabulary,
+The ten Phase 5 slices validate the existing semantic field vocabulary,
 derive revision/hash-bound fixed-point widget projections, keep explicit
 noncanonical fill overrides separate from authored defaults through to the
 derived widget, emit bounded AcroForm field/widget dictionaries from an
 accepted projection, carry accepted current values through a versioned
 Rust/WASM boundary into a guarded dedicated IndexedDB store, expose accessible
 native controls, configure descriptors, place already-authored valid fields
-through Rust `SetField`, and insert a typed default text field through the
-parity-catalogued Rust `InsertField` path. They do not claim field deletion,
-tab-order authoring, appearance streams, flattening, external form import, or
-target-viewer compatibility. Those remain separately planned and verified.
+through Rust `SetField`, insert a typed default text field through the
+parity-catalogued Rust `InsertField` path, and remove valid fields through the
+confirmed `RemoveField` path. They do not claim tab-order authoring, appearance
+streams, flattening, external form import, or target-viewer compatibility.
+Those remain separately planned and verified.
 **UI hint**: yes
 
 ### Phase 6: Voice Dictation and Commands

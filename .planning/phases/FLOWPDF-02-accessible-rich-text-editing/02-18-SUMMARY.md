@@ -138,6 +138,9 @@ do not claim pagination, geometry, shaping, or PDF implementation.
 - The shared command catalog is now `34/34` because Phase 5 Plan 05-09 adds
   the parity-closed `InsertField` extension; the original Phase 2 baseline
   remains `33/33`.
+- The current shared command catalog is `35/35` after Phase 5 Plan 05-10
+  adds the parity-closed `RemoveField` extension; this later Phase 5
+  extension does not rewrite the historical Phase 2 baseline of `33/33`.
 - External Edge/Windows screen-reader evidence remains
   `unavailable/outstanding`; no local Chromium or macOS evidence is promoted as
   a substitute.
