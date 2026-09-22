@@ -187,6 +187,7 @@ export type EditorFieldValueSummaryDto =
 export interface EditorFieldViewDto {
   readonly descriptor: FieldDescriptorDto
   readonly valueSummary: EditorFieldValueSummaryDto
+  readonly tabOrder: number
 }
 
 export type EditorFieldReviewStatusDto =

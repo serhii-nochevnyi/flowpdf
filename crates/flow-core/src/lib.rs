@@ -891,6 +891,7 @@ const fn audit_command_kind(kind: &CommandKind) -> AuditCommandKind {
         CommandKind::InsertField { .. } => AuditCommandKind::InsertField,
         CommandKind::SetField { .. } => AuditCommandKind::SetField,
         CommandKind::RemoveField { .. } => AuditCommandKind::RemoveField,
+        CommandKind::MoveField { .. } => AuditCommandKind::MoveField,
         CommandKind::Batch { .. } => AuditCommandKind::Batch,
         CommandKind::Undo => AuditCommandKind::Undo,
         CommandKind::Redo => AuditCommandKind::Redo,
@@ -1661,6 +1662,7 @@ pub(crate) fn replay_history_effect(
                     "insertField",
                     "setField",
                     "removeField",
+                    "moveField",
                     "batch",
                 ]
                 .contains(&record.command_type.as_str())

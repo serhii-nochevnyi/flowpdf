@@ -264,6 +264,56 @@ fn projection_is_deterministic_and_revision_bound() {
 }
 
 #[test]
+fn projection_tab_order_follows_canonical_field_order_not_geometry() {
+    let mut document = document_with_field();
+    let node = document.content[0].id.clone();
+    let second = text_field(9_956, node, 0);
+    document.fields.push(second.clone());
+    let display = display_list(&document);
+    let projection = resolve_form_widgets(&document, &display).expect("ordered projection");
+    assert_eq!(
+        projection
+            .widgets
+            .iter()
+            .find(|widget| widget.field_id == document.fields[0].id)
+            .expect("first widget")
+            .tab_order,
+        0
+    );
+    assert_eq!(
+        projection
+            .widgets
+            .iter()
+            .find(|widget| widget.field_id == second.id)
+            .expect("second widget")
+            .tab_order,
+        1
+    );
+
+    document.fields.swap(0, 1);
+    let swapped_display = display_list(&document);
+    let swapped = resolve_form_widgets(&document, &swapped_display).expect("swapped projection");
+    assert_eq!(
+        swapped
+            .widgets
+            .iter()
+            .find(|widget| widget.field_id == document.fields[0].id)
+            .expect("swapped first widget")
+            .tab_order,
+        0
+    );
+    assert_eq!(
+        swapped
+            .widgets
+            .iter()
+            .find(|widget| widget.field_id == document.fields[1].id)
+            .expect("swapped second widget")
+            .tab_order,
+        1
+    );
+}
+
+#[test]
 fn required_empty_defaults_are_projectable_but_empty_user_values_are_rejected() {
     let mut document = document_with_field();
     document.fields[0].required = true;

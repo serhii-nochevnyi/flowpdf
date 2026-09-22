@@ -704,6 +704,7 @@ export function assertPhaseTwoParityBoundary(root, snapshot = loadWorkspaceSnaps
     'insertField',
     'setField',
     'removeField',
+    'moveField',
   ]
   assert.equal(contract.formatVersion, 1)
   assert.equal(contract.phase, 'FLOWPDF-02-accessible-rich-text-editing')

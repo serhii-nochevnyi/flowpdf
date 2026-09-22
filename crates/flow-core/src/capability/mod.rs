@@ -47,10 +47,11 @@ pub enum MutationFamily {
     InsertField,
     SetField,
     RemoveField,
+    MoveField,
 }
 
 impl MutationFamily {
-    pub const ALL: [Self; 35] = [
+    pub const ALL: [Self; 36] = [
         Self::InsertText,
         Self::ReplaceText,
         Self::ReplaceSelection,
@@ -86,6 +87,7 @@ impl MutationFamily {
         Self::InsertField,
         Self::SetField,
         Self::RemoveField,
+        Self::MoveField,
     ];
 
     #[must_use]
@@ -126,6 +128,7 @@ impl MutationFamily {
             Self::InsertField => "insertField",
             Self::SetField => "setField",
             Self::RemoveField => "removeField",
+            Self::MoveField => "moveField",
         }
     }
 
@@ -167,6 +170,7 @@ impl MutationFamily {
             Mutation::InsertField { .. } => Self::InsertField,
             Mutation::SetField { .. } => Self::SetField,
             Mutation::RemoveField { .. } => Self::RemoveField,
+            Mutation::MoveField { .. } => Self::MoveField,
         }
     }
 
@@ -208,6 +212,7 @@ impl MutationFamily {
             CommandKind::InsertField { .. } => Some(Self::InsertField),
             CommandKind::SetField { .. } => Some(Self::SetField),
             CommandKind::RemoveField { .. } => Some(Self::RemoveField),
+            CommandKind::MoveField { .. } => Some(Self::MoveField),
             CommandKind::Batch { .. } | CommandKind::Undo | CommandKind::Redo => None,
         }
     }
@@ -309,7 +314,7 @@ const fn capability(
     }
 }
 
-pub static COMMAND_CAPABILITIES: [CommandCapability; 35] = [
+pub static COMMAND_CAPABILITIES: [CommandCapability; 36] = [
     capability(
         MutationFamily::InsertText,
         "editor.intent.insertText",
@@ -660,6 +665,16 @@ pub static COMMAND_CAPABILITIES: [CommandCapability; 35] = [
         "editor.parity.keyboard.removeField",
         "keyboard.deleteField",
     ),
+    capability(
+        MutationFamily::MoveField,
+        "editor.intent.moveField",
+        RiskLevel::Structure,
+        ConfirmationPolicy::None,
+        "editor.parity.visible.moveField",
+        "editor.fields",
+        "editor.parity.keyboard.moveField",
+        "keyboard.fieldOrder",
+    ),
 ];
 
 #[must_use]
@@ -744,5 +759,6 @@ const fn family_index(family: MutationFamily) -> usize {
         MutationFamily::InsertField => 32,
         MutationFamily::SetField => 33,
         MutationFamily::RemoveField => 34,
+        MutationFamily::MoveField => 35,
     }
 }

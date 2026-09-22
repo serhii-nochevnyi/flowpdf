@@ -125,6 +125,11 @@ export type StructuralCommandDto =
       readonly confirmed: boolean
     }
   | {
+      readonly type: 'moveField'
+      readonly fieldId: string
+      readonly targetIndex: number
+    }
+  | {
       readonly type: 'insertImage'
       readonly placement: StructuralPlacementDto
       readonly sessionId: string

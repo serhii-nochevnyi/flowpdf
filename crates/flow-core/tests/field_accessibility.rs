@@ -107,6 +107,9 @@ fn valid_fields_are_sorted_by_document_position_then_offset_and_id() {
     assert_eq!(ordered_ids[0], document.fields[1].id);
     assert_eq!(ordered_ids[1], document.fields[0].id);
     assert_eq!(ordered_ids[2], document.fields[2].id);
+    assert_eq!(view.document.fields[0].tab_order, 1);
+    assert_eq!(view.document.fields[1].tab_order, 0);
+    assert_eq!(view.document.fields[2].tab_order, 2);
 }
 
 #[test]

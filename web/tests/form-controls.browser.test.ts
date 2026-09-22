@@ -431,4 +431,82 @@ for (const locale of ['uk', 'en'] as const) {
     )
     expect(root.querySelector(`[data-field-id="${textField.descriptor.id}"]`)).toBeNull()
   })
+
+  test(`field tab order moves through Rust and rebinds form state in ${locale}`, async () => {
+    const { root, controller } = await openFormEditor(locale)
+    const initial = controller.snapshot().accepted
+    if (initial === null) throw new Error('accepted editor state is required')
+    const textField = initial.editor.view.document.fields.find(
+      (field) => field.descriptor.kind.type === 'text',
+    )
+    if (textField === undefined) throw new Error('text field is required')
+    const textCard = root.querySelector<HTMLElement>(
+      `[data-field-id="${textField.descriptor.id}"]`,
+    )
+    const text = textCard?.querySelector<HTMLInputElement>('[data-form-control-kind="text"] input')
+    if (textCard === null || textCard === undefined || text === null || text === undefined) {
+      throw new Error('text field card is required')
+    }
+
+    setInputValue(text, 'Перед порядком')
+    for (let attempt = 0; attempt < 40 && text.value !== 'Перед порядком'; attempt += 1) {
+      await settle(controller)
+    }
+    expect(text.value).toBe('Перед порядком')
+    await settleForm(root, controller)
+
+    const beforeMove = controller.snapshot().accepted
+    if (beforeMove === null) throw new Error('accepted pre-order state is required')
+    const moveEarlier = textField.tabOrder > 0
+    const action = textCard.querySelector<HTMLButtonElement>(
+      `[data-action="editor-field-move-${moveEarlier ? 'earlier' : 'later'}"]`,
+    )
+    if (action === null) throw new Error('field order action is required')
+    expect(action.disabled).toBe(false)
+    action.click()
+    await settle(controller)
+    await settleForm(root, controller)
+
+    const moved = controller.snapshot().accepted
+    if (moved === null) throw new Error('accepted reordered state is required')
+    const movedField = moved.editor.view.document.fields.find(
+      (field) => field.descriptor.id === textField.descriptor.id,
+    )
+    if (movedField === undefined) throw new Error('reordered text field is required')
+    expect(moved.session.revision).toBe(beforeMove.session.revision + 1)
+    expect(movedField.tabOrder).toBe(textField.tabOrder + (moveEarlier ? -1 : 1))
+    expect(
+      moved.editor.view.document.fields.map((field) => field.tabOrder).sort((a, b) => a - b),
+    ).toEqual([...Array(moved.editor.view.document.fields.length).keys()])
+    expect(
+      root.querySelector<HTMLInputElement>(
+        `[data-field-id="${textField.descriptor.id}"] [data-form-control-kind="text"] input`,
+      )?.value,
+    ).toBe('Тест')
+
+    await controller.undo()
+    await settle(controller)
+    await settleForm(root, controller)
+    const undone = controller.snapshot().accepted
+    if (undone === null) throw new Error('accepted undo state is required')
+    expect(
+      undone.editor.view.document.fields.find(
+        (field) => field.descriptor.id === textField.descriptor.id,
+      )?.tabOrder,
+    ).toBe(textField.tabOrder)
+    expect(
+      root.querySelector<HTMLInputElement>(
+        `[data-field-id="${textField.descriptor.id}"] [data-form-control-kind="text"] input`,
+      )?.value,
+    ).toBe('Тест')
+
+    await controller.redo()
+    await settle(controller)
+    await settleForm(root, controller)
+    expect(
+      controller.snapshot().accepted?.editor.view.document.fields.find(
+        (field) => field.descriptor.id === textField.descriptor.id,
+      )?.tabOrder,
+    ).toBe(textField.tabOrder + (moveEarlier ? -1 : 1))
+  })
 }

@@ -77,6 +77,7 @@ pub struct PdfFormField {
     pub flags: u32,
     pub default_value: PdfFormValue,
     pub value: PdfFormValue,
+    pub tab_order: u32,
     pub options: Vec<PdfFormOption>,
     pub page_index: u32,
     pub rect: LayoutRect,
@@ -129,6 +130,8 @@ pub enum PdfFormError {
     PageOutOfRange,
     #[error("the PDF form option is invalid")]
     InvalidOption,
+    #[error("the PDF form tab order is invalid")]
+    InvalidTabOrder,
     #[error("the PDF form plan could not be serialized")]
     Serialization,
 }
@@ -154,6 +157,7 @@ impl PdfFormError {
             Self::InvalidGeometry => "FLOW_PDF_FORM_GEOMETRY_INVALID",
             Self::PageOutOfRange => "FLOW_PDF_FORM_PAGE_OUT_OF_RANGE",
             Self::InvalidOption => "FLOW_PDF_FORM_OPTION_INVALID",
+            Self::InvalidTabOrder => "FLOW_PDF_FORM_TAB_ORDER_INVALID",
             Self::Serialization => "FLOW_PDF_FORM_SERIALIZATION",
         }
     }
@@ -233,6 +237,7 @@ pub fn build_pdf_form_plan(
             flags: flags | flags_for_field(field),
             default_value: to_pdf_value(field, &widget.default_value)?,
             value: to_pdf_value(field, &widget.value)?,
+            tab_order: widget.tab_order,
             options,
             page_index: widget.page_index,
             rect: widget.rect,
@@ -272,6 +277,7 @@ pub(crate) fn validate_pdf_form_plan(plan: &PdfFormPlan) -> Result<(), PdfFormEr
     let mut field_ids = BTreeSet::new();
     let mut widget_ids = BTreeSet::new();
     let mut field_names = BTreeSet::new();
+    let mut tab_orders = BTreeSet::new();
     let mut option_count = 0_usize;
     for field in &plan.fields {
         if field.name.trim().is_empty()
@@ -284,6 +290,9 @@ pub(crate) fn validate_pdf_form_plan(plan: &PdfFormPlan) -> Result<(), PdfFormEr
             || !widget_ids.insert(field.widget_id.as_str())
         {
             return Err(PdfFormError::InvalidIdentity);
+        }
+        if !tab_orders.insert(field.tab_order) {
+            return Err(PdfFormError::InvalidTabOrder);
         }
         option_count = option_count
             .checked_add(field.options.len())
@@ -310,6 +319,12 @@ pub(crate) fn validate_pdf_form_plan(plan: &PdfFormPlan) -> Result<(), PdfFormEr
         }
         validate_pdf_value(field.field_type, &field.default_value)?;
         validate_pdf_value(field.field_type, &field.value)?;
+    }
+    if tab_orders.len() != plan.fields.len()
+        || !(0..u32::try_from(plan.fields.len()).map_err(|_| PdfFormError::FieldLimit)?)
+            .all(|tab_order| tab_orders.contains(&tab_order))
+    {
+        return Err(PdfFormError::InvalidTabOrder);
     }
     if plan.result_hash.trim().is_empty()
         || plan.result_hash.len() > super::MAX_IDENTITY_BYTES
@@ -492,9 +507,11 @@ pub(crate) fn emit_form_objects(
 ) -> Result<PdfFormEmission, PdfError> {
     validate_pdf_form_plan(plan)?;
     let mut page_widgets = vec![Vec::new(); pages.len()];
-    let mut field_refs = Vec::with_capacity(plan.fields.len());
-    let mut widget_refs = Vec::with_capacity(plan.fields.len());
-    for field in &plan.fields {
+    let mut ordered_fields = plan.fields.iter().collect::<Vec<_>>();
+    ordered_fields.sort_by_key(|field| field.tab_order);
+    let mut field_refs = Vec::with_capacity(ordered_fields.len());
+    let mut widget_refs = Vec::with_capacity(ordered_fields.len());
+    for field in &ordered_fields {
         let page_index =
             usize::try_from(field.page_index).map_err(|_| PdfFormError::PageOutOfRange)?;
         let (_, _, bounds) = pages.get(page_index).ok_or(PdfFormError::PageOutOfRange)?;
@@ -503,8 +520,7 @@ pub(crate) fn emit_form_objects(
         widget_refs.push(document.add_object(CosValue::Null)?);
     }
 
-    for ((field, field_ref), widget_ref) in plan
-        .fields
+    for ((field, field_ref), widget_ref) in ordered_fields
         .iter()
         .zip(field_refs.iter().copied())
         .zip(widget_refs.iter().copied())

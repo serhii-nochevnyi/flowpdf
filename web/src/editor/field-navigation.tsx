@@ -58,6 +58,7 @@ export function FieldNavigation({
               <FieldCard
                 key={field.descriptor.id}
                 field={field}
+                fieldCount={fields.length}
                 locale={locale}
                 controller={controller}
                 canonicalJson={canonicalJson}
@@ -93,6 +94,7 @@ export function FieldNavigation({
 
 interface FieldCardProps {
   readonly field: EditorFieldViewDto
+  readonly fieldCount: number
   readonly locale: EditorLocale
   readonly controller?: InputCommandTarget | undefined
   readonly canonicalJson?: string | undefined
@@ -102,6 +104,7 @@ interface FieldCardProps {
 
 function FieldCard({
   field,
+  fieldCount,
   locale,
   controller,
   canonicalJson,
@@ -158,6 +161,13 @@ function FieldCard({
       </p>
       {controller === undefined ? null : (
         <>
+          <FieldOrderActions
+            fieldId={field.descriptor.id}
+            tabOrder={field.tabOrder}
+            fieldCount={fieldCount}
+            locale={locale}
+            controller={controller}
+          />
           <FieldRemovalAction
             fieldId={field.descriptor.id}
             locale={locale}
@@ -183,6 +193,57 @@ function FieldCard({
         />
       )}
     </article>
+  )
+}
+
+function FieldOrderActions({
+  fieldId,
+  tabOrder,
+  fieldCount,
+  locale,
+  controller,
+}: {
+  readonly fieldId: string
+  readonly tabOrder: number
+  readonly fieldCount: number
+  readonly locale: EditorLocale
+  readonly controller: InputCommandTarget
+}) {
+  const labels = editorMessages[locale]
+  const busy = controller.snapshot().phase === 'pending'
+  const focusEditor = (): void => {
+    document.querySelector<HTMLTextAreaElement>('[data-editor-input-host]')?.focus()
+  }
+  const move = (targetIndex: number): void => {
+    void controller
+      .structuralCommand({ type: 'moveField', fieldId, targetIndex }, 'ui')
+      .finally(focusEditor)
+  }
+
+  return (
+    <div className="editor-field-order-actions" data-field-order-actions="">
+      <span data-field-tab-order="">
+        {labels.fieldTabOrder}: {tabOrder + 1}/{fieldCount}
+      </span>
+      <button
+        type="button"
+        data-action="editor-field-move-earlier"
+        disabled={busy || tabOrder === 0}
+        onMouseDown={(event) => event.preventDefault()}
+        onClick={() => move(tabOrder - 1)}
+      >
+        {labels.fieldMoveEarlier}
+      </button>
+      <button
+        type="button"
+        data-action="editor-field-move-later"
+        disabled={busy || tabOrder >= fieldCount - 1}
+        onMouseDown={(event) => event.preventDefault()}
+        onClick={() => move(tabOrder + 1)}
+      >
+        {labels.fieldMoveLater}
+      </button>
+    </div>
   )
 }
 

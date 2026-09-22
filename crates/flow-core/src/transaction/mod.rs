@@ -187,6 +187,10 @@ pub enum CommandKind {
         field_id: FieldId,
         confirmed: bool,
     },
+    MoveField {
+        field_id: FieldId,
+        target_index: u32,
+    },
     Batch {
         mutations: Vec<Mutation>,
     },
@@ -335,6 +339,10 @@ pub enum Mutation {
         field_id: FieldId,
         confirmed: bool,
     },
+    MoveField {
+        field_id: FieldId,
+        target_index: u32,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -415,6 +423,11 @@ pub enum Operation {
     },
     RemoveField {
         index: u32,
+        field: Box<FieldDescriptor>,
+    },
+    MoveField {
+        from_index: u32,
+        to_index: u32,
         field: Box<FieldDescriptor>,
     },
 }
@@ -1307,6 +1320,13 @@ fn command_mutations(kind: &CommandKind) -> Result<Vec<Mutation>, CommandError> 
             field_id: field_id.clone(),
             confirmed: *confirmed,
         }]),
+        CommandKind::MoveField {
+            field_id,
+            target_index,
+        } => Ok(vec![Mutation::MoveField {
+            field_id: field_id.clone(),
+            target_index: *target_index,
+        }]),
         CommandKind::Undo | CommandKind::Redo => Err(CommandError::BrokenInvariant),
     }
 }
@@ -1583,7 +1603,69 @@ fn derive_operation(
                 },
             ))
         }
+        Mutation::MoveField {
+            field_id,
+            target_index,
+        } => derive_move_field_operation(document, field_id, *target_index),
     }
+}
+
+fn derive_move_field_operation(
+    document: &FlowDocument,
+    field_id: &FieldId,
+    target_index: u32,
+) -> Result<(Operation, Operation), CommandError> {
+    let valid_indices = document
+        .fields
+        .iter()
+        .enumerate()
+        .filter_map(|(index, field)| {
+            matches!(field.anchor, FieldAnchorState::GraphemeSafe { .. }).then_some(index)
+        })
+        .collect::<Vec<_>>();
+    let target_index = usize::try_from(target_index).map_err(|_| CommandError::InvalidRange)?;
+    let source_valid_index = valid_indices
+        .iter()
+        .position(|index| document.fields[*index].id == *field_id)
+        .ok_or(CommandError::InvalidTarget)?;
+    if target_index >= valid_indices.len() || target_index == source_valid_index {
+        return Err(CommandError::BrokenInvariant);
+    }
+
+    let source_index = valid_indices[source_valid_index];
+    let field = document
+        .fields
+        .get(source_index)
+        .ok_or(CommandError::InvalidTarget)?;
+    let mut remaining_indices = valid_indices;
+    remaining_indices.remove(source_valid_index);
+    let to_index = remaining_indices
+        .get(target_index)
+        .copied()
+        .unwrap_or(document.fields.len());
+    let to_index = if to_index > source_index {
+        to_index.checked_sub(1).ok_or(CommandError::InvalidRange)?
+    } else {
+        to_index
+    };
+    if to_index == source_index {
+        return Err(CommandError::BrokenInvariant);
+    }
+    let from_index = u32::try_from(source_index).map_err(|_| CommandError::InvalidRange)?;
+    let to_index = u32::try_from(to_index).map_err(|_| CommandError::InvalidRange)?;
+    let field = Box::new(field.clone());
+    Ok((
+        Operation::MoveField {
+            from_index,
+            to_index,
+            field: field.clone(),
+        },
+        Operation::MoveField {
+            from_index: to_index,
+            to_index: from_index,
+            field,
+        },
+    ))
 }
 
 fn derive_text_operation(
@@ -4815,6 +4897,23 @@ fn apply_operation(
             }
             document.fields.remove(index);
         }
+        Operation::MoveField {
+            from_index,
+            to_index,
+            field,
+        } => {
+            let from_index =
+                usize::try_from(*from_index).map_err(|_| CommandError::InvalidRange)?;
+            let to_index = usize::try_from(*to_index).map_err(|_| CommandError::InvalidRange)?;
+            if from_index >= document.fields.len()
+                || to_index >= document.fields.len()
+                || document.fields.get(from_index) != Some(field.as_ref())
+            {
+                return Err(CommandError::HistoryConflict);
+            }
+            let moved = document.fields.remove(from_index);
+            document.fields.insert(to_index, moved);
+        }
     }
     Ok(mapping)
 }
@@ -4943,6 +5042,7 @@ fn command_type(kind: &CommandKind) -> &'static str {
         CommandKind::InsertField { .. } => "insertField",
         CommandKind::SetField { .. } => "setField",
         CommandKind::RemoveField { .. } => "removeField",
+        CommandKind::MoveField { .. } => "moveField",
         CommandKind::Batch { .. } => "batch",
         CommandKind::Undo => "undo",
         CommandKind::Redo => "redo",

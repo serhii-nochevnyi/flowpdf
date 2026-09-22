@@ -353,6 +353,7 @@ pub enum EditorFieldValueSummaryDto {
 pub struct EditorFieldViewDto {
     pub descriptor: FieldDescriptor,
     pub value_summary: EditorFieldValueSummaryDto,
+    pub tab_order: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -424,6 +425,15 @@ fn field_views(document: &FlowDocument) -> (Vec<EditorFieldViewDto>, Vec<EditorF
     let mut node_paths = BTreeMap::new();
     collect_node_paths(&document.content, &mut Vec::new(), &mut node_paths);
 
+    let mut tab_orders = BTreeMap::new();
+    for descriptor in &document.fields {
+        if valid_field_anchor(document, descriptor) {
+            let tab_order =
+                u32::try_from(tab_orders.len()).expect("validated field count fits tab order");
+            tab_orders.insert(descriptor.id.clone(), tab_order);
+        }
+    }
+
     let mut fields = Vec::new();
     let mut field_review = Vec::new();
     for descriptor in &document.fields {
@@ -445,6 +455,9 @@ fn field_views(document: &FlowDocument) -> (Vec<EditorFieldViewDto>, Vec<EditorF
                 EditorFieldViewDto {
                     descriptor: descriptor.clone(),
                     value_summary,
+                    tab_order: *tab_orders
+                        .get(&descriptor.id)
+                        .expect("valid field has a derived tab order"),
                 },
             ));
         } else {

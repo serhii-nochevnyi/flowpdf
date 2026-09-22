@@ -718,9 +718,22 @@ fn resolve_form_widgets_inner(
                 &right.field_id,
             ))
     });
-    for (index, widget) in widgets.iter_mut().enumerate() {
-        widget.tab_order =
-            u32::try_from(index).map_err(|_| FormProjectionError::GeometryOverflow)?;
+    let projected_field_ids = widgets
+        .iter()
+        .map(|widget| widget.field_id.clone())
+        .collect::<BTreeSet<_>>();
+    let mut tab_orders = BTreeMap::new();
+    for field in &document.fields {
+        if projected_field_ids.contains(&field.id) {
+            let tab_order = u32::try_from(tab_orders.len())
+                .map_err(|_| FormProjectionError::GeometryOverflow)?;
+            tab_orders.insert(field.id.clone(), tab_order);
+        }
+    }
+    for widget in &mut widgets {
+        widget.tab_order = *tab_orders
+            .get(&widget.field_id)
+            .ok_or(FormProjectionError::GeometryOverflow)?;
     }
     review.sort_by(|left, right| left.field_id.cmp(&right.field_id));
 

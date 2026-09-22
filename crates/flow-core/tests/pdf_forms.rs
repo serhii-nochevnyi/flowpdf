@@ -134,6 +134,13 @@ fn form_plan_maps_all_current_field_kinds_and_export_is_deterministic() {
             .iter()
             .any(|field| matches!(field.field_type, flow_core::PdfFormFieldType::Signature))
     );
+    let mut tab_orders = plan
+        .fields
+        .iter()
+        .map(|field| field.tab_order)
+        .collect::<Vec<_>>();
+    tab_orders.sort_unstable();
+    assert_eq!(tab_orders, (0..6).collect::<Vec<_>>());
     assert!(!plan.result_hash.is_empty());
 
     let request = request(&document, plan, 1)

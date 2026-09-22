@@ -1,13 +1,13 @@
 use flow_core::{
-    ApiResponse, ApplyCommandRequest, CommandDto, CommandKind, CreateSampleRequest, SourceModality,
-    apply_command, create_sample,
+    ApiResponse, ApplyCommandRequest, CommandDto, CommandKind, CreateSampleRequest, RecoverRequest,
+    SourceModality, apply_command, create_sample,
     model::{
         Affinity, FieldAnchorState, FieldDescriptor, FieldId, FieldKind, FieldValue, FlowDocument,
-        LogicalPosition, TextInputHint,
+        LegacyAnchorReason, LogicalPosition, TextInputHint,
     },
     recover,
     store::{CommitPlanner, DocumentStore, InMemoryDocumentStore, SnapshotPolicy, SnapshotReason},
-    transaction::Operation,
+    transaction::{EditorState, Operation, TransactionService},
 };
 
 fn success<T>(response: ApiResponse<T>) -> T {
@@ -296,4 +296,212 @@ fn remove_field_requires_confirmation_restores_middle_order_and_recovers() {
         serde_json::from_str(&recovered.session.canonical_json).expect("recovered document");
     assert_eq!(recovered_document.fields, expected_fields);
     assert_eq!(recovered.session.history.cursor, 1);
+}
+
+#[test]
+fn move_field_reorders_valid_tab_order_and_recovers_exactly() {
+    let created = success(create_sample(CreateSampleRequest {
+        requested_locale: "uk-UA".to_owned(),
+        issued_at: "2026-09-22T00:10:00Z".to_owned(),
+    }));
+    let original_document: FlowDocument =
+        serde_json::from_str(&created.session.canonical_json).expect("canonical document");
+    assert!(original_document.fields.len() >= 4);
+    let moved_field = original_document.fields[1].clone();
+    let mut expected_fields = original_document.fields.clone();
+    let moved = expected_fields.remove(1);
+    expected_fields.insert(3, moved);
+
+    let same_index = apply_command(ApplyCommandRequest {
+        canonical_json: created.session.canonical_json.clone(),
+        history: created.session.history.clone(),
+        command: CommandDto {
+            command_id: command_id(5101),
+            base_revision: created.session.revision,
+            modality: SourceModality::Api,
+            issued_at: "2026-09-22T00:10:01Z".to_owned(),
+            kind: CommandKind::MoveField {
+                field_id: moved_field.id.clone(),
+                target_index: 1,
+            },
+        },
+    });
+    assert!(!same_index.ok);
+    assert_eq!(
+        same_index.error.expect("same-index error").code,
+        "FLOW_BROKEN_INVARIANT"
+    );
+
+    let reordered = success(apply_command(ApplyCommandRequest {
+        canonical_json: created.session.canonical_json.clone(),
+        history: created.session.history.clone(),
+        command: CommandDto {
+            command_id: command_id(5102),
+            base_revision: created.session.revision,
+            modality: SourceModality::Ui,
+            issued_at: "2026-09-22T00:10:02Z".to_owned(),
+            kind: CommandKind::MoveField {
+                field_id: moved_field.id.clone(),
+                target_index: 3,
+            },
+        },
+    }));
+    let reordered_document: FlowDocument =
+        serde_json::from_str(&reordered.session.canonical_json).expect("reordered document");
+    assert_eq!(reordered_document.fields, expected_fields);
+    assert_eq!(reordered.session.revision, created.session.revision + 1);
+    assert_eq!(reordered.commit.transaction.command_type, "moveField");
+    assert!(
+        reordered
+            .commit
+            .transaction
+            .forward_operations
+            .iter()
+            .any(|operation| matches!(
+                operation,
+                Operation::MoveField {
+                    from_index: 1,
+                    to_index: 3,
+                    field,
+                } if field.as_ref() == &moved_field
+            ))
+    );
+
+    let out_of_range = apply_command(ApplyCommandRequest {
+        canonical_json: created.session.canonical_json.clone(),
+        history: created.session.history.clone(),
+        command: CommandDto {
+            command_id: command_id(5103),
+            base_revision: created.session.revision,
+            modality: SourceModality::Api,
+            issued_at: "2026-09-22T00:10:03Z".to_owned(),
+            kind: CommandKind::MoveField {
+                field_id: moved_field.id.clone(),
+                target_index: 99,
+            },
+        },
+    });
+    assert!(!out_of_range.ok);
+    assert_eq!(
+        out_of_range.error.expect("range error").code,
+        "FLOW_BROKEN_INVARIANT"
+    );
+    assert_eq!(created.session.revision, 1);
+
+    let undone = success(apply_command(ApplyCommandRequest {
+        canonical_json: reordered.session.canonical_json.clone(),
+        history: reordered.session.history.clone(),
+        command: CommandDto {
+            command_id: command_id(5104),
+            base_revision: reordered.session.revision,
+            modality: SourceModality::Keyboard,
+            issued_at: "2026-09-22T00:10:04Z".to_owned(),
+            kind: CommandKind::Undo,
+        },
+    }));
+    let undone_document: FlowDocument =
+        serde_json::from_str(&undone.session.canonical_json).expect("undone document");
+    assert_eq!(undone_document.fields, original_document.fields);
+
+    let redone = success(apply_command(ApplyCommandRequest {
+        canonical_json: undone.session.canonical_json.clone(),
+        history: undone.session.history.clone(),
+        command: CommandDto {
+            command_id: command_id(5105),
+            base_revision: undone.session.revision,
+            modality: SourceModality::Keyboard,
+            issued_at: "2026-09-22T00:10:05Z".to_owned(),
+            kind: CommandKind::Redo,
+        },
+    }));
+    let redone_document: FlowDocument =
+        serde_json::from_str(&redone.session.canonical_json).expect("redone document");
+    assert_eq!(redone_document.fields, expected_fields);
+
+    let planner = CommitPlanner::new(SnapshotPolicy::EveryTransaction);
+    let mut store = InMemoryDocumentStore::default();
+    planner
+        .commit(&mut store, created.commit.clone(), SnapshotReason::Creation)
+        .expect("durable creation commit");
+    planner
+        .commit(
+            &mut store,
+            reordered.commit.clone(),
+            SnapshotReason::CommittedTransaction,
+        )
+        .expect("durable field reorder commit");
+    let recovered = success(recover(store.load_records().expect("durable records")));
+    let recovered_document: FlowDocument =
+        serde_json::from_str(&recovered.session.canonical_json).expect("recovered document");
+    assert_eq!(recovered_document.fields, expected_fields);
+    assert_eq!(recovered.session.history.cursor, 1);
+
+    let mut forged_transaction = reordered.commit.transaction.clone();
+    match &mut forged_transaction.forward_operations[0] {
+        Operation::MoveField { to_index, .. } => *to_index = 0,
+        operation => panic!("unexpected move operation: {operation:?}"),
+    }
+    let forged_recovery = recover(RecoverRequest {
+        snapshots: vec![
+            created.commit.snapshot.clone(),
+            reordered.commit.snapshot.clone(),
+        ],
+        transactions: vec![created.commit.transaction.clone(), forged_transaction],
+        audits: vec![created.commit.audit.clone(), reordered.commit.audit.clone()],
+        assets: created.commit.assets.clone(),
+        sources: Vec::new(),
+    });
+    assert!(!forged_recovery.ok);
+    assert_eq!(
+        forged_recovery.error.expect("forged replay error").code,
+        "FLOW_RECOVERY_GAP"
+    );
+}
+
+#[test]
+fn move_field_rejects_review_and_stale_requests_without_mutating_state() {
+    let mut document = FlowDocument::deterministic_sample("uk-UA").expect("sample document");
+    let review_field_id = document.fields[0].id.clone();
+    let original = document.fields[0].anchor.original().clone();
+    document.fields[0].anchor = FieldAnchorState::LegacyInvalid {
+        original,
+        reason: LegacyAnchorReason::NonGraphemeBoundary,
+    };
+    let state = EditorState::new(document).expect("editor state");
+    let before = state.clone();
+
+    let review = TransactionService::apply(
+        &state,
+        CommandDto {
+            command_id: command_id(5111),
+            base_revision: state.document().revision,
+            modality: SourceModality::Ui,
+            issued_at: "2026-09-22T00:11:00Z".to_owned(),
+            kind: CommandKind::MoveField {
+                field_id: review_field_id,
+                target_index: 0,
+            },
+        },
+    )
+    .expect_err("review field cannot be reordered");
+    assert_eq!(review.code(), "FLOW_INVALID_TARGET");
+    assert_eq!(state, before);
+
+    let valid_field_id = state.document().fields[1].id.clone();
+    let stale = TransactionService::apply(
+        &state,
+        CommandDto {
+            command_id: command_id(5112),
+            base_revision: state.document().revision.saturating_sub(1),
+            modality: SourceModality::Api,
+            issued_at: "2026-09-22T00:11:01Z".to_owned(),
+            kind: CommandKind::MoveField {
+                field_id: valid_field_id,
+                target_index: 0,
+            },
+        },
+    )
+    .expect_err("stale move cannot publish");
+    assert_eq!(stale.code(), "FLOW_STALE_REVISION");
+    assert_eq!(state, before);
 }
