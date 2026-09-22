@@ -23,6 +23,11 @@ import {
   type PdfReaderWorkerPort,
   type RevisionAwarePdfReaderScheduler,
 } from '../pdf/pdf-reader-worker.js'
+import {
+  createWorkerPdfReconstructionScheduler,
+  type PdfReconstructionWorkerPort,
+  type RevisionAwarePdfReconstructionScheduler,
+} from '../pdf/pdf-reconstruction-worker.js'
 import type { RuntimeFontCatalog } from '../runtime/font-catalog.js'
 
 export type WorkerConstructor = typeof Worker
@@ -32,6 +37,7 @@ export interface DefaultWorkerRuntime {
   readonly layoutScheduler: RevisionAwareLayoutScheduler
   readonly pdfExportScheduler: RevisionAwarePdfExportScheduler
   readonly pdfReaderScheduler: RevisionAwarePdfReaderScheduler
+  readonly pdfReconstructionScheduler: RevisionAwarePdfReconstructionScheduler
   readonly layoutRequestFactory: NonNullable<EditorControllerDependencies['layoutRequestFactory']>
   readonly pdfExportRequestFactory: NonNullable<EditorControllerDependencies['pdfExportRequestFactory']>
   dispose(): void
@@ -54,9 +60,16 @@ export function createDefaultWorkerRuntime(
     new URL('../pdf/pdf-reader-worker-entry.ts', import.meta.url),
     { type: 'module' },
   ) as unknown as PdfReaderWorkerPort
+  const pdfReconstructionWorker = new workerConstructor(
+    new URL('../pdf/pdf-reconstruction-worker-entry.ts', import.meta.url),
+    { type: 'module' },
+  ) as unknown as PdfReconstructionWorkerPort
   const layoutScheduler = createWorkerLayoutScheduler(layoutWorker)
   const pdfExportScheduler = createWorkerPdfExportScheduler(pdfWorker)
   const pdfReaderScheduler = createWorkerPdfReaderScheduler(pdfReaderWorker)
+  const pdfReconstructionScheduler = createWorkerPdfReconstructionScheduler(
+    pdfReconstructionWorker,
+  )
   let layoutRequestNumber = 0
   const layoutRequestFactory = (accepted: EditorAcceptedSnapshot): LayoutRequestDto => {
     layoutRequestNumber += 1
@@ -112,15 +125,18 @@ export function createDefaultWorkerRuntime(
     layoutScheduler,
     pdfExportScheduler,
     pdfReaderScheduler,
+    pdfReconstructionScheduler,
     layoutRequestFactory,
     pdfExportRequestFactory,
     dispose() {
       layoutScheduler.dispose()
       pdfExportScheduler.dispose()
       pdfReaderScheduler.dispose()
+      pdfReconstructionScheduler.dispose()
       layoutWorker.terminate()
       pdfWorker.terminate()
       pdfReaderWorker.terminate()
+      pdfReconstructionWorker.terminate()
     },
   }
 }

@@ -9,6 +9,7 @@ web/generated/
 web/tests/__screenshots__/
 .vitest-attachments/
 .planning/research/.cache/
+.planning/graph/session-observations.jsonl
 
 # ── GSD baseline (auto-generated) ──
 .gsd

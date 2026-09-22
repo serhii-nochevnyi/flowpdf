@@ -54,6 +54,7 @@ pub use reconstruction::{
     PdfReconstructionDiagnostic, PdfReconstructionDiagnosticCode, PdfReconstructionError,
     PdfReconstructionReport, PdfReconstructionRequest, PdfReconstructionResult, PdfReviewAction,
     PdfReviewDecision, PdfSourceMapping, accept_pdf_reconstruction, reconstruct_pdf_scene,
+    verify_pdf_document_candidate, verify_pdf_reconstruction_result,
 };
 pub use recovery::{
     PdfRecoveredSource, PdfRecoveryError, PdfRecoveryExpectation, recover_owned_source,

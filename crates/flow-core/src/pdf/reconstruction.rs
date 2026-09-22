@@ -503,6 +503,103 @@ pub fn accept_pdf_reconstruction(
     })
 }
 
+/// Verifies the closed reconstruction result before it crosses a worker or
+/// browser boundary. The scene itself is not repeated in the result, so the
+/// caller must also compare `source_hash` and `scene_result_hash` with the
+/// request it scheduled.
+#[must_use]
+pub fn verify_pdf_reconstruction_result(result: &PdfReconstructionResult) -> bool {
+    if result.schema_version != PDF_RECONSTRUCTION_SCHEMA_VERSION
+        || !valid_raw_source_hash(&result.source_hash)
+        || result.scene_result_hash.trim().is_empty()
+        || result.result_hash.trim().is_empty()
+        || result.blocks.len() > MAX_RECONSTRUCTION_BLOCKS
+        || result.opaque_islands.len() > MAX_RECONSTRUCTION_ELEMENTS
+    {
+        return false;
+    }
+
+    let expected_provenance = Provenance::ExternalReconstruction {
+        source_hash: normalized_source_hash(&result.source_hash),
+        reconstruction_schema_version: PDF_RECONSTRUCTION_SCHEMA_VERSION,
+    };
+    if result.candidate.document.provenance != expected_provenance {
+        return false;
+    }
+
+    let Ok(canonical) = canonical_bytes(&result.candidate.document) else {
+        return false;
+    };
+    if result.candidate.canonical_json.as_bytes() != canonical.as_slice()
+        || result.candidate.canonical_hash != canonical_hash(&canonical)
+    {
+        return false;
+    }
+
+    let mut node_ids = std::collections::BTreeSet::new();
+    for block in &result.blocks {
+        if !node_ids.insert(block.node_id.as_str())
+            || block.text.len() > MAX_RECONSTRUCTION_TEXT_BYTES
+            || block.confidence_basis_points > 10_000
+            || block.mappings.len() > MAX_RECONSTRUCTION_ELEMENTS
+        {
+            return false;
+        }
+        if !result
+            .candidate
+            .document
+            .content
+            .iter()
+            .any(|node| node.id == block.node_id && node.text() == block.text)
+        {
+            return false;
+        }
+    }
+    if usize::try_from(result.report.review_required_count).ok()
+        != Some(
+            result
+                .blocks
+                .iter()
+                .filter(|block| block.review_required)
+                .count(),
+        )
+    {
+        return false;
+    }
+
+    let mut unhashed = result.clone();
+    unhashed.result_hash.clear();
+    let Ok(bytes) = serde_json::to_vec(&unhashed) else {
+        return false;
+    };
+    blake3::hash(&bytes).to_hex().as_str() == result.result_hash
+}
+
+/// Verifies a candidate returned after explicit review decisions.
+#[must_use]
+pub fn verify_pdf_document_candidate(candidate: &PdfDocumentCandidate) -> bool {
+    let Provenance::ExternalReconstruction {
+        source_hash,
+        reconstruction_schema_version,
+    } = &candidate.document.provenance
+    else {
+        return false;
+    };
+    let Some(raw_source_hash) = source_hash.strip_prefix(PDF_EXTERNAL_SOURCE_HASH_PREFIX) else {
+        return false;
+    };
+    if *reconstruction_schema_version != PDF_RECONSTRUCTION_SCHEMA_VERSION
+        || !valid_raw_source_hash(raw_source_hash)
+    {
+        return false;
+    }
+    let Ok(canonical) = canonical_bytes(&candidate.document) else {
+        return false;
+    };
+    candidate.canonical_json.as_bytes() == canonical.as_slice()
+        && candidate.canonical_hash == canonical_hash(&canonical)
+}
+
 fn validate_request(request: &PdfReconstructionRequest) -> Result<(), PdfReconstructionError> {
     if !valid_raw_source_hash(&request.source_hash)
         || request.source_hash != request.scene.source_hash

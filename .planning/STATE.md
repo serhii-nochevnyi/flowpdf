@@ -4,16 +4,16 @@ milestone: v1.0
 current_phase: 8
 current_phase_name: External Reconstruction and OCR
 status: executing
-stopped_at: Phase 8 Plan 08-01 complete; next Phase 8 Plan 08-02 exposes reconstruction and OCR through the verified worker boundary while external OCR/reference/AT inputs remain release evidence
-last_updated: "2026-09-22T19:45:00Z"
+stopped_at: Phase 8 Plan 08-02 complete; next Phase 8 Plan 08-03 adds immutable PDF source persistence and side-by-side reconstruction review while external OCR/reference/AT inputs remain release evidence
+last_updated: "2026-09-22T17:30:00Z"
 last_activity: 2026-09-22
-last_activity_desc: Completed Phase 8 Plan 08-01 Rust reconstruction candidate, external provenance, mappings, confidence, review, and opaque-island sidecar
+last_activity_desc: Completed Phase 8 Plan 08-02 verified Rust/WASM reconstruction boundary, cancellable worker, OCR adapter seam, and runtime wiring
 state_head: 08
 progress:
   total_phases: 9
   completed_phases: 1
-total_plans: 72
-completed_plans: 72
+total_plans: 76
+completed_plans: 74
 milestone_name: milestone
 ---
 
@@ -29,11 +29,11 @@ See: .planning/PROJECT.md (updated 2026-08-25)
 ## Current Position
 
 Phase: 8 (External Reconstruction and OCR) — EXECUTING
-Plan: Phase 8 Plan 08-02 — expose reconstruction and OCR through the verified worker boundary
-Status: Phase 7 remains locally complete for the controlled reader subset. Phase 8 Plan 08-01 now owns a Rust confidence-scored single-column candidate with external provenance, source mappings, and opaque-island preservation. External OCR provider, qpdf/Poppler, target-viewer, and AT evidence remain explicitly unavailable/outstanding.
-Last activity: 2026-09-22 — Phase 8 Plan 08-01 completed locally; Plan 08-02 next
+Plan: Phase 8 Plan 08-03 — add immutable PDF source persistence and side-by-side reconstruction review
+Status: Phase 7 remains locally complete for the controlled reader subset. Phase 8 Plans 08-01 and 08-02 now own a Rust confidence-scored candidate, verified string-only boundary, cancellable reconstruction worker, and explicit OCR adapter seam. External OCR provider, qpdf/Poppler, target-viewer, and AT evidence remain explicitly unavailable/outstanding.
+Last activity: 2026-09-22 — Phase 8 Plan 08-02 completed locally; Plan 08-03 next
 
-Progress: Phase 2 — 18/18 implementation plans complete; Phase 3 — 6/6 local implementation plans executed; Phase 4 — 6/6 plans executed; Phase 5 — 26/26 local plans executed and locally gated, with target-viewer/import evidence explicitly pending; Phase 6 — 6/6 local plans executed and gated, with speech-service and external AT evidence explicitly pending; Phase 7 — 4/4 plans executed and complete locally for the controlled reader subset, with qpdf/Poppler/target-viewer/AT evidence explicitly unavailable; Phase 8 — 1/4 plans executed, with the Rust reconstruction candidate complete locally and worker/UI/gate plans remaining. Phase 2/3 phase-level closure remains honest about inherited external AT evidence, and Phase 4/5 remain open for unavailable external PDF/reference evidence.
+Progress: Phase 2 — 18/18 implementation plans complete; Phase 3 — 6/6 local implementation plans executed; Phase 4 — 6/6 plans executed; Phase 5 — 26/26 local plans executed and locally gated, with target-viewer/import evidence explicitly pending; Phase 6 — 6/6 local plans executed and gated, with speech-service and external AT evidence explicitly pending; Phase 7 — 4/4 plans executed and complete locally for the controlled reader subset, with qpdf/Poppler/target-viewer/AT evidence explicitly unavailable; Phase 8 — 2/4 plans executed, with the Rust candidate and verified worker/OCR adapter boundary complete locally while source-store/UI/gate plans remain. Phase 2/3 phase-level closure remains honest about inherited external AT evidence, and Phase 4/5 remain open for unavailable external PDF/reference evidence.
 
 ## Performance Metrics
 
@@ -54,7 +54,7 @@ Progress: Phase 2 — 18/18 implementation plans complete; Phase 3 — 6/6 local
 | 5 | 26 | same session | - |
 | 6 | 6 | same session | - |
 
-**Recent Trend:** Schema-v2 tree, lossless migration, editor accessibility, exact UI coverage, deterministic semantic scale, and the dual-run release gates remain green. Phase 2 still records 18/18 implementation plans with Edge/Windows screen-reader UAT outstanding. Phase 3 has all six local plans complete and retains the inherited external AT boundary. Phase 4 has all six local plans complete while structural/extraction/raster/target-viewer evidence remains unavailable. Phase 5 has all 26 local plans complete while target-viewer and external form-import evidence remain open. Phase 6 now has all six local plans complete, two passing full gates, a privacy/ownership contract, and explicit unavailable speech-service/external AT evidence. Phase 7 now has four executable plans complete locally for the controlled subset, with external PDF/reference and AT inputs preserved as unavailable release evidence.
+**Recent Trend:** Schema-v2 tree, lossless migration, editor accessibility, exact UI coverage, deterministic semantic scale, and the dual-run release gates remain green. Phase 2 still records 18/18 implementation plans with Edge/Windows screen-reader UAT outstanding. Phase 3 has all six local plans complete and retains the inherited external AT boundary. Phase 4 has all six local plans complete while structural/extraction/raster/target-viewer evidence remains unavailable. Phase 5 has all 26 local plans complete while target-viewer and external form-import evidence remain open. Phase 6 now has all six local plans complete, two passing full gates, a privacy/ownership contract, and explicit unavailable speech-service/external AT evidence. Phase 7 now has four executable plans complete locally for the controlled subset, with external PDF/reference and AT inputs preserved as unavailable release evidence. Phase 8 now has the bounded Rust candidate plus verified WASM/OCR worker boundary complete; source immutability/review UI and the local phase gate remain next, while external provider/reference/AT evidence stays unavailable.
 **Per-Plan Metrics:**
 
 | Plan | Duration | Tasks | Files |
