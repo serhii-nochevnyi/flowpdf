@@ -134,6 +134,10 @@ pub enum PdfFormError {
     InvalidOption,
     #[error("the PDF form tab order is invalid")]
     InvalidTabOrder,
+    #[error("flattening requires a validated PDF form plan")]
+    FlatteningRequiresPlan,
+    #[error("the PDF form flattening selection is invalid")]
+    InvalidFlatteningSelection,
     #[error("the PDF form plan could not be serialized")]
     Serialization,
 }
@@ -160,6 +164,8 @@ impl PdfFormError {
             Self::PageOutOfRange => "FLOW_PDF_FORM_PAGE_OUT_OF_RANGE",
             Self::InvalidOption => "FLOW_PDF_FORM_OPTION_INVALID",
             Self::InvalidTabOrder => "FLOW_PDF_FORM_TAB_ORDER_INVALID",
+            Self::FlatteningRequiresPlan => "FLOW_PDF_FORM_FLATTENING_REQUIRES_PLAN",
+            Self::InvalidFlatteningSelection => "FLOW_PDF_FORM_FLATTENING_INVALID",
             Self::Serialization => "FLOW_PDF_FORM_SERIALIZATION",
         }
     }
@@ -541,32 +547,108 @@ fn to_pdf_value(field: &FieldDescriptor, value: &FieldValue) -> Result<PdfFormVa
 }
 
 pub(crate) struct PdfFormEmission {
-    pub acro_form_ref: PdfRef,
+    pub acro_form_ref: Option<PdfRef>,
     pub page_widgets: Vec<Vec<PdfRef>>,
+    pub page_content: Vec<Vec<u8>>,
+    pub flattened_font_ref: Option<PdfRef>,
+}
+
+pub(crate) fn validate_flattened_field_ids_shape(field_ids: &[String]) -> Result<(), PdfFormError> {
+    if field_ids.len() > MAX_PDF_FORM_FIELDS {
+        return Err(PdfFormError::FieldLimit);
+    }
+    let mut unique = BTreeSet::new();
+    for field_id in field_ids {
+        if field_id.trim().is_empty()
+            || field_id.len() > super::MAX_IDENTITY_BYTES
+            || !field_id.is_ascii()
+            || !unique.insert(field_id.as_str())
+        {
+            return Err(PdfFormError::InvalidFlatteningSelection);
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn normalized_flattened_field_ids(
+    plan: Option<&PdfFormPlan>,
+    field_ids: &[String],
+) -> Result<Vec<String>, PdfError> {
+    validate_flattened_field_ids_shape(field_ids)?;
+    if field_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let plan = plan.ok_or(PdfFormError::FlatteningRequiresPlan)?;
+    let selected = field_ids
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    if selected.iter().any(|field_id| {
+        !plan
+            .fields
+            .iter()
+            .any(|field| field.field_id.as_str() == *field_id)
+    }) {
+        return Err(PdfFormError::InvalidFlatteningSelection.into());
+    }
+    Ok(plan
+        .fields
+        .iter()
+        .filter(|field| selected.contains(field.field_id.as_str()))
+        .map(|field| field.field_id.as_str().to_owned())
+        .collect())
 }
 
 pub(crate) fn emit_form_objects(
     document: &mut CosDocument,
     plan: &PdfFormPlan,
     pages: &[(PdfRef, PdfRef, LayoutRect)],
+    flattened_field_ids: &[String],
 ) -> Result<PdfFormEmission, PdfError> {
     validate_pdf_form_plan(plan)?;
+    let flattened_field_ids = normalized_flattened_field_ids(Some(plan), flattened_field_ids)?
+        .into_iter()
+        .collect::<BTreeSet<_>>();
     let mut page_widgets = vec![Vec::new(); pages.len()];
+    let mut page_content = vec![Vec::new(); pages.len()];
     let mut ordered_fields = plan.fields.iter().collect::<Vec<_>>();
     ordered_fields.sort_by_key(|field| field.tab_order);
-    let appearance_font_ref = emit_appearance_font(document)?;
-    let mut field_refs = Vec::with_capacity(ordered_fields.len());
-    let mut widget_refs = Vec::with_capacity(ordered_fields.len());
     for field in &ordered_fields {
         let page_index =
             usize::try_from(field.page_index).map_err(|_| PdfFormError::PageOutOfRange)?;
         let (_, _, bounds) = pages.get(page_index).ok_or(PdfFormError::PageOutOfRange)?;
         validate_rect(field.rect, *bounds)?;
+    }
+    let appearance_font_ref = emit_appearance_font(document)?;
+    for field in &ordered_fields {
+        if !flattened_field_ids.contains(field.field_id.as_str()) {
+            continue;
+        }
+        let page_index =
+            usize::try_from(field.page_index).map_err(|_| PdfFormError::PageOutOfRange)?;
+        let state = if field.field_type == PdfFormFieldType::Button
+            && field.flags & FIELD_FLAG_PUSH_BUTTON == 0
+        {
+            appearance_state(&field.value)
+        } else {
+            None
+        };
+        page_content[page_index].extend(flattened_appearance_data(field, state)?);
+    }
+
+    let retained_fields = ordered_fields
+        .iter()
+        .filter(|field| !flattened_field_ids.contains(field.field_id.as_str()))
+        .copied()
+        .collect::<Vec<_>>();
+    let mut field_refs = Vec::with_capacity(retained_fields.len());
+    let mut widget_refs = Vec::with_capacity(retained_fields.len());
+    for _ in &retained_fields {
         field_refs.push(document.add_object(CosValue::Null)?);
         widget_refs.push(document.add_object(CosValue::Null)?);
     }
 
-    for ((field, field_ref), widget_ref) in ordered_fields
+    for ((field, field_ref), widget_ref) in retained_fields
         .iter()
         .zip(field_refs.iter().copied())
         .zip(widget_refs.iter().copied())
@@ -633,32 +715,38 @@ pub(crate) fn emit_form_objects(
         page_widgets[page_index].push(widget_ref);
     }
 
-    let acro_form_ref = document.add_object(CosValue::dictionary([
-        (
-            PdfName::new("DA")?,
-            pdf_string(&format!(
-                "/{APPEARANCE_FONT_RESOURCE} {APPEARANCE_FONT_SIZE} Tf 0 g"
-            ))?,
-        ),
-        (
-            PdfName::new("DR")?,
-            CosValue::dictionary([(
-                PdfName::new("Font")?,
+    let acro_form_ref = if field_refs.is_empty() {
+        None
+    } else {
+        Some(document.add_object(CosValue::dictionary([
+            (
+                PdfName::new("DA")?,
+                pdf_string(&format!(
+                    "/{APPEARANCE_FONT_RESOURCE} {APPEARANCE_FONT_SIZE} Tf 0 g"
+                ))?,
+            ),
+            (
+                PdfName::new("DR")?,
                 CosValue::dictionary([(
-                    PdfName::new(APPEARANCE_FONT_RESOURCE)?,
-                    CosValue::Reference(appearance_font_ref),
+                    PdfName::new("Font")?,
+                    CosValue::dictionary([(
+                        PdfName::new(APPEARANCE_FONT_RESOURCE)?,
+                        CosValue::Reference(appearance_font_ref),
+                    )])?,
                 )])?,
-            )])?,
-        ),
-        (
-            PdfName::new("Fields")?,
-            CosValue::Array(field_refs.into_iter().map(CosValue::Reference).collect()),
-        ),
-        (PdfName::new("NeedAppearances")?, CosValue::Boolean(false)),
-    ])?)?;
+            ),
+            (
+                PdfName::new("Fields")?,
+                CosValue::Array(field_refs.into_iter().map(CosValue::Reference).collect()),
+            ),
+            (PdfName::new("NeedAppearances")?, CosValue::Boolean(false)),
+        ])?)?)
+    };
     Ok(PdfFormEmission {
         acro_form_ref,
         page_widgets,
+        page_content,
+        flattened_font_ref: (!flattened_field_ids.is_empty()).then_some(appearance_font_ref),
     })
 }
 
@@ -803,6 +891,24 @@ fn appearance_stream_data(field: &PdfFormField, state: Option<&str>) -> Result<V
         )?;
     }
 
+    Ok(data)
+}
+
+fn flattened_appearance_data(
+    field: &PdfFormField,
+    state: Option<&str>,
+) -> Result<Vec<u8>, PdfError> {
+    let mut data = Vec::new();
+    super::append_ascii(
+        &mut data,
+        &format!(
+            "q\n1 0 0 1 {} {} cm\n",
+            super::format_layout_unit(field.rect.x),
+            super::format_layout_unit(field.rect.y),
+        ),
+    )?;
+    data.extend_from_slice(&appearance_stream_data(field, state)?);
+    super::append_ascii(&mut data, "Q\n")?;
     Ok(data)
 }
 

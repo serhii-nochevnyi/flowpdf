@@ -1,13 +1,13 @@
 use flow_core::{
     FormSessionState, FormValueErrorCode, PdfError, PdfFormError, PdfFormPlan, PdfPagePlan,
-    PdfSupportReport, build_display_list, build_pdf_form_plan,
+    PdfRecoveryExpectation, PdfSupportReport, build_display_list, build_pdf_form_plan,
     canonical::{canonical_bytes, canonical_hash},
     export_pdf,
     layout::{FontCatalog, FontFace, LayoutUnit, PaginationRequest},
     model::{Affinity, ContentNode, FieldAnchorState, FlowDocument, LogicalPosition, NodeId},
     paginate_document,
     pdf::{PdfExportOptions, PdfExportRequest, PdfSupportedFeature, PdfUnsupportedFeature},
-    resolve_form_widgets, resolve_form_widgets_with_session,
+    recover_owned_source, resolve_form_widgets, resolve_form_widgets_with_session,
 };
 
 const NOTO_SANS: &[u8] = include_bytes!("../data/NotoSans-Regular.ttf");
@@ -212,6 +212,93 @@ fn session_values_change_form_export_identity_without_moving_widgets() {
     assert_ne!(default_export.byte_hash, filled_export.byte_hash);
     assert_eq!(default_export.source_hash, filled_export.source_hash);
     assert!(!session.overrides().is_empty());
+}
+
+#[test]
+fn explicit_flattening_is_deterministic_partial_and_source_bound() {
+    let document = document();
+    let plan = build_pdf_form_plan(&document, &projection(&document)).expect("plan");
+    let selected = plan.fields[0].field_id.as_str().to_owned();
+
+    let mut partial_request = request(&document, plan.clone(), 1)
+        .with_source_document(&document)
+        .expect("source");
+    partial_request.options.flattened_field_ids = vec![selected.clone()];
+    let partial = export_pdf(&partial_request).expect("partial flatten export");
+    let repeat = export_pdf(&partial_request).expect("repeat partial flatten export");
+    let default_request = request(&document, plan.clone(), 1)
+        .with_source_document(&document)
+        .expect("default source");
+    let default = export_pdf(&default_request).expect("default export");
+    assert_eq!(partial, repeat);
+    assert_ne!(partial.byte_hash, default.byte_hash);
+    let partial_pdf = String::from_utf8_lossy(&partial.bytes);
+    assert!(partial_pdf.contains("/AcroForm"));
+    assert_eq!(partial_pdf.matches("/AP").count(), 5);
+    assert!(partial_pdf.contains("1 0 0 1"));
+    assert!(partial_pdf.contains("/Helv"));
+    assert_eq!(partial.manifest.options.flattened_field_ids, vec![selected]);
+
+    let recovered = recover_owned_source(
+        Some(&partial.private_source_stream),
+        &PdfRecoveryExpectation::default(),
+    )
+    .expect("recover flattened source");
+    assert!(recovered.exact);
+    assert_eq!(recovered.canonical_hash, partial.source_hash);
+    assert_eq!(recovered.document, document);
+
+    let mut all_request = request(&document, plan.clone(), 1)
+        .with_source_document(&document)
+        .expect("source");
+    all_request.options.flattened_field_ids = plan
+        .fields
+        .iter()
+        .map(|field| field.field_id.as_str().to_owned())
+        .rev()
+        .collect();
+    let all = export_pdf(&all_request).expect("all flatten export");
+    let all_pdf = String::from_utf8_lossy(&all.bytes);
+    assert!(!all_pdf.contains("/AcroForm"));
+    assert!(!all_pdf.contains("/Widget"));
+    assert!(!all_pdf.contains("/AP"));
+    assert!(all_pdf.contains("1 0 0 1"));
+    assert!(all_pdf.contains("/Helv"));
+}
+
+#[test]
+fn flattening_rejects_ambiguous_or_unbound_selections_before_export() {
+    let document = document();
+    let plan = build_pdf_form_plan(&document, &projection(&document)).expect("plan");
+    let selected = plan.fields[0].field_id.as_str().to_owned();
+
+    let mut no_plan = bare_request(&document, 1);
+    no_plan.options.flattened_field_ids = vec![selected.clone()];
+    assert_eq!(
+        export_pdf(&no_plan),
+        Err(PdfError::Forms(PdfFormError::FlatteningRequiresPlan))
+    );
+
+    let mut duplicate = request(&document, plan.clone(), 1);
+    duplicate.options.flattened_field_ids = vec![selected.clone(), selected];
+    assert_eq!(
+        export_pdf(&duplicate),
+        Err(PdfError::Forms(PdfFormError::InvalidFlatteningSelection))
+    );
+
+    let mut unknown = request(&document, plan.clone(), 1);
+    unknown.options.flattened_field_ids = vec!["missing-field".to_owned()];
+    assert_eq!(
+        export_pdf(&unknown),
+        Err(PdfError::Forms(PdfFormError::InvalidFlatteningSelection))
+    );
+
+    let mut oversized = request(&document, plan, 1);
+    oversized.options.flattened_field_ids = vec!["field".to_owned(); 2_049];
+    assert_eq!(
+        export_pdf(&oversized),
+        Err(PdfError::Forms(PdfFormError::FieldLimit))
+    );
 }
 
 #[test]

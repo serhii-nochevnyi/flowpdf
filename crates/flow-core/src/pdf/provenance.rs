@@ -52,6 +52,8 @@ pub struct PdfManifestOptions {
     pub metadata: PdfMetadataOptions,
     pub outlines: Vec<PdfOutlineEntry>,
     pub internal_links: Vec<PdfInternalLink>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub flattened_field_ids: Vec<String>,
 }
 
 /// Versioned identity record for one owned export.
@@ -215,11 +217,14 @@ pub(crate) fn build_manifest(
 }
 
 pub(crate) fn normalized_options(options: &PdfExportOptions) -> PdfManifestOptions {
+    let mut flattened_field_ids = options.flattened_field_ids.clone();
+    flattened_field_ids.sort();
     PdfManifestOptions {
         producer: options.producer.clone(),
         metadata: options.metadata.clone(),
         outlines: metadata::ordered_outlines(&options.outlines),
         internal_links: metadata::ordered_links(&options.internal_links),
+        flattened_field_ids,
     }
 }
 

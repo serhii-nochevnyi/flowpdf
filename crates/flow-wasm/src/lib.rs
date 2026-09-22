@@ -471,6 +471,7 @@ fn execute_pdf_export(request: PdfExportWireRequest) -> Result<PdfExportWireResu
         metadata: request.metadata.unwrap_or_default(),
         outlines: request.outlines,
         internal_links: request.internal_links,
+        flattened_field_ids: Vec::new(),
     };
     let inputs = PdfReproducibilityInputs {
         layout_result_hash: request.layout_result_hash,

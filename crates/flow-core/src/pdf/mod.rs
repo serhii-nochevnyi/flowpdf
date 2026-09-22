@@ -392,6 +392,7 @@ pub struct PdfExportOptions {
     pub metadata: PdfMetadataOptions,
     pub outlines: Vec<PdfOutlineEntry>,
     pub internal_links: Vec<PdfInternalLink>,
+    pub flattened_field_ids: Vec<String>,
 }
 
 impl Default for PdfExportOptions {
@@ -401,6 +402,7 @@ impl Default for PdfExportOptions {
             metadata: PdfMetadataOptions::default(),
             outlines: Vec::new(),
             internal_links: Vec::new(),
+            flattened_field_ids: Vec::new(),
         }
     }
 }
@@ -451,6 +453,7 @@ impl PdfExportRequest {
         validate_identity(&source_hash)?;
         validate_identity(&layout_settings_fingerprint)?;
         validate_identity(&options.producer)?;
+        forms::validate_flattened_field_ids_shape(&options.flattened_field_ids)?;
         if pages.is_empty() {
             return Err(PdfError::EmptyPagePlan);
         }
@@ -490,6 +493,7 @@ impl PdfExportRequest {
             return Err(PdfFormError::SourceHashMismatch.into());
         }
         forms::validate_pdf_form_plan(&plan)?;
+        forms::normalized_flattened_field_ids(Some(&plan), &self.options.flattened_field_ids)?;
         self.form_plan = Some(plan);
         Ok(self)
     }
@@ -548,6 +552,17 @@ impl PdfExportRequest {
             &self.options.outlines,
             &self.options.internal_links,
         );
+        let flattened_field_ids = forms::normalized_flattened_field_ids(
+            self.form_plan.as_ref(),
+            &self.options.flattened_field_ids,
+        )?;
+        if !flattened_field_ids.is_empty() {
+            append_ascii(&mut bytes, "flattened-form-fields-v1\n")?;
+            append_fingerprint_text(&mut bytes, &flattened_field_ids.len().to_string());
+            for field_id in flattened_field_ids {
+                append_fingerprint_text(&mut bytes, &field_id);
+            }
+        }
         provenance::append_inputs_fingerprint(&mut bytes, &self.reproducibility);
         if let Some(form_plan) = &self.form_plan {
             let form_bytes = serde_json::to_vec(form_plan)
@@ -752,14 +767,25 @@ pub fn export_pdf(request: &PdfExportRequest) -> Result<PdfExportResult, PdfErro
         page_annotations[page_index].push(link_ref);
     }
 
-    let acro_form_ref = if let Some(form_plan) = &request.form_plan {
-        let emission = forms::emit_form_objects(&mut document, form_plan, &page_refs)?;
+    let (acro_form_ref, flattened_font_ref) = if let Some(form_plan) = &request.form_plan {
+        let emission = forms::emit_form_objects(
+            &mut document,
+            form_plan,
+            &page_refs,
+            &request.options.flattened_field_ids,
+        )?;
         for (page_index, widgets) in emission.page_widgets.into_iter().enumerate() {
             page_annotations[page_index].extend(widgets);
         }
-        Some(emission.acro_form_ref)
+        for (page_index, content) in emission.page_content.into_iter().enumerate() {
+            if !content.is_empty() {
+                document.replace_object(page_refs[page_index].1, CosValue::stream([], content)?)?;
+            }
+        }
+        (emission.acro_form_ref, emission.flattened_font_ref)
     } else {
-        None
+        forms::normalized_flattened_field_ids(None, &request.options.flattened_field_ids)?;
+        (None, None)
     };
 
     let outline_ref = if request.options.outlines.is_empty() {
@@ -842,7 +868,10 @@ pub fn export_pdf(request: &PdfExportRequest) -> Result<PdfExportResult, PdfErro
                 ]),
             ),
             (PdfName::new("Parent")?, CosValue::Reference(pages_ref)),
-            (PdfName::new("Resources")?, CosValue::dictionary([])?),
+            (
+                PdfName::new("Resources")?,
+                page_resources(flattened_font_ref)?,
+            ),
             (PdfName::new("Type")?, CosValue::name("Page")?),
         ];
         if !page_annotations[index].is_empty() {
@@ -1071,6 +1100,16 @@ fn write_string(value: &[u8], output: &mut Vec<u8>) {
         }
     }
     output.push(b')');
+}
+
+fn page_resources(font_ref: Option<PdfRef>) -> Result<CosValue, PdfError> {
+    let Some(font_ref) = font_ref else {
+        return CosValue::dictionary([]);
+    };
+    CosValue::dictionary([(
+        PdfName::new("Font")?,
+        CosValue::dictionary([(PdfName::new("Helv")?, CosValue::Reference(font_ref))])?,
+    )])
 }
 
 fn format_layout_unit(value: LayoutUnit) -> String {
