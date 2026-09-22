@@ -48,6 +48,7 @@ import type {
 } from '../pdf/pdf-protocol.js'
 import type { PdfExportScheduleOutcome } from '../pdf/pdf-worker.js'
 import type { FormSessionWasmBoundary } from '../forms/form-session.js'
+import type { FormProjectionWasmBoundary } from '../forms/form-projection.js'
 
 export type { EditorLocale }
 
@@ -371,6 +372,9 @@ export interface WasmBoundary {
   readonly query_editor_view: (request: unknown) => ApiResponse<EditorViewDto>
   readonly recover_document_audited: (request: unknown) => ApiResponse<AuditedRecoverResultDto>
   readonly apply_form_session?: FormSessionWasmBoundary['apply_form_session']
+  readonly project_form_widgets?: FormProjectionWasmBoundary['project_form_widgets']
+  readonly verify_form_projection_response?:
+    FormProjectionWasmBoundary['verify_form_projection_response']
   readonly layout_document?: (requestJson: string) => string
   readonly verify_layout_response?: (responseJson: string) => boolean
   readonly export_pdf?: (requestJson: string) => string
