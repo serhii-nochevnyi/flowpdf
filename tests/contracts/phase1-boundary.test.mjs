@@ -667,7 +667,8 @@ function boundaryPolicy(options) {
       phase,
       forbiddenWebPathSegment:
         /(?:^|[\/._-])(?:auth|backend|collaboration|forms?|pdf|voice)(?=[\/._-]|$)/i,
-      allowsEditorSource: (path) => phaseFourEditorSource.test(path),
+      allowsEditorSource: (path) =>
+        phaseFourEditorSource.test(path) || phaseFiveFormSource.test(path),
       allowsDeferredPath: (path) => phaseFourPdfSource.test(path) || phaseFiveFormSource.test(path),
       allowsSemanticForm: (path) => phaseFiveFormEditorSource.test(path),
     }

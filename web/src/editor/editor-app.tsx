@@ -23,6 +23,16 @@ import { SemanticDocument } from './semantic-document.js'
 import { PageViewport } from '../layout/page-viewport.js'
 import { PdfPreview } from '../pdf/pdf-preview.js'
 import { FormSessionCoordinator, requireFormSessionWasm } from '../forms/form-session.js'
+import { FormProjectionViewport } from '../forms/form-projection-viewport.js'
+import {
+  createFormProjectionRequest,
+  createWasmFormProjectionEngine,
+  requireFormProjectionWasm,
+  RevisionAwareFormProjectionScheduler,
+  type FormProjectionRequestDto,
+  type FormProjectionResultDto,
+  type FormProjectionScheduler,
+} from '../forms/form-projection.js'
 import type {
   DirectionalSelectionDto,
   EditorAcceptedSnapshot,
@@ -45,6 +55,7 @@ export { copy as editorCopy }
 export type {
   EditorLayoutScheduler,
   EditorPdfExportScheduler,
+  FormProjectionScheduler,
   FormattingCommandDto,
   SourceModality,
   StructuralCommandDto,
@@ -72,9 +83,14 @@ export type { FoundationInspectorLocale }
 export interface EditorAppProps {
   readonly controller?: EditorController
   readonly options?: EditorAppOptions
+  readonly formProjectionScheduler?: FormProjectionScheduler
 }
 
-export function EditorApp({ controller: suppliedController, options = {} }: EditorAppProps) {
+export function EditorApp({
+  controller: suppliedController,
+  options = {},
+  formProjectionScheduler: suppliedFormProjectionScheduler,
+}: EditorAppProps) {
   const [controller] = useState(
     () => suppliedController ?? new EditorController(options),
   )
@@ -85,6 +101,9 @@ export function EditorApp({ controller: suppliedController, options = {} }: Edit
         persistence: new IndexedDbDocumentStore(options.databaseName),
       }),
   )
+  const [formProjectionScheduler] = useState<FormProjectionScheduler>(
+    () => suppliedFormProjectionScheduler ?? createDefaultFormProjectionScheduler(),
+  )
   const snapshot = useSyncExternalStore(
     controller.subscribe,
     controller.getSnapshot,
@@ -94,6 +113,11 @@ export function EditorApp({ controller: suppliedController, options = {} }: Edit
     formSession.subscribe,
     formSession.getSnapshot,
     formSession.getSnapshot,
+  )
+  const formProjectionSnapshot = useSyncExternalStore(
+    (listener) => formProjectionScheduler.subscribe(listener),
+    () => formProjectionScheduler.snapshot(),
+    () => formProjectionScheduler.snapshot(),
   )
   const locale = options.locale ?? 'uk'
   const labels = copy(locale)
@@ -126,6 +150,54 @@ export function EditorApp({ controller: suppliedController, options = {} }: Edit
     snapshot.accepted?.session.documentId,
     snapshot.accepted?.session.revision,
   ])
+
+  useEffect(() => {
+    const accepted = snapshot.accepted
+    const acceptedLayout = snapshot.layout.accepted
+    if (accepted === null || acceptedLayout === null) {
+      formProjectionScheduler.cancel()
+      return
+    }
+    if (
+      acceptedLayout.result.sourceRevision !== accepted.session.revision ||
+      acceptedLayout.result.sourceHash !== accepted.session.canonicalHash ||
+      acceptedLayout.request.sourceRevision !== accepted.session.revision ||
+      acceptedLayout.request.sourceHash !== accepted.session.canonicalHash
+    ) {
+      formProjectionScheduler.cancel()
+      return
+    }
+    const session = sameFormProjectionIdentity(
+      formSessionSnapshot.identity,
+      accepted.session,
+    )
+      ? formSessionSnapshot.session
+      : null
+    const request = createFormProjectionRequest(
+      acceptedLayout,
+      `editor-form-projection-${accepted.session.revision}-${acceptedLayout.result.resultHash}-${session?.generation ?? 'defaults'}`,
+      session,
+    )
+    void formProjectionScheduler.request(request)
+    return () => formProjectionScheduler.cancel(request.requestId)
+  }, [
+    formProjectionScheduler,
+    formSessionSnapshot.identity,
+    formSessionSnapshot.session,
+    snapshot.accepted?.session.canonicalHash,
+    snapshot.accepted?.session.revision,
+    snapshot.layout.accepted?.request.sourceRevision,
+    snapshot.layout.accepted?.result.resultHash,
+  ])
+
+  useEffect(
+    () => () => {
+      if (suppliedFormProjectionScheduler === undefined) {
+        formProjectionScheduler.dispose?.()
+      }
+    },
+    [formProjectionScheduler, suppliedFormProjectionScheduler],
+  )
 
   const openDiagnostics = (): void => {
     if (diagnosticsMounted.current || diagnosticsRoot.current === null) return
@@ -254,9 +326,18 @@ export function EditorApp({ controller: suppliedController, options = {} }: Edit
           </section>
           <PageViewport
             layout={snapshot.layout}
+            projection={formProjectionSnapshot}
             sourceRevision={accepted.session.revision}
             locale={locale}
           />
+          {snapshot.layout.accepted === null ? null : (
+            <FormProjectionViewport
+              projection={formProjectionSnapshot}
+              sourceRevision={accepted.session.revision}
+              sourceHash={accepted.session.canonicalHash}
+              locale={locale}
+            />
+          )}
           {controller.hasPdfExport() ? (
             <PdfPreview
               layout={snapshot.layout}
@@ -285,4 +366,33 @@ export async function mountEditorApp(
   reactRoot.render(<EditorApp controller={controller} options={options} />)
   await controller.initialize()
   return controller
+}
+
+function createDefaultFormProjectionScheduler(): FormProjectionScheduler {
+  const engine = async (
+    request: FormProjectionRequestDto,
+    signal: AbortSignal,
+  ): Promise<FormProjectionResultDto> => {
+    const wasm = await loadWasm().then(requireFormProjectionWasm)
+    return createWasmFormProjectionEngine(wasm).run(request, signal)
+  }
+  return new RevisionAwareFormProjectionScheduler(engine, {
+    verifyResultHash: (result) =>
+      result.projection.resultHash.trim().length > 0 &&
+      (result.formPlan === null || result.formPlan.resultHash.trim().length > 0),
+  })
+}
+
+function sameFormProjectionIdentity(
+  identity: {
+    readonly sourceRevision: number
+    readonly sourceHash: string
+  } | null,
+  source: { readonly revision: number; readonly canonicalHash: string },
+): boolean {
+  return (
+    identity !== null &&
+    identity.sourceRevision === source.revision &&
+    identity.sourceHash === source.canonicalHash
+  )
 }

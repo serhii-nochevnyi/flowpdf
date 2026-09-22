@@ -186,6 +186,15 @@ export interface FormProjectionSchedulerOptions {
   readonly onDiagnostic?: (diagnostic: FormProjectionWorkerDiagnosticDto) => void
 }
 
+export interface FormProjectionScheduler {
+  request(request: FormProjectionRequestDto): Promise<FormProjectionScheduleOutcome>
+  cancel(requestId?: string): void
+  accepted(): AcceptedFormProjectionDto | null
+  snapshot(): FormProjectionSchedulerSnapshotDto
+  subscribe(listener: () => void): () => void
+  dispose?(): void
+}
+
 export type FormProjectionScheduleOutcome =
   | { readonly kind: 'published'; readonly accepted: AcceptedFormProjectionDto }
   | { readonly kind: 'discarded'; readonly requestId: string; readonly code: string }
@@ -392,6 +401,12 @@ export class RevisionAwareFormProjectionScheduler {
   private phase: FormProjectionSchedulerPhase = 'idle'
   private pendingRequestId: string | null = null
   private errorValue: string | null = null
+  private snapshotValue: FormProjectionSchedulerSnapshotDto = Object.freeze({
+    phase: 'idle',
+    accepted: null,
+    requestId: null,
+    errorCode: null,
+  })
 
   constructor(
     private readonly engine: FormProjectionEngine,
@@ -402,14 +417,7 @@ export class RevisionAwareFormProjectionScheduler {
     return this.acceptedValue
   }
 
-  snapshot(): FormProjectionSchedulerSnapshotDto {
-    return {
-      phase: this.phase,
-      accepted: this.acceptedValue,
-      requestId: this.pendingRequestId,
-      errorCode: this.errorValue,
-    }
-  }
+  readonly snapshot = (): FormProjectionSchedulerSnapshotDto => this.snapshotValue
 
   subscribe(listener: () => void): () => void {
     this.listeners.add(listener)
@@ -530,6 +538,12 @@ export class RevisionAwareFormProjectionScheduler {
   }
 
   private notify(): void {
+    this.snapshotValue = Object.freeze({
+      phase: this.phase,
+      accepted: this.acceptedValue,
+      requestId: this.pendingRequestId,
+      errorCode: this.errorValue,
+    })
     for (const listener of this.listeners) listener()
   }
 }

@@ -1,0 +1,79 @@
+.form-projection-viewport {
+  display: grid;
+  gap: 8px;
+  margin-top: 16px;
+  padding: 16px;
+  border: 1px solid var(--border-default);
+  border-radius: 6px;
+  background: var(--surface-app);
+}
+
+.form-projection-title,
+.form-projection-status,
+.form-projection-viewport p {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.form-projection-title {
+  color: var(--text-primary);
+  font-size: 18px;
+}
+
+.form-projection-status {
+  min-height: 24px;
+  color: var(--text-secondary);
+}
+
+.form-projection-status-error {
+  color: var(--status-error);
+}
+
+.form-projection-empty {
+  padding: 12px;
+  border: 1px dashed var(--border-subtle);
+  color: var(--text-secondary);
+}
+
+.form-projection-widget-list,
+.form-projection-review ul {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding-inline-start: 24px;
+}
+
+.form-projection-widget {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  align-items: baseline;
+}
+
+.form-projection-widget-name {
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
+.form-projection-widget-meta,
+.form-projection-derived-note,
+.form-projection-review {
+  color: var(--text-secondary);
+  font-size: 14px;
+}
+
+.form-projection-review h3 {
+  margin: 0 0 4px;
+  color: var(--status-error);
+  font-size: 15px;
+}
+
+.form-widget-overlay {
+  position: absolute;
+  min-width: 2px;
+  min-height: 2px;
+  border: 2px solid rgb(180 83 9 / 72%);
+  border-radius: 3px;
+  background: rgb(251 191 36 / 18%);
+  pointer-events: none;
+}

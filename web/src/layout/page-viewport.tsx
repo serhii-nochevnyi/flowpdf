@@ -6,10 +6,16 @@ import type {
   LayoutPageDto,
   LayoutSchedulerSnapshotDto,
 } from './layout-protocol.js'
+import type {
+  FormWidgetProjectionDto,
+  FormProjectionSchedulerSnapshotDto,
+} from '../forms/form-projection.js'
 import './page-viewport.css'
+import '../forms/form-projection.css'
 
 export interface PageViewportProps {
   readonly layout: LayoutSchedulerSnapshotDto
+  readonly projection?: FormProjectionSchedulerSnapshotDto
   readonly sourceRevision: number
   readonly locale?: 'uk' | 'en'
 }
@@ -21,6 +27,7 @@ export interface PageViewportProps {
  */
 export function PageViewport({
   layout,
+  projection,
   sourceRevision,
   locale = 'uk',
 }: PageViewportProps) {
@@ -32,6 +39,14 @@ export function PageViewport({
     accepted?.request.sourceRevision === sourceRevision &&
     accepted.request.sourceHash === result.sourceHash
   const pages = synchronized && result !== null ? result.pages : []
+  const projected = projection?.accepted?.result ?? null
+  const projectionSynchronized =
+    projection?.phase === 'ready' &&
+    projected !== null &&
+    projected.sourceRevision === sourceRevision &&
+    projected.sourceHash === result?.sourceHash &&
+    accepted?.result.resultHash === projected.layoutResultHash
+  const widgetProjection = projectionSynchronized ? projected?.projection ?? null : null
   const [activePage, setActivePage] = useState(0)
   const pageRefs = useRef(new Map<number, HTMLElement>())
 
@@ -121,10 +136,11 @@ export function PageViewport({
       ) : (
         <div className="layout-pages" data-layout-pages="">
           {pages.map((page) => (
-            <LayoutPage
-              key={`${result?.resultHash ?? 'layout'}-${page.pageIndex}`}
-              page={page}
-              register={(element) => {
+              <LayoutPage
+                key={`${result?.resultHash ?? 'layout'}-${page.pageIndex}`}
+                page={page}
+                projection={widgetProjection}
+                register={(element) => {
                 if (element === null) pageRefs.current.delete(page.pageIndex)
                 else pageRefs.current.set(page.pageIndex, element)
               }}
@@ -138,9 +154,11 @@ export function PageViewport({
 
 function LayoutPage({
   page,
+  projection,
   register,
 }: {
   readonly page: LayoutPageDto
+  readonly projection: FormWidgetProjectionDto | null
   readonly register: (element: HTMLElement | null) => void
 }) {
   const pageStyle: CSSProperties = {
@@ -170,6 +188,27 @@ function LayoutPage({
         ))}
         {page.footer === null ? null : <LayoutFragment fragment={page.footer} />}
       </div>
+      {projection === null ? null : (
+        <div className="form-widget-overlays" aria-hidden="true" data-form-widget-overlays="">
+          {projection.widgets
+            .filter((widget) => widget.pageIndex === page.pageIndex)
+            .map((widget) => (
+              <div
+                key={widget.widgetId}
+                className="form-widget-overlay"
+                style={{
+                  left: cssLength(widget.rect.x),
+                  top: cssLength(widget.rect.y),
+                  width: cssLength(widget.rect.width),
+                  height: cssLength(widget.rect.height),
+                }}
+                data-form-widget-overlay=""
+                data-field-id={widget.fieldId}
+                data-widget-id={widget.widgetId}
+              />
+            ))}
+        </div>
+      )}
     </article>
   )
 }
