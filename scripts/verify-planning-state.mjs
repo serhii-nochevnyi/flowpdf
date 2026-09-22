@@ -76,7 +76,7 @@ function latestCompletedPlan(root) {
 
 function currentPlan(stateMarkdown) {
   const phase = /^current_phase:\s*"?(\d+)"?/im.exec(stateMarkdown)?.[1]
-  const plan = /^Plan:\s*(\d{1,2})\b/im.exec(stateMarkdown)?.[1]
+  const plan = /^Plan:\s*(?:\d{1,2}-)?(\d{1,2})\b/im.exec(stateMarkdown)?.[1]
   if (phase === undefined || plan === undefined) return null
   return `${String(Number(phase)).padStart(2, '0')}-${String(Number(plan)).padStart(2, '0')}`
 }
