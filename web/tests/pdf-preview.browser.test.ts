@@ -18,8 +18,8 @@ import {
   PDF_PROTOCOL_VERSION,
   type PdfExportRequestDto,
   type PdfExportWorkerResultDto,
+  validatePdfExportRequest,
 } from '../src/pdf/pdf-protocol.js'
-import { createPdfExportRequest } from '../src/pdf/pdf-request.js'
 import { RevisionAwarePdfExportScheduler } from '../src/pdf/pdf-worker.js'
 
 test('PDF preview stays visual-only, searchable, virtualized, and revision-safe', async () => {
@@ -28,7 +28,6 @@ test('PDF preview stays visual-only, searchable, virtualized, and revision-safe'
   document.body.replaceChildren(root)
 
   let requestNumber = 0
-  let pdfRequestNumber = 0
   let sourceNodeId = ''
   let documentId = ''
   let lastPdfRequest: PdfExportRequestDto | null = null
@@ -39,6 +38,7 @@ test('PDF preview stays visual-only, searchable, virtualized, and revision-safe'
   )
   const pdfScheduler = new RevisionAwarePdfExportScheduler(
     async (request) => {
+      lastPdfRequest = request
       const pending = deferred<PdfExportWorkerResultDto>()
       pendingPdf.set(request.requestId, { resolve: pending.resolve })
       return pending.promise
@@ -71,15 +71,6 @@ test('PDF preview stays visual-only, searchable, virtualized, and revision-safe'
         }
       },
       pdfExportScheduler: pdfScheduler,
-      pdfExportRequestFactory: (accepted, layout, formSelection) => {
-        const request = createPdfExportRequest(accepted, layout, {
-          requestId: `browser-pdf-${++pdfRequestNumber}`,
-          formSelection,
-        })
-        if (request === null) throw new Error('PDF request is required')
-        lastPdfRequest = request
-        return request
-      },
     },
   )
   const reactRoot: Root = createRoot(root)
@@ -139,6 +130,18 @@ test('PDF preview stays visual-only, searchable, virtualized, and revision-safe'
   if (oldRequestId === undefined) throw new Error('pending PDF request is required')
   const oldRequest = pdfScheduler.snapshot().requestId
   expect(oldRequest).toBe(oldRequestId)
+  if (lastPdfRequest === null) throw new Error('default PDF request is required')
+  const capturedPdfRequest = lastPdfRequest as PdfExportRequestDto
+  expect(validatePdfExportRequest(capturedPdfRequest)).toBeNull()
+  expect(capturedPdfRequest.sourceRevision).toBe(accepted.session.revision)
+  expect(capturedPdfRequest.sourceHash).toBe(accepted.session.canonicalHash)
+  expect(capturedPdfRequest.layoutResultHash).toBe(
+    controller.snapshot().layout.accepted?.result.resultHash,
+  )
+  const serializedRequest = JSON.parse(capturedPdfRequest.serializedRequest) as {
+    readonly pages: readonly unknown[]
+  }
+  expect(serializedRequest.pages).toHaveLength(5)
 
   await controller.replaceSelection()
   await settle(controller)
@@ -147,8 +150,7 @@ test('PDF preview stays visual-only, searchable, virtualized, and revision-safe'
   expect(root.querySelector('[data-pdf-preview]')?.getAttribute('data-pdf-phase')).toBe('idle')
   expect(root.querySelector('[data-editor-input-host]')).not.toBeNull()
 
-  if (lastPdfRequest === null) throw new Error('PDF request fixture is required')
-  const oldResult = pdfResult(lastPdfRequest, documentId)
+  const oldResult = pdfResult(capturedPdfRequest, documentId)
   pendingPdf.get(oldRequestId)?.resolve(oldResult)
   await tick()
   expect(root.querySelector('[data-pdf-download]')).toBeNull()
