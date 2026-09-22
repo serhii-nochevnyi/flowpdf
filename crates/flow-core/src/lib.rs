@@ -19,6 +19,7 @@ pub mod provenance;
 pub mod schema;
 pub mod store;
 pub mod transaction;
+pub mod voice;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -105,6 +106,11 @@ pub use transaction::{
 use transaction::{
     CommandError, EditorState, HistoryEffect, HistoryEntry, TransactionService, replay_forward,
     replay_inverse, semantic_hash, validate_private_preimages,
+};
+pub use voice::{
+    FieldNavigationDirection, MAX_VOICE_TRANSCRIPT_BYTES, VOICE_PROTOCOL_VERSION, VoiceAction,
+    VoiceCapabilityMetadata, VoiceCommandRequest, VoiceError, VoiceIntent, VoiceLocale,
+    resolve_voice_command,
 };
 
 const SAMPLE_CREATE_COMMAND_ID: &str = "00000000-0000-4000-8000-000000000201";

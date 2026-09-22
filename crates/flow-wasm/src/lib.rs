@@ -11,7 +11,8 @@ use flow_core::{
     PdfExportOptions, PdfExportRequest, PdfFontManifestIdentity, PdfFormPlan, PdfInternalLink,
     PdfMetadataOptions, PdfOutlineEntry, PdfPagePlan, PdfRecoveryExpectation,
     PdfReproducibilityInputs, PlanPersistenceCommitRequest, PlanStandaloneAuditRequest,
-    RecoverRequest, RecoverResult, UkrainianHyphenation, export_pdf as core_export_pdf,
+    RecoverRequest, RecoverResult, UkrainianHyphenation, VOICE_PROTOCOL_VERSION,
+    VoiceCommandRequest, VoiceIntent, export_pdf as core_export_pdf,
     recover_owned_source as core_recover_owned_source, store::PlannedPersistenceCommit,
 };
 use serde::{Deserialize, Serialize};
@@ -25,6 +26,7 @@ const FONT_CATALOG_PROTOCOL_VERSION: u32 = 1;
 const MAX_FONT_CATALOG_PROTOCOL_REQUEST_BYTES: usize = flow_core::MAX_LAYOUT_WASM_REQUEST_BYTES;
 const HYPHENATION_PROTOCOL_VERSION: u32 = 1;
 const MAX_HYPHENATION_PROTOCOL_REQUEST_BYTES: usize = flow_core::MAX_LAYOUT_WASM_FONT_DATA_BYTES;
+const MAX_VOICE_PROTOCOL_REQUEST_BYTES: usize = 16 * 1024;
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -57,6 +59,21 @@ struct HyphenationWireResponse {
     ok: bool,
     identity: Option<String>,
     error: Option<PdfProtocolError>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct VoiceWireError {
+    code: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct VoiceWireResponse {
+    protocol_version: u32,
+    ok: bool,
+    intent: Option<VoiceIntent>,
+    error: Option<VoiceWireError>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -235,6 +252,51 @@ pub fn apply_form_session_json(request_json: String) -> String {
         Err(_) => flow_core::decode_failure::<FormSessionResponse>(),
     };
     serialize_json_response(&response)
+}
+
+/// Resolves one bounded command-mode speech transcript through Rust's exact
+/// locale allowlist. The response never echoes or persists the transcript.
+#[wasm_bindgen]
+pub fn resolve_voice_command(request_json: String) -> String {
+    if request_json.len() > MAX_VOICE_PROTOCOL_REQUEST_BYTES {
+        return serialize_voice_response(VoiceWireResponse {
+            protocol_version: VOICE_PROTOCOL_VERSION,
+            ok: false,
+            intent: None,
+            error: Some(VoiceWireError {
+                code: "FLOW_VOICE_REQUEST_SIZE_LIMIT".to_owned(),
+            }),
+        });
+    }
+    let request = match serde_json::from_str::<VoiceCommandRequest>(&request_json) {
+        Ok(request) => request,
+        Err(_) => {
+            return serialize_voice_response(VoiceWireResponse {
+                protocol_version: VOICE_PROTOCOL_VERSION,
+                ok: false,
+                intent: None,
+                error: Some(VoiceWireError {
+                    code: "FLOW_VOICE_REQUEST_DECODE".to_owned(),
+                }),
+            });
+        }
+    };
+    match flow_core::resolve_voice_command(request) {
+        Ok(intent) => serialize_voice_response(VoiceWireResponse {
+            protocol_version: VOICE_PROTOCOL_VERSION,
+            ok: true,
+            intent: Some(intent),
+            error: None,
+        }),
+        Err(error) => serialize_voice_response(VoiceWireResponse {
+            protocol_version: VOICE_PROTOCOL_VERSION,
+            ok: false,
+            intent: None,
+            error: Some(VoiceWireError {
+                code: error.code().to_owned(),
+            }),
+        }),
+    }
 }
 
 /// Revalidates and returns the immutable Rust-owned editor view projection.
@@ -766,6 +828,10 @@ fn serialize_font_catalog_response(response: FontCatalogWireResponse) -> String 
 
 fn serialize_hyphenation_response(response: HyphenationWireResponse) -> String {
     serde_json::to_string(&response).expect("serializing a closed hyphenation protocol cannot fail")
+}
+
+fn serialize_voice_response(response: VoiceWireResponse) -> String {
+    serde_json::to_string(&response).expect("serializing a closed voice protocol cannot fail")
 }
 
 fn serialize_json_response<T: Serialize>(response: &ApiResponse<T>) -> String {

@@ -45,6 +45,7 @@ const phaseFiveWasmExports = new Set([
   'font_catalog_identity',
   'hyphenation_data_identity',
   'project_form_widgets',
+  'resolve_voice_command',
   'verify_form_projection_response',
 ])
 const forbiddenDirectPackages = new Set([
@@ -1387,7 +1388,8 @@ function hasTypedWasmSignature(item) {
   }
   if (
     item.exportName === 'export_pdf' ||
-    item.exportName === 'recover_owned_source'
+    item.exportName === 'recover_owned_source' ||
+    item.exportName === 'resolve_voice_command'
   ) {
     return (
       parameters.join('') === 'request_json:String' &&
