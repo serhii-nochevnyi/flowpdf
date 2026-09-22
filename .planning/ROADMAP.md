@@ -302,12 +302,12 @@ external form import remains outside the implemented local scope.
   4. Ambiguous or high-risk operations require the configured preview/confirmation and provide visible and accessible feedback.
   5. Stopping voice input ends microphone capture and default telemetry retains no raw audio or sensitive transcript text.
 
-**Plans**: 2/6 executed; 4 remaining
+**Plans**: 3/6 executed; 3 remaining
 
 - [x] 06-01-PLAN.md — Add the Rust-owned bounded voice-intent boundary.
 - [x] 06-02-PLAN.md — Route final dictation through one revision-safe
   transaction.
-- [ ] 06-03-PLAN.md — Add the ephemeral push-to-talk recognition state machine.
+- [x] 06-03-PLAN.md — Add the ephemeral push-to-talk recognition state machine.
 - [ ] 06-04-PLAN.md — Expand allowlisted commands to navigation, formatting,
   history, and fields.
 - [ ] 06-05-PLAN.md — Expose accessible voice controls, preview, confirmation,
