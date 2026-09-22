@@ -3,6 +3,8 @@ import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import test from 'node:test'
 
+import { validateExternalAtEvidence } from '../../scripts/phase2-at-evidence.mjs'
+
 const projectRoot = resolve(import.meta.dirname, '../..')
 function jsonBlock(path) {
   const markdown = readFileSync(path, 'utf8')
@@ -44,22 +46,7 @@ export function validatePhaseTwoAtEvidence(evidence) {
   if (/\b(pass|passed|complete|closed)\b/i.test(JSON.stringify(evidence.local))) {
     throw new Error('local AT evidence contains an unqualified pass/completion claim')
   }
-  if (evidence.external?.target !== 'Microsoft Edge on Windows with a Windows screen reader') {
-    throw new Error('external AT evidence target is not the required checkpoint')
-  }
-  if (evidence.external.status !== 'unavailable' || evidence.external.closure !== 'outstanding') {
-    throw new Error('external Edge/Windows AT evidence must remain unavailable/outstanding')
-  }
-  if (evidence.external.observed !== false) {
-    throw new Error('unavailable external AT evidence cannot claim observed=true')
-  }
-  if (evidence.external.substitutionForbidden?.length !== 2) {
-    throw new Error('external evidence must prohibit the two local substitutions')
-  }
-  const externalText = JSON.stringify(evidence.external)
-  if (/\b(pass|passed|complete|closed)\b/i.test(externalText)) {
-    throw new Error('external AT evidence contains a fabricated pass/completion claim')
-  }
+  validateExternalAtEvidence(evidence.external)
   return true
 }
 
@@ -101,4 +88,14 @@ test('AT evidence requires a real platform record before allowing observed local
   evidence.local.observed = true
   evidence.local.environment.browser = 'Chromium on macOS'
   assert.throws(() => validatePhaseTwoAtEvidence(evidence), /pass\/completion|VoiceOver|inferred/)
+})
+
+test('AT evidence accepts a recorded Edge/Windows observation only after a closed target run', () => {
+  const evidence = loadPhaseTwoAtEvidence()
+  evidence.external.status = 'observed'
+  evidence.external.observed = true
+  evidence.external.closure = 'closed'
+  evidence.external.environment.browser = 'Microsoft Edge on Windows'
+  evidence.external.environment.screenReader = 'Windows screen reader'
+  assert.doesNotThrow(() => validatePhaseTwoAtEvidence(evidence))
 })

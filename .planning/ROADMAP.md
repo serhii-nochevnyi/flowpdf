@@ -15,7 +15,7 @@ FlowPDF progresses through nine dependency-ordered vertical capabilities. The ro
 - [ ] **Phase 2: Accessible Rich-Text Editing** - Users can edit semantic Ukrainian and English content through correct keyboard, IME, UI, and assistive-technology interactions.
 - [ ] **Phase 3: Deterministic Reflow and Pagination** - Document edits reshape, fragment, and repaginate predictably with incremental/full equivalence.
 - [ ] **Phase 4: Owned PDF Preview and Export** - Users can preview and export selectable, reproducible PDFs and recover the exact owned source.
-- [ ] **Phase 5: Semantic Fillable Forms** - Users can author validated semantic fields that become interoperable AcroForm widgets after pagination.
+- [x] **Phase 5: Semantic Fillable Forms** - Local implementation complete 2026-09-22; target-viewer and external form-import evidence remain explicit release inputs.
 - [ ] **Phase 6: Voice Dictation and Commands** - Users can dictate and invoke safe, undoable document commands through explicit voice modes.
 - [ ] **Phase 7: Secure PDF Reader and Scene** - Users can open the controlled PDF subset through a bounded parser and inspect supported page content and warnings.
 - [ ] **Phase 8: External Reconstruction and OCR** - Users can review and accept confidence-scored FlowDocument reconstruction while preserving the original and opaque content.
@@ -171,7 +171,7 @@ compatibility, and general PDF import remain unclaimed.
   4. Exported fields and appearance states behave consistently in the target viewer matrix.
   5. Flattening is explicit, selected, validated and never silently replaces the editable source.
 
-**Plans**: 25/25 local plans executed; phase-level closure remains open
+**Plans**: 26/26 local plans executed; local gate passed; phase-level release evidence remains open
 
 - [x] 05-01-PLAN.md — Add Rust-owned field-value validation and deterministic
   display-list anchor-to-widget projection with explicit review paths.
@@ -224,8 +224,10 @@ compatibility, and general PDF import remain unclaimed.
   caller-owned seam.
 - [x] 05-25-PLAN.md — Verify the PDF worker message loop at its scope
   boundary.
+- [x] 05-26-PLAN.md — Wire the Rust-verified font catalog and production
+  layout/PDF worker entries without creating a browser-side authority.
 
-The twenty-five Phase 5 slices validate the existing semantic field vocabulary,
+The twenty-six Phase 5 slices validate the existing semantic field vocabulary,
 derive revision/hash-bound fixed-point widget projections, keep explicit
 noncanonical fill overrides separate from authored defaults through to the
 derived widget, emit bounded AcroForm field/widget dictionaries from an
@@ -276,7 +278,14 @@ The WASM composition slice adds a small helper that joins the existing
 Rust-verifying adapter to the revision-aware scheduler, and the generated-WASM
 smoke now covers the complete request-to-accepted-result path.
 The worker-boundary slice verifies accepted and cooperative-cancelled outbound
-messages with a fake scope without activating a production worker entry.
+messages with a fake scope, and the final wiring slice activates the
+repository-owned production layout/PDF worker entries with a bounded
+Rust-verified Noto Sans and Ukrainian hyphenation catalog. The real Chromium
+smoke proves the default runtime path on a supported-glyph fixture; the sample
+document's deliberately unsupported emoji/non-BMP path remains fail-closed.
+No target-viewer compatibility or external PDF form import is claimed: the
+available environment has no matching external viewer/tool fixture, and
+external form import remains outside the implemented local scope.
 **UI hint**: yes
 
 ### Phase 6: Voice Dictation and Commands
@@ -293,7 +302,17 @@ messages with a fake scope without activating a production worker entry.
   4. Ambiguous or high-risk operations require the configured preview/confirmation and provide visible and accessible feedback.
   5. Stopping voice input ends microphone capture and default telemetry retains no raw audio or sensitive transcript text.
 
-**Plans**: TBD
+**Plans**: 6/6 plans prepared
+
+- [ ] 06-01-PLAN.md — Add the Rust-owned bounded voice-intent boundary.
+- [ ] 06-02-PLAN.md — Route final dictation through one revision-safe
+  transaction.
+- [ ] 06-03-PLAN.md — Add the ephemeral push-to-talk recognition state machine.
+- [ ] 06-04-PLAN.md — Expand allowlisted commands to navigation, formatting,
+  history, and fields.
+- [ ] 06-05-PLAN.md — Expose accessible voice controls, preview, confirmation,
+  and feedback.
+- [ ] 06-06-PLAN.md — Close the voice phase with privacy and regression gates.
 **UI hint**: yes
 
 ### Phase 7: Secure PDF Reader and Scene
@@ -355,8 +374,8 @@ messages with a fake scope without activating a production worker entry.
 | 2. Accessible Rich-Text Editing | 18/18 | In Progress (external AT checkpoint) |  |
 | 3. Deterministic Reflow and Pagination | 6/6 | In Progress (external AT checkpoint) |  |
 | 4. Owned PDF Preview and Export | 6/6 | In Progress (reference evidence unavailable) |  |
-| 5. Semantic Fillable Forms | 25/25 executed | In Progress (target-viewer/import evidence) |  |
-| 6. Voice Dictation and Commands | 0/TBD | Not started | - |
+| 5. Semantic Fillable Forms | 26/26 executed | Complete locally (release evidence pending) | 2026-09-22 |
+| 6. Voice Dictation and Commands | 0/6 planned | Planning | - |
 | 7. Secure PDF Reader and Scene | 0/TBD | Not started | - |
 | 8. External Reconstruction and OCR | 0/TBD | Not started | - |
 | 9. Controlled Native PDF Editing | 0/TBD | Not started | - |

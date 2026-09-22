@@ -13,9 +13,11 @@ import {
   RevisionAwarePdfExportScheduler,
   createWasmPdfExportEngine,
   createWasmPdfExportScheduler,
+  createWorkerPdfExportScheduler,
   installPdfWorker,
   recoverWithWasm,
   type PdfExportEngine,
+  type PdfWorkerPort,
   type PdfWorkerScope,
 } from '../src/pdf/pdf-worker.js'
 import type { PdfWorkerOutboundMessage } from '../src/pdf/pdf-protocol.js'
@@ -374,6 +376,30 @@ describe('revision-aware PDF worker scheduling', () => {
         },
       }),
     ).toThrowError('FLOW_PDF_RECOVERY_PAYLOAD_MISSING')
+  })
+
+  it('delegates a worker-backed request through the existing scheduler guards', async () => {
+    const posted: string[] = []
+    const worker: PdfWorkerPort = {
+      onmessage: null,
+      onerror: null,
+      onmessageerror: null,
+      postMessage: (message) => {
+        if (message.type !== 'export') return
+        posted.push(message.request.requestId)
+        queueMicrotask(() => {
+          worker.onmessage?.({
+            data: { type: 'accepted', requestId: message.request.requestId, result: result(message.request) },
+          })
+        })
+      },
+      terminate: () => undefined,
+    }
+    const scheduler = createWorkerPdfExportScheduler(worker)
+    const outcome = await scheduler.request(request(3, 'worker-backed'))
+    expect(outcome).toMatchObject({ kind: 'published' })
+    expect(posted).toEqual(['worker-backed'])
+    scheduler.dispose()
   })
 })
 

@@ -9,6 +9,8 @@ import {
   LayoutWorkerError,
   RevisionAwareLayoutScheduler,
   createWasmLayoutEngine,
+  createWorkerLayoutScheduler,
+  type LayoutWorkerPort,
   type LayoutEngine,
 } from '../src/layout/layout-worker.js'
 
@@ -207,5 +209,29 @@ describe('revision-aware layout worker scheduling', () => {
     await expect(rejected.run(sourceRequest, new AbortController().signal)).rejects.toMatchObject({
       code: 'FLOW_LAYOUT_RESULT_HASH_INVALID',
     })
+  })
+
+  it('delegates a worker-backed request through the existing scheduler guards', async () => {
+    const posted: string[] = []
+    const worker: LayoutWorkerPort = {
+      onmessage: null,
+      onerror: null,
+      onmessageerror: null,
+      postMessage: (message) => {
+        if (message.type !== 'paginate') return
+        posted.push(message.request.requestId)
+        queueMicrotask(() => {
+          worker.onmessage?.({
+            data: { type: 'accepted', requestId: message.request.requestId, result: result(message.request) },
+          })
+        })
+      },
+      terminate: () => undefined,
+    }
+    const scheduler = createWorkerLayoutScheduler(worker)
+    const outcome = await scheduler.request(request(3, 'worker-backed'))
+    expect(outcome).toMatchObject({ kind: 'published' })
+    expect(posted).toEqual(['worker-backed'])
+    scheduler.dispose()
   })
 })

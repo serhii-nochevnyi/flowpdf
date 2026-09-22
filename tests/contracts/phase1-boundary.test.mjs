@@ -42,6 +42,8 @@ const phaseFourWasmExports = new Set([
 const phaseFiveWasmExports = new Set([
   'apply_form_session',
   'apply_form_session_json',
+  'font_catalog_identity',
+  'hyphenation_data_identity',
   'project_form_widgets',
   'verify_form_projection_response',
 ])
@@ -902,7 +904,15 @@ function validateCall(path, source, call, diagnostics, capabilities) {
     if (first && isSemanticTarget(first)) {
       diagnostics.push(`${path}: Object.assign mutates semantic state ${first.getText(source)}`)
     }
-  } else if (capability !== undefined) {
+  } else if (
+    capability !== undefined &&
+    !(
+      capability === 'fetch' &&
+      path === 'web/src/runtime/font-catalog.ts' &&
+      callee === 'fetch' &&
+      first?.getText(source) === 'url'
+    )
+  ) {
     diagnostics.push(`${path}: deferred ${capabilityLabel(capability)} runtime surface`)
   }
   if (
@@ -1363,6 +1373,16 @@ function hasTypedWasmSignature(item) {
       parameters.join('') === 'response_json:String' &&
       tokens[parametersEnd + 1] === '->' &&
       tokens.slice(parametersEnd + 2).join('') === 'bool'
+    )
+  }
+  if (
+    item.exportName === 'font_catalog_identity' ||
+    item.exportName === 'hyphenation_data_identity'
+  ) {
+    return (
+      parameters.join('') === 'request_json:String' &&
+      tokens[parametersEnd + 1] === '->' &&
+      tokens.slice(parametersEnd + 2).join('') === 'String'
     )
   }
   if (

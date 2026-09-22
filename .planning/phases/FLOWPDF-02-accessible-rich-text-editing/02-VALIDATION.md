@@ -35,7 +35,7 @@ Each `Automated Command` is character-for-character the decoded shell command in
 
 | Final Task ID | Plan | Wave | Requirement | Threat | Secure behavior | Automated Command | Availability | Status |
 |---|---:|---:|---|---|---|---|---|---|
-| 02-01-01 | 02-01 | 1 | all | T-02-01-SC | Exact official dependency evidence fails closed before install | `node --test scripts/verify-phase2-dependencies.test.mjs && node scripts/verify-phase2-dependencies.mjs` | verifier/test created same task | pending |
+| 02-01-01 | 02-01 | 1 | all | T-02-01-SC | Checked-in official dependency evidence fails closed before install | `node --test scripts/verify-phase2-dependencies.test.mjs && node scripts/verify-phase2-dependencies.mjs --check` | verifier/test created same task | pending |
 | 02-01-02 | 02-01 | 1 | all | T-02-01-02 | Only accepted exact pins enter lifecycle-disabled locks | `npm ci --ignore-scripts && node scripts/verify-dependency-locks.mjs && npm ls --all && RUSTUP_HOME=./work/toolchains/rustup CARGO_HOME=./work/toolchains/cargo PATH=./work/toolchains/cargo/bin:$PATH cargo tree --locked -e features` | prior verifier; locks/config same task | pending |
 | 02-02-01 | 02-02 | 2 | EDIT-01 | T-02-02-01 | Unicode corpus/provenance drift rejects offline | `node --test scripts/verify-unicode-corpus.test.mjs && node scripts/verify-unicode-corpus.mjs` | corpus/verifier/test created same task | pending |
 | 02-02-02 | 02-02 | 2 | EDIT-01, QUAL-03, QUAL-04 | T-02-02-02..04 | One canonical numerical WASM gate and retained Phase 1 boundary | `node scripts/verify-wasm-size.mjs && node --test tests/contracts/phase1-boundary.test.mjs && npm run check` | size script/artifact/boundary created or revised same task | pending |

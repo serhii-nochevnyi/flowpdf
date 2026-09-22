@@ -38,7 +38,7 @@ created: 2026-08-14
 
 | Task ID | Plan | Wave | Requirements | Threat Ref | Test Type | Automated Command | Status |
 |---------|------|------|--------------|------------|-----------|-------------------|--------|
-| 01-01-01 | 01-01 | 0 | all (tooling gate) | T-01-SC | Node unit + live official provenance | `node --test scripts/verify-dependency-provenance.mjs && node scripts/verify-dependency-provenance.mjs --config config/dependency-provenance.json --report artifacts/provenance/phase1-dependencies.json --blocker artifacts/provenance/phase1-blocker.json` | ✅ green |
+| 01-01-01 | 01-01 | 0 | all (tooling gate) | T-01-SC | Node unit + checked-in official provenance | `node --test scripts/verify-dependency-provenance.mjs && node scripts/verify-dependency-provenance.mjs --check --config config/dependency-provenance.json --report artifacts/provenance/phase1-dependencies.json --blocker artifacts/provenance/phase1-blocker.json` | ✅ green |
 | 01-01-02 | 01-01 | 0 | all (Rust/WASM gate) | T-01-02 | Toolchain/metadata | `npm run check` | ✅ green |
 | 01-01-03 | 01-01 | 0 | all (Node/browser gate) | T-01-SC | Lock unit + installed tools | `npm run check` | ✅ green |
 | 01-02-01 | 01-02 | 1 | FLOW-01, FLOW-02, FLOW-04, FLOW-05, QUAL-08 | T-02-01..03 | Real Chromium tracer | `npm run test:browser -- walking-skeleton` | ✅ green |

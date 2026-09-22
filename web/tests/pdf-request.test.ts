@@ -66,6 +66,17 @@ describe('Rust-compatible PDF request builder', () => {
     expect(partialWire.pages).toEqual(allWire.pages)
   })
 
+  it('carries only Rust-verified font manifest identities', () => {
+    const request = createPdfExportRequest(accepted(), layout(), {
+      requestId: 'pdf-fonts',
+      fontFaces: [{ faceId: 'noto-sans', contentHash: 'blake3:font' }],
+    })
+    if (request === null) throw new Error('font manifest request is required')
+    expect(JSON.parse(request.serializedRequest).fontFaces).toEqual([
+      { faceId: 'noto-sans', contentHash: 'blake3:font' },
+    ])
+  })
+
   it('rejects stale layout and source-bound form selection before serialization', () => {
     expect(
       createPdfExportRequest(accepted(), {

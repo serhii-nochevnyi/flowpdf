@@ -280,6 +280,87 @@ export interface PdfWorkerScope {
   postMessage(message: PdfWorkerOutboundMessage): void
 }
 
+export interface PdfWorkerPort {
+  onmessage: ((event: { readonly data: PdfWorkerOutboundMessage }) => void) | null
+  onerror: ((event: unknown) => void) | null
+  onmessageerror: ((event: unknown) => void) | null
+  postMessage(message: PdfWorkerInboundMessage): void
+  terminate(): void
+}
+
+/** Creates a scheduler whose engine delegates to an already-created Worker. */
+export function createWorkerPdfExportScheduler(
+  worker: PdfWorkerPort,
+  options: Omit<PdfExportSchedulerOptions, 'verifyResultHash'> & {
+    readonly verifyResultHash?: PdfExportSchedulerOptions['verifyResultHash']
+  } = {},
+): RevisionAwarePdfExportScheduler {
+  const engine = createWorkerPdfExportEngine(worker)
+  return new RevisionAwarePdfExportScheduler(engine, {
+    ...options,
+    verifyResultHash: options.verifyResultHash ?? ((result) => result.byteHash.trim().length > 0),
+  })
+}
+
+function createWorkerPdfExportEngine(worker: PdfWorkerPort): PdfExportEngine {
+  const pending = new Map<
+    string,
+    { readonly resolve: (result: PdfExportWorkerResultDto) => void; readonly reject: (error: unknown) => void }
+  >()
+  let closed = false
+
+  worker.onmessage = (event) => {
+    const message = event.data
+    if (message.type === 'accepted') {
+      pending.get(message.requestId)?.resolve(message.result)
+      pending.delete(message.requestId)
+    } else if (message.type === 'discarded' || message.type === 'failed') {
+      pending.get(message.requestId)?.reject(new PdfWorkerError(message.code))
+      pending.delete(message.requestId)
+    } else {
+      pending.get(message.requestId)?.reject(new PdfWorkerError('FLOW_PDF_CANCELLED'))
+      pending.delete(message.requestId)
+    }
+  }
+  const fail = () => {
+    closed = true
+    for (const entry of pending.values()) entry.reject(new PdfWorkerError('FLOW_PDF_WORKER_FAILURE'))
+    pending.clear()
+  }
+  worker.onerror = fail
+  worker.onmessageerror = fail
+
+  return (request, signal) => {
+    if (closed) return Promise.reject(new PdfWorkerError('FLOW_PDF_WORKER_FAILURE'))
+    if (signal.aborted) return Promise.reject(new PdfWorkerError('FLOW_PDF_CANCELLED'))
+    return new Promise<PdfExportWorkerResultDto>((resolve, reject) => {
+      const cancel = () => {
+        pending.delete(request.requestId)
+        worker.postMessage({ type: 'cancel', requestId: request.requestId })
+        reject(new PdfWorkerError('FLOW_PDF_CANCELLED'))
+      }
+      signal.addEventListener('abort', cancel, { once: true })
+      pending.set(request.requestId, {
+        resolve: (result) => {
+          signal.removeEventListener('abort', cancel)
+          resolve(result)
+        },
+        reject: (error) => {
+          signal.removeEventListener('abort', cancel)
+          reject(error)
+        },
+      })
+      try {
+        worker.postMessage({ type: 'export', request })
+      } catch (error: unknown) {
+        pending.delete(request.requestId)
+        signal.removeEventListener('abort', cancel)
+        reject(error)
+      }
+    })
+  }
+}
+
 /** Installs the message loop for a dedicated PDF worker entry point. */
 export function installPdfWorker(
   scope: PdfWorkerScope,

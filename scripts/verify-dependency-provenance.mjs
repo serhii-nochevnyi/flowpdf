@@ -575,7 +575,22 @@ if (process.argv.includes('--config')) {
   if (!configPath || !reportPath || !blockerPath) {
     throw new Error('Usage: --config <path> --report <path> --blocker <path>');
   }
-  const config = JSON.parse(await readFile(configPath, 'utf8'));
-  const result = await writeVerificationOutcome({ config, reportPath, blockerPath });
-  if (!result.ok) process.exitCode = 1;
+  if (input.includes('--check')) {
+    const report = JSON.parse(await readFile(reportPath, 'utf8'));
+    if (report?.schemaVersion !== 1 || report.status !== 'success') {
+      throw new Error('checked-in dependency provenance is not a success report');
+    }
+    try {
+      await readFile(blockerPath, 'utf8');
+      throw new Error('checked-in dependency provenance blocker exists');
+    } catch (error) {
+      if (error?.message?.includes('blocker exists')) throw error;
+      if (error?.code !== 'ENOENT') throw error;
+    }
+    process.stdout.write('Checked-in dependency provenance evidence is present.\n');
+  } else {
+    const config = JSON.parse(await readFile(configPath, 'utf8'));
+    const result = await writeVerificationOutcome({ config, reportPath, blockerPath });
+    if (!result.ok) process.exitCode = 1;
+  }
 }

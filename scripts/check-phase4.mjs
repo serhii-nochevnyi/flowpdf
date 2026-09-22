@@ -1,13 +1,14 @@
 #!/usr/bin/env node
 
 import { createHash } from 'node:crypto'
-import { spawnSync } from 'node:child_process'
-import { existsSync, readFileSync } from 'node:fs'
-import { delimiter, dirname, resolve } from 'node:path'
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { delimiter, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { performance } from 'node:perf_hooks'
+import { tmpdir } from 'node:os'
 
 import { assertSupportedNodeVersion } from './node-version.mjs'
+import { validateExternalAtEvidence } from './phase2-at-evidence.mjs'
+import { runBoundedStep, writeFailureDetails } from './phase-gate-runner.mjs'
 
 assertSupportedNodeVersion()
 
@@ -79,18 +80,7 @@ function loadPhase2ExternalEvidence(root = projectRoot) {
   const match = markdown.match(/```json\n([\s\S]*?)\n```/)
   if (match === null) throw new Error('missing Phase 2 external AT evidence JSON')
   const evidence = JSON.parse(match[1])
-  if (
-    evidence?.target !== 'Microsoft Edge on Windows with a Windows screen reader' ||
-    evidence.status !== 'unavailable' ||
-    evidence.observed !== false ||
-    evidence.closure !== 'outstanding' ||
-    evidence.substitutionForbidden?.length !== 2
-  ) {
-    throw new Error('Phase 2 external AT evidence is not honestly unavailable/outstanding')
-  }
-  if (/\b(pass|passed|complete|closed)\b/i.test(JSON.stringify(evidence))) {
-    throw new Error('Phase 2 external AT evidence contains a fabricated completion claim')
-  }
+  validateExternalAtEvidence(evidence)
   return evidence
 }
 
@@ -175,7 +165,10 @@ export const phaseFourValidationTasks = Object.freeze([
     ],
   ),
   task('04-06-02', 'npm run test:unit', [npmStep(['run', 'test:unit'])]),
-  task('04-06-03', 'npm run check:phase3', [npmStep(['run', 'check:phase3'])]),
+  task('04-06-03', 'npm run check:phase2 && npm run check:phase3', [
+    npmStep(['run', 'check:phase2']),
+    npmStep(['run', 'check:phase3']),
+  ]),
   task('04-06-04', 'git diff --check', [gitStep(['diff', '--check'])]),
   task(
     '04-06-05',
@@ -303,6 +296,14 @@ export function assertReferenceDiagnostic(
   return true
 }
 
+export function isStrictReleaseReady({ unavailableReferences, totalReferences, phase2ExternalAt }) {
+  return (
+    unavailableReferences === 0 &&
+    totalReferences > 0 &&
+    phase2ExternalAt === 'observed/closed'
+  )
+}
+
 export function assertRevisionSafeWorkerContract(source = readFileSync(phaseWorkerPath, 'utf8')) {
   const required = [
     'validatePdfExportResult(request, result)',
@@ -339,33 +340,24 @@ function digestFile(path) {
 }
 
 function runStep(taskId, stepDefinition) {
-  const startedAt = performance.now()
-  const result = spawnSync(stepDefinition.command, stepDefinition.args, {
+  const result = runBoundedStep({
+    id: taskId,
+    command: stepDefinition.command,
+    args: stepDefinition.args,
     cwd: projectRoot,
     env: stepDefinition.env ?? process.env,
-    shell: false,
-    stdio: ['ignore', 'ignore', 'ignore'],
   })
-  const elapsedMilliseconds = Math.round(performance.now() - startedAt)
-  const exitCode = Number.isInteger(result.status) ? result.status : 1
-  const diagnostic = {
-    id: taskId,
-    status: exitCode === 0 ? 'pass' : 'fail',
-    exitCode,
-    elapsedMilliseconds,
-  }
+  const { diagnostic } = result
   assertSafeDiagnostic(diagnostic)
-  return diagnostic
+  return result
 }
 
 function toolAvailable(tool) {
   if (tool === 'Microsoft Edge on Windows') return false
-  const result = spawnSync('which', [tool], { cwd: projectRoot, stdio: 'ignore', shell: false })
-  return result.status === 0
+  return runBoundedStep({ id: 'reference-tool-probe', command: 'which', args: [tool], cwd: projectRoot }).diagnostic.status === 'pass'
 }
 
-export function runReferenceTask(referenceTask) {
-  const startedAt = performance.now()
+export function runReferenceTask(referenceTask, { output = null } = {}) {
   const availableTool = toolAvailable(referenceTask.tool)
   const availableArtifact = existsSync(resolve(projectRoot, referenceTask.artifact))
   if (!availableTool || !availableArtifact) {
@@ -373,7 +365,7 @@ export function runReferenceTask(referenceTask) {
       id: referenceTask.id,
       status: 'unavailable',
       exitCode: 127,
-      elapsedMilliseconds: Math.round(performance.now() - startedAt),
+      elapsedMilliseconds: 0,
     }
     assertReferenceDiagnostic(diagnostic, {
       toolAvailable: availableTool,
@@ -381,39 +373,54 @@ export function runReferenceTask(referenceTask) {
     })
     return diagnostic
   }
-  const result = spawnSync(referenceTask.tool, referenceTask.args, {
-    cwd: projectRoot,
-    env: process.env,
-    shell: false,
-    stdio: ['ignore', 'ignore', 'ignore'],
-  })
-  const diagnostic = {
-    id: referenceTask.id,
-    status: result.status === 0 ? 'pass' : 'fail',
-    exitCode: Number.isInteger(result.status) ? result.status : 1,
-    elapsedMilliseconds: Math.round(performance.now() - startedAt),
+  const temporaryRoot = mkdtempSync(join(tmpdir(), 'flowpdf-reference-'))
+  try {
+    const args = referenceTask.id === '04-06-R2'
+      ? [referenceTask.args[0], join(temporaryRoot, 'flowpdf.txt')]
+      : referenceTask.id === '04-06-R3'
+        ? [referenceTask.args[0], referenceTask.args[1], join(temporaryRoot, 'render')]
+        : referenceTask.args
+    const result = runBoundedStep({
+      id: referenceTask.id,
+      command: referenceTask.tool,
+      args,
+      cwd: projectRoot,
+      env: process.env,
+    })
+    const { diagnostic } = result
+    assertReferenceDiagnostic(diagnostic, {
+      toolAvailable: availableTool,
+      artifactAvailable: availableArtifact,
+    })
+    if (diagnostic.status === 'fail' && output !== null) {
+      writeFailureDetails(output, referenceTask.id, result.details)
+    }
+    return diagnostic
+  } finally {
+    rmSync(temporaryRoot, { recursive: true, force: true })
   }
-  assertReferenceDiagnostic(diagnostic, {
-    toolAvailable: availableTool,
-    artifactAvailable: availableArtifact,
-  })
-  return diagnostic
 }
 
-export function runPhaseFourGate({ output = process.stdout } = {}) {
+export function runPhaseFourGate({ output = process.stdout, strictExternal = false, includeDependencies = true } = {}) {
   assertValidationManifest()
   const before = buildGateFingerprint()
   output.write(
     `Phase 4 preflight requirements=${phaseFourCoverageSummary.requirements} ` +
       `local=${phaseFourCoverageSummary.local} regressions=${phaseFourCoverageSummary.regressions} ` +
-      `phase2ExternalAT=${before.phase2ExternalAt}\n`,
+      `phase2ExternalAT=${before.phase2ExternalAt} ` +
+      `dependencies=${includeDependencies ? 'included' : 'already-checked'}\n`,
   )
   for (const planTask of phaseFourValidationTasks) {
     if (planTask.mode === 'terminal') continue
+    if (!includeDependencies && planTask.id === '04-06-03') {
+      output.write(`[${planTask.id}] skipped inherited Phase 2/3 gates\n`)
+      continue
+    }
     output.write(`[${planTask.id}] start\n`)
     for (const stepDefinition of planTask.steps) {
-      const diagnostic = runStep(planTask.id, stepDefinition)
+      const { diagnostic, details } = runStep(planTask.id, stepDefinition)
       if (diagnostic.status === 'fail') {
+        writeFailureDetails(output, planTask.id, details)
         output.write(`[${planTask.id}] fail exit=${diagnostic.exitCode}\n`)
         return diagnostic.exitCode
       }
@@ -423,10 +430,25 @@ export function runPhaseFourGate({ output = process.stdout } = {}) {
 
   let unavailableReferences = 0
   for (const referenceTask of phaseFourReferenceTasks) {
-    const diagnostic = runReferenceTask(referenceTask)
+    const diagnostic = runReferenceTask(referenceTask, { output })
     if (diagnostic.status === 'unavailable') unavailableReferences += 1
     output.write(`[${referenceTask.id}] ${diagnostic.status}\n`)
     if (diagnostic.status === 'fail') return diagnostic.exitCode
+  }
+
+  if (
+    strictExternal &&
+    !isStrictReleaseReady({
+      unavailableReferences,
+      totalReferences: phaseFourReferenceTasks.length,
+      phase2ExternalAt: before.phase2ExternalAt,
+    })
+  ) {
+    output.write(
+      `Phase 4 release gate blocked: references=${unavailableReferences}/${phaseFourReferenceTasks.length} ` +
+        `phase2ExternalAT=${before.phase2ExternalAt}\n`,
+    )
+    return 2
   }
 
   const after = buildGateFingerprint()
@@ -448,7 +470,10 @@ const isMain =
 
 if (isMain) {
   try {
-    process.exitCode = runPhaseFourGate()
+    process.exitCode = runPhaseFourGate({
+      strictExternal: process.argv.includes('--strict-external'),
+      includeDependencies: !process.argv.includes('--release-child'),
+    })
   } catch (error) {
     process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`)
     process.exitCode = 1

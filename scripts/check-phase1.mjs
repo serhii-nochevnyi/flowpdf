@@ -4,9 +4,9 @@ import { spawnSync } from 'node:child_process'
 import { existsSync, readFileSync } from 'node:fs'
 import { delimiter, dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { performance } from 'node:perf_hooks'
 
 import { assertSupportedNodeVersion } from './node-version.mjs'
+import { runBoundedStep, writeFailureDetails } from './phase-gate-runner.mjs'
 
 assertSupportedNodeVersion()
 const projectRoot = resolve(import.meta.dirname, '..')
@@ -30,10 +30,11 @@ export const phaseOneSteps = Object.freeze([
   ),
   step(
     'dependency-provenance-live',
-    'Live dependency provenance verification',
+    'Checked-in dependency provenance evidence',
     process.execPath,
     [
       'scripts/verify-dependency-provenance.mjs',
+      '--check',
       '--config',
       'config/dependency-provenance.json',
       '--report',
@@ -223,23 +224,22 @@ function validateRequiredEvidence() {
 
 function runStep(gate, spawn, output) {
   output.write(`\n[${gate.id}] ${gate.label}\n`)
-  const startedAt = performance.now()
-  const result = spawn(gate.command, gate.args, {
-    cwd: projectRoot,
-    env: gate.env ?? process.env,
-    shell: false,
-    stdio: 'inherit',
-  })
-  const milliseconds = performance.now() - startedAt
-  const exitCode = resolveChildExitCode(result)
-  output.write(`[${gate.id}] ${formatDuration(milliseconds)}\n`)
-  if (result.error !== undefined) {
-    output.write(`[${gate.id}] unable to start: ${result.error.message}\n`)
+  const { diagnostic, details } = runBoundedStep(
+    {
+      id: gate.id,
+      command: gate.command,
+      args: gate.args,
+      cwd: projectRoot,
+      env: gate.env ?? process.env,
+    },
+    { spawn },
+  )
+  output.write(`[${gate.id}] ${formatDuration(diagnostic.elapsedMilliseconds)}\n`)
+  if (diagnostic.status === 'fail') {
+    writeFailureDetails(output, gate.id, details)
+    output.write(`[${gate.id}] failed with exit code ${diagnostic.exitCode}; stopping.\n`)
   }
-  if (exitCode !== 0) {
-    output.write(`[${gate.id}] failed with exit code ${exitCode}; stopping.\n`)
-  }
-  return { exitCode, milliseconds }
+  return { exitCode: diagnostic.exitCode, milliseconds: diagnostic.elapsedMilliseconds }
 }
 
 function step(id, label, command, args, options = {}) {

@@ -385,6 +385,8 @@ export interface WasmBoundary {
   readonly export_pdf?: (requestJson: string) => string
   readonly verify_pdf_export_response?: (responseJson: string) => boolean
   readonly recover_owned_source?: (requestJson: string) => string
+  readonly font_catalog_identity?: (requestJson: string) => string
+  readonly hyphenation_data_identity?: (requestJson: string) => string
 }
 
 export interface EditorPersistence {

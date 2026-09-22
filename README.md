@@ -314,18 +314,34 @@ npm run check:phase3:smoke # Phase 3 manifest/diagnostic contract smoke
 npm run check:phase3       # Phase 3 local gate; runs exact rows in fixed order
 npm run check:phase4:smoke # Phase 4 manifest/diagnostic contract smoke
 npm run check:phase4       # Phase 4 local gate plus explicit reference rows
-npm run check:phase4:smoke && npm run check:phase4 && npm run check:phase4
+npm run check:phase4:release # Phase 4 strict release evidence gate
+npm run check:phase5:smoke # Phase 5 manifest, closure, and diagnostic smoke
+npm run check:phase5       # Phase 5 local form, PDF, worker, and build gate
+npm run check:planning     # planning head, plan, and state projection check
+npm run check:release      # ordered release gate with dependency de-duplication
 ```
 
 `npm run test:browser` requires the pinned Chromium installation under
-`work/playwright`. `npm run check` is broader than a local source-only check:
-it validates retained evidence and live dependency provenance as well as Rust,
-WASM, TypeScript, unit, and browser gates, so it can be network- and
-environment-sensitive. `npm run check:phase3` additionally covers the
-deterministic layout, pagination, worker, viewport, migration, and scale
-lanes; its external AT status remains explicit rather than substituted by
-local Chromium evidence. The terminal Phase 3 verification is two consecutive
-full gate runs after the smoke contract.
+`work/playwright`. `npm run check` validates checked-in dependency evidence and
+the Phase 1 Rust, WASM, TypeScript, unit, browser, and recovery lanes without
+refreshing tracked reports. Use `npm run refresh:provenance`,
+`npm run refresh:phase2-dependencies`, `npm run refresh:wasm-size`, or
+`npm run refresh:recovery-benchmark` when the corresponding evidence must be
+renewed. `npm run check:phase3`
+additionally covers the deterministic layout, pagination, worker, viewport,
+migration, and scale lanes; its external AT status remains explicit rather than
+substituted by local Chromium evidence. Phase 4 reference rows are reported as
+unavailable locally and become release blockers under
+`npm run check:phase4:release`.
+
+`npm run check:release` is the single release entry point. It first requires a
+synchronized clean working tree, `.planning/STATE.md`, and a closed Phase 5 plan inventory, runs
+Phase 1 once, invokes Phase 2 and Phase 3 in dependency-child mode, runs the
+strict Phase 4 evidence gate, then runs Phase 5 and the final diff check. Every
+child process has a bounded timeout and emits only a redacted diagnostic tail
+on failure. External Edge/Windows accessibility and PDF reference evidence
+must be observed on their required target; local substitutes cannot promote
+those checkpoints.
 
 For a direct Rust workspace check using the repository-local toolchain:
 
@@ -348,7 +364,7 @@ Phase 3, Deterministic Reflow and Pagination, has completed its six local
 implementation plans and dual-run gate. Phase 4 has completed its six local
 implementation plans and dual-run local gate; its qpdf/Poppler/target-viewer
 reference rows remain unavailable, so the phase is not marked complete. Phase
-5 has twenty completed local slices for validation/projection,
+5 has twenty-six completed local slices for validation/projection,
 noncanonical fill state, effective-value projection, bounded AcroForm
 field/widget structure, the Rust/WASM plus guarded IndexedDB session boundary,
 accessible controls, descriptor configuration, safe anchor placement,
@@ -360,20 +376,20 @@ envelopes, plus a typed revision-safe browser projection adapter/scheduler,
 an EditorApp-integrated visual/read-only projection surface, and explicit
 source-bound selection controls propagated to the PDF export factory.
 The latest slice centralizes that callback payload construction in a tested
-Rust-compatible builder; it does not activate production font-catalog or
-worker wiring.
+Rust-compatible builder and wires the production font catalog plus layout/PDF
+worker entries through the default runtime.
 The controller now uses that builder by default when a PDF scheduler is
 provided without a custom factory, while preserving the explicit custom-factory
 path.
 The real-Chromium PDF preview smoke now exercises that default path and checks
 the captured source/layout-bound request before the fixture scheduler runs.
 The editor shell exposes the same caller-owned controller dependencies through
-`EditorApp` and `mountEditorApp`; it still does not instantiate production
-workers or font catalogs.
+`EditorApp` and `mountEditorApp` while the default application entry composes
+the production worker and font-catalog runtime.
 The generated-WASM smoke now crosses the complete request-builder,
 WASM-adapter, scheduler, and accepted-result path through this helper.
-The worker message loop is covered separately with a fake scope; it is not yet
-connected to the active application entry.
+The worker message loop remains covered at its scope boundary alongside the
+real-Chromium default-runtime smoke.
 The latest slice also verifies an ordinary request against the generated
 Rust/WASM `export_pdf` and response verifier.
 Target-viewer behavior and external form import remain unimplemented; the

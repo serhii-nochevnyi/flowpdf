@@ -20,7 +20,7 @@ PDF/reference evidence remain separate rows.
 | 04-05-03 | PDFX-01, PDFX-06, QUAL-07 | `npm run build:web && PLAYWRIGHT_BROWSERS_PATH=./work/playwright npx --no-install vitest run --project browser web/tests/pdf-preview.browser.test.ts web/tests/layout-viewport.browser.test.ts web/tests/editor-accessibility.browser.test.ts` |
 | 04-06-01 | QUAL-07 | `RUSTUP_HOME=./work/toolchains/rustup CARGO_HOME=./work/toolchains/cargo PATH=./work/toolchains/cargo/bin:$PATH cargo test --locked -p flow-core --quiet && RUSTUP_HOME=./work/toolchains/rustup CARGO_HOME=./work/toolchains/cargo PATH=./work/toolchains/cargo/bin:$PATH cargo test --locked -p flow-wasm --quiet` |
 | 04-06-02 | QUAL-07 | `npm run test:unit` |
-| 04-06-03 | QUAL-07, retained Phase 1/2/3 regression | `npm run check:phase3` |
+| 04-06-03 | QUAL-07, retained Phase 1/2/3 regression | `npm run check:phase2 && npm run check:phase3` |
 | 04-06-04 | QUAL-07 | `git diff --check` |
 | 04-06-05 | Orchestration | `npm run check:phase4:smoke && npm run check:phase4 && npm run check:phase4` |
 

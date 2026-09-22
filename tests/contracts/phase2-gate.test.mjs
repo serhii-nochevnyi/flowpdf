@@ -8,6 +8,7 @@ import {
   buildGateFingerprint,
   parseValidationCommands,
   phaseTwoCoverageSummary,
+  selectPhaseTwoSteps,
   phaseTwoValidationTasks,
 } from '../../scripts/check-phase2.mjs'
 
@@ -84,4 +85,10 @@ test('validation source keeps the terminal command as orchestration rather than 
   )
   assert.match(validation, /npm run check:phase2:smoke && npm run check:phase2 && npm run check:phase2/)
   assert.equal(phaseTwoValidationTasks.filter(({ mode }) => mode === 'terminal').length, 1)
+})
+
+test('release-child mode does not rerun the inherited Phase 1 step', () => {
+  const task = phaseTwoValidationTasks.find(({ id }) => id === '02-02-02')
+  assert.equal(selectPhaseTwoSteps(task, { includePhaseOne: true }).length, 3)
+  assert.equal(selectPhaseTwoSteps(task, { includePhaseOne: false }).length, 2)
 })

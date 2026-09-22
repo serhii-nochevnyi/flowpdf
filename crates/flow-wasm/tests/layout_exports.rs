@@ -50,6 +50,71 @@ fn response(input: &str) -> LayoutWasmResponse {
     serde_json::from_str(&flow_wasm::layout_document(input.to_owned())).unwrap()
 }
 
+fn catalog_request() -> serde_json::Value {
+    serde_json::json!({
+        "protocolVersion": 1,
+        "fonts": [{
+            "id": "noto-sans",
+            "family": "Noto Sans",
+            "faceIndex": 0,
+            "bytes": NOTO_SANS,
+        }],
+    })
+}
+
+#[test]
+fn font_catalog_identity_matches_the_layout_catalog() {
+    let identity_response: serde_json::Value = serde_json::from_str(
+        &flow_wasm::font_catalog_identity(serde_json::to_string(&catalog_request()).unwrap()),
+    )
+    .unwrap();
+    assert_eq!(identity_response["protocolVersion"], 1);
+    assert_eq!(identity_response["ok"], true);
+    assert_eq!(
+        identity_response["identity"].as_str(),
+        Some(request().font_catalog_identity.as_str())
+    );
+    assert_eq!(identity_response["error"], serde_json::Value::Null);
+}
+
+#[test]
+fn font_catalog_identity_rejects_future_and_invalid_requests() {
+    let mut future = catalog_request();
+    future["protocolVersion"] = serde_json::Value::from(2);
+    let future_response: serde_json::Value = serde_json::from_str(
+        &flow_wasm::font_catalog_identity(serde_json::to_string(&future).unwrap()),
+    )
+    .unwrap();
+    assert_eq!(
+        future_response["error"]["code"],
+        "FLOW_FONT_CATALOG_PROTOCOL_VERSION"
+    );
+
+    let mut invalid = catalog_request();
+    invalid["fonts"][0]["bytes"] = serde_json::json!([1, 2, 3]);
+    let invalid_response: serde_json::Value = serde_json::from_str(
+        &flow_wasm::font_catalog_identity(serde_json::to_string(&invalid).unwrap()),
+    )
+    .unwrap();
+    assert_eq!(invalid_response["ok"], false);
+    assert_eq!(
+        invalid_response["error"]["code"],
+        "FLOW_LAYOUT_FONT_INVALID"
+    );
+}
+
+#[test]
+fn hyphenation_identity_validates_and_hashes_the_pinned_dictionary() {
+    let bytes = include_bytes!("../../flow-core/data/uk.standard.bincode");
+    let response: serde_json::Value = serde_json::from_str(&flow_wasm::hyphenation_data_identity(
+        serde_json::json!({ "protocolVersion": 1, "bytes": bytes.to_vec() }).to_string(),
+    ))
+    .unwrap();
+    assert_eq!(response["ok"], true);
+    assert_eq!(response["identity"].as_str().map(str::len), Some(71));
+    assert_eq!(response["error"], serde_json::Value::Null);
+}
+
 #[test]
 fn layout_export_is_closed_deterministic_and_does_not_leak_authored_payloads() {
     let input = serde_json::to_string(&request()).unwrap();

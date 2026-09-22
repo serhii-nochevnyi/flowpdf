@@ -9,6 +9,7 @@ import {
   assertSafeDiagnostic,
   assertValidationManifest,
   buildGateFingerprint,
+  isStrictReleaseReady,
   parseReferenceCommands,
   parseValidationCommands,
   phaseFourCoverageSummary,
@@ -46,6 +47,15 @@ test('Phase 4 rows do not mutate dependencies and browser rows use the pinned ca
   assert.doesNotMatch(manifest, /npm\s+(?:ci|install)|cargo\s+update/i)
   assert.doesNotMatch(manifest, /Phase 5|Phase 6|Phase 7|Phase 8|Phase 9/)
   assert.doesNotMatch(manifest.split('## Evidence boundary')[0], /AcroForm|OCR|voice|PDF\/A|PDF\/UA/i)
+})
+
+test('Phase 4 regression row closes the Phase 2 dependency before Phase 3', () => {
+  const regressionTask = phaseFourValidationTasks.find(({ id }) => id === '04-06-03')
+  assert.equal(regressionTask?.commandText, 'npm run check:phase2 && npm run check:phase3')
+  assert.deepEqual(
+    regressionTask?.steps.map(({ args }) => args),
+    [['run', 'check:phase2'], ['run', 'check:phase3']],
+  )
 })
 
 test('Phase 4 preflight reports complete mapping and deterministic safe fingerprints', () => {
@@ -119,6 +129,21 @@ test('Phase 4 diagnostics are allowlisted and reference absence cannot pass', ()
         pdfBytes: [1, 2, 3],
       }),
     /unsafe gate diagnostic key/,
+  )
+})
+
+test('strict release mode requires every reference lane and inherited external evidence', () => {
+  assert.equal(
+    isStrictReleaseReady({ unavailableReferences: 0, totalReferences: 4, phase2ExternalAt: 'observed/closed' }),
+    true,
+  )
+  assert.equal(
+    isStrictReleaseReady({ unavailableReferences: 0, totalReferences: 4, phase2ExternalAt: 'unavailable/outstanding' }),
+    false,
+  )
+  assert.equal(
+    isStrictReleaseReady({ unavailableReferences: 1, totalReferences: 4, phase2ExternalAt: 'observed/closed' }),
+    false,
   )
 })
 

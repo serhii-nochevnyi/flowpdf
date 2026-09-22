@@ -1,17 +1,17 @@
 #!/usr/bin/env node
 
-import { spawnSync } from 'node:child_process'
 import { readFileSync } from 'node:fs'
 import { delimiter, dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { performance } from 'node:perf_hooks'
 
 import { assertSupportedNodeVersion } from './node-version.mjs'
 import {
   buildPhaseTwoUiContract,
   validatePhaseTwoUiContract,
 } from './build-phase2-ui-contract.mjs'
+import { validateExternalAtEvidence } from './phase2-at-evidence.mjs'
 import { runPhaseTwoScaleSmoke } from './verify-phase2-scale.mjs'
+import { runBoundedStep, writeFailureDetails } from './phase-gate-runner.mjs'
 
 assertSupportedNodeVersion()
 
@@ -68,18 +68,7 @@ function validatePhaseTwoAtEvidence(evidence) {
   ) {
     throw new Error('observed local AT evidence must name an exercised VoiceOver target')
   }
-  if (evidence.external?.target !== 'Microsoft Edge on Windows with a Windows screen reader') {
-    throw new Error('external AT evidence target is not the required checkpoint')
-  }
-  if (evidence.external.status !== 'unavailable' || evidence.external.closure !== 'outstanding') {
-    throw new Error('external Edge/Windows AT evidence must remain unavailable/outstanding')
-  }
-  if (evidence.external.observed !== false || evidence.external.substitutionForbidden?.length !== 2) {
-    throw new Error('external AT evidence is incomplete')
-  }
-  if (/\b(pass|passed|complete|closed)\b/i.test(JSON.stringify(evidence.external))) {
-    throw new Error('external AT evidence contains a fabricated pass/completion claim')
-  }
+  validateExternalAtEvidence(evidence.external)
   return true
 }
 
@@ -113,9 +102,9 @@ function task(id, commandText, steps, mode = 'run') {
 // task rows in 02-VALIDATION.md. The executable steps use pinned binaries and
 // shell=false; the text remains the auditable planning contract.
 export const phaseTwoValidationTasks = Object.freeze([
-  task('02-01-01', 'node --test scripts/verify-phase2-dependencies.test.mjs && node scripts/verify-phase2-dependencies.mjs', [
+  task('02-01-01', 'node --test scripts/verify-phase2-dependencies.test.mjs && node scripts/verify-phase2-dependencies.mjs --check', [
     nodeStep(['--test', 'scripts/verify-phase2-dependencies.test.mjs']),
-    nodeStep(['scripts/verify-phase2-dependencies.mjs']),
+    nodeStep(['scripts/verify-phase2-dependencies.mjs', '--check']),
   ]),
   task('02-01-02', 'npm ci --ignore-scripts && node scripts/verify-dependency-locks.mjs && npm ls --all && RUSTUP_HOME=./work/toolchains/rustup CARGO_HOME=./work/toolchains/cargo PATH=./work/toolchains/cargo/bin:$PATH cargo tree --locked -e features', [
     npmStep(['ci', '--ignore-scripts']),
@@ -303,39 +292,42 @@ export function assertSafeDiagnostic(diagnostic) {
 }
 
 function runStep(taskId, stepDefinition) {
-  const startedAt = performance.now()
-  const result = spawnSync(stepDefinition.command, stepDefinition.args, {
+  const result = runBoundedStep({
+    id: taskId,
+    command: stepDefinition.command,
+    args: stepDefinition.args,
     cwd: projectRoot,
     env: stepDefinition.env ?? process.env,
-    shell: false,
-    stdio: ['ignore', 'ignore', 'ignore'],
   })
-  const elapsedMilliseconds = Math.round(performance.now() - startedAt)
-  const exitCode = Number.isInteger(result.status) ? result.status : 1
-  const diagnostic = {
-    id: taskId,
-    status: exitCode === 0 ? 'pass' : 'fail',
-    exitCode,
-    elapsedMilliseconds,
-  }
+  const { diagnostic } = result
   assertSafeDiagnostic(diagnostic)
-  return diagnostic
+  return result
 }
 
-export function runPhaseTwoGate({ output = process.stdout } = {}) {
+export function selectPhaseTwoSteps(planTask, { includePhaseOne = true } = {}) {
+  if (includePhaseOne || planTask.id !== '02-02-02') return planTask.steps
+  return planTask.steps.filter(
+    (stepDefinition) => !(stepDefinition.command === npmBinary && stepDefinition.args.join(' ') === 'run check'),
+  )
+}
+
+export function runPhaseTwoGate({ output = process.stdout, includePhaseOne = true } = {}) {
   assertValidationManifest()
   const before = buildGateFingerprint()
   output.write(
-    `Phase 2 preflight requirements=${phaseTwoCoverageSummary.requirements} ` +
+      `Phase 2 preflight requirements=${phaseTwoCoverageSummary.requirements} ` +
       `edges=${phaseTwoCoverageSummary.edges} ui=${phaseTwoCoverageSummary.ui} ` +
-      `prohibitions=${phaseTwoCoverageSummary.prohibitions} externalAT=${phaseTwoCoverageSummary.externalAt}\n`,
+      `prohibitions=${phaseTwoCoverageSummary.prohibitions} externalAT=${before.externalAt} ` +
+      `phase1=${includePhaseOne ? 'included' : 'already-checked'}\n`,
   )
   for (const planTask of phaseTwoValidationTasks) {
     if (planTask.mode === 'terminal') continue
+    const steps = selectPhaseTwoSteps(planTask, { includePhaseOne })
     output.write(`[${planTask.id}] start\n`)
-    for (const stepDefinition of planTask.steps) {
-      const diagnostic = runStep(planTask.id, stepDefinition)
+    for (const stepDefinition of steps) {
+      const { diagnostic, details } = runStep(planTask.id, stepDefinition)
       if (diagnostic.status === 'fail') {
+        writeFailureDetails(output, planTask.id, details)
         output.write(`[${planTask.id}] fail exit=${diagnostic.exitCode}\n`)
         return diagnostic.exitCode
       }
@@ -359,7 +351,7 @@ const isMain =
 
 if (isMain) {
   try {
-    process.exitCode = runPhaseTwoGate()
+    process.exitCode = runPhaseTwoGate({ includePhaseOne: !process.argv.includes('--release-child') })
   } catch (error) {
     process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`)
     process.exitCode = 1

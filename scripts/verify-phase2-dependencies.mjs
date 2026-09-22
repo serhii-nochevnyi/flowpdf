@@ -345,7 +345,37 @@ export async function verifyPhase2Dependencies(options = {}) {
   }
 }
 
+export async function validatePhase2DependencyEvidence({
+  reportPath = DEFAULT_REPORT,
+  blockerPath = DEFAULT_BLOCKER,
+} = {}) {
+  const report = JSON.parse(await readFile(reportPath, 'utf8'))
+  if (report?.schemaVersion !== 1 || report.status !== 'success' || report.phase !== 'FLOWPDF-02') {
+    throw new EvidenceError('stale_report', 'checked-in Phase 2 dependency evidence is not a success report')
+  }
+  try {
+    await readFile(blockerPath, 'utf8')
+    throw new EvidenceError('blocked_report', 'checked-in Phase 2 dependency blocker exists')
+  } catch (error) {
+    if (error instanceof EvidenceError) throw error
+    if (error?.code !== 'ENOENT') throw error
+  }
+  return report
+}
+
 async function main() {
+  const input = process.argv.slice(2)
+  const valueAfter = (flag) => {
+    const index = input.indexOf(flag)
+    return index >= 0 ? input[index + 1] : undefined
+  }
+  const reportPath = valueAfter('--report') ?? DEFAULT_REPORT
+  const blockerPath = valueAfter('--blocker') ?? DEFAULT_BLOCKER
+  if (input.includes('--check')) {
+    const report = await validatePhase2DependencyEvidence({ reportPath, blockerPath })
+    console.log(`Checked Phase 2 dependency evidence: ${report.lockIntentDigest}.`)
+    return
+  }
   const report = await verifyPhase2Dependencies()
   console.log(`Verified ${report.npm.length} npm packages and ${report.crates.length} crates; exact lock intent ${report.lockIntentDigest}.`)
 }

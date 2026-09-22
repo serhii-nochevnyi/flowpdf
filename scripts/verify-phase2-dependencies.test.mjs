@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url'
 
 import {
   buildPhase2DependencyReport,
+  validatePhase2DependencyEvidence,
   verifyPhase2Dependencies,
 } from './verify-phase2-dependencies.mjs'
 
@@ -288,4 +289,26 @@ test('verifier has no package-manager or shell execution path', async () => {
   const sourcePath = path.join(path.dirname(fileURLToPath(import.meta.url)), 'verify-phase2-dependencies.mjs')
   const source = await readFile(sourcePath, 'utf8')
   assert.doesNotMatch(source, /node:child_process|\b(?:spawn|exec|npm install|cargo add)\b/)
+})
+
+test('checked-in Phase 2 evidence validation is read-only', async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'flowpdf-phase2-check-'))
+  try {
+    const reportPath = path.join(directory, 'report.json')
+    const blockerPath = path.join(directory, 'blocker.json')
+    const report = {
+      schemaVersion: 1,
+      status: 'success',
+      phase: 'FLOWPDF-02',
+      lockIntentDigest: 'sha256:test',
+    }
+    await writeFile(reportPath, `${JSON.stringify(report)}\n`)
+    const before = await readFile(reportPath, 'utf8')
+    const checked = await validatePhase2DependencyEvidence({ reportPath, blockerPath })
+    const after = await readFile(reportPath, 'utf8')
+    assert.deepEqual(checked, report)
+    assert.equal(after, before)
+  } finally {
+    await rm(directory, { recursive: true, force: true })
+  }
 })

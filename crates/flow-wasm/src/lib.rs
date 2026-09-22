@@ -5,12 +5,13 @@
 use flow_core::{
     ApiResponse, ApplyCommandRequest, AssetStageRequest, AssetStageResponse, AuditedRecoverRequest,
     AuditedRecoverResult, CommandKind, CreateSampleRequest, EditorSessionRequest,
-    EditorSessionResponse, EditorViewDto, EditorViewRequest, FormSessionRequest,
-    FormSessionResponse, MigrateDocumentRequest, MigrateDocumentResult, OperationResult,
-    PdfExportManifest, PdfExportOptions, PdfExportRequest, PdfFontManifestIdentity, PdfFormPlan,
-    PdfInternalLink, PdfMetadataOptions, PdfOutlineEntry, PdfPagePlan, PdfRecoveryExpectation,
+    EditorSessionResponse, EditorViewDto, EditorViewRequest, FontCatalog, FontFace,
+    FontFaceIdentity, FormSessionRequest, FormSessionResponse, LayoutWasmFontInput,
+    MigrateDocumentRequest, MigrateDocumentResult, OperationResult, PdfExportManifest,
+    PdfExportOptions, PdfExportRequest, PdfFontManifestIdentity, PdfFormPlan, PdfInternalLink,
+    PdfMetadataOptions, PdfOutlineEntry, PdfPagePlan, PdfRecoveryExpectation,
     PdfReproducibilityInputs, PlanPersistenceCommitRequest, PlanStandaloneAuditRequest,
-    RecoverRequest, RecoverResult, export_pdf as core_export_pdf,
+    RecoverRequest, RecoverResult, UkrainianHyphenation, export_pdf as core_export_pdf,
     recover_owned_source as core_recover_owned_source, store::PlannedPersistenceCommit,
 };
 use serde::{Deserialize, Serialize};
@@ -20,6 +21,43 @@ const SUPPORTED_OLDER_FIXTURE: &str = include_str!("../../../fixtures/flowdoc/ol
 const PDF_PROTOCOL_VERSION: u32 = 1;
 const MAX_PDF_PROTOCOL_REQUEST_BYTES: usize = 96 * 1024 * 1024;
 const MAX_PDF_PROTOCOL_HEX_BYTES: usize = flow_core::MAX_PDF_SOURCE_STREAM_BYTES;
+const FONT_CATALOG_PROTOCOL_VERSION: u32 = 1;
+const MAX_FONT_CATALOG_PROTOCOL_REQUEST_BYTES: usize = flow_core::MAX_LAYOUT_WASM_REQUEST_BYTES;
+const HYPHENATION_PROTOCOL_VERSION: u32 = 1;
+const MAX_HYPHENATION_PROTOCOL_REQUEST_BYTES: usize = flow_core::MAX_LAYOUT_WASM_FONT_DATA_BYTES;
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct FontCatalogWireRequest {
+    protocol_version: u32,
+    fonts: Vec<LayoutWasmFontInput>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FontCatalogWireResponse {
+    protocol_version: u32,
+    ok: bool,
+    identity: Option<String>,
+    faces: Option<Vec<FontFaceIdentity>>,
+    error: Option<PdfProtocolError>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct HyphenationWireRequest {
+    protocol_version: u32,
+    bytes: Vec<u8>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct HyphenationWireResponse {
+    protocol_version: u32,
+    ok: bool,
+    identity: Option<String>,
+    error: Option<PdfProtocolError>,
+}
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -323,6 +361,151 @@ pub fn verify_layout_response(response_json: String) -> bool {
     flow_core::verify_layout_wasm_response_json(&response_json)
 }
 
+/// Returns the exact Rust-owned identity for one bounded ordered font
+/// catalog. The browser uses this only to construct a matching layout
+/// request; font bytes never return through the response.
+#[wasm_bindgen]
+pub fn font_catalog_identity(request_json: String) -> String {
+    if request_json.len() > MAX_FONT_CATALOG_PROTOCOL_REQUEST_BYTES {
+        return serialize_font_catalog_response(FontCatalogWireResponse {
+            protocol_version: FONT_CATALOG_PROTOCOL_VERSION,
+            ok: false,
+            identity: None,
+            faces: None,
+            error: Some(PdfProtocolError {
+                code: "FLOW_FONT_CATALOG_REQUEST_SIZE_LIMIT".to_owned(),
+            }),
+        });
+    }
+    let request = match serde_json::from_str::<FontCatalogWireRequest>(&request_json) {
+        Ok(request) => request,
+        Err(_) => {
+            return serialize_font_catalog_response(FontCatalogWireResponse {
+                protocol_version: FONT_CATALOG_PROTOCOL_VERSION,
+                ok: false,
+                identity: None,
+                faces: None,
+                error: Some(PdfProtocolError {
+                    code: "FLOW_FONT_CATALOG_REQUEST_DECODE".to_owned(),
+                }),
+            });
+        }
+    };
+    if request.protocol_version != FONT_CATALOG_PROTOCOL_VERSION {
+        return serialize_font_catalog_response(FontCatalogWireResponse {
+            protocol_version: FONT_CATALOG_PROTOCOL_VERSION,
+            ok: false,
+            identity: None,
+            faces: None,
+            error: Some(PdfProtocolError {
+                code: "FLOW_FONT_CATALOG_PROTOCOL_VERSION".to_owned(),
+            }),
+        });
+    }
+    let faces = match request
+        .fonts
+        .into_iter()
+        .map(|font| FontFace::new(font.id, font.family, font.face_index, font.bytes))
+        .collect::<Result<Vec<_>, _>>()
+    {
+        Ok(faces) => faces,
+        Err(error) => {
+            return serialize_font_catalog_response(FontCatalogWireResponse {
+                protocol_version: FONT_CATALOG_PROTOCOL_VERSION,
+                ok: false,
+                identity: None,
+                faces: None,
+                error: Some(PdfProtocolError {
+                    code: error.code().to_owned(),
+                }),
+            });
+        }
+    };
+    let catalog = match FontCatalog::new(faces) {
+        Ok(catalog) => catalog,
+        Err(error) => {
+            return serialize_font_catalog_response(FontCatalogWireResponse {
+                protocol_version: FONT_CATALOG_PROTOCOL_VERSION,
+                ok: false,
+                identity: None,
+                faces: None,
+                error: Some(PdfProtocolError {
+                    code: error.code().to_owned(),
+                }),
+            });
+        }
+    };
+    serialize_font_catalog_response(FontCatalogWireResponse {
+        protocol_version: FONT_CATALOG_PROTOCOL_VERSION,
+        ok: true,
+        identity: Some(catalog.identity().to_owned()),
+        faces: Some(
+            catalog
+                .faces()
+                .iter()
+                .map(|face| face.identity().clone())
+                .collect(),
+        ),
+        error: None,
+    })
+}
+
+/// Validates one bounded pinned Ukrainian dictionary and returns its BLAKE3
+/// identity. The browser uses the identity with the same bytes in every
+/// layout request; dictionary bytes never return through this response.
+#[wasm_bindgen]
+pub fn hyphenation_data_identity(request_json: String) -> String {
+    if request_json.len() > MAX_HYPHENATION_PROTOCOL_REQUEST_BYTES {
+        return serialize_hyphenation_response(HyphenationWireResponse {
+            protocol_version: HYPHENATION_PROTOCOL_VERSION,
+            ok: false,
+            identity: None,
+            error: Some(PdfProtocolError {
+                code: "FLOW_HYPHENATION_REQUEST_SIZE_LIMIT".to_owned(),
+            }),
+        });
+    }
+    let request = match serde_json::from_str::<HyphenationWireRequest>(&request_json) {
+        Ok(request) => request,
+        Err(_) => {
+            return serialize_hyphenation_response(HyphenationWireResponse {
+                protocol_version: HYPHENATION_PROTOCOL_VERSION,
+                ok: false,
+                identity: None,
+                error: Some(PdfProtocolError {
+                    code: "FLOW_HYPHENATION_REQUEST_DECODE".to_owned(),
+                }),
+            });
+        }
+    };
+    if request.protocol_version != HYPHENATION_PROTOCOL_VERSION {
+        return serialize_hyphenation_response(HyphenationWireResponse {
+            protocol_version: HYPHENATION_PROTOCOL_VERSION,
+            ok: false,
+            identity: None,
+            error: Some(PdfProtocolError {
+                code: "FLOW_HYPHENATION_PROTOCOL_VERSION".to_owned(),
+            }),
+        });
+    }
+    if UkrainianHyphenation::from_bincode("validated", &request.bytes).is_err() {
+        return serialize_hyphenation_response(HyphenationWireResponse {
+            protocol_version: HYPHENATION_PROTOCOL_VERSION,
+            ok: false,
+            identity: None,
+            error: Some(PdfProtocolError {
+                code: "FLOW_LAYOUT_HYPHENATION_INVALID".to_owned(),
+            }),
+        });
+    }
+    serialize_hyphenation_response(HyphenationWireResponse {
+        protocol_version: HYPHENATION_PROTOCOL_VERSION,
+        ok: true,
+        identity: Some(format!("blake3:{}", blake3::hash(&request.bytes).to_hex())),
+        error: None,
+    })
+}
+
 /// Derives a revision/hash-bound form projection from an opaque Rust layout
 /// request. The browser supplies no page coordinates or display-list data.
 #[wasm_bindgen]
@@ -574,6 +757,15 @@ fn execute_pdf_recovery(request: PdfRecoveryWireRequest) -> Result<PdfRecoveryWi
 
 fn serialize_pdf_response<T: Serialize>(response: PdfProtocolResponse<T>) -> String {
     serde_json::to_string(&response).expect("serializing a closed PDF protocol cannot fail")
+}
+
+fn serialize_font_catalog_response(response: FontCatalogWireResponse) -> String {
+    serde_json::to_string(&response)
+        .expect("serializing a closed font-catalog protocol cannot fail")
+}
+
+fn serialize_hyphenation_response(response: HyphenationWireResponse) -> String {
+    serde_json::to_string(&response).expect("serializing a closed hyphenation protocol cannot fail")
 }
 
 fn serialize_json_response<T: Serialize>(response: &ApiResponse<T>) -> String {

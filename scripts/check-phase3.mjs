@@ -1,13 +1,13 @@
 #!/usr/bin/env node
 
 import { createHash } from 'node:crypto'
-import { spawnSync } from 'node:child_process'
 import { readFileSync } from 'node:fs'
 import { delimiter, dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { performance } from 'node:perf_hooks'
 
 import { assertSupportedNodeVersion } from './node-version.mjs'
+import { validateExternalAtEvidence } from './phase2-at-evidence.mjs'
+import { runBoundedStep, writeFailureDetails } from './phase-gate-runner.mjs'
 
 assertSupportedNodeVersion()
 
@@ -70,18 +70,7 @@ function loadPhase2ExternalEvidence(root = projectRoot) {
   const match = markdown.match(/```json\n([\s\S]*?)\n```/)
   if (match === null) throw new Error('missing Phase 2 external AT evidence JSON')
   const evidence = JSON.parse(match[1])
-  if (
-    evidence?.target !== 'Microsoft Edge on Windows with a Windows screen reader' ||
-    evidence.status !== 'unavailable' ||
-    evidence.observed !== false ||
-    evidence.closure !== 'outstanding' ||
-    evidence.substitutionForbidden?.length !== 2
-  ) {
-    throw new Error('Phase 2 external AT evidence is not honestly unavailable/outstanding')
-  }
-  if (/\b(pass|passed|complete|closed)\b/i.test(JSON.stringify(evidence))) {
-    throw new Error('Phase 2 external AT evidence contains a fabricated completion claim')
-  }
+  validateExternalAtEvidence(evidence)
   return evidence
 }
 
@@ -263,40 +252,43 @@ function digestFile(path) {
 }
 
 function runStep(taskId, stepDefinition) {
-  const startedAt = performance.now()
-  const result = spawnSync(stepDefinition.command, stepDefinition.args, {
+  const result = runBoundedStep({
+    id: taskId,
+    command: stepDefinition.command,
+    args: stepDefinition.args,
     cwd: projectRoot,
     env: stepDefinition.env ?? process.env,
-    shell: false,
-    stdio: ['ignore', 'ignore', 'ignore'],
   })
-  const elapsedMilliseconds = Math.round(performance.now() - startedAt)
-  const exitCode = Number.isInteger(result.status) ? result.status : 1
-  const diagnostic = {
-    id: taskId,
-    status: exitCode === 0 ? 'pass' : 'fail',
-    exitCode,
-    elapsedMilliseconds,
-  }
+  const { diagnostic } = result
   assertSafeDiagnostic(diagnostic)
-  return diagnostic
+  return result
 }
 
-export function runPhaseThreeGate({ output = process.stdout } = {}) {
+export function selectPhaseThreeSteps(planTask, { includePhaseOne = true } = {}) {
+  if (includePhaseOne || planTask.id !== '03-06-06') return planTask.steps
+  return planTask.steps.filter(
+    (stepDefinition) => !(stepDefinition.command === npmBinary && stepDefinition.args.join(' ') === 'run check'),
+  )
+}
+
+export function runPhaseThreeGate({ output = process.stdout, includePhaseOne = true } = {}) {
   assertValidationManifest()
   const before = buildGateFingerprint()
   output.write(
     `Phase 3 preflight requirements=${phaseThreeCoverageSummary.requirements} ` +
       `rust=${phaseThreeCoverageSummary.rust} worker=${phaseThreeCoverageSummary.worker} ` +
       `browser=${phaseThreeCoverageSummary.browser} ` +
-      `phase2ExternalAT=${before.phase2ExternalAt}\n`,
+      `phase2ExternalAT=${before.phase2ExternalAt} ` +
+      `phase1=${includePhaseOne ? 'included' : 'already-checked'}\n`,
   )
   for (const planTask of phaseThreeValidationTasks) {
     if (planTask.mode === 'terminal') continue
+    const steps = selectPhaseThreeSteps(planTask, { includePhaseOne })
     output.write(`[${planTask.id}] start\n`)
-    for (const stepDefinition of planTask.steps) {
-      const diagnostic = runStep(planTask.id, stepDefinition)
+    for (const stepDefinition of steps) {
+      const { diagnostic, details } = runStep(planTask.id, stepDefinition)
       if (diagnostic.status === 'fail') {
+        writeFailureDetails(output, planTask.id, details)
         output.write(`[${planTask.id}] fail exit=${diagnostic.exitCode}\n`)
         return diagnostic.exitCode
       }
@@ -321,7 +313,7 @@ const isMain =
 
 if (isMain) {
   try {
-    process.exitCode = runPhaseThreeGate()
+    process.exitCode = runPhaseThreeGate({ includePhaseOne: !process.argv.includes('--release-child') })
   } catch (error) {
     process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`)
     process.exitCode = 1

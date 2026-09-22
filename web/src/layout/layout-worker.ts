@@ -275,6 +275,88 @@ export interface LayoutWorkerScope {
   postMessage(message: LayoutWorkerOutboundMessage): void
 }
 
+export interface LayoutWorkerPort {
+  onmessage: ((event: { readonly data: LayoutWorkerOutboundMessage }) => void) | null
+  onerror: ((event: unknown) => void) | null
+  onmessageerror: ((event: unknown) => void) | null
+  postMessage(message: LayoutWorkerInboundMessage): void
+  terminate(): void
+}
+
+/** Creates a scheduler whose engine delegates to an already-created Worker. */
+export function createWorkerLayoutScheduler(
+  worker: LayoutWorkerPort,
+  options: Omit<LayoutSchedulerOptions, 'verifyResultHash'> & {
+    readonly verifyResultHash?: LayoutSchedulerOptions['verifyResultHash']
+  } = {},
+): RevisionAwareLayoutScheduler {
+  const engine = createWorkerLayoutEngine(worker)
+  const scheduler = new RevisionAwareLayoutScheduler(engine, {
+    ...options,
+    verifyResultHash: options.verifyResultHash ?? ((result) => result.resultHash.trim().length > 0),
+  })
+  return scheduler
+}
+
+function createWorkerLayoutEngine(worker: LayoutWorkerPort): LayoutEngine {
+  const pending = new Map<
+    string,
+    { readonly resolve: (result: LayoutWorkerResultDto) => void; readonly reject: (error: unknown) => void }
+  >()
+  let closed = false
+
+  worker.onmessage = (event) => {
+    const message = event.data
+    if (message.type === 'accepted') {
+      pending.get(message.requestId)?.resolve(message.result)
+      pending.delete(message.requestId)
+    } else if (message.type === 'discarded' || message.type === 'failed') {
+      pending.get(message.requestId)?.reject(new LayoutWorkerError(message.code))
+      pending.delete(message.requestId)
+    } else {
+      pending.get(message.requestId)?.reject(new LayoutWorkerError('FLOW_LAYOUT_CANCELLED'))
+      pending.delete(message.requestId)
+    }
+  }
+  const fail = () => {
+    closed = true
+    for (const entry of pending.values()) entry.reject(new LayoutWorkerError('FLOW_LAYOUT_WORKER_FAILURE'))
+    pending.clear()
+  }
+  worker.onerror = fail
+  worker.onmessageerror = fail
+
+  return (request, signal) => {
+    if (closed) return Promise.reject(new LayoutWorkerError('FLOW_LAYOUT_WORKER_FAILURE'))
+    if (signal.aborted) return Promise.reject(new LayoutWorkerError('FLOW_LAYOUT_CANCELLED'))
+    return new Promise<LayoutWorkerResultDto>((resolve, reject) => {
+      const cancel = () => {
+        pending.delete(request.requestId)
+        worker.postMessage({ type: 'cancel', requestId: request.requestId })
+        reject(new LayoutWorkerError('FLOW_LAYOUT_CANCELLED'))
+      }
+      signal.addEventListener('abort', cancel, { once: true })
+      pending.set(request.requestId, {
+        resolve: (result) => {
+          signal.removeEventListener('abort', cancel)
+          resolve(result)
+        },
+        reject: (error) => {
+          signal.removeEventListener('abort', cancel)
+          reject(error)
+        },
+      })
+      try {
+        worker.postMessage({ type: 'paginate', request })
+      } catch (error: unknown) {
+        pending.delete(request.requestId)
+        signal.removeEventListener('abort', cancel)
+        reject(error)
+      }
+    })
+  }
+}
+
 /** Installs the message loop used by a dedicated worker entry point. */
 export function installLayoutWorker(
   scope: LayoutWorkerScope,

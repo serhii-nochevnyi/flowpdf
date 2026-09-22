@@ -6,6 +6,7 @@ import type { EditorAcceptedSnapshot } from '../editor/editor-store.js'
 import type { AcceptedLayoutDto } from '../layout/layout-protocol.js'
 import {
   PDF_PROTOCOL_VERSION,
+  type PdfFontManifestIdentityDto,
   type PdfExportRequestDto,
   validatePdfExportRequest,
 } from './pdf-protocol.js'
@@ -14,6 +15,7 @@ export interface PdfExportRequestBuilderOptions {
   readonly requestId: string
   readonly producer?: string
   readonly formSelection?: FormProjectionSelectionDto | null
+  readonly fontFaces?: readonly PdfFontManifestIdentityDto[]
 }
 
 /**
@@ -75,7 +77,7 @@ export function createPdfExportRequest(
       layoutSettingsFingerprint: layout.result.layoutSettingsFingerprint,
       layoutResultHash: layout.result.resultHash,
       fontCatalogIdentity: layout.result.fontCatalogIdentity,
-      fontFaces: [],
+      fontFaces: options.fontFaces ?? [],
       hyphenationDataIdentity: layout.result.hyphenationDataIdentity,
       canonicalJson: accepted.session.canonicalJson,
       pages: layout.result.pages.map((page) => ({ bounds: page.bounds })),

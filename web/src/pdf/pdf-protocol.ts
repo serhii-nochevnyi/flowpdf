@@ -25,10 +25,15 @@ export interface PdfExportManifestDto {
   readonly engine: string
   readonly engineVersion: string
   readonly fontCatalogIdentity: string | null
-  readonly fontFaces: readonly { readonly faceId: string; readonly contentHash: string }[]
+  readonly fontFaces: readonly PdfFontManifestIdentityDto[]
   readonly hyphenationIdentity: string | null
   readonly options: unknown
   readonly exportFingerprint: string
+}
+
+export interface PdfFontManifestIdentityDto {
+  readonly faceId: string
+  readonly contentHash: string
 }
 
 export interface PdfSupportReportDto {

@@ -8,6 +8,7 @@ import {
   buildGateFingerprint,
   parseValidationCommands,
   phaseThreeCoverageSummary,
+  selectPhaseThreeSteps,
   phaseThreeValidationTasks,
 } from '../../scripts/check-phase3.mjs'
 
@@ -95,4 +96,10 @@ test('Phase 3 diagnostics are allowlisted and cannot carry layout/source payload
     () => assertSafeDiagnostic({ id: '03-05-03', status: 'pass', exitCode: 0, elapsedMilliseconds: 1, code: 'FLOW_OK' }),
     /unsafe gate diagnostic key/,
   )
+})
+
+test('release-child mode does not rerun the inherited Phase 1 step', () => {
+  const task = phaseThreeValidationTasks.find(({ id }) => id === '03-06-06')
+  assert.equal(selectPhaseThreeSteps(task, { includePhaseOne: true }).length, 1)
+  assert.equal(selectPhaseThreeSteps(task, { includePhaseOne: false }).length, 0)
 })
