@@ -131,22 +131,22 @@ The current tree includes:
   AcroForm catalog entry, and the private source envelope still recovers the
   canonical document exactly. The optional source-bound form plan and
   `flattenedFieldIds` selection are also admitted by the Rust/WASM export
-  envelope; browser-side projection and selection controls are not yet wired;
+  envelope; the browser now offers source-bound selection intent without
+  moving flattening authority out of Rust;
 - a closed Rust/WASM form-projection endpoint that reuses the validated layout
   request, builds the display list in Rust, returns session-aware fixed-point
   widget geometry and review entries, and derives an optional source-bound
-  `PdfFormPlan` with a Rust verifier; this transport is available to a later
-  browser adapter, but browser-side projection and selection controls are not
-  yet wired;
+  `PdfFormPlan` with a Rust verifier; the result is consumed by the typed
+  browser adapter and editor projection surface;
 - a typed revision-safe browser adapter and single-flight scheduler for that
   projection endpoint, bound to the accepted layout result hash and optional
-  source session; it publishes only Rust-verified derived responses, while
-  browser overlays and selection/flattening controls are still not wired;
+  source session; it publishes only Rust-verified derived responses and feeds
+  the visual overlay, accessible summary, and source-bound selection surface;
 - an `EditorApp`-integrated projection surface that requests only against the
   current accepted layout/session, paints fixed-point widget overlays on the
-  visual page viewport, and exposes a separate accessible read-only widget and
-  review summary; interactive selection and flattening controls are not yet
-  wired;
+  visual page viewport, exposes a separate accessible widget/review summary,
+  and offers explicit select-all/clear/per-field flatten intent without
+  mutating semantic or session state;
 - Phase 1 and Phase 2 foundation fixtures, Unicode 17 grapheme conformance
   data, dependency provenance checks, Rust tests, TypeScript checks, browser
   tests for the implemented foundation and Phase 3 layout path, and a Phase 4
@@ -174,12 +174,11 @@ things:
 - a bounded PDF reader, with selectable text, reproducibility evidence,
   explicit unsupported-content reporting, and an exact owned-source round trip
   when the source payload is available;
-- accessible form-field selection/flattening controls over the verified
-  Rust/WASM projection response, target-viewer behavior, and external PDF form
-  import; the core and Rust/WASM envelope can now explicitly flatten selected
-  accepted fields into derived page content while retaining unselected widgets
-  and the recoverable source, but this does not claim general text/image
-  flattening or target-viewer compatibility;
+- target-viewer behavior and external PDF form import for the verified
+  form-field export path; the core and Rust/WASM envelope can explicitly
+  flatten selected accepted fields into derived page content while retaining
+  unselected widgets and the recoverable source, but this does not claim
+  general text/image flattening or target-viewer compatibility;
 - voice dictation and commands through the same revision-checked transaction
   boundary;
 - controlled external-PDF reconstruction/OCR and later native editing of
@@ -331,7 +330,7 @@ Phase 3, Deterministic Reflow and Pagination, has completed its six local
 implementation plans and dual-run gate. Phase 4 has completed its six local
 implementation plans and dual-run local gate; its qpdf/Poppler/target-viewer
 reference rows remain unavailable, so the phase is not marked complete. Phase
-5 has seventeen completed local slices for validation/projection,
+5 has eighteen completed local slices for validation/projection,
 noncanonical fill state, effective-value projection, bounded AcroForm
 field/widget structure, the Rust/WASM plus guarded IndexedDB session boundary,
 accessible controls, descriptor configuration, safe anchor placement,
@@ -339,9 +338,9 @@ Rust-owned default text-field insertion, semantic field removal, and canonical
 tab-order authoring, bounded derived AcroForm appearance resources and state
 streams, explicit core export-time flattening of selected fields, and the
 source-bound Rust/WASM form-plan/selection and display-list-backed projection
-envelopes, plus a typed revision-safe browser projection adapter/scheduler and
-an EditorApp-integrated visual/read-only projection surface. Interactive
-selection/flattening controls, target-viewer behavior, and external form
-import remain unimplemented; the current implementation still makes no claim
-of complete Unicode/PDF compatibility, commercial-SDK parity, or production
-readiness.
+envelopes, plus a typed revision-safe browser projection adapter/scheduler,
+an EditorApp-integrated visual/read-only projection surface, and explicit
+source-bound selection controls propagated to the PDF export factory.
+Target-viewer behavior and external form import remain unimplemented; the
+current implementation still makes no claim of complete Unicode/PDF
+compatibility, commercial-SDK parity, or production readiness.

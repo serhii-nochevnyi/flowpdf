@@ -171,7 +171,7 @@ compatibility, and general PDF import remain unclaimed.
   4. Exported fields and appearance states behave consistently in the target viewer matrix.
   5. Flattening is explicit, selected, validated and never silently replaces the editable source.
 
-**Plans**: 17/17 local plans executed; phase-level closure remains open
+**Plans**: 18/18 local plans executed; phase-level closure remains open
 
 - [x] 05-01-PLAN.md — Add Rust-owned field-value validation and deterministic
   display-list anchor-to-widget projection with explicit review paths.
@@ -208,8 +208,10 @@ compatibility, and general PDF import remain unclaimed.
   the verified Rust/WASM form projection response.
 - [x] 05-17-PLAN.md — Integrate verified form projection into the editor as a
   reflow-safe visual overlay and accessible read-only review summary.
+- [x] 05-18-PLAN.md — Add explicit accessible flatten selection controls and
+  carry the source-bound selection to the PDF export factory.
 
-The seventeen Phase 5 slices validate the existing semantic field vocabulary,
+The eighteen Phase 5 slices validate the existing semantic field vocabulary,
 derive revision/hash-bound fixed-point widget projections, keep explicit
 noncanonical fill overrides separate from authored defaults through to the
 derived widget, emit bounded AcroForm field/widget dictionaries from an
@@ -230,15 +232,17 @@ selected, and keeps exact owned-source recovery. The final projection slice
 reuses validated layout execution, builds display-list-backed widget geometry,
 and carries session-effective values, review entries, and an optional
 source-bound plan through a verified Rust/WASM response. The slices do not
-claim target-viewer compatibility, browser-side form projection or selection
-UI, or external form import; those remain separately planned and verified.
+claim target-viewer compatibility or external form import; those remain
+separately planned and verified. The browser now exposes source-bound
+per-field/select-all/clear flatten intent and passes it to the opaque export
+factory without becoming a second semantic or PDF authority.
 The source-bound form plan, explicit selection, and projection response now
 cross the closed Rust/WASM export boundary without moving semantic authority
 into the browser. A typed browser adapter now binds that response to the
-accepted layout result hash and optional session while keeping overlays and
-selection/flattening controls as later UI work. The EditorApp now schedules
-the verified projection against the accepted layout/session and shows a visual
-fixed-point widget overlay plus an accessible read-only widget/review summary.
+accepted layout result hash and optional session. The EditorApp now schedules
+the verified projection against the accepted layout/session, shows a visual
+fixed-point widget overlay, exposes an accessible read-only widget/review
+summary, and passes explicit selection intent to the opaque export factory.
 **UI hint**: yes
 
 ### Phase 6: Voice Dictation and Commands
@@ -317,7 +321,7 @@ fixed-point widget overlay plus an accessible read-only widget/review summary.
 | 2. Accessible Rich-Text Editing | 18/18 | In Progress (external AT checkpoint) |  |
 | 3. Deterministic Reflow and Pagination | 6/6 | In Progress (external AT checkpoint) |  |
 | 4. Owned PDF Preview and Export | 6/6 | In Progress (reference evidence unavailable) |  |
-| 5. Semantic Fillable Forms | 17/17 executed | In Progress (browser projection/viewer/import evidence) |  |
+| 5. Semantic Fillable Forms | 18/18 executed | In Progress (target-viewer/import evidence) |  |
 | 6. Voice Dictation and Commands | 0/TBD | Not started | - |
 | 7. Secure PDF Reader and Scene | 0/TBD | Not started | - |
 | 8. External Reconstruction and OCR | 0/TBD | Not started | - |
