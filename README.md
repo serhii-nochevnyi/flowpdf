@@ -151,6 +151,9 @@ The current tree includes:
   layout identities, Rust-produced page bounds, and verified form-plan/
   flatten-selection data into the exact opaque Rust PDF wire payload, failing
   closed on stale identity combinations;
+- an `EditorController` default that uses this builder when a caller provides
+  a PDF scheduler without a custom factory; explicit factories remain
+  authoritative, and worker/font-catalog ownership remains with the caller;
 - Phase 1 and Phase 2 foundation fixtures, Unicode 17 grapheme conformance
   data, dependency provenance checks, Rust tests, TypeScript checks, browser
   tests for the implemented foundation and Phase 3 layout path, and a Phase 4
@@ -348,6 +351,9 @@ source-bound selection controls propagated to the PDF export factory.
 The latest slice centralizes that callback payload construction in a tested
 Rust-compatible builder; it does not activate production font-catalog or
 worker wiring.
+The controller now uses that builder by default when a PDF scheduler is
+provided without a custom factory, while preserving the explicit custom-factory
+path.
 The latest slice also verifies an ordinary request against the generated
 Rust/WASM `export_pdf` and response verifier.
 Target-viewer behavior and external form import remain unimplemented; the
