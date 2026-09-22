@@ -3,17 +3,17 @@ gsd_state_version: "1.0"
 milestone: v1.0
 current_phase: 6
 current_phase_name: Voice Dictation and Commands
-status: planning
-stopped_at: Phase 5 local implementation closed at 05-26; Phase 6 planning begins while target-viewer, external form import, four external Phase 4 PDF/reference rows, and the inherited Phase 2/3 external AT checkpoint remain explicit release inputs
-last_updated: "2026-09-22T08:36:31Z"
+status: executing
+stopped_at: Phase 6 Plan 06-01 complete; next plan is 06-02 while external Phase 4/5 evidence and inherited Phase 2/3 external AT checkpoints remain explicit release inputs
+last_updated: "2026-09-22T09:28:27Z"
 last_activity: 2026-09-22
-last_activity_desc: Completed Phase 5 Plan 05-26 with Rust-verified production font/catalog and layout/PDF worker wiring; local Phase 5 gate passed
-state_head: 8246ed7
+last_activity_desc: Completed Phase 6 Plan 06-01 with a bounded Rust/WASM voice intent resolver; focused Rust, WASM, clippy, build, and boundary checks passed
+state_head: 2159d22d61802bbbec51f9766aa6f1261c28ec5a
 progress:
   total_phases: 9
   completed_phases: 1
 total_plans: 68
-completed_plans: 62
+completed_plans: 63
 milestone_name: milestone
 ---
 
@@ -24,22 +24,22 @@ milestone_name: milestone
 See: .planning/PROJECT.md (updated 2026-08-25)
 
 **Core value:** A user can edit semantic document text naturally, repaginate following content, and export a visually consistent, selectable, form-capable PDF.
-**Current focus:** Phase 6 — Voice Dictation and Commands (planning; Phase 5 local implementation is closed with external release inputs preserved)
+**Current focus:** Phase 6 — Voice Dictation and Commands (executing 06-02 next; Phase 5 local implementation is closed with external release inputs preserved)
 
 ## Current Position
 
-Phase: 6 (Voice Dictation and Commands) — PLANNING
-Plan: Phase 6 plans 06-01 through 06-06 prepared; execution starts at 06-01
-Status: Phase 5 local implementation is complete through Plan 05-26. Rust validates the current field vocabulary, derives deterministic revision/hash-bound fixed-point widget projections with explicit invalid/deleted/unmapped review, exposes separate authored defaults/effective session values, emits bounded deterministic AcroForm field/widget COS structure and derived normal appearances, and exposes a versioned Rust/WASM session action boundary with guarded `form-sessions-v1` IndexedDB persistence. The browser renders accessible native controls, descriptor configuration, safe anchor placement, default text-field insertion, confirmed valid-field removal, and canonical tab-order controls through Rust-owned transactions. Core export explicitly flattens selected accepted fields into fixed-point page content while retaining unselected widgets and exact owned-source recovery. The projection, browser adapter, editor overlay/review summary, explicit flatten selection, shared PDF request builder, generated-WASM export verification, controller default, Chromium preview, editor-shell dependency seam, WASM scheduler composition, worker-scope routing, and production font/catalog/worker wiring are covered by the completed local plans. The Phase 5 gate passed its local Rust/WASM, unit, browser, build, boundary, and planning lanes. Target-viewer AcroForm behavior, external PDF form-value import, Phase 4 external PDF/reference rows, and the inherited Phase 2/3 Edge/Windows screen-reader evidence remain explicitly unavailable/outstanding; see `05-CLOSURE.md`.
-Last activity: 2026-09-22 — Phase 5 Plan 05-26 and local closure gate completed; Phase 6 planning begins
+Phase: 6 (Voice Dictation and Commands) — EXECUTING
+Plan: 06-01 complete; next 06-02 (final dictation through one revision-safe transaction)
+Status: Phase 6 Plan 06-01 is complete. Rust resolves bounded command-mode Ukrainian/English phrases into typed, revision/selection-bound actions without mutating canonical state or returning raw transcript text; the string-only WASM export and boundary contract are covered by focused tests. Phase 5 local implementation remains complete through Plan 05-26. Target-viewer AcroForm behavior, external PDF form-value import, Phase 4 external PDF/reference rows, and the inherited Phase 2/3 Edge/Windows screen-reader evidence remain explicitly unavailable/outstanding; see `05-CLOSURE.md`.
+Last activity: 2026-09-22 — Phase 6 Plan 06-01 completed; focused Rust/WASM voice boundary checks passed
 
-Progress: Phase 2 — 18/18 implementation plans complete; Phase 3 — 6/6 local implementation plans executed; Phase 4 — 6/6 plans executed; Phase 5 — 26/26 local plans executed and locally gated, with target-viewer/import evidence explicitly pending. Phase 2/3 phase-level closure remains honest about inherited external AT evidence, and Phase 4 remains open for unavailable external PDF/reference evidence.
+Progress: Phase 2 — 18/18 implementation plans complete; Phase 3 — 6/6 local implementation plans executed; Phase 4 — 6/6 plans executed; Phase 5 — 26/26 local plans executed and locally gated, with target-viewer/import evidence explicitly pending; Phase 6 — 1/6 plans executed. Phase 2/3 phase-level closure remains honest about inherited external AT evidence, and Phase 4 remains open for unavailable external PDF/reference evidence.
 
 ## Performance Metrics
 
 **Velocity:**
 
-- Total plans completed: 61
+- Total plans completed: 63
 - Average duration: not comparable (Plan 05 was a multi-session closeout)
 - Total execution time: multi-session
 
@@ -113,6 +113,7 @@ Progress: Phase 2 — 18/18 implementation plans complete; Phase 3 — 6/6 local
 | Phase FLOWPDF-05 P23 | same session | 1 task | 4 files |
 | Phase FLOWPDF-05 P24 | same session | 1 task | 5 files |
 | Phase FLOWPDF-05 P25 | same session | 1 task | 3 files |
+| Phase FLOWPDF-06 P01 | same session | 2 tasks | 6 files |
 
 ## Accumulated Context
 
@@ -227,6 +228,6 @@ Decisions are logged in `.planning/PROJECT.md`.
 
 ## Session Continuity
 
-Last session: 2026-09-22T08:36:31Z
-Stopped at: Phase 5 local implementation closed at 05-26; Phase 4 reference PDF rows, target-viewer/import evidence, and the inherited Phase 2/3 external AT checkpoint remain explicit release inputs while Phase 6 planning begins
+Last session: 2026-09-22T09:28:27Z
+Stopped at: Phase 6 Plan 06-01 complete; next 06-02 implements one revision-safe dictation transaction while Phase 4/5 external evidence and inherited Phase 2/3 external AT remain explicit release inputs
 Resume file: None

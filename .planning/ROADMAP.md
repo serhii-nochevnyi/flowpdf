@@ -302,9 +302,9 @@ external form import remains outside the implemented local scope.
   4. Ambiguous or high-risk operations require the configured preview/confirmation and provide visible and accessible feedback.
   5. Stopping voice input ends microphone capture and default telemetry retains no raw audio or sensitive transcript text.
 
-**Plans**: 6/6 plans prepared
+**Plans**: 1/6 executed; 5 remaining
 
-- [ ] 06-01-PLAN.md — Add the Rust-owned bounded voice-intent boundary.
+- [x] 06-01-PLAN.md — Add the Rust-owned bounded voice-intent boundary.
 - [ ] 06-02-PLAN.md — Route final dictation through one revision-safe
   transaction.
 - [ ] 06-03-PLAN.md — Add the ephemeral push-to-talk recognition state machine.
@@ -375,7 +375,7 @@ external form import remains outside the implemented local scope.
 | 3. Deterministic Reflow and Pagination | 6/6 | In Progress (external AT checkpoint) |  |
 | 4. Owned PDF Preview and Export | 6/6 | In Progress (reference evidence unavailable) |  |
 | 5. Semantic Fillable Forms | 26/26 executed | Complete locally (release evidence pending) | 2026-09-22 |
-| 6. Voice Dictation and Commands | 0/6 planned | Planning | - |
+| 6. Voice Dictation and Commands | 1/6 executed | In Progress |  |
 | 7. Secure PDF Reader and Scene | 0/TBD | Not started | - |
 | 8. External Reconstruction and OCR | 0/TBD | Not started | - |
 | 9. Controlled Native PDF Editing | 0/TBD | Not started | - |
