@@ -160,6 +160,9 @@ The current tree includes:
 - caller-owned `EditorControllerDependencies` composition through `EditorApp`
   and `mountEditorApp`, so scheduler/WASM seams can be supplied without
   duplicating controller construction;
+- a `createWasmPdfExportScheduler` composition helper that joins the existing
+  Rust-verifying WASM adapter to the revision-aware scheduler while preserving
+  caller-owned worker and font-catalog decisions;
 - Phase 1 and Phase 2 foundation fixtures, Unicode 17 grapheme conformance
   data, dependency provenance checks, Rust tests, TypeScript checks, browser
   tests for the implemented foundation and Phase 3 layout path, and a Phase 4
@@ -365,6 +368,8 @@ the captured source/layout-bound request before the fixture scheduler runs.
 The editor shell exposes the same caller-owned controller dependencies through
 `EditorApp` and `mountEditorApp`; it still does not instantiate production
 workers or font catalogs.
+The generated-WASM smoke now crosses the complete request-builder,
+WASM-adapter, scheduler, and accepted-result path through this helper.
 The latest slice also verifies an ordinary request against the generated
 Rust/WASM `export_pdf` and response verifier.
 Target-viewer behavior and external form import remain unimplemented; the
