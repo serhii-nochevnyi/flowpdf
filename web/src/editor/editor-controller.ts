@@ -54,6 +54,17 @@ import type {
   PdfReaderSchedulerSnapshotDto,
 } from '../pdf/pdf-protocol.js'
 import type { PdfReaderScheduleOutcome } from '../pdf/pdf-reader-worker.js'
+import type {
+  AcceptedPdfReconstructionDto,
+  PdfReconstructionRequestDto,
+  PdfReconstructionAcceptedCandidateDto,
+  PdfReconstructionSchedulerSnapshotDto,
+  PdfReviewDecisionDto,
+} from '../pdf/pdf-reconstruction-protocol.js'
+import type {
+  PdfReconstructionAcceptOutcome,
+  PdfReconstructionScheduleOutcome,
+} from '../pdf/pdf-reconstruction-worker.js'
 import { createPdfExportRequest } from '../pdf/pdf-request.js'
 import {
   resolveVoiceFieldTarget,
@@ -446,6 +457,8 @@ export interface EditorControllerDependencies {
   ) => PdfExportRequestDto | null
   /** Optional controlled PDF reader bridge; imported scenes remain read-only. */
   readonly pdfReaderScheduler?: EditorPdfReaderScheduler
+  /** Optional external reconstruction bridge; candidates remain review-only until accepted. */
+  readonly pdfReconstructionScheduler?: EditorPdfReconstructionScheduler
   /** Optional caller-owned source-bound noncanonical field session for voice. */
   readonly voiceFormSession?: VoiceFormSessionTarget
 }
@@ -471,6 +484,16 @@ export interface EditorPdfReaderScheduler {
   cancel(requestId?: string): void
   accepted(): AcceptedPdfReaderDto | null
   snapshot(): PdfReaderSchedulerSnapshotDto
+  subscribe?(listener: () => void): () => void
+}
+
+export interface EditorPdfReconstructionScheduler {
+  request(request: PdfReconstructionRequestDto): Promise<PdfReconstructionScheduleOutcome>
+  accept(decisions: readonly PdfReviewDecisionDto[]): Promise<PdfReconstructionAcceptOutcome>
+  cancel(requestId?: string): void
+  accepted(): AcceptedPdfReconstructionDto | null
+  acceptedCandidate(): PdfReconstructionAcceptedCandidateDto | null
+  snapshot(): PdfReconstructionSchedulerSnapshotDto
   subscribe?(listener: () => void): () => void
 }
 

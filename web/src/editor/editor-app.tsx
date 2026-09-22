@@ -14,6 +14,7 @@ import {
   type EditorControllerDependencies,
   type EditorLayoutScheduler,
   type EditorPdfExportScheduler,
+  type EditorPdfReconstructionScheduler,
   type EditorPdfReaderScheduler,
   type SourceModality,
   type StructuralCommandDto,
@@ -29,6 +30,7 @@ import { SemanticDocument } from './semantic-document.js'
 import { PageViewport } from '../layout/page-viewport.js'
 import { PdfPreview } from '../pdf/pdf-preview.js'
 import { PdfReaderPanel } from '../pdf/pdf-reader-panel.js'
+import { PdfReconstructionPanel } from '../pdf/pdf-reconstruction-panel.js'
 import { FormSessionCoordinator, requireFormSessionWasm } from '../forms/form-session.js'
 import { FormProjectionViewport } from '../forms/form-projection-viewport.js'
 import {
@@ -64,6 +66,7 @@ export { copy as editorCopy }
 export type {
   EditorLayoutScheduler,
   EditorPdfExportScheduler,
+  EditorPdfReconstructionScheduler,
   EditorPdfReaderScheduler,
   EditorControllerDependencies,
   FormProjectionScheduler,
@@ -97,6 +100,7 @@ export interface EditorAppProps {
   readonly options?: EditorAppOptions
   readonly formProjectionScheduler?: FormProjectionScheduler
   readonly pdfReaderScheduler?: EditorPdfReaderScheduler
+  readonly pdfReconstructionScheduler?: EditorPdfReconstructionScheduler
   readonly voiceRecognitionConstructor?: VoiceControlsProps['recognitionConstructor']
 }
 
@@ -106,6 +110,7 @@ export function EditorApp({
   options = {},
   formProjectionScheduler: suppliedFormProjectionScheduler,
   pdfReaderScheduler: suppliedPdfReaderScheduler,
+  pdfReconstructionScheduler: suppliedPdfReconstructionScheduler,
   voiceRecognitionConstructor,
 }: EditorAppProps) {
   const [controller] = useState(
@@ -126,6 +131,8 @@ export function EditorApp({
   )
   const pdfReaderScheduler =
     suppliedPdfReaderScheduler ?? controllerDependencies?.pdfReaderScheduler
+  const pdfReconstructionScheduler =
+    suppliedPdfReconstructionScheduler ?? controllerDependencies?.pdfReconstructionScheduler
   const snapshot = useSyncExternalStore(
     controller.subscribe,
     controller.getSnapshot,
@@ -282,7 +289,13 @@ export function EditorApp({
           ? {}
           : { recognitionConstructor: voiceRecognitionConstructor })}
       />
-      {pdfReaderScheduler === undefined ? null : (
+      {pdfReconstructionScheduler !== undefined && pdfReaderScheduler !== undefined ? (
+        <PdfReconstructionPanel
+          readerScheduler={pdfReaderScheduler}
+          reconstructionScheduler={pdfReconstructionScheduler}
+          locale={options.locale ?? 'uk'}
+        />
+      ) : pdfReaderScheduler === undefined ? null : (
         <PdfReaderPanel scheduler={pdfReaderScheduler} locale={options.locale ?? 'uk'} />
       )}
       {accepted === null ? (
@@ -434,6 +447,9 @@ export async function mountEditorApp(
       {...(dependencies.pdfReaderScheduler === undefined
         ? {}
         : { pdfReaderScheduler: dependencies.pdfReaderScheduler })}
+      {...(dependencies.pdfReconstructionScheduler === undefined
+        ? {}
+        : { pdfReconstructionScheduler: dependencies.pdfReconstructionScheduler })}
       {...(voiceRecognitionConstructor === undefined
         ? {}
         : { voiceRecognitionConstructor })}

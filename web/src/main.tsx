@@ -43,6 +43,7 @@ async function start(): Promise<void> {
         pdfExportScheduler: runtime.pdfExportScheduler,
         pdfExportRequestFactory: runtime.pdfExportRequestFactory,
         pdfReaderScheduler: runtime.pdfReaderScheduler,
+        pdfReconstructionScheduler: runtime.pdfReconstructionScheduler,
       },
     )
   } catch (error: unknown) {
