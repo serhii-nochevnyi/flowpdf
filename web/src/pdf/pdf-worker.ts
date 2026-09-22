@@ -242,6 +242,18 @@ export function createWasmPdfExportEngine(wasm: PdfWasmBoundary): PdfExportEngin
   return { run, verifyResultHash: (result) => result.byteHash.trim().length > 0 }
 }
 
+/** Composes the string-only WASM adapter with the revision-aware scheduler. */
+export function createWasmPdfExportScheduler(
+  wasm: PdfWasmBoundary,
+  options: Omit<PdfExportSchedulerOptions, 'verifyResultHash'> = {},
+): RevisionAwarePdfExportScheduler {
+  const adapter = createWasmPdfExportEngine(wasm)
+  return new RevisionAwarePdfExportScheduler(adapter.run, {
+    ...options,
+    verifyResultHash: adapter.verifyResultHash,
+  })
+}
+
 /** Parses exact recovery responses without treating errors as source data. */
 export function recoverWithWasm(
   wasm: PdfWasmBoundary,

@@ -12,6 +12,7 @@ import {
   PdfWorkerError,
   RevisionAwarePdfExportScheduler,
   createWasmPdfExportEngine,
+  createWasmPdfExportScheduler,
   recoverWithWasm,
   type PdfExportEngine,
 } from '../src/pdf/pdf-worker.js'
@@ -200,6 +201,40 @@ describe('revision-aware PDF worker scheduling', () => {
         serializedRequest: 'x'.repeat(96 * 1024 * 1024 + 1),
       }),
     ).toBe('FLOW_PDF_REQUEST_LIMIT')
+  })
+
+  it('composes the WASM adapter with the revision-aware scheduler', async () => {
+    const sourceRequest = request(1, 'wasm-scheduler-request')
+    const expected = result(sourceRequest)
+    const exportResponse = JSON.stringify({
+      protocolVersion: PDF_PROTOCOL_VERSION,
+      requestId: sourceRequest.requestId,
+      ok: true,
+      result: expected,
+      error: null,
+    })
+    let responseVerified = 0
+    let published = 0
+    const scheduler = createWasmPdfExportScheduler(
+      {
+        export_pdf: () => exportResponse,
+        verify_pdf_export_response: () => {
+          responseVerified += 1
+          return true
+        },
+        recover_owned_source: () => '',
+      },
+      { onPublished: () => published += 1 },
+    )
+
+    const outcome = await scheduler.request(sourceRequest)
+    expect(outcome).toMatchObject({
+      kind: 'published',
+      accepted: { request: { requestId: sourceRequest.requestId } },
+    })
+    expect(responseVerified).toBe(1)
+    expect(published).toBe(1)
+    scheduler.dispose()
   })
 
   it('adapts export responses and classifies exact recovery failures', async () => {

@@ -8,6 +8,7 @@ import init, {
 import type { EditorAcceptedSnapshot } from '../src/editor/editor-store.js'
 import type { AcceptedLayoutDto } from '../src/layout/layout-protocol.js'
 import { createPdfExportRequest } from '../src/pdf/pdf-request.js'
+import { createWasmPdfExportScheduler } from '../src/pdf/pdf-worker.js'
 
 interface SampleSession {
   readonly canonicalJson: string
@@ -21,23 +22,7 @@ interface SampleResponse {
   readonly error: { readonly code: string } | null
 }
 
-interface PdfResponse {
-  readonly ok: boolean
-  readonly requestId: string
-  readonly result: {
-    readonly sourceRevision: number
-    readonly sourceHash: string
-    readonly layoutSettingsFingerprint: string
-    readonly manifest: {
-      readonly sourceRevision: number
-      readonly sourceHash: string
-      readonly layoutSettingsFingerprint: string
-      readonly layoutResultHash: string | null
-    }
-  } | null
-}
-
-test('shared PDF request builder crosses the generated Rust/WASM export boundary', async () => {
+test('shared PDF request crosses the generated Rust/WASM scheduler boundary', async () => {
   await init()
 
   const sample = create_sample({
@@ -57,12 +42,16 @@ test('shared PDF request builder crosses the generated Rust/WASM export boundary
   })
   if (request === null) throw new Error('Rust-compatible PDF request is required')
 
-  const serializedResponse = export_pdf(request.serializedRequest)
-  const response = JSON.parse(serializedResponse) as PdfResponse
-  expect(response.ok).toBe(true)
-  expect(response.requestId).toBe(request.requestId)
-  expect(verify_pdf_export_response(serializedResponse)).toBe(true)
-  expect(response.result).toMatchObject({
+  const scheduler = createWasmPdfExportScheduler({
+    export_pdf,
+    verify_pdf_export_response,
+    recover_owned_source: () => '',
+  })
+  const outcome = await scheduler.request(request)
+  expect(outcome.kind).toBe('published')
+  if (outcome.kind !== 'published') throw new Error(`PDF export failed: ${outcome.kind}`)
+  expect(outcome.accepted.request.requestId).toBe(request.requestId)
+  expect(outcome.accepted.result).toMatchObject({
     sourceRevision: request.sourceRevision,
     sourceHash: request.sourceHash,
     layoutSettingsFingerprint: request.layoutSettingsFingerprint,
@@ -73,6 +62,7 @@ test('shared PDF request builder crosses the generated Rust/WASM export boundary
       layoutResultHash: request.layoutResultHash,
     },
   })
+  scheduler.dispose()
 })
 
 function acceptedLayout(session: SampleSession): AcceptedLayoutDto {
