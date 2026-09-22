@@ -1,13 +1,8 @@
 import { page } from 'vitest/browser'
 import { expect, test } from 'vitest'
-import { createElement } from 'react'
-import { createRoot, type Root } from 'react-dom/client'
 
 import '../src/styles.css'
-import {
-  EditorApp,
-  EditorController,
-} from '../src/editor/editor-app.js'
+import { mountEditorApp, type EditorController } from '../src/editor/editor-app.js'
 import type { EditorBlockViewDto } from '../src/editor/editor-store.js'
 import type {
   LayoutRequestDto,
@@ -45,7 +40,8 @@ test('PDF preview stays visual-only, searchable, virtualized, and revision-safe'
     },
     { verifyResultHash: () => true },
   )
-  const controller = new EditorController(
+  const controller = await mountEditorApp(
+    root,
     {
       databaseName: `flowpdf-pdf-preview-${crypto.randomUUID()}`,
       locale: 'uk',
@@ -73,8 +69,6 @@ test('PDF preview stays visual-only, searchable, virtualized, and revision-safe'
       pdfExportScheduler: pdfScheduler,
     },
   )
-  const reactRoot: Root = createRoot(root)
-  reactRoot.render(createElement(EditorApp, { controller, options: { locale: 'uk' } }))
   await controller.initialize()
   await tick()
 
@@ -155,7 +149,6 @@ test('PDF preview stays visual-only, searchable, virtualized, and revision-safe'
   await tick()
   expect(root.querySelector('[data-pdf-download]')).toBeNull()
 
-  reactRoot.unmount()
   controller.dispose()
 })
 

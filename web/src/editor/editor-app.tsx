@@ -11,6 +11,7 @@ import {
   EditorController,
   type FormattingCommandDto,
   type EditorAppOptions,
+  type EditorControllerDependencies,
   type EditorLayoutScheduler,
   type EditorPdfExportScheduler,
   type SourceModality,
@@ -57,6 +58,7 @@ export { copy as editorCopy }
 export type {
   EditorLayoutScheduler,
   EditorPdfExportScheduler,
+  EditorControllerDependencies,
   FormProjectionScheduler,
   FormattingCommandDto,
   SourceModality,
@@ -84,17 +86,19 @@ export type { FoundationInspectorLocale }
 
 export interface EditorAppProps {
   readonly controller?: EditorController
+  readonly controllerDependencies?: EditorControllerDependencies
   readonly options?: EditorAppOptions
   readonly formProjectionScheduler?: FormProjectionScheduler
 }
 
 export function EditorApp({
   controller: suppliedController,
+  controllerDependencies,
   options = {},
   formProjectionScheduler: suppliedFormProjectionScheduler,
 }: EditorAppProps) {
   const [controller] = useState(
-    () => suppliedController ?? new EditorController(options),
+    () => suppliedController ?? new EditorController(options, controllerDependencies),
   )
   const [formSession] = useState(
     () =>
@@ -392,8 +396,9 @@ export function EditorApp({
 export async function mountEditorApp(
   root: HTMLElement,
   options: EditorAppOptions = {},
+  dependencies: EditorControllerDependencies = {},
 ): Promise<EditorController> {
-  const controller = new EditorController(options)
+  const controller = new EditorController(options, dependencies)
   const reactRoot = createRoot(root)
   reactRoot.render(<EditorApp controller={controller} options={options} />)
   await controller.initialize()
