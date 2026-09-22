@@ -4,16 +4,16 @@ milestone: v1.0
 current_phase: 5
 current_phase_name: Semantic Fillable Forms
 status: executing
-stopped_at: Completed 05-16-PLAN.md; confirmed revision-safe browser transport for display-list-backed form projection through Rust/WASM, while browser projection/selection UI, target-viewer evidence, external form import, four external Phase 4 PDF/reference rows, and the inherited Phase 2/3 external AT checkpoint remain open
-last_updated: "2026-09-22T03:57:15Z"
+stopped_at: Completed 05-17-PLAN.md; confirmed EditorApp-integrated display-list-backed form projection overlay and accessible review summary through the revision-safe Rust/WASM adapter, while selection/flattening UI, target-viewer evidence, external form import, four external Phase 4 PDF/reference rows, and the inherited Phase 2/3 external AT checkpoint remain open
+last_updated: "2026-09-22T04:15:13Z"
 last_activity: 2026-09-22
-last_activity_desc: Completed Phase 5 Plan 05-16 with a typed revision-safe browser projection adapter/scheduler, Rust response verification, identity fences, and full gates
-state_head: eabd1ac
+last_activity_desc: Completed Phase 5 Plan 05-17 with EditorApp projection scheduling, fixed-point visual widget overlay, accessible review summary, boundary allowance, and full gates
+state_head: 27f90f1
 progress:
   total_phases: 9
   completed_phases: 1
-  total_plans: 52
-  completed_plans: 52
+  total_plans: 53
+  completed_plans: 53
 milestone_name: milestone
 ---
 
@@ -24,22 +24,22 @@ milestone_name: milestone
 See: .planning/PROJECT.md (updated 2026-08-25)
 
 **Core value:** A user can edit semantic document text naturally, repaginate following content, and export a visually consistent, selectable, form-capable PDF.
-**Current focus:** Phase 5 — Semantic Fillable Forms (sixteen local slices complete; browser projection overlays/selection UI, target-viewer evidence, import, and follow-on plans open)
+**Current focus:** Phase 5 — Semantic Fillable Forms (seventeen local slices complete; interactive selection/flattening UI, target-viewer evidence, import, and follow-on plans open)
 
 ## Current Position
 
 Phase: 5 (Semantic Fillable Forms) — EXECUTING
-Plan: 16 executed; follow-on plans to be decomposed
-Status: 05-16 complete; Rust validates the current field vocabulary, derives deterministic revision/hash-bound fixed-point widget projections with explicit invalid/deleted/unmapped review, exposes separate authored defaults/effective session values, emits bounded deterministic AcroForm field/widget COS structure and derived normal appearances, and exposes a versioned Rust/WASM session action boundary with guarded `form-sessions-v1` IndexedDB persistence. The browser now renders accessible native controls, descriptor configuration, safe anchor placement, default text-field insertion, confirmed valid-field removal, and canonical tab-order earlier/later controls through Rust-owned `SetField`/`InsertField`/`RemoveField`/`MoveField` paths. Core export can explicitly flatten selected accepted fields into fixed-point page content, retain unselected editable widgets, omit `/AcroForm` when all fields are selected, and preserve exact owned-source recovery without mutating canonical/session state. The optional source-bound form plan and explicit flatten selection now cross the Rust/WASM export envelope with deterministic partial/all evidence. The projection boundary reuses validated layout execution, builds display-list-backed geometry in Rust, returns session-effective values and review entries, and verifies an optional source-bound plan before publication. A typed browser adapter/scheduler now serializes that response boundary, binds it to the accepted layout result hash, and rejects stale or unverified derived data before publication. Browser-side projection overlays/selection UI, target-viewer evidence, and external form import remain open. Phase 4 external PDF/reference rows and Phase 2/3 external Edge/Windows screen-reader evidence remain outstanding.
-Last activity: 2026-09-22 — Phase 5 Plan 05-16 confirmed the typed revision-safe browser projection adapter/scheduler, Rust response verification, identity fences, and full gates completed
+Plan: 17 executed; follow-on plans to be decomposed
+Status: 05-17 complete; Rust validates the current field vocabulary, derives deterministic revision/hash-bound fixed-point widget projections with explicit invalid/deleted/unmapped review, exposes separate authored defaults/effective session values, emits bounded deterministic AcroForm field/widget COS structure and derived normal appearances, and exposes a versioned Rust/WASM session action boundary with guarded `form-sessions-v1` IndexedDB persistence. The browser now renders accessible native controls, descriptor configuration, safe anchor placement, default text-field insertion, confirmed valid-field removal, and canonical tab-order earlier/later controls through Rust-owned `SetField`/`InsertField`/`RemoveField`/`MoveField` paths. Core export can explicitly flatten selected accepted fields into fixed-point page content, retain unselected editable widgets, omit `/AcroForm` when all fields are selected, and preserve exact owned-source recovery without mutating canonical/session state. The optional source-bound form plan and explicit flatten selection now cross the Rust/WASM export envelope with deterministic partial/all evidence. The projection boundary reuses validated layout execution, builds display-list-backed geometry in Rust, returns session-effective values and review entries, and verifies an optional source-bound plan before publication. A typed browser adapter/scheduler now serializes that response boundary, binds it to the accepted layout result hash, and rejects stale or unverified derived data before publication. `EditorApp` schedules matching projection work, paints fixed-point widget overlays in the visual viewport, and exposes an accessible read-only widget/review summary. Interactive selection/flattening UI, target-viewer evidence, and external form import remain open. Phase 4 external PDF/reference rows and Phase 2/3 external Edge/Windows screen-reader evidence remain outstanding.
+Last activity: 2026-09-22 — Phase 5 Plan 05-17 confirmed EditorApp projection scheduling, fixed-point visual overlay, accessible review summary, boundary allowance, and full gates completed
 
-Progress: Phase 2 — 18/18 implementation plans complete; Phase 3 — 6/6 local implementation plans executed; Phase 4 — 6/6 plans executed; Phase 5 — 16/16 local plans executed with browser-side projection overlays/selection UI, target-viewer, import, and follow-on plans still open. Phase 2/3 phase-level closure remains honest about inherited external AT evidence, and Phase 4 remains open for unavailable external PDF/reference evidence.
+Progress: Phase 2 — 18/18 implementation plans complete; Phase 3 — 6/6 local implementation plans executed; Phase 4 — 6/6 plans executed; Phase 5 — 17/17 local plans executed with interactive selection/flattening UI, target-viewer, import, and follow-on plans still open. Phase 2/3 phase-level closure remains honest about inherited external AT evidence, and Phase 4 remains open for unavailable external PDF/reference evidence.
 
 ## Performance Metrics
 
 **Velocity:**
 
-- Total plans completed: 52
+- Total plans completed: 53
 - Average duration: not comparable (Plan 05 was a multi-session closeout)
 - Total execution time: multi-session
 
@@ -51,9 +51,9 @@ Progress: Phase 2 — 18/18 implementation plans complete; Phase 3 — 6/6 local
 | 2 | 18 | multi-session | - |
 | 3 | 6 | multi-session | - |
 | 4 | 6 | planned | - |
-| 5 | 16 executed (follow-on TBD) | same session | - |
+| 5 | 17 executed (follow-on TBD) | same session | - |
 
-**Recent Trend:** Schema-v2 tree, lossless migration, editor accessibility, exact UI coverage, deterministic semantic scale, and the dual-run release gate remain green. Plan 02-18 closes all Phase 2 implementation plans with 7/7 requirements, 33/33 baseline edges (the shared catalog is now 36/36 after the Phase 5 `InsertField`, `RemoveField`, and `MoveField` extensions), 108/108 UI owners, and 3/3 flagged prohibitions; Edge/Windows screen-reader UAT remains explicitly outstanding before Phase 2 closure. Phase 3 now has all six local implementation plans complete, including Rust typography/pagination, schema-v3 sections, incremental equivalence, revision-safe workers, the accessible viewport, and a two-run local gate; Phase 3 phase-level closure does not invent the inherited external AT result. Phase 4 now has all six local plans complete and a two-run local gate, while structural/extraction/raster/target-viewer evidence remains explicitly unavailable. Phase 5 now has sixteen local slices complete through source-bound Rust/WASM flatten transport, display-list-backed Rust/WASM projection, and the typed revision-safe browser adapter; browser-side projection overlays/selection UI, target-viewer evidence, and external form import remain open.
+**Recent Trend:** Schema-v2 tree, lossless migration, editor accessibility, exact UI coverage, deterministic semantic scale, and the dual-run release gate remain green. Plan 02-18 closes all Phase 2 implementation plans with 7/7 requirements, 33/33 baseline edges (the shared catalog is now 36/36 after the Phase 5 `InsertField`, `RemoveField`, and `MoveField` extensions), 108/108 UI owners, and 3/3 flagged prohibitions; Edge/Windows screen-reader UAT remains explicitly outstanding before Phase 2 closure. Phase 3 now has all six local implementation plans complete, including Rust typography/pagination, schema-v3 sections, incremental equivalence, revision-safe workers, the accessible viewport, and a two-run local gate; Phase 3 phase-level closure does not invent the inherited external AT result. Phase 4 now has all six local plans complete and a two-run local gate, while structural/extraction/raster/target-viewer evidence remains explicitly unavailable. Phase 5 now has seventeen local slices complete through source-bound Rust/WASM flatten transport, display-list-backed Rust/WASM projection, the typed revision-safe browser adapter, and the EditorApp visual/read-only projection surface; interactive selection/flattening UI, target-viewer evidence, and external form import remain open.
 **Per-Plan Metrics:**
 
 | Plan | Duration | Tasks | Files |
@@ -104,6 +104,7 @@ Progress: Phase 2 — 18/18 implementation plans complete; Phase 3 — 6/6 local
 | Phase FLOWPDF-05 P14 | same session | 2 tasks | 2 files |
 | Phase FLOWPDF-05 P15 | same session | 2 tasks | 6 files |
 | Phase FLOWPDF-05 P16 | same session | 2 tasks | 3 files |
+| Phase FLOWPDF-05 P17 | same session | 2 tasks | 7 files |
 
 ## Accumulated Context
 
@@ -189,6 +190,7 @@ Decisions are logged in `.planning/PROJECT.md`.
 - [Phase 5]: Flattening is explicit `PdfExportOptions.flattened_field_ids`; an empty selection preserves the ordinary export contract, selected accepted fields become derived fixed-point page content, unselected widgets remain editable, all-field selection omits `/AcroForm`, and the private source envelope still recovers the canonical document exactly. A source-bound `PdfFormPlan` and selection now cross the closed Rust/WASM envelope; browser-side projection/selection UI and target-viewer behavior remain outside this slice.
 - [Phase 5]: Rust/WASM form projection accepts only an opaque validated layout request plus an optional source-bound session; Rust builds display-list geometry, returns session-effective values and review entries, derives an optional source-bound plan, and verifies the response hashes. Browser UI remains a later projection/selection adapter.
 - [Phase 5]: The browser projection adapter serializes only the accepted layout request plus optional session, invokes the Rust response verifier, and publishes only source/layout/projection/plan-identity matches; widget overlays and selection/flattening actions remain later UI work.
+- [Phase 5]: `EditorApp` requests projection only after accepted layout/source identity alignment; visual widget rectangles remain `aria-hidden`, while a separate accessible read-only summary exposes widgets and review entries without becoming a second semantic form surface.
 
 ### Pending Todos
 
@@ -209,6 +211,6 @@ Decisions are logged in `.planning/PROJECT.md`.
 
 ## Session Continuity
 
-Last session: 2026-09-22T03:57:15Z
-Stopped at: Completed 05-16-PLAN.md; Phase 5 confirmed the typed revision-safe browser adapter for display-list-backed Rust/WASM form projection, optional source-bound plan transport, deterministic response verification, Phase 4 reference PDF rows are unavailable, and the inherited Phase 2/3 external AT checkpoint remains outstanding
+Last session: 2026-09-22T04:15:13Z
+Stopped at: Completed 05-17-PLAN.md; Phase 5 confirmed EditorApp-integrated fixed-point form overlays and accessible review summary over the typed Rust/WASM projection adapter, optional source-bound plan transport, Phase 4 reference PDF rows are unavailable, and the inherited Phase 2/3 external AT checkpoint remains outstanding
 Resume file: None
