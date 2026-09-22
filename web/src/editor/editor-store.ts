@@ -304,6 +304,12 @@ export interface EditorAcceptedSnapshot {
   readonly view: InspectorViewDto
 }
 
+export interface VoiceFeedbackDto {
+  readonly phase: 'committed' | 'error'
+  readonly revision: number | null
+  readonly errorCode: string | null
+}
+
 export type EditorAppPhase = 'loading' | 'empty' | 'pending' | 'ready' | 'error'
 
 export interface EditorAppSnapshot {
@@ -313,6 +319,7 @@ export interface EditorAppSnapshot {
   readonly pdf: PdfExportSchedulerSnapshotDto
   readonly status: string
   readonly errorCode: string | null
+  readonly voice?: VoiceFeedbackDto
 }
 
 export class EditorStore {
@@ -392,6 +399,10 @@ export class EditorStore {
       status: '',
       errorCode,
     })
+  }
+
+  publishVoice(feedback: VoiceFeedbackDto): void {
+    this.publish({ ...this.snapshotValue, voice: Object.freeze({ ...feedback }) })
   }
 
   publishLayout(layout: LayoutSchedulerSnapshotDto): void {

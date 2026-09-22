@@ -54,6 +54,18 @@ import {
   type FormProjectionWasmBoundary,
   validateFormProjectionSelection,
 } from '../forms/form-projection.js'
+import {
+  createVoiceCommandCapture,
+  createVoiceDictationCapture,
+  resolveVoiceCommand as resolveVoiceIntent,
+  validateAcceptedVoiceIntent,
+  validateVoiceDictationCapture,
+} from '../voice/voice-command.js'
+import type {
+  AcceptedVoiceIntentDto,
+  VoiceDictationCaptureDto,
+  VoiceDispatchOutcome,
+} from '../voice/voice-protocol.js'
 
 export type { EditorLocale }
 
@@ -387,6 +399,7 @@ export interface WasmBoundary {
   readonly recover_owned_source?: (requestJson: string) => string
   readonly font_catalog_identity?: (requestJson: string) => string
   readonly hyphenation_data_identity?: (requestJson: string) => string
+  readonly resolve_voice_command?: (requestJson: string) => string
 }
 
 export interface EditorPersistence {
@@ -465,6 +478,8 @@ export const editorCopy = {
     edited: 'Абзац змінено і перевірено зі сховища.',
     structural: 'Структуру документа змінено і перевірено зі сховища.',
     formatting: 'Форматування змінено і перевірено зі сховища.',
+    voiceDictated: 'Голосовий фрагмент додано одним комітом і перевірено зі сховища.',
+    voiceCommand: 'Голосову команду виконано і перевірено зі сховища.',
     selection: 'Виділення оновлено в Rust-сесії.',
     undone: 'Зміну скасовано і перевірено зі сховища.',
     redone: 'Зміну повторено і перевірено зі сховища.',
@@ -501,6 +516,8 @@ export const editorCopy = {
     edited: 'Paragraph changed and verified from storage.',
     structural: 'Document structure changed and verified from storage.',
     formatting: 'Formatting changed and verified from storage.',
+    voiceDictated: 'The dictated fragment was added in one commit and verified from storage.',
+    voiceCommand: 'The voice command was executed and verified from storage.',
     selection: 'Selection updated in the Rust session.',
     undone: 'Change undone and verified from storage.',
     redone: 'Change redone and verified from storage.',
@@ -832,6 +849,127 @@ export class EditorController {
         copy(this.locale).edited,
         result.editor.session,
       )
+    })
+  }
+
+  createVoiceDictationCapture(
+    text: string,
+    selection?: DirectionalSelectionDto,
+  ): VoiceDictationCaptureDto {
+    return createVoiceDictationCapture(
+      this.requireAccepted(),
+      text,
+      selection,
+    )
+  }
+
+  async resolveVoiceCommand(
+    transcript: string,
+    selection?: DirectionalSelectionDto,
+    activeFieldId?: string,
+  ): Promise<AcceptedVoiceIntentDto> {
+    const accepted = this.requireAccepted()
+    const capture = createVoiceCommandCapture(
+      accepted,
+      this.locale === 'uk' ? 'uk-UA' : 'en-US',
+      transcript,
+      selection,
+      activeFieldId,
+    )
+    const wasm = await this.wasm
+    if (wasm.resolve_voice_command === undefined) {
+      throw new EditorError('FLOW_VOICE_UNAVAILABLE')
+    }
+    try {
+      return resolveVoiceIntent(
+        { resolve_voice_command: wasm.resolve_voice_command },
+        capture,
+      )
+    } catch (error: unknown) {
+      this.publishError(error)
+      throw error
+    }
+  }
+
+  dictateVoice(
+    text: string,
+    selection?: DirectionalSelectionDto,
+  ): Promise<VoiceDispatchOutcome> {
+    return this.dispatchVoiceDictation(this.createVoiceDictationCapture(text, selection))
+  }
+
+  dispatchVoiceDictation(
+    capture: VoiceDictationCaptureDto,
+  ): Promise<VoiceDispatchOutcome> {
+    const validationError = validateVoiceDictationCapture(capture)
+    if (validationError !== null) return this.rejectVoice(validationError)
+    return this.enqueueVoice(async () => {
+      const accepted = this.requireAccepted()
+      this.assertVoiceSource(accepted, capture)
+      const session = await this.applyVoiceCommand(
+        {
+          type: 'replaceSelection',
+          selection: capture.selection,
+          text: capture.text,
+        },
+        copy(this.locale).voiceDictated,
+      )
+      return this.voiceCommitted(session)
+    })
+  }
+
+  dispatchVoiceCommand(intent: AcceptedVoiceIntentDto): Promise<VoiceDispatchOutcome> {
+    const validationError = validateAcceptedVoiceIntent(intent)
+    if (validationError !== null) return this.rejectVoice(validationError)
+    return this.enqueueVoice(async () => {
+      const accepted = this.requireAccepted()
+      if (intent.selection === null) {
+        throw new EditorError('FLOW_VOICE_SELECTION_REQUIRED')
+      }
+      this.assertVoiceSource(accepted, {
+        sourceRevision: intent.sourceRevision,
+        sourceHash: intent.sourceHash,
+        selection: intent.selection,
+      })
+
+      let kind: ApplyCommandRequestDto['command']['kind'] | undefined
+      switch (intent.action.type) {
+        case 'undo':
+          kind = { type: 'undo' }
+          break
+        case 'redo':
+          kind = { type: 'redo' }
+          break
+        case 'deleteSelection':
+          kind = { type: 'replaceSelection', selection: intent.selection, text: '' }
+          break
+        case 'setInlineMark':
+          kind = {
+            type: 'setInlineMark',
+            selection: intent.selection,
+            mark: intent.action.mark,
+          }
+          break
+        case 'insertPageBreak': {
+          const placement = accepted.editor.view.capabilities.find(
+            (capability) => capability.name === 'insertPageBreak',
+          )?.placement
+          if (placement === undefined || placement === null) {
+            throw new EditorError('FLOW_VOICE_INSERT_PLACEMENT_UNAVAILABLE')
+          }
+          kind = { type: 'insertPageBreak', placement }
+          break
+        }
+        case 'removePageBreak':
+          kind = { type: 'removePageBreak', pageBreakId: intent.action.pageBreakId }
+          break
+        case 'navigateField':
+        case 'clearField':
+          throw new EditorError('FLOW_VOICE_ACTION_DEFERRED')
+      }
+      if (kind === undefined) throw new EditorError('FLOW_VOICE_ACTION_INVALID')
+      const session = await this.applyVoiceCommand(kind, copy(this.locale).voiceCommand)
+      return this.voiceCommitted(session)
     })
   }
 
@@ -1214,6 +1352,86 @@ export class EditorController {
       await this.persistPlanned(result.commit, 'committedTransaction')
       await this.publishVerified(result.session, status, result.editor.session)
     })
+  }
+
+  private async applyVoiceCommand(
+    kind: ApplyCommandRequestDto['command']['kind'],
+    status: string,
+  ): Promise<SessionDto> {
+    const accepted = this.requireAccepted()
+    const wasm = await this.wasm
+    const result = unwrap(
+      wasm.apply_command({
+        canonicalJson: accepted.session.canonicalJson,
+        history: accepted.session.history,
+        command: {
+          commandId: newCommandId(),
+          baseRevision: accepted.session.revision,
+          modality: 'voice',
+          issuedAt: this.currentTimestamp(),
+          kind,
+        },
+      }),
+    )
+    await this.persistPlanned(result.commit, 'committedTransaction')
+    await this.publishVerified(result.session, status, result.editor.session)
+    return result.session
+  }
+
+  private assertVoiceSource(
+    accepted: EditorAcceptedSnapshot,
+    source: Pick<VoiceDictationCaptureDto, 'sourceRevision' | 'sourceHash' | 'selection'>,
+  ): void {
+    if (
+      source.sourceRevision !== accepted.session.revision ||
+      source.sourceHash !== accepted.session.canonicalHash
+    ) {
+      throw new EditorError('FLOW_VOICE_SOURCE_STALE')
+    }
+    if (!sameSelection(accepted.editor.session.selection, source.selection)) {
+      throw new EditorError('FLOW_VOICE_SELECTION_STALE')
+    }
+  }
+
+  private voiceCommitted(session: SessionDto): VoiceDispatchOutcome {
+    const outcome: VoiceDispatchOutcome = {
+      kind: 'committed',
+      revision: session.revision,
+      canonicalHash: session.canonicalHash,
+    }
+    this.stateStore.publishVoice({
+      phase: 'committed',
+      revision: session.revision,
+      errorCode: null,
+    })
+    return outcome
+  }
+
+  private rejectVoice(code: string): Promise<VoiceDispatchOutcome> {
+    this.publishError(new EditorError(code))
+    this.stateStore.publishVoice({ phase: 'error', revision: null, errorCode: code })
+    return Promise.resolve({ kind: 'rejected', code })
+  }
+
+  private enqueueVoice(
+    operation: () => Promise<VoiceDispatchOutcome>,
+  ): Promise<VoiceDispatchOutcome> {
+    const task = this.pending.then(async () => {
+      this.stateStore.publishPending(copy(this.locale).pending)
+      try {
+        return await operation()
+      } catch (error: unknown) {
+        const code = errorCode(error)
+        this.publishError(error)
+        this.stateStore.publishVoice({ phase: 'error', revision: null, errorCode: code })
+        return { kind: 'rejected', code } as const
+      }
+    })
+    this.pending = task.then(
+      () => undefined,
+      () => undefined,
+    )
+    return task
   }
 
   private applyEditorSession(action: EditorSessionActionDto): Promise<void> {

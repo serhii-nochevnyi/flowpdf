@@ -26,6 +26,8 @@ import {
 } from '../src/forms/form-projection.js'
 import type { AcceptedLayoutDto } from '../src/layout/layout-protocol.js'
 import { PDF_PROTOCOL_VERSION, type PdfExportRequestDto } from '../src/pdf/pdf-protocol.js'
+import { createVoiceDictationCapture } from '../src/voice/voice-command.js'
+import type { AcceptedVoiceIntentDto } from '../src/voice/voice-protocol.js'
 
 const emptyRecords: RecoveryRecordsDto = {
   snapshots: [],
@@ -133,6 +135,135 @@ describe('editor external store and controller publication', () => {
     )
     const malformed = String.fromCharCode(0xd800)
     expect(validateInputPayload(malformed, 'paste')).toBe('FLOW_INVALID_UTF16_BOUNDARY')
+  })
+
+  it('commits one final dictation as one ordinary voice transaction', async () => {
+    const accepted = acceptedFixture()
+    const stateStore = new EditorStore('loading')
+    stateStore.publishAccepted(accepted, 'ready')
+    const requests: unknown[] = []
+    const controller = new EditorController({}, {
+      store: stateStore,
+      wasm: Promise.resolve(successfulVoiceWasm(requests, accepted)),
+      documentStore: successfulPersistence(),
+    })
+
+    const outcome = await controller.dispatchVoiceDictation(
+      createVoiceDictationCapture(accepted, 'один фінальний фрагмент'),
+    )
+    await controller.whenIdle()
+
+    expect(outcome).toMatchObject({ kind: 'committed', revision: 1 })
+    expect(requests).toHaveLength(1)
+    expect(requests[0]).toMatchObject({
+      command: {
+        modality: 'voice',
+        baseRevision: 1,
+        kind: {
+          type: 'replaceSelection',
+          text: 'один фінальний фрагмент',
+          selection: accepted.editor.session.selection,
+        },
+      },
+    })
+    expect(controller.snapshot().voice).toEqual({
+      phase: 'committed',
+      revision: 1,
+      errorCode: null,
+    })
+  })
+
+  it('rejects a dictation captured before revision or selection drift without dispatch', async () => {
+    const accepted = acceptedFixture()
+    const stateStore = new EditorStore('loading')
+    stateStore.publishAccepted(accepted, 'ready')
+    const requests: unknown[] = []
+    const controller = new EditorController({}, {
+      store: stateStore,
+      wasm: Promise.resolve(successfulVoiceWasm(requests, accepted)),
+      documentStore: successfulPersistence(),
+    })
+    const capture = createVoiceDictationCapture(accepted, 'stale speech')
+
+    stateStore.publishAccepted(
+      {
+        ...accepted,
+        session: { ...accepted.session, revision: 2, canonicalHash: 'hash-2' },
+      },
+      'ready',
+    )
+    await expect(controller.dispatchVoiceDictation(capture)).resolves.toEqual({
+      kind: 'rejected',
+      code: 'FLOW_VOICE_SOURCE_STALE',
+    })
+    expect(requests).toHaveLength(0)
+
+    stateStore.publishAccepted(accepted, 'ready')
+    const selectionDrift = {
+      ...accepted.editor.session.selection,
+      focus: {
+        ...accepted.editor.session.selection.focus,
+        utf16Offset: 1,
+      },
+    }
+    stateStore.publishAccepted(
+      {
+        ...accepted,
+        editor: {
+          ...accepted.editor,
+          session: { ...accepted.editor.session, selection: selectionDrift },
+        },
+      },
+      'ready',
+    )
+    await expect(controller.dispatchVoiceDictation(capture)).resolves.toEqual({
+      kind: 'rejected',
+      code: 'FLOW_VOICE_SELECTION_STALE',
+    })
+    expect(requests).toHaveLength(0)
+  })
+
+  it('dispatches a validated formatting intent through the voice command bus', async () => {
+    const accepted = acceptedFixture()
+    const stateStore = new EditorStore('loading')
+    stateStore.publishAccepted(accepted, 'ready')
+    const requests: unknown[] = []
+    const controller = new EditorController({}, {
+      store: stateStore,
+      wasm: Promise.resolve(successfulVoiceWasm(requests, accepted)),
+      documentStore: successfulPersistence(),
+    })
+    const intent: AcceptedVoiceIntentDto = {
+      protocolVersion: 1,
+      locale: 'uk-UA',
+      sourceRevision: accepted.session.revision,
+      sourceHash: accepted.session.canonicalHash,
+      selection: accepted.editor.session.selection,
+      action: { type: 'setInlineMark', mark: { kind: 'bold', value: true } },
+      capability: {
+        family: 'setInlineMark',
+        commandType: 'setInlineMark',
+        intent: 'editor.intent.setInlineMark',
+        risk: 'formatting',
+        confirmation: 'none',
+        undo: 'reversible',
+      },
+    }
+
+    await expect(controller.dispatchVoiceCommand(intent)).resolves.toMatchObject({
+      kind: 'committed',
+    })
+    expect(requests).toHaveLength(1)
+    expect(requests[0]).toMatchObject({
+      command: {
+        modality: 'voice',
+        kind: {
+          type: 'setInlineMark',
+          selection: accepted.editor.session.selection,
+          mark: { kind: 'bold', value: true },
+        },
+      },
+    })
   })
 
   it('passes a valid form selection to export and fences a stale source selection', async () => {
@@ -508,6 +639,67 @@ function wasmFixture(requests: unknown[]): WasmBoundary {
     plan_standalone_audit: () => ({ ok: false, value: null, error: null }),
     query_document: () => ({ ok: false, value: null, error: null }),
     query_editor_view: () => ({ ok: false, value: null, error: null }),
+    recover_document_audited: () => ({ ok: false, value: null, error: null }),
+  } as unknown as WasmBoundary
+}
+
+function successfulPersistence(): EditorPersistence {
+  return {
+    commit: async () => undefined,
+    commitMigration: async () => undefined,
+    commitStandaloneAudit: async () => undefined,
+    loadRecords: async () => emptyRecords,
+    loadRecoveryImage: async () => ({ records: emptyRecords, head: null }),
+    installRecoveredHead: async () => undefined,
+  }
+}
+
+function successfulVoiceWasm(
+  requests: unknown[],
+  accepted: EditorAcceptedSnapshot,
+): WasmBoundary {
+  const operation = {
+    session: accepted.session,
+    view: accepted.view,
+    editor: accepted.editor,
+    commit: {
+      replaceExisting: false,
+      snapshot: null,
+      transaction: {},
+      audit: {},
+      assets: [],
+    },
+  }
+  return {
+    default: async () => undefined,
+    create_sample: () => ({ ok: false, value: null, error: null }),
+    apply_command: (request: unknown) => {
+      requests.push(request)
+      return { ok: true, value: operation, error: null }
+    },
+    open_document: () => ({ ok: false, value: null, error: null }),
+    commit_record: () => ({
+      ok: true,
+      value: {
+        replaceExisting: false,
+        snapshot: null,
+        transaction: {},
+        audit: {},
+        assets: [],
+      },
+      error: null,
+    }),
+    plan_standalone_audit: () => ({ ok: false, value: null, error: null }),
+    query_document: () => ({
+      ok: true,
+      value: {
+        session: accepted.session,
+        view: accepted.view,
+        editor: accepted.editor,
+      },
+      error: null,
+    }),
+    query_editor_view: () => ({ ok: true, value: accepted.editor.view, error: null }),
     recover_document_audited: () => ({ ok: false, value: null, error: null }),
   } as unknown as WasmBoundary
 }
