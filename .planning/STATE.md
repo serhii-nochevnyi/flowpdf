@@ -4,16 +4,16 @@ milestone: v1.0
 current_phase: 5
 current_phase_name: Semantic Fillable Forms
 status: executing
-stopped_at: Completed 05-11-PLAN.md; confirmed Rust-owned semantic field tab-order authoring is green, while AcroForm appearances/viewer evidence, follow-on form plans, four external Phase 4 PDF/reference rows, and the inherited Phase 2/3 external AT checkpoint remain open
-last_updated: "2026-09-22T01:29:20Z"
+stopped_at: Completed 05-12-PLAN.md; confirmed bounded deterministic AcroForm appearances are green, while target-viewer evidence, flattening, external form import, four external Phase 4 PDF/reference rows, and the inherited Phase 2/3 external AT checkpoint remain open
+last_updated: "2026-09-22T02:11:27Z"
 last_activity: 2026-09-22
-last_activity_desc: Completed Phase 5 Plan 05-11 confirmed Rust-owned semantic field tab-order authoring through the parity-closed MoveField transaction, derived editor/form/PDF order, localized accessible controls, source rebind fences, and full gates
-state_head: 6c0fb85
+last_activity_desc: Completed Phase 5 Plan 05-12 with bounded deterministic AcroForm normal appearances, explicit resources/defaults, validated button states, fail-closed limits, and full gates
+state_head: da3d731
 progress:
   total_phases: 9
   completed_phases: 1
-  total_plans: 47
-  completed_plans: 47
+  total_plans: 48
+  completed_plans: 48
 milestone_name: milestone
 ---
 
@@ -24,22 +24,22 @@ milestone_name: milestone
 See: .planning/PROJECT.md (updated 2026-08-25)
 
 **Core value:** A user can edit semantic document text naturally, repaginate following content, and export a visually consistent, selectable, form-capable PDF.
-**Current focus:** Phase 5 — Semantic Fillable Forms (eleven local slices complete; appearances/viewer evidence and follow-on plans open)
+**Current focus:** Phase 5 — Semantic Fillable Forms (twelve local slices complete; target-viewer evidence, flattening, import, and follow-on plans open)
 
 ## Current Position
 
 Phase: 5 (Semantic Fillable Forms) — EXECUTING
-Plan: 11 executed; follow-on plans to be decomposed
-Status: 05-11 complete; Rust validates the current field vocabulary, derives deterministic revision/hash-bound fixed-point widget projections with explicit invalid/deleted/unmapped review, exposes separate authored defaults/effective session values, emits bounded deterministic AcroForm field/widget COS structure, and exposes a versioned Rust/WASM session action boundary with guarded `form-sessions-v1` IndexedDB persistence. The browser now renders accessible native controls, descriptor configuration, safe anchor placement, default text-field insertion, confirmed valid-field removal, and canonical tab-order earlier/later controls through Rust-owned `SetField`/`InsertField`/`RemoveField`/`MoveField` paths. Editor and form/PDF tab order is derived from canonical field order; appearance streams, flattening, target-viewer evidence, and external form import remain open. Phase 4 external PDF/reference rows and Phase 2/3 external Edge/Windows screen-reader evidence remain outstanding.
-Last activity: 2026-09-22 — Phase 5 Plan 05-11 confirmed semantic field tab-order authoring, derived order propagation, exact inverse/recovery evidence, and full gates completed
+Plan: 12 executed; follow-on plans to be decomposed
+Status: 05-12 complete; Rust validates the current field vocabulary, derives deterministic revision/hash-bound fixed-point widget projections with explicit invalid/deleted/unmapped review, exposes separate authored defaults/effective session values, emits bounded deterministic AcroForm field/widget COS structure and derived normal appearances, and exposes a versioned Rust/WASM session action boundary with guarded `form-sessions-v1` IndexedDB persistence. The browser now renders accessible native controls, descriptor configuration, safe anchor placement, default text-field insertion, confirmed valid-field removal, and canonical tab-order earlier/later controls through Rust-owned `SetField`/`InsertField`/`RemoveField`/`MoveField` paths. Editor and form/PDF tab order is derived from canonical field order; target-viewer evidence, flattening, and external form import remain open. Phase 4 external PDF/reference rows and Phase 2/3 external Edge/Windows screen-reader evidence remain outstanding.
+Last activity: 2026-09-22 — Phase 5 Plan 05-12 confirmed explicit bounded AcroForm appearances, validated button states, source/session determinism, and full gates completed
 
-Progress: Phase 2 — 18/18 implementation plans complete; Phase 3 — 6/6 local implementation plans executed; Phase 4 — 6/6 plans executed; Phase 5 — 11/11 local plans executed with appearance/viewer, flattening, import, and follow-on plans still to be decomposed. Phase 2/3 phase-level closure remains honest about inherited external AT evidence, and Phase 4 remains open for unavailable external PDF/reference evidence.
+Progress: Phase 2 — 18/18 implementation plans complete; Phase 3 — 6/6 local implementation plans executed; Phase 4 — 6/6 plans executed; Phase 5 — 12/12 local plans executed with target-viewer, flattening, import, and follow-on plans still to be decomposed. Phase 2/3 phase-level closure remains honest about inherited external AT evidence, and Phase 4 remains open for unavailable external PDF/reference evidence.
 
 ## Performance Metrics
 
 **Velocity:**
 
-- Total plans completed: 46
+- Total plans completed: 48
 - Average duration: not comparable (Plan 05 was a multi-session closeout)
 - Total execution time: multi-session
 
@@ -51,9 +51,9 @@ Progress: Phase 2 — 18/18 implementation plans complete; Phase 3 — 6/6 local
 | 2 | 18 | multi-session | - |
 | 3 | 6 | multi-session | - |
 | 4 | 6 | planned | - |
-| 5 | 11 executed (follow-on TBD) | same session | - |
+| 5 | 12 executed (follow-on TBD) | same session | - |
 
-**Recent Trend:** Schema-v2 tree, lossless migration, editor accessibility, exact UI coverage, deterministic semantic scale, and the dual-run release gate remain green. Plan 02-18 closes all Phase 2 implementation plans with 7/7 requirements, 33/33 baseline edges (the shared catalog is now 36/36 after the Phase 5 `InsertField`, `RemoveField`, and `MoveField` extensions), 108/108 UI owners, and 3/3 flagged prohibitions; Edge/Windows screen-reader UAT remains explicitly outstanding before Phase 2 closure. Phase 3 now has all six local implementation plans complete, including Rust typography/pagination, schema-v3 sections, incremental equivalence, revision-safe workers, the accessible viewport, and a two-run local gate; Phase 3 phase-level closure does not invent the inherited external AT result. Phase 4 now has all six local plans complete and a two-run local gate, while structural/extraction/raster/target-viewer evidence remains explicitly unavailable. Phase 5 now has eleven local slices complete through Rust-owned semantic field tab-order authoring; appearances, viewer evidence, flattening, and import remain open.
+**Recent Trend:** Schema-v2 tree, lossless migration, editor accessibility, exact UI coverage, deterministic semantic scale, and the dual-run release gate remain green. Plan 02-18 closes all Phase 2 implementation plans with 7/7 requirements, 33/33 baseline edges (the shared catalog is now 36/36 after the Phase 5 `InsertField`, `RemoveField`, and `MoveField` extensions), 108/108 UI owners, and 3/3 flagged prohibitions; Edge/Windows screen-reader UAT remains explicitly outstanding before Phase 2 closure. Phase 3 now has all six local implementation plans complete, including Rust typography/pagination, schema-v3 sections, incremental equivalence, revision-safe workers, the accessible viewport, and a two-run local gate; Phase 3 phase-level closure does not invent the inherited external AT result. Phase 4 now has all six local plans complete and a two-run local gate, while structural/extraction/raster/target-viewer evidence remains explicitly unavailable. Phase 5 now has twelve local slices complete through bounded deterministic AcroForm appearances; target-viewer evidence, flattening, and import remain open.
 **Per-Plan Metrics:**
 
 | Plan | Duration | Tasks | Files |
@@ -99,6 +99,7 @@ Progress: Phase 2 — 18/18 implementation plans complete; Phase 3 — 6/6 local
 | Phase FLOWPDF-05 P09 | same session | 2 tasks | 20 files |
 | Phase FLOWPDF-05 P10 | same session | 2 tasks | 20 files |
 | Phase FLOWPDF-05 P11 | same session | 2 tasks | 23 files |
+| Phase FLOWPDF-05 P12 | same session | 2 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -168,7 +169,7 @@ Decisions are logged in `.planning/PROJECT.md`.
 - [Phase 5]: Plans 05-01 through 05-03 deliberately kept durable current-value records, AcroForm dictionaries/appearances, flattening, external-PDF form import, and target-viewer compatibility out of the projection/session slices; Plan 05-04 adds only bounded field/widget structure, with the remaining items still follow-on contracts.
 - [Phase 5]: Form fill state is a noncanonical document-ID/revision/hash-bound override map; absent overrides resolve to authored defaults, set/clear operations are immutable generation changes, and read-only/forged/stale state fails closed. Durable browser persistence remains separate from canonical recovery and accepts only Rust-returned session DTOs.
 - [Phase 5]: Version-2 derived widgets carry both authored `default_value` and effective session `value`; the default-only resolver remains deterministic, while session-aware projection rejects invalid session identity before placement and never changes canonical bytes.
-- [Phase 5]: The first PDF form export slice accepts only a source-bound, hash-checked `PdfFormPlan`, emits bounded AcroForm field/widget/page/catalog structure, and keeps appearance streams, viewer behavior, import, and flattening as explicit follow-on evidence.
+- [Phase 5]: The PDF form export path accepts only a source-bound, hash-checked `PdfFormPlan`, emits bounded AcroForm field/widget/page/catalog structure plus derived normal appearances, and uses shared built-in Helvetica resources with explicit `/DR`, `/DA`, and `/NeedAppearances false`; this does not claim full Unicode glyph coverage or target-viewer behavior.
 - [Phase 5]: The form-session action protocol is versioned and closed at Rust/WASM: Start, Validate, SetValue, and ClearValue decode one canonical source and return only a validated immutable session, never canonical mutations or PDF state.
 - [Phase 5]: `form-sessions-v1` is a separate IndexedDB object store keyed by document identity/revision/source hash; exact retries are idempotent, divergent writes require the next generation, and canonical recovery records never include session values.
 - [Phase 5]: The browser form-session coordinator subscribes to accepted editor snapshots, clears stale UI session state on source identity changes, serializes accepted mutations, and leaves canonical revision/history ownership with the editor controller.
@@ -180,6 +181,7 @@ Decisions are logged in `.planning/PROJECT.md`.
 - [Phase 5]: Valid semantic field removal uses the parity-catalogued Rust `RemoveField` command with explicit confirmation; its inverse `InsertField` restores the original vector index, and browser form sessions rebind by the new revision/hash without leaking old overrides. Review-region fields remain read-only.
 - [Phase 5]: Semantic field tab-order authoring uses the parity-catalogued Rust `MoveField` command over valid grapheme-safe fields only; its exact descriptor preimage supports undo, redo, and durable recovery, while editor cards retain spatial accessibility order and expose a derived canonical `tabOrder`.
 - [Phase 5]: Form widgets and PDF field emission derive contiguous tab order from canonical `FlowDocument.fields` order without persisting page coordinates or a tab-order property in `FieldDescriptor`; review-region fields remain unchanged and expose no ordering controls.
+- [Phase 5]: Appearance streams are derived only at COS emission from the accepted plan; uppercase hex UTF-16BE text, fixed-point geometry, validated state names, and stream/object limits keep the output deterministic and fail closed without adding canonical or session state.
 
 ### Pending Todos
 
@@ -200,6 +202,6 @@ Decisions are logged in `.planning/PROJECT.md`.
 
 ## Session Continuity
 
-Last session: 2026-09-22T01:29:20Z
-Stopped at: Completed 05-11-PLAN.md; Phase 5 confirmed semantic field tab-order authoring is green, Phase 4 reference PDF rows are unavailable, and the inherited Phase 2/3 external AT checkpoint remains outstanding
+Last session: 2026-09-22T02:11:27Z
+Stopped at: Completed 05-12-PLAN.md; Phase 5 confirmed bounded deterministic AcroForm appearances are green, Phase 4 reference PDF rows are unavailable, and the inherited Phase 2/3 external AT checkpoint remains outstanding
 Resume file: None
