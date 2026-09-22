@@ -12,6 +12,7 @@ import {
   type EditorController,
 } from '../src/editor/editor-app.js'
 import { EditorShell } from '../src/editor/editor-shell.js'
+import { editorMessages } from '../src/editor/editor-messages.js'
 import type { DirectionalSelectionDto, EditorLocale } from '../src/editor/editor-store.js'
 
 const LONG_TOKEN = `ДужеДовгийНерозривнийТокен-${'x'.repeat(180)}`
@@ -239,6 +240,17 @@ for (const locale of ['uk', 'en'] as const) {
     assertEmptyState(root, locale)
     await openOlder(root, controller)
     assertPopulatedState(root, locale)
+    const voiceControls = root.querySelector<HTMLElement>('[data-voice-controls]')
+    if (voiceControls === null) throw new Error('voice controls are required')
+    expect(voiceControls.getAttribute('aria-labelledby')).toBe('flowpdf-voice-heading')
+    expect(voiceControls.querySelector('h2')?.textContent).toBe(editorMessages[locale].voiceTitle)
+    expect(voiceControls.querySelector('[data-voice-status]')?.getAttribute('role')).toBe('status')
+    expect(
+      voiceControls.querySelector('input[value="dictation"]')?.parentElement?.textContent,
+    ).toContain(editorMessages[locale].voiceModeDictation)
+    expect(
+      voiceControls.querySelector('input[value="command"]')?.parentElement?.textContent,
+    ).toContain(editorMessages[locale].voiceModeCommand)
     assertZeroOneManyState(root)
     await assertPartialState(root, controller, locale)
     await assertLongTextState(root, controller)

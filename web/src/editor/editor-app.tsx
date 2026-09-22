@@ -20,6 +20,10 @@ import {
 } from './editor-controller.js'
 import { EditorToolbar } from './editor-toolbar.js'
 import { EditorShell } from './editor-shell.js'
+import {
+  VoiceControls,
+  type VoiceControlsProps,
+} from './voice-controls.js'
 import { SemanticDocument } from './semantic-document.js'
 import { PageViewport } from '../layout/page-viewport.js'
 import { PdfPreview } from '../pdf/pdf-preview.js'
@@ -89,6 +93,7 @@ export interface EditorAppProps {
   readonly controllerDependencies?: EditorControllerDependencies
   readonly options?: EditorAppOptions
   readonly formProjectionScheduler?: FormProjectionScheduler
+  readonly voiceRecognitionConstructor?: VoiceControlsProps['recognitionConstructor']
 }
 
 export function EditorApp({
@@ -96,6 +101,7 @@ export function EditorApp({
   controllerDependencies,
   options = {},
   formProjectionScheduler: suppliedFormProjectionScheduler,
+  voiceRecognitionConstructor,
 }: EditorAppProps) {
   const [controller] = useState(
     () => suppliedController ?? new EditorController(options, controllerDependencies),
@@ -262,6 +268,13 @@ export function EditorApp({
       diagnosticsError={diagnosticsError}
       onOpenDiagnostics={openDiagnostics}
     >
+      <VoiceControls
+        controller={controller}
+        locale={locale}
+        {...(voiceRecognitionConstructor === undefined
+          ? {}
+          : { recognitionConstructor: voiceRecognitionConstructor })}
+      />
       {accepted === null ? (
         <div className="empty-state" data-empty-document="">
           <h2 className="section-heading">{labels.emptyTitle}</h2>
@@ -400,10 +413,19 @@ export async function mountEditorApp(
   root: HTMLElement,
   options: EditorAppOptions = {},
   dependencies: EditorControllerDependencies = {},
+  voiceRecognitionConstructor?: VoiceControlsProps['recognitionConstructor'],
 ): Promise<EditorController> {
   const controller = new EditorController(options, dependencies)
   const reactRoot = createRoot(root)
-  reactRoot.render(<EditorApp controller={controller} options={options} />)
+  reactRoot.render(
+    <EditorApp
+      controller={controller}
+      options={options}
+      {...(voiceRecognitionConstructor === undefined
+        ? {}
+        : { voiceRecognitionConstructor })}
+    />,
+  )
   await controller.initialize()
   return controller
 }
