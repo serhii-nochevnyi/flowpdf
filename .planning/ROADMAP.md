@@ -171,7 +171,7 @@ compatibility, and general PDF import remain unclaimed.
   4. Exported fields and appearance states behave consistently in the target viewer matrix.
   5. Flattening is explicit, selected, validated and never silently replaces the editable source.
 
-**Plans**: 10/10 local plans executed; phase-level closure remains open
+**Plans**: 11/11 local plans executed; phase-level closure remains open
 
 - [x] 05-01-PLAN.md — Add Rust-owned field-value validation and deterministic
   display-list anchor-to-widget projection with explicit review paths.
@@ -193,8 +193,10 @@ compatibility, and general PDF import remain unclaimed.
   at an accepted collapsed caret with localized accessible controls.
 - [x] 05-10-PLAN.md — Add confirmed Rust-owned semantic field removal with an
   exact indexed inverse, accessible localized controls, and source rebind fences.
+- [x] 05-11-PLAN.md — Add Rust-owned semantic field tab-order authoring with
+  derived editor/widget/PDF order and accessible localized earlier/later controls.
 
-The ten Phase 5 slices validate the existing semantic field vocabulary,
+The eleven Phase 5 slices validate the existing semantic field vocabulary,
 derive revision/hash-bound fixed-point widget projections, keep explicit
 noncanonical fill overrides separate from authored defaults through to the
 derived widget, emit bounded AcroForm field/widget dictionaries from an
@@ -203,9 +205,12 @@ Rust/WASM boundary into a guarded dedicated IndexedDB store, expose accessible
 native controls, configure descriptors, place already-authored valid fields
 through Rust `SetField`, insert a typed default text field through the
 parity-catalogued Rust `InsertField` path, and remove valid fields through the
-confirmed `RemoveField` path. They do not claim tab-order authoring, appearance
-streams, flattening, external form import, or target-viewer compatibility.
-Those remain separately planned and verified.
+confirmed `RemoveField` path. Valid fields can also be reordered through the
+parity-catalogued `MoveField` path; editor and form/PDF projections derive
+contiguous tab order from the canonical field vector without persisting a
+tab-order property. The slices do not claim appearance streams, flattening,
+external form import, or target-viewer compatibility. Those remain separately
+planned and verified.
 **UI hint**: yes
 
 ### Phase 6: Voice Dictation and Commands

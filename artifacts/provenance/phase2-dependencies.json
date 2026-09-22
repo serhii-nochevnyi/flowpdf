@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "status": "success",
   "phase": "FLOWPDF-02",
-  "observedAt": "2026-09-22T00:26:57.932Z",
+  "observedAt": "2026-09-22T01:19:59.140Z",
   "policy": {
     "minimumAgeDays": 30,
     "minimumWeeklyDownloads": 1000,
@@ -93,7 +93,7 @@
       "sources": {
         "package": "https://registry.npmjs.org/react",
         "version": "https://registry.npmjs.org/react/19.2.8",
-        "repository": "https://github.com/react/react"
+        "repository": "https://api.github.com/repos/react/react"
       },
       "legitimacy": {
         "verdict": "OK",
@@ -130,7 +130,7 @@
       "sources": {
         "package": "https://registry.npmjs.org/react-dom",
         "version": "https://registry.npmjs.org/react-dom/19.2.8",
-        "repository": "https://github.com/react/react"
+        "repository": "https://api.github.com/repos/react/react"
       },
       "legitimacy": {
         "verdict": "OK",
@@ -167,7 +167,7 @@
       "sources": {
         "package": "https://registry.npmjs.org/%40types%2Freact",
         "version": "https://registry.npmjs.org/%40types%2Freact/19.2.17",
-        "repository": "https://github.com/DefinitelyTyped/DefinitelyTyped"
+        "repository": "https://api.github.com/repos/DefinitelyTyped/DefinitelyTyped"
       },
       "legitimacy": {
         "verdict": "OK",
@@ -204,7 +204,7 @@
       "sources": {
         "package": "https://registry.npmjs.org/%40types%2Freact-dom",
         "version": "https://registry.npmjs.org/%40types%2Freact-dom/19.2.3",
-        "repository": "https://github.com/DefinitelyTyped/DefinitelyTyped"
+        "repository": "https://api.github.com/repos/DefinitelyTyped/DefinitelyTyped"
       },
       "legitimacy": {
         "verdict": "OK",
@@ -241,7 +241,7 @@
       "sources": {
         "package": "https://registry.npmjs.org/vite",
         "version": "https://registry.npmjs.org/vite/8.1.5",
-        "repository": "https://github.com/vitejs/vite"
+        "repository": "https://api.github.com/repos/vitejs/vite"
       },
       "legitimacy": {
         "verdict": "OK",
@@ -278,7 +278,7 @@
       "sources": {
         "package": "https://registry.npmjs.org/%40vitejs%2Fplugin-react",
         "version": "https://registry.npmjs.org/%40vitejs%2Fplugin-react/6.0.5",
-        "repository": "https://github.com/vitejs/vite-plugin-react"
+        "repository": "https://api.github.com/repos/vitejs/vite-plugin-react"
       },
       "legitimacy": {
         "verdict": "OK",
@@ -302,13 +302,13 @@
       "yanked": false,
       "numericSnapshot": {
         "metric": "recentDownloads",
-        "value": 7188041,
+        "value": 7193637,
         "source": "https://crates.io/api/v1/crates/icu_segmenter"
       },
       "sources": {
         "package": "https://crates.io/api/v1/crates/icu_segmenter",
         "version": "https://crates.io/api/v1/crates/icu_segmenter/2.3.0",
-        "repository": "https://github.com/unicode-org/icu4x"
+        "repository": "https://api.github.com/repos/unicode-org/icu4x"
       },
       "legitimacy": {
         "verdict": "OK",
@@ -334,13 +334,13 @@
       "yanked": false,
       "numericSnapshot": {
         "metric": "recentDownloads",
-        "value": 51168893,
+        "value": 50898285,
         "source": "https://crates.io/api/v1/crates/image"
       },
       "sources": {
         "package": "https://crates.io/api/v1/crates/image",
         "version": "https://crates.io/api/v1/crates/image/0.25.10",
-        "repository": "https://github.com/image-rs/image"
+        "repository": "https://api.github.com/repos/image-rs/image"
       },
       "legitimacy": {
         "verdict": "OK",
