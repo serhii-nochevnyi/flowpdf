@@ -17,7 +17,7 @@ FlowPDF progresses through nine dependency-ordered vertical capabilities. The ro
 - [ ] **Phase 4: Owned PDF Preview and Export** - Users can preview and export selectable, reproducible PDFs and recover the exact owned source.
 - [x] **Phase 5: Semantic Fillable Forms** - Local implementation complete 2026-09-22; target-viewer and external form-import evidence remain explicit release inputs.
 - [x] **Phase 6: Voice Dictation and Commands** - Users can dictate and invoke safe, undoable document commands through explicit voice modes. (local implementation complete 2026-09-22; speech-service and external AT evidence remain explicit release inputs)
-- [ ] **Phase 7: Secure PDF Reader and Scene** - Users can open the controlled PDF subset through a bounded parser and inspect supported page content and warnings.
+- [x] **Phase 7: Secure PDF Reader and Scene** - Users can open the controlled PDF subset through a bounded parser and inspect supported page content and warnings. (local implementation complete 2026-09-22; external reference/AT evidence remains an explicit release input)
 - [ ] **Phase 8: External Reconstruction and OCR** - Users can review and accept confidence-scored FlowDocument reconstruction while preserving the original and opaque content.
 - [ ] **Phase 9: Controlled Native PDF Editing** - Users can edit supported PDF scene islands, page objects, annotations and forms with secure rewrite/redaction behavior.
 
@@ -336,12 +336,18 @@ by fake recognition or local DOM assertions; see `06-CLOSURE.md`.
   4. Hostile or over-budget files terminate with a bounded diagnostic rather than hanging the UI or service.
   5. PDF JavaScript, launch actions, executables and external resource actions never execute during import or preview.
 
-**Plans**: 4 plans
+**Plans**: 4/4 plans executed
 
 - [x] 07-01-PLAN.md — bounded lazy PDF syntax reader
 - [x] 07-02-PLAN.md — provenance-rich PDF scene
 - [x] 07-03-PLAN.md — WASM/worker/browser reader surface
-- [ ] 07-04-PLAN.md — local gates and evidence closure
+- [x] 07-04-PLAN.md — local gates and evidence closure
+
+Phase 7 is locally complete for the controlled unencrypted PDF subset. The
+bounded reader, fixed-point scene, Rust/WASM boundary, worker, report-first
+browser panel, and local regression gates pass. qpdf/Poppler/target-viewer and
+external assistive-technology observations remain unavailable and are not
+represented as local compatibility or accessibility passes.
 **UI hint**: yes
 
 ### Phase 8: External Reconstruction and OCR
@@ -388,6 +394,6 @@ by fake recognition or local DOM assertions; see `06-CLOSURE.md`.
 | 4. Owned PDF Preview and Export | 6/6 | In Progress (reference evidence unavailable) |  |
 | 5. Semantic Fillable Forms | 26/26 executed | Complete locally (release evidence pending) | 2026-09-22 |
 | 6. Voice Dictation and Commands | 6/6 executed | Complete locally (release evidence pending) | 2026-09-22 |
-| 7. Secure PDF Reader and Scene | 3/4 | In Progress |  |
+| 7. Secure PDF Reader and Scene | 4/4 | Complete locally (release evidence pending) | 2026-09-22 |
 | 8. External Reconstruction and OCR | 0/TBD | Not started | - |
 | 9. Controlled Native PDF Editing | 0/TBD | Not started | - |

@@ -638,10 +638,7 @@ impl<'a> SceneBuilder<'a> {
                             }
                             ContentToken::Integer(value) => {
                                 let adjustment = LayoutUnit::from_raw(
-                                    i64::try_from(*value)
-                                        .map_err(|_| PdfReadError::NumericLimit)?
-                                        .checked_mul(-1)
-                                        .ok_or(PdfReadError::NumericLimit)?,
+                                    value.checked_mul(-1).ok_or(PdfReadError::NumericLimit)?,
                                 );
                                 let adjustment =
                                     scale_font_width(adjustment, self.state.font_size)?;
@@ -1283,9 +1280,8 @@ impl ContentToken {
     fn number(&self) -> Option<LayoutUnit> {
         match self {
             Self::Number(value) => Some(*value),
-            Self::Integer(value) => i64::try_from(*value)
-                .ok()
-                .and_then(|value| value.checked_mul(LayoutUnit::UNITS_PER_POINT))
+            Self::Integer(value) => value
+                .checked_mul(LayoutUnit::UNITS_PER_POINT)
                 .map(LayoutUnit::from_raw),
             _ => None,
         }
@@ -1294,7 +1290,7 @@ impl ContentToken {
 
 fn font_width(value: &PdfValue) -> Option<LayoutUnit> {
     match value {
-        PdfValue::Integer(value) => i64::try_from(*value).ok().map(LayoutUnit::from_raw),
+        PdfValue::Integer(value) => Some(LayoutUnit::from_raw(*value)),
         PdfValue::Real(value) => Some(*value),
         _ => None,
     }

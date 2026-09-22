@@ -38,6 +38,8 @@
     "check:phase5": "node scripts/check-phase5.mjs",
     "check:phase6:smoke": "node --test tests/contracts/phase6-gate.test.mjs tests/contracts/phase1-boundary.test.mjs",
     "check:phase6": "node scripts/check-phase6.mjs",
+    "check:phase7:smoke": "node --test tests/contracts/phase7-gate.test.mjs",
+    "check:phase7": "node scripts/check-phase7.mjs",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

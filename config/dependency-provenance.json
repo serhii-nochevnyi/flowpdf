@@ -23,6 +23,7 @@
     { "name": "hyphenation", "version": "0.8.4", "repository": "https://github.com/tapeinosyne/hyphenation" },
     { "name": "icu_segmenter", "version": "2.3.0", "repository": "https://github.com/unicode-org/icu4x" },
     { "name": "image", "version": "0.25.10", "repository": "https://github.com/image-rs/image" },
+    { "name": "miniz_oxide", "version": "0.8.9", "repository": "https://github.com/Frommi/miniz_oxide" },
     {
       "name": "rustybuzz",
       "version": "0.20.1",

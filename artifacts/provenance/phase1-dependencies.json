@@ -124,6 +124,16 @@
     },
     {
       "ecosystem": "crates.io",
+      "name": "miniz_oxide",
+      "version": "0.8.9",
+      "kind": "dependency",
+      "repository": "https://github.com/Frommi/miniz_oxide",
+      "publishedAt": "2025-06-09T22:26:12.218895Z",
+      "checksum": "1fa76a2c86f704bdb222d66965fb3d63269ce38518b83cb0575fca855ebb6316",
+      "source": "https://crates.io/api/v1/crates/miniz_oxide/0.8.9"
+    },
+    {
+      "ecosystem": "crates.io",
       "name": "rustybuzz",
       "version": "0.20.1",
       "kind": "dependency",

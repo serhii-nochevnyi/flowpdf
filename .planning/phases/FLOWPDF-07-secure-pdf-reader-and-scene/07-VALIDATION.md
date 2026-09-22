@@ -14,10 +14,11 @@ by the gate.
 | 07-03-01 | PDFI-01, PDFI-05, QUAL-05, QUAL-06 | `RUSTUP_HOME=./work/toolchains/rustup CARGO_HOME=./work/toolchains/cargo PATH=./work/toolchains/cargo/bin:$PATH cargo test --locked -p flow-wasm --test pdf_reader -- --nocapture` |
 | 07-03-02 | PDFI-01, PDFI-02, PDFI-05 | `npm run typecheck && PLAYWRIGHT_BROWSERS_PATH=./work/playwright npx --no-install vitest run --project unit web/tests/pdf-reader.test.ts` |
 | 07-03-03 | PDFI-02, PDFI-05, QUAL-06 | `npm run build:web && PLAYWRIGHT_BROWSERS_PATH=./work/playwright npx --no-install vitest run --project browser web/tests/pdf-reader.browser.test.ts` |
-| 07-04-01 | QUAL-05, QUAL-06 | `RUSTUP_HOME=./work/toolchains/rustup CARGO_HOME=./work/toolchains/cargo PATH=./work/toolchains/cargo/bin:$PATH cargo test --locked -p flow-core --quiet && RUSTUP_HOME=./work/toolchains/rustup CARGO_HOME=./work/toolchains/cargo PATH=./work/toolchains/cargo/bin:$PATH cargo test --locked -p flow-wasm --quiet` |
-| 07-04-02 | Regression | `npm run check:phase6 && npm run check:phase5 && npm run check:phase4` |
-| 07-04-03 | QUAL-05, QUAL-06 | `npm run check:phase7 && npm run check:phase7` |
-| 07-04-04 | Formatting | `git diff --check && cargo fmt --all -- --check` |
+| 07-04-01 | QUAL-05, QUAL-06 | `node --test tests/contracts/phase7-gate.test.mjs && git diff --check` |
+| 07-04-02 | QUAL-05, QUAL-06 | `RUSTUP_HOME=./work/toolchains/rustup CARGO_HOME=./work/toolchains/cargo PATH=./work/toolchains/cargo/bin:$PATH cargo test --locked -p flow-core --quiet && RUSTUP_HOME=./work/toolchains/rustup CARGO_HOME=./work/toolchains/cargo PATH=./work/toolchains/cargo/bin:$PATH cargo test --locked -p flow-wasm --quiet` |
+| 07-04-03 | Regression | `npm run check:phase6 && npm run check:phase5 && npm run check:phase4` |
+| 07-04-04 | QUAL-05, QUAL-06 | `npm run check:phase7 && npm run check:phase7 && npm run check:planning` |
+| 07-04-05 | Formatting | `git diff --check && cargo fmt --all -- --check` |
 
 ## Reference validation rows
 
@@ -33,4 +34,3 @@ an explicitly checked-in Phase 7 fixture exist:
 
 Missing reference tools are not local passes. The phase can be locally closed
 only with that limitation recorded in `07-CLOSURE.md`.
-

@@ -48,6 +48,7 @@ const phaseFiveWasmExports = new Set([
   'resolve_voice_command',
   'verify_form_projection_response',
 ])
+const phaseSevenWasmExports = new Set(['read_pdf', 'verify_pdf_reader_response'])
 const forbiddenDirectPackages = new Set([
   '@vitejs/plugin-react',
   'actix-web',
@@ -113,7 +114,7 @@ const semanticOwnerName = /^(?:apply|canonicalize|hash|migrate|mutate|recover|re
 
 test('the checked-in workspace preserves deferred scope and Rust semantic ownership', async () => {
   const snapshot = loadWorkspaceSnapshot(projectRoot)
-  assert.deepEqual(boundaryDiagnostics(snapshot, { phase: 6 }), [])
+  assert.deepEqual(boundaryDiagnostics(snapshot, { phase: 7 }), [])
   assertPhaseTwoParityBoundary(projectRoot, snapshot)
 
   const gatePath = resolve(projectRoot, 'scripts/check-phase1.mjs')
@@ -614,10 +615,19 @@ function wasmFixtureFunction(name) {
   if (name === 'stage_asset') {
     return '#[wasm_bindgen]\npub fn stage_asset(bytes: &[u8], request: JsValue) -> JsValue { request }'
   }
-  if (name === 'layout_document' || name === 'export_pdf' || name === 'recover_owned_source') {
+  if (
+    name === 'layout_document' ||
+    name === 'export_pdf' ||
+    name === 'recover_owned_source' ||
+    name === 'read_pdf'
+  ) {
     return `#[wasm_bindgen]\npub fn ${name}(request_json: String) -> String { request_json }`
   }
-  if (name === 'verify_layout_response' || name === 'verify_pdf_export_response') {
+  if (
+    name === 'verify_layout_response' ||
+    name === 'verify_pdf_export_response' ||
+    name === 'verify_pdf_reader_response'
+  ) {
     return `#[wasm_bindgen]\npub fn ${name}(response_json: String) -> bool { !response_json.is_empty() }`
   }
   if (name === 'project_form_widgets') {
@@ -716,6 +726,23 @@ function boundaryPolicy(options) {
     }
   }
   if (phase === 6) {
+    return {
+      phase,
+      forbiddenWebPathSegment:
+        /(?:^|[\/._-])(?:auth|backend|collaboration|forms?|layout|pdf|voice)(?=[\/._-]|$)/i,
+      allowsEditorSource: (path) =>
+        phaseFourEditorSource.test(path) ||
+        phaseFiveFormSource.test(path) ||
+        phaseSixVoiceEditorSource.test(path),
+      allowsDeferredPath: (path) =>
+        phaseFourEditorSource.test(path) ||
+        phaseFiveFormSource.test(path) ||
+        phaseSixVoiceSource.test(path) ||
+        phaseSixVoiceEditorSource.test(path),
+      allowsSemanticForm: (path) => phaseFiveFormEditorSource.test(path),
+    }
+  }
+  if (phase === 7) {
     return {
       phase,
       forbiddenWebPathSegment:
@@ -1278,6 +1305,9 @@ function validateWasmBoundary(source, diagnostics, policy) {
   if (policy.phase >= 5) {
     for (const exportName of phaseFiveWasmExports) allowedExports.add(exportName)
   }
+  if (policy.phase >= 7) {
+    for (const exportName of phaseSevenWasmExports) allowedExports.add(exportName)
+  }
   const items = rustWasmItems(source)
   const exports = []
   for (const item of items) {
@@ -1445,7 +1475,8 @@ function hasTypedWasmSignature(item) {
   if (
     item.exportName === 'export_pdf' ||
     item.exportName === 'recover_owned_source' ||
-    item.exportName === 'resolve_voice_command'
+    item.exportName === 'resolve_voice_command' ||
+    item.exportName === 'read_pdf'
   ) {
     return (
       parameters.join('') === 'request_json:String' &&
@@ -1453,7 +1484,10 @@ function hasTypedWasmSignature(item) {
       tokens.slice(parametersEnd + 2).join('') === 'String'
     )
   }
-  if (item.exportName === 'verify_pdf_export_response') {
+  if (
+    item.exportName === 'verify_pdf_export_response' ||
+    item.exportName === 'verify_pdf_reader_response'
+  ) {
     return (
       parameters.join('') === 'response_json:String' &&
       tokens[parametersEnd + 1] === '->' &&

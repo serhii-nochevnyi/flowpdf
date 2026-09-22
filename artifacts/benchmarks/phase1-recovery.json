@@ -5,19 +5,19 @@
   "sourceManifest": {
     "formatVersion": 1,
     "algorithm": "sha256",
-    "fileCount": 33,
+    "fileCount": 35,
     "files": [
       {
         "path": "Cargo.lock",
-        "sha256": "sha256:98aa6a1cfe621e201c3743ce166cad0aee428a41878f4ca55f8fa0410e9728e4"
+        "sha256": "sha256:b732b3e30b7e695e6f4e53c221ae423a35a53f56dc444bc335f3f90d284fb526"
       },
       {
         "path": "Cargo.toml",
-        "sha256": "sha256:8ffec9d559dc3d9e26ce5c99a59f91f5fe43974c2e2dfb269776726a7953ff26"
+        "sha256": "sha256:57b1628917c2d4d4fdb08ae2b842f06dfbd1769729f1955cd31fde802e09bd38"
       },
       {
         "path": "crates/flow-core/Cargo.toml",
-        "sha256": "sha256:d8a18d33fcf277d7c172365c9f99950dd2d3e14887aa7700551a4ba2f771ce6b"
+        "sha256": "sha256:5b54d3ade52e260aa29e31a86aef7123042d594fb0af04a6ba765b1c099d6d3e"
       },
       {
         "path": "crates/flow-core/examples/recovery_benchmark.rs",
@@ -61,7 +61,7 @@
       },
       {
         "path": "crates/flow-core/src/lib.rs",
-        "sha256": "sha256:4b2cbc6e78ef3bf6852c02f0aa15af850387f1c779ebc5c8e616ca44598269dd"
+        "sha256": "sha256:0267c8906ad5bb590bb9ae3b7468784ba69d487138f4ac79d6113adcef0fbe67"
       },
       {
         "path": "crates/flow-core/src/model/mod.rs",
@@ -89,15 +89,23 @@
       },
       {
         "path": "crates/flow-core/src/pdf/mod.rs",
-        "sha256": "sha256:690cadbcb8483bc58cb0a78976e124f19b80a9ad0c01f117fcbe7580c38f50b4"
+        "sha256": "sha256:4149144b20853e8d42fed9ecf6cf1da872fcfae030f22e8b0b29dc78fea2538b"
       },
       {
         "path": "crates/flow-core/src/pdf/provenance.rs",
         "sha256": "sha256:ef011e7d8c5fd747258ae42f1144245e4aab910a6ec47df7575141532a3c63f9"
       },
       {
+        "path": "crates/flow-core/src/pdf/reader.rs",
+        "sha256": "sha256:6d103a3a7de182410afab58b3d0c96367062aaea7e19c546f4f03729a6d825d7"
+      },
+      {
         "path": "crates/flow-core/src/pdf/recovery.rs",
         "sha256": "sha256:fe0e505fe25472fb7f5bcf706bd01f6c8d61838c755bdef06ddb4eb98c17099e"
+      },
+      {
+        "path": "crates/flow-core/src/pdf/scene.rs",
+        "sha256": "sha256:718856ca0e21f7006e65edbaed2adb5b092967c0f9c5783fe74e9097d4455423"
       },
       {
         "path": "crates/flow-core/src/provenance/mod.rs",
@@ -140,7 +148,7 @@
         "sha256": "sha256:9d50a6f28923fc94c0d56dccc9038a12a8ff040f764a8ff048fa6d5a9eba722c"
       }
     ],
-    "digest": "sha256:1972b445534555639877fb043bc1644e27441404fff9939d19787243c518dea8"
+    "digest": "sha256:9d1ea6a60563e82eb9d128d072eb492a66a7d05699afcb6ff4ac073563885819"
   },
   "toolchain": {
     "node": "v24.10.0",
@@ -185,37 +193,37 @@
         "plannedTransactionCount": 1000
       },
       "durationsMilliseconds": [
-        524.675083,
-        527.312083,
-        526.761167,
-        522.1988749999999,
-        529.284667,
-        527.9815,
-        535.815666,
-        524.4283330000001,
-        527.5846250000001,
-        524.033209,
-        526.9463330000001,
-        526.2795,
-        527.1788750000001,
-        526.9835419999999,
-        522.317708,
-        529.013416,
-        527.098084,
-        544.450334,
-        533.947791,
-        529.1969170000001
+        540.56525,
+        556.921958,
+        544.022042,
+        546.675459,
+        547.430917,
+        547.914833,
+        540.158583,
+        544.1631249999999,
+        543.310792,
+        542.981625,
+        540.2665420000001,
+        541.777292,
+        537.2776660000001,
+        541.960542,
+        538.0985000000001,
+        543.72075,
+        552.37575,
+        554.8267500000001,
+        537.402791,
+        538.422583
       ],
-      "p50Milliseconds": 527.098084,
-      "p95Milliseconds": 535.815666
+      "p50Milliseconds": 542.981625,
+      "p95Milliseconds": 554.8267500000001
     }
   ],
   "selectedPolicy": {
     "transactionInterval": 100,
     "byteInterval": 4194304
   },
-  "p50Milliseconds": 527.098084,
-  "p95Milliseconds": 535.815666,
+  "p50Milliseconds": 542.981625,
+  "p95Milliseconds": 554.8267500000001,
   "p95TargetMilliseconds": 2000,
   "passed": true,
   "blocked": false

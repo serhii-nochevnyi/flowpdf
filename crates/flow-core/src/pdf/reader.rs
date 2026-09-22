@@ -357,9 +357,8 @@ impl PdfValue {
 
     pub(crate) fn as_number(&self) -> Option<LayoutUnit> {
         match self {
-            Self::Integer(value) => i64::try_from(*value)
-                .ok()
-                .and_then(|value| value.checked_mul(LayoutUnit::UNITS_PER_POINT))
+            Self::Integer(value) => value
+                .checked_mul(LayoutUnit::UNITS_PER_POINT)
                 .map(LayoutUnit::from_raw),
             Self::Real(value) => Some(*value),
             _ => None,
@@ -712,11 +711,13 @@ fn find_startxref(bytes: &[u8]) -> Result<usize, PdfReadError> {
     usize::try_from(offset).map_err(|_| PdfReadError::StartxrefInvalid)
 }
 
+type ParsedXref = (BTreeMap<u32, PdfXrefEntry>, BTreeMap<String, PdfValue>);
+
 fn parse_xref(
     bytes: &[u8],
     offset: usize,
     limits: &PdfReaderLimits,
-) -> Result<(BTreeMap<u32, PdfXrefEntry>, BTreeMap<String, PdfValue>), PdfReadError> {
+) -> Result<ParsedXref, PdfReadError> {
     if offset >= bytes.len() {
         return Err(PdfReadError::XrefInvalid);
     }
