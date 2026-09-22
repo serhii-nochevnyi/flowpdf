@@ -125,6 +125,12 @@ The current tree includes:
   resources, explicit `/DR`/`/DA`/`NeedAppearances false`, and closed checkbox
   and radio state dictionaries; this is not a full-Unicode or target-viewer
   compatibility claim;
+- an explicit core export option for selected-field flattening: accepted field
+  appearances can be emitted as fixed-point page content while unselected
+  fields retain editable AcroForm widgets; selecting every field omits the
+  AcroForm catalog entry, and the private source envelope still recovers the
+  canonical document exactly. This export-only path is not yet exposed through
+  the browser/WASM request wire;
 - Phase 1 and Phase 2 foundation fixtures, Unicode 17 grapheme conformance
   data, dependency provenance checks, Rust tests, TypeScript checks, browser
   tests for the implemented foundation and Phase 3 layout path, and a Phase 4
@@ -152,11 +158,11 @@ things:
 - a bounded PDF reader, with selectable text, reproducibility evidence,
   explicit unsupported-content reporting, and an exact owned-source round trip
   when the source payload is available;
-- target-viewer behavior, flattening, and external PDF form import; the current
-  editor can insert, configure, place, fill, reorder, and explicitly remove
-  typed and already-authored valid fields through native accessible controls,
-  while bounded derived AcroForm appearances, the Rust/WASM transport, and
-  guarded browser persistence remain the implemented boundary;
+- target-viewer behavior, browser/WASM integration for the flattening option,
+  and external PDF form import; the core can now explicitly flatten selected
+  accepted fields into derived page content while retaining unselected widgets
+  and the recoverable source, but this does not claim general text/image
+  flattening or target-viewer compatibility;
 - voice dictation and commands through the same revision-checked transaction
   boundary;
 - controlled external-PDF reconstruction/OCR and later native editing of
@@ -307,14 +313,15 @@ are complete with external Windows/Edge/screen-reader closure still open.
 Phase 3, Deterministic Reflow and Pagination, has completed its six local
 implementation plans and dual-run gate. Phase 4 has completed its six local
 implementation plans and dual-run local gate; its qpdf/Poppler/target-viewer
-reference rows remain unavailable, so the phase is not marked complete. The
-Phase 5 has twelve completed local slices for validation/projection,
+reference rows remain unavailable, so the phase is not marked complete. Phase
+5 has thirteen completed local slices for validation/projection,
 noncanonical fill state, effective-value projection, bounded AcroForm
 field/widget structure, the Rust/WASM plus guarded IndexedDB session boundary,
 accessible controls, descriptor configuration, safe anchor placement,
 Rust-owned default text-field insertion, semantic field removal, and canonical
-tab-order authoring, plus bounded derived AcroForm appearance resources and
-state streams. Target-viewer behavior, flattening, and external form import
+tab-order authoring, bounded derived AcroForm appearance resources and state
+streams, plus explicit core export-time flattening of selected fields. Browser
+flattening integration, target-viewer behavior, and external form import
 remain unimplemented; the current implementation still makes no claim of
 complete Unicode/PDF compatibility, commercial-SDK parity, or production
 readiness.

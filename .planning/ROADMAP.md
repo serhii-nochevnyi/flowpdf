@@ -171,7 +171,7 @@ compatibility, and general PDF import remain unclaimed.
   4. Exported fields and appearance states behave consistently in the target viewer matrix.
   5. Flattening is explicit, selected, validated and never silently replaces the editable source.
 
-**Plans**: 12/12 local plans executed; phase-level closure remains open
+**Plans**: 13/13 local plans executed; phase-level closure remains open
 
 - [x] 05-01-PLAN.md — Add Rust-owned field-value validation and deterministic
   display-list anchor-to-widget projection with explicit review paths.
@@ -197,8 +197,11 @@ compatibility, and general PDF import remain unclaimed.
   derived editor/widget/PDF order and accessible localized earlier/later controls.
 - [x] 05-12-PLAN.md — Add bounded deterministic AcroForm normal appearance
   streams, shared resources, and validated checkbox/radio appearance states.
+- [x] 05-13-PLAN.md — Add explicit export-time flattening of selected accepted
+  fields into derived page content while retaining unselected widgets and the
+  recoverable owned source.
 
-The twelve Phase 5 slices validate the existing semantic field vocabulary,
+The thirteen Phase 5 slices validate the existing semantic field vocabulary,
 derive revision/hash-bound fixed-point widget projections, keep explicit
 noncanonical fill overrides separate from authored defaults through to the
 derived widget, emit bounded AcroForm field/widget dictionaries from an
@@ -212,8 +215,12 @@ parity-catalogued `MoveField` path; editor and form/PDF projections derive
 contiguous tab order from the canonical field vector without persisting a
 tab-order property, and the owned writer emits derived bounded normal
 appearance streams with explicit AcroForm resources/defaults and button state
-dictionaries. The slices do not claim target-viewer compatibility, flattening,
-or external form import; those remain separately planned and verified.
+dictionaries. The final slice adds an explicit core export selection that
+translates selected accepted appearances into fixed-point page content,
+retains unselected editable widgets, omits `/AcroForm` only when all fields are
+selected, and keeps exact owned-source recovery. The slices do not claim
+target-viewer compatibility, browser/WASM flattening integration, or external
+form import; those remain separately planned and verified.
 **UI hint**: yes
 
 ### Phase 6: Voice Dictation and Commands
@@ -292,7 +299,7 @@ or external form import; those remain separately planned and verified.
 | 2. Accessible Rich-Text Editing | 18/18 | In Progress (external AT checkpoint) |  |
 | 3. Deterministic Reflow and Pagination | 6/6 | In Progress (external AT checkpoint) |  |
 | 4. Owned PDF Preview and Export | 6/6 | In Progress (reference evidence unavailable) |  |
-| 5. Semantic Fillable Forms | 12/12 executed | In Progress (viewer/flatten/import evidence) |  |
+| 5. Semantic Fillable Forms | 13/13 executed | In Progress (viewer/import/UI integration evidence) |  |
 | 6. Voice Dictation and Commands | 0/TBD | Not started | - |
 | 7. Secure PDF Reader and Scene | 0/TBD | Not started | - |
 | 8. External Reconstruction and OCR | 0/TBD | Not started | - |
