@@ -8,7 +8,7 @@ stopped_at: Phase 6 local closure complete; Phase 7 planning is not started whil
 last_updated: "2026-09-22T15:00:00Z"
 last_activity: 2026-09-22
 last_activity_desc: Completed Phase 6 Plan 06-06 with two passing full local gates, privacy/ownership contracts, refreshed recovery evidence, and explicit speech-service/AT limitations
-state_head: 3
+state_head: a
 progress:
   total_phases: 9
   completed_phases: 1
