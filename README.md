@@ -147,6 +147,10 @@ The current tree includes:
   visual page viewport, exposes a separate accessible widget/review summary,
   and offers explicit select-all/clear/per-field flatten intent without
   mutating semantic or session state;
+- a reusable `createPdfExportRequest` builder that copies accepted source and
+  layout identities, Rust-produced page bounds, and verified form-plan/
+  flatten-selection data into the exact opaque Rust PDF wire payload, failing
+  closed on stale identity combinations;
 - Phase 1 and Phase 2 foundation fixtures, Unicode 17 grapheme conformance
   data, dependency provenance checks, Rust tests, TypeScript checks, browser
   tests for the implemented foundation and Phase 3 layout path, and a Phase 4
@@ -330,7 +334,7 @@ Phase 3, Deterministic Reflow and Pagination, has completed its six local
 implementation plans and dual-run gate. Phase 4 has completed its six local
 implementation plans and dual-run local gate; its qpdf/Poppler/target-viewer
 reference rows remain unavailable, so the phase is not marked complete. Phase
-5 has eighteen completed local slices for validation/projection,
+5 has nineteen completed local slices for validation/projection,
 noncanonical fill state, effective-value projection, bounded AcroForm
 field/widget structure, the Rust/WASM plus guarded IndexedDB session boundary,
 accessible controls, descriptor configuration, safe anchor placement,
@@ -341,6 +345,9 @@ source-bound Rust/WASM form-plan/selection and display-list-backed projection
 envelopes, plus a typed revision-safe browser projection adapter/scheduler,
 an EditorApp-integrated visual/read-only projection surface, and explicit
 source-bound selection controls propagated to the PDF export factory.
+The latest slice centralizes that callback payload construction in a tested
+Rust-compatible builder; it does not activate production font-catalog or
+worker wiring.
 Target-viewer behavior and external form import remain unimplemented; the
 current implementation still makes no claim of complete Unicode/PDF
 compatibility, commercial-SDK parity, or production readiness.
