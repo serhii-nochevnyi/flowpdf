@@ -22,6 +22,31 @@ test('planning state accepts a matching head and completed plan', () => {
   )
 })
 
+test('planning state accepts its parent head when the current commit updates STATE.md', () => {
+  assert.deepEqual(
+    inspectPlanningState({
+      stateMarkdown: synchronizedState,
+      actualHead: 'deadbeef1234567890',
+      parentHead: '8af808cabcdef01234',
+      stateUpdatedInHead: true,
+      latestCompletedPlan: '05-25',
+      currentPlan: '05-25',
+    }),
+    [],
+  )
+})
+
+test('planning state rejects a parent head unless the current commit updates STATE.md', () => {
+  const issues = inspectPlanningState({
+    stateMarkdown: synchronizedState,
+    actualHead: 'deadbeef1234567890',
+    parentHead: '8af808cabcdef01234',
+    stateUpdatedInHead: false,
+  })
+  assert.equal(issues.length, 1)
+  assert.match(issues[0], /does not match HEAD/)
+})
+
 test('planning state reports stale head, untracked projection, and plan drift', () => {
   const issues = inspectPlanningState({
     stateMarkdown: synchronizedState,

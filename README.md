@@ -25,6 +25,11 @@ FlowDocument
     -> browser page viewport plus synchronized semantic accessibility DOM
     -> Rust-owned semantic form validation and derived widget projection
     -> owned fixed-layout PDF objects, export, and visual preview adapter
+
+Imported PDF bytes
+    -> bounded, read-only classic-xref reader and supported scene
+        -> confidence-scored FlowDocument candidate for side-by-side review
+        -> [planned] Rust-owned edit session and fresh full-document rewrite
 ```
 
 Rust owns the document model, revision checks, transactions, recovery rules,
@@ -36,12 +41,14 @@ Worker adapter. IndexedDB is the current browser durability adapter. The page
 viewport is a projection of accepted Rust geometry; the semantic DOM remains
 the authoring and accessibility surface.
 
-The canonical model is deliberately not the DOM and is not a PDF page tree.
-This keeps reflow, undo/redo, accessibility projections, and future PDF
-conversion from depending on unstable browser coordinates. Imported or
-unsupported PDF content is intended to remain explicitly marked and
-preserved; the future reconstruction path is best effort and must not claim
-lossless semantic recovery where it cannot prove it.
+The canonical model is deliberately not the DOM and is not an imported PDF page
+tree. This keeps reflow, undo/redo, and accessibility projections independent
+of unstable browser coordinates. Imported PDFs follow a separate bounded,
+read-only path today: reconstruction is best effort, confidence-scored, and
+reviewed beside an immutable source. Native PDF editing is still planned; an
+accepted architecture decision requires a Rust-owned source-bound session and
+a fresh rewrite, with unsafe or unrepresentable inputs refused rather than
+silently flattened.
 
 ## What is implemented
 
@@ -58,7 +65,7 @@ The current tree includes:
   IndexedDB;
 - pinned ICU4X grapheme-boundary validation for UTF-16 browser positions,
   exact atomic-node edges, and a Rust-owned noncanonical editor session/view
-  projection in the current Phase 2 working tree;
+  projection established by the completed Phase 2 local implementation plans;
 - deterministic fixed-point text layout with explicit Noto Sans/font and
   Ukrainian hyphenation provenance, ICU line segmentation, bidi runs, shaping,
   UTF-8/UTF-16 cluster ranges, and fail-closed unsupported-glyph paths;
@@ -170,6 +177,17 @@ The current tree includes:
   tests for the implemented foundation and Phase 3 layout path, and a Phase 4
   local/reference validation gate that keeps unavailable external evidence
   explicit.
+- a bounded voice-command resolver and browser voice-input seam over the
+  existing command boundary; this does not prove access to a real browser
+  speech service or external assistive-technology behavior;
+- a bounded read-only classic-xref PDF reader, supported-scene projection, and
+  explicit unsupported-content diagnostics; this is not a universal PDF
+  parser or native editing implementation;
+- confidence-scored single-column reconstruction candidates, immutable source
+  storage, side-by-side review, and an OCR adapter seam; no OCR engine or
+  external recognition provider is bundled;
+- a Phase 9 native-editing investigation and accepted ADR; executable plans
+  and native-PDF editing code have not yet been delivered.
 
 These capabilities provide deterministic engine contracts and an inspection
 surface; they do not yet constitute a finished rich-text editor or PDF
@@ -177,51 +195,29 @@ product. Schema support for images, lists, tables, page breaks, fields, and
 styles should not be read as a claim that all corresponding UI operations or
 PDF behavior are already implemented.
 
-## Planned capabilities
+## Remaining work and evidence boundaries
 
-The roadmap is intentionally staged. Remaining work includes, among other
-things:
+Implementation plans for Phases 2–8 are locally complete, but that is not the
+same as closing every release criterion. Microsoft Edge/Windows
+assistive-technology observations remain outstanding for the accessibility
+work; target-viewer and external form-import evidence remains open for forms;
+and external speech-service, qpdf/Poppler, target-viewer, OCR-provider, and
+corpus evidence is unavailable where the phase closures say so. The repository
+does not claim broad PDF compatibility or production readiness.
 
-- broader accessible paragraph and structured rich-text editing with complete
-  keyboard, IME, clipboard, and visible-control coverage;
-- broader script/font coverage, advanced layout constraints, and production
-  pagination hardening beyond the admitted fixtures and bounded Phase 3 path;
-- end-to-end PDF text/image content streams, production font/layout catalog
-  wiring, and target-viewer validation on top of the current owned
-  preview/export contracts;
-- a bounded PDF reader, with selectable text, reproducibility evidence,
-  explicit unsupported-content reporting, and an exact owned-source round trip
-  when the source payload is available;
-- target-viewer behavior and external PDF form import for the verified
-  form-field export path; the core and Rust/WASM envelope can explicitly
-  flatten selected accepted fields into derived page content while retaining
-  unselected widgets and the recoverable source, but this does not claim
-  general text/image flattening or target-viewer compatibility;
-- voice dictation and commands through the same revision-checked transaction
-  boundary;
-- controlled external-PDF reconstruction/OCR and later native editing of
-  supported PDF scene islands.
+The owned PDF export path still has bounded content/resource and viewer
+coverage; Phase 4's external PDF-reference rows are unavailable locally. Phase
+7 reads only its controlled, unencrypted classic-xref subset. Phase 8 produces
+reviewable best-effort reconstruction and exposes an OCR adapter, not a
+bundled OCR engine or provider. Phase 9's investigation and architecture
+decision are accepted, but its executable plans and implementation have not
+started. The first planned end-to-end native-edit path is a plain text-note
+annotation through a Rust-owned source/revision-bound session and fresh rewrite;
+broader text, form, page, and redaction operations require explicit bounds and
+verification before being described as supported.
 
-Phase 2 implementation plans and the Phase 3 local implementation gate are
-complete, but the explicitly required Microsoft Edge on Windows plus Windows
-screen-reader evidence remains outstanding. All six Phase 4 implementation
-plans are now executed: the first five slices add a deterministic bounded Rust
-COS/page envelope, a revision-bound display list, compact TrueType/ToUnicode
-resource inputs, bounded PNG/JPEG resource preparation, typed
-metadata/outline/internal-link support with explicit exclusions for active and
-external actions, a private reproducibility manifest and exact owned-source
-recovery path, plus a revision-safe WASM/worker export adapter and
-visual-only virtualized preview; the sixth adds the reproducible local/
-reference gate. The local Phase 4 gate passes its rows twice, while the four
-external PDF/reference rows are `unavailable` because this checkout has no
-Phase 4 PDF fixture or matching qpdf/Poppler/target-viewer environment. End-
-to-end PDF text/image content streams, production runtime catalog wiring,
-target-viewer validation, and general PDF import remain planned. Complete
-assistive-technology validation, voice control, and production hardening are
-not delivered by this repository state.
-See the
-[roadmap](.planning/ROADMAP.md) and [project constraints](.planning/PROJECT.md)
-for authoritative scope and sequencing.
+See the [roadmap](.planning/ROADMAP.md), [project constraints](.planning/PROJECT.md),
+and [current state](.planning/STATE.md) for authoritative scope and sequencing.
 
 ## Repository map
 
@@ -317,6 +313,12 @@ npm run check:phase4       # Phase 4 local gate plus explicit reference rows
 npm run check:phase4:release # Phase 4 strict release evidence gate
 npm run check:phase5:smoke # Phase 5 manifest, closure, and diagnostic smoke
 npm run check:phase5       # Phase 5 local form, PDF, worker, and build gate
+npm run check:phase6:smoke # Phase 6 manifest/closure/diagnostic smoke
+npm run check:phase6       # Phase 6 local voice and regression gate
+npm run check:phase7:smoke # Phase 7 reader manifest/diagnostic smoke
+npm run check:phase7       # Phase 7 controlled reader local gate
+npm run check:phase8:smoke # Phase 8 reconstruction manifest/diagnostic smoke
+npm run check:phase8       # Phase 8 local reconstruction and regression gate
 npm run check:planning     # planning head, plan, and state projection check
 npm run check:release      # ordered release gate with dependency de-duplication
 ```
@@ -332,16 +334,19 @@ additionally covers the deterministic layout, pagination, worker, viewport,
 migration, and scale lanes; its external AT status remains explicit rather than
 substituted by local Chromium evidence. Phase 4 reference rows are reported as
 unavailable locally and become release blockers under
-`npm run check:phase4:release`.
+`npm run check:phase4:release`. Phase 6–8 checks validate their bounded local
+contracts; they do not substitute for unavailable external service,
+PDF-reference, viewer, OCR-provider, corpus, or accessibility evidence.
 
-`npm run check:release` is the single release entry point. It first requires a
-synchronized clean working tree, `.planning/STATE.md`, and a closed Phase 5 plan inventory, runs
-Phase 1 once, invokes Phase 2 and Phase 3 in dependency-child mode, runs the
-strict Phase 4 evidence gate, then runs Phase 5 and the final diff check. Every
-child process has a bounded timeout and emits only a redacted diagnostic tail
-on failure. External Edge/Windows accessibility and PDF reference evidence
-must be observed on their required target; local substitutes cannot promote
-those checkpoints.
+`npm run check:release` is the aggregate strict gate currently wired for
+Phases 1–5, not a single complete release gate for every roadmap phase. It
+requires a synchronized clean working tree, `.planning/STATE.md`, and a closed
+Phase 5 plan inventory, then runs Phase 1, Phase 2/3 in dependency-child mode,
+the strict Phase 4 evidence gate, Phase 5, and final tree/state/diff checks.
+Each child has a bounded timeout and emits a redacted diagnostic tail on
+failure. Run the separate Phase 6–8 gates for their local contracts; required
+external Edge/Windows accessibility, PDF-reference, viewer, speech-service,
+and OCR evidence still must be observed on the relevant target.
 
 For a direct Rust workspace check using the repository-local toolchain:
 
@@ -358,40 +363,23 @@ relevant plan under [`.planning/phases`](.planning/phases).
 
 ## Development status
 
-Phase 1, Durable Flow Foundation, is complete. Phase 2 implementation plans
-are complete with external Windows/Edge/screen-reader closure still open.
-Phase 3, Deterministic Reflow and Pagination, has completed its six local
-implementation plans and dual-run gate. Phase 4 has completed its six local
-implementation plans and dual-run local gate; its qpdf/Poppler/target-viewer
-reference rows remain unavailable, so the phase is not marked complete. Phase
-5 has twenty-six completed local slices for validation/projection,
-noncanonical fill state, effective-value projection, bounded AcroForm
-field/widget structure, the Rust/WASM plus guarded IndexedDB session boundary,
-accessible controls, descriptor configuration, safe anchor placement,
-Rust-owned default text-field insertion, semantic field removal, and canonical
-tab-order authoring, bounded derived AcroForm appearance resources and state
-streams, explicit core export-time flattening of selected fields, and the
-source-bound Rust/WASM form-plan/selection and display-list-backed projection
-envelopes, plus a typed revision-safe browser projection adapter/scheduler,
-an EditorApp-integrated visual/read-only projection surface, and explicit
-source-bound selection controls propagated to the PDF export factory.
-The latest slice centralizes that callback payload construction in a tested
-Rust-compatible builder and wires the production font catalog plus layout/PDF
-worker entries through the default runtime.
-The controller now uses that builder by default when a PDF scheduler is
-provided without a custom factory, while preserving the explicit custom-factory
-path.
-The real-Chromium PDF preview smoke now exercises that default path and checks
-the captured source/layout-bound request before the fixture scheduler runs.
-The editor shell exposes the same caller-owned controller dependencies through
-`EditorApp` and `mountEditorApp` while the default application entry composes
-the production worker and font-catalog runtime.
-The generated-WASM smoke now crosses the complete request-builder,
-WASM-adapter, scheduler, and accepted-result path through this helper.
-The worker message loop remains covered at its scope boundary alongside the
-real-Chromium default-runtime smoke.
-The latest slice also verifies an ordinary request against the generated
-Rust/WASM `export_pdf` and response verifier.
-Target-viewer behavior and external form import remain unimplemented; the
-current implementation still makes no claim of complete Unicode/PDF
-compatibility, commercial-SDK parity, or production readiness.
+- Phases 1–4: local implementation plans/gates are recorded; Phase 2/3 external
+  accessibility evidence and Phase 4 external PDF-reference/viewer evidence
+  remain open.
+- Phase 5: local forms implementation and gate complete; target-viewer and
+  external form-import evidence remain pending.
+- Phase 6: local voice-command/input seam complete; real speech-service and
+  external accessibility evidence remain pending.
+- Phase 7: bounded read-only reader/scene complete locally; external PDF,
+  target-viewer, and accessibility evidence remain unavailable.
+- Phase 8: confidence-scored reconstruction/review and OCR adapter seam
+  complete locally; OCR provider/corpus and external PDF/viewer/accessibility
+  evidence remain unavailable.
+- Phase 9: investigation closed and ADR accepted; executable plans and code
+  have not started. It is scoped around a complete bounded imported-PDF graph,
+  Rust-owned source/revision-bound sessions, fresh rewrites, explicit refusal
+  boundaries, and independently verified redaction.
+
+The current shell and engine are development software. No phase status here
+claims general PDF compatibility, full accessibility certification, or
+production readiness.

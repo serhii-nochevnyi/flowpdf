@@ -1,14 +1,14 @@
 ---
 gsd_state_version: "1.0"
 milestone: v1.0
-current_phase: 8
-current_phase_name: External Reconstruction and OCR
-status: complete
-stopped_at: Phase 8 Plan 08-04 complete; Phase 8 locally closed for the bounded reconstruction/OCR-adapter subset while external evidence remains a release input
-last_updated: "2026-09-22T19:02:19Z"
-last_activity: 2026-09-22
-last_activity_desc: Completed Phase 8 Plan 08-04 local gates, inherited regressions, and honest evidence closure
-state_head: 08
+current_phase: 9
+current_phase_name: Controlled Native PDF Editing
+status: planning
+stopped_at: INV-001 closed and ADR-001 accepted; executable Phase 9 plans are pending a compatible typed research-artifact handoff
+last_updated: "2026-09-24T12:32:23Z"
+last_activity: 2026-09-24
+last_activity_desc: Closed native-PDF editing investigation, accepted ADR-001, and recorded the Shipyard research-artifact handoff blocker
+state_head: b31a250374327d13f07acd13b5f48fb918a47baa
 progress:
   total_phases: 9
   completed_phases: 1
@@ -21,19 +21,19 @@ milestone_name: milestone
 
 ## Project Reference
 
-See: .planning/PROJECT.md (updated 2026-08-25)
+See: .planning/PROJECT.md (updated 2026-09-24)
 
 **Core value:** A user can edit semantic document text naturally, repaginate following content, and export a visually consistent, selectable, form-capable PDF.
-**Current focus:** Phase 8 — External Reconstruction and OCR (local implementation complete; external OCR/reference/viewer/AT evidence preserved as release inputs)
+**Current focus:** Phase 9 — Controlled Native PDF Editing (investigation and ADR accepted; executable plans pending; no implementation claimed)
 
 ## Current Position
 
-Phase: 8 (External Reconstruction and OCR) — COMPLETE LOCALLY
-Plan: Phase 8 complete locally — no further executable Phase 8 plan
-Status: Phase 7 remains locally complete for the controlled reader subset. Phase 8 Plans 08-01 through 08-04 now own a Rust confidence-scored candidate, verified string-only boundary, cancellable reconstruction worker, immutable source store, side-by-side review surface, privacy-safe local gate, and explicit OCR adapter seam. External OCR provider, qpdf/Poppler, target-viewer, and AT evidence remain explicitly unavailable/outstanding.
-Last activity: 2026-09-22 — Phase 8 Plan 08-04 completed locally; phase closure recorded
+Phase: 9 (Controlled Native PDF Editing) — PLANNING
+Plan: No executable Phase 9 plan yet; investigation INV-001 is closed and ADR-001 is accepted.
+Status: Phase 9 scope and technical decisions are recorded. The installed Codex decomposition host launches `gsd-phase-researcher` read-only, while the role contract requires it to write `RESEARCH.md`; the required typed research-artifact handoff is therefore unavailable. No Phase 9 implementation has started. Earlier Phase 5–8 local implementation status and outstanding external evidence remain as recorded below and in their closure files.
+Last activity: 2026-09-24 — Closed INV-001 and accepted ADR-001; Phase 9 executable planning awaits a compatible typed research handoff
 
-Progress: Phase 2 — 18/18 implementation plans complete; Phase 3 — 6/6 local implementation plans executed; Phase 4 — 6/6 plans executed; Phase 5 — 26/26 local plans executed and locally gated, with target-viewer/import evidence explicitly pending; Phase 6 — 6/6 local plans executed and gated, with speech-service and external AT evidence explicitly pending; Phase 7 — 4/4 plans executed and complete locally for the controlled reader subset, with qpdf/Poppler/target-viewer/AT evidence explicitly unavailable; Phase 8 — 4/4 plans executed and complete locally for the bounded reconstruction/OCR-adapter subset, with external provider/reference/viewer/AT evidence explicitly unavailable. Phase 2/3 phase-level closure remains honest about inherited external AT evidence, and Phase 4/5 remain open for unavailable external PDF/reference evidence.
+Progress: Phase 2 — 18/18 implementation plans complete; Phase 3 — 6/6 local implementation plans executed; Phase 4 — 6/6 plans executed; Phase 5 — 26/26 local plans executed and locally gated, with target-viewer/import evidence explicitly pending; Phase 6 — 6/6 local plans executed and gated, with speech-service and external AT evidence explicitly pending; Phase 7 — 4/4 plans executed and complete locally for the controlled reader subset, with qpdf/Poppler/target-viewer/AT evidence explicitly unavailable; Phase 8 — 4/4 plans executed and complete locally for the bounded reconstruction/OCR-adapter subset, with external provider/reference/viewer/AT evidence explicitly unavailable. Phase 9 investigation/ADR are complete, but there are no executable plans or implementation yet; the typed research-artifact handoff is blocked by the installed host/role sandbox mismatch. Phase 2/3 phase-level closure remains honest about inherited external AT evidence, and Phase 4/5 remain open for unavailable external PDF/reference evidence.
 
 ## Performance Metrics
 

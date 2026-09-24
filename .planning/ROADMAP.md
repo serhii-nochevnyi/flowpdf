@@ -374,18 +374,18 @@ Plans:
 
 ### Phase 9: Controlled Native PDF Editing
 
-**Goal**: Users can directly modify recognized PDF page objects and perform secure page and redaction operations within the supported scene subset.
+**Goal**: Users can edit a bounded subset of imported PDFs without converting them to FlowDocument, while the original remains immutable and every accepted edit is emitted through a validated fresh rewrite.
 **Mode:** mvp
 **Depends on**: Phase 7
 **Requirements**: NPDF-01, NPDF-02, NPDF-03, NPDF-04, NPDF-05
 **Success Criteria** (what must be TRUE):
 
-  1. User can edit supported annotations, form widgets, text islands, images and simple graphics while unsupported scene content remains intact.
-  2. User receives an actionable warning instead of corrupted output when fonts, transforms, clipping or resource constraints make a local edit unsafe.
-  3. User can reorder, rotate, insert, duplicate and delete pages while retaining supported resources and annotations.
-  4. Secure redaction uses a full rewrite and passes post-save object, text and visual checks.
+  1. A plain `/Text` note can be added, moved, edited, and removed through a Rust-owned source/revision-bound session, fresh rewrite, reopen verification, WASM contract, worker, and browser surface; the imported source remains unchanged.
+  2. Reachable supported COS values and untouched encoded streams survive ordinary edits; unsupported or unrepresentable reachable structures fail closed with an actionable diagnostic rather than being dropped or rebuilt from the partial scene.
+  3. Strictly recognized text islands, supported annotations/widgets/page objects, and transactional page operations are admitted only within the limits recorded in ADR-001; stale commands and operations that break references are refused.
+  4. Redaction removes recognized content through a fresh complete rewrite and returns output only after internal post-save checks and required independent structure, text-extraction, and raster validators pass; otherwise no redacted output is published.
 
-**Plans**: TBD
+**Plans**: Not created. Investigation `INV-001-native-pdf-editing` is closed and ADR-001 is accepted; plan decomposition is pending because the installed Codex typed host cannot provide the required writable research artifact.
 **UI hint**: yes
 
 ## Progress
@@ -402,4 +402,4 @@ Plans:
 | 6. Voice Dictation and Commands | 6/6 executed | Complete locally (release evidence pending) | 2026-09-22 |
 | 7. Secure PDF Reader and Scene | 4/4 | Complete locally (release evidence pending) | 2026-09-22 |
 | 8. External Reconstruction and OCR | 4/4 | Complete locally (release evidence pending) | 2026-09-22 |
-| 9. Controlled Native PDF Editing | 0/TBD | Not started | - |
+| 9. Controlled Native PDF Editing | 0/TBD | Investigation/ADR accepted; executable plans pending | - |

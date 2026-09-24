@@ -1,6 +1,6 @@
 # Options
 
-<!-- Draft options; no recommendation is selected during research. -->
+<!-- Options were compared during investigation; the selected decision is recorded in DECISIONS.md. -->
 
 ## Option A — Rewrite a bounded source object graph
 
@@ -21,3 +21,14 @@ Defer native editing and redaction. Continue supporting reader/reconstruction wh
 | Complexity | High: object graph retention and deterministic rewriting | High: scene-to-content emission, resource rebuilding, and fidelity limits | Low |
 | Risks | Incorrect reachability or serialization may lose hidden or interactive content | Flattening/rebuilding can change text selection, forms, links, accessibility, and appearance | Does not deliver NPDF-01 through NPDF-05 |
 | What it forecloses | Fast implementation without a preservation proof; edits to unrecognized affected objects | Reliable preservation of source semantics and per-object provenance | Native corrections, page operations, and redaction |
+
+## Decision
+
+Option A is selected with strict refusal boundaries: import only a fully
+parseable reachable graph from the currently admitted unencrypted
+classic-xref subset; retain supported generic COS values and raw encoded stream
+bytes; write a fresh complete PDF; drop unreachable source objects; refuse the
+entire edit if any reachable structure cannot be safely represented. Redaction
+adds a narrower supported-content policy and mandatory post-save validation.
+Affirmative positions and scope fences are recorded in `DECISIONS.md` and
+`.planning/architecture/ADR-001-native-pdf-editing.md`.

@@ -14,13 +14,18 @@ export function inspectPlanningState({
   stateJsonTracked = true,
   latestCompletedPlan = null,
   currentPlan = null,
+  parentHead = null,
+  stateUpdatedInHead = false,
 }) {
   const issues = []
   const stateHead = /^state_head:\s*"?([0-9a-f]+)"?/im.exec(stateMarkdown)?.[1]
+  const matchesHead = (candidate) => candidate !== null
+    && (candidate.startsWith(stateHead) || stateHead.startsWith(candidate))
   if (stateHead === undefined) {
     issues.push('STATE.md has no state_head')
-  } else if (!(actualHead.startsWith(stateHead) || stateHead.startsWith(actualHead))) {
-    issues.push(`STATE.md state_head ${stateHead} does not match HEAD ${actualHead}`)
+  } else if (!matchesHead(actualHead)
+      && !(stateUpdatedInHead && matchesHead(parentHead))) {
+    issues.push(`STATE.md state_head ${stateHead} does not match HEAD ${actualHead} or the parent HEAD of a commit that updates STATE.md`)
   }
 
   if (stateJsonExists && !stateJsonTracked) {
@@ -84,10 +89,18 @@ function currentPlan(stateMarkdown) {
 export function loadPlanningState(root = projectRoot) {
   const stateMarkdown = readFileSync(resolve(root, '.planning/STATE.md'), 'utf8')
   const stateJsonPath = resolve(root, '.planning/state.json')
+  const commitLine = gitOutput(root, ['rev-list', '--parents', '-n', '1', 'HEAD']).split(/\s+/)
+  const parentHead = commitLine[1] ?? null
+  const stateUpdatedInHead = parentHead !== null
+    && gitOutput(root, ['diff', '--name-only', parentHead, commitLine[0], '--', '.planning/STATE.md'])
+      .split(/\r?\n/)
+      .includes('.planning/STATE.md')
   return {
     issues: inspectPlanningState({
       stateMarkdown,
       actualHead: gitOutput(root, ['rev-parse', 'HEAD']),
+      parentHead,
+      stateUpdatedInHead,
       stateJsonExists: existsSync(stateJsonPath),
       stateJsonTracked: isTracked(root, '.planning/state.json'),
       latestCompletedPlan: latestCompletedPlan(root),
