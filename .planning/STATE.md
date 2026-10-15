@@ -4,10 +4,10 @@ milestone: v1.0
 current_phase: 9
 current_phase_name: Controlled Native PDF Editing
 status: planning
-stopped_at: INV-001 closed and ADR-001 accepted; executable Phase 9 plans are pending a compatible typed research-artifact handoff
-last_updated: "2026-09-24T12:32:23Z"
-last_activity: 2026-09-24
-last_activity_desc: Closed native-PDF editing investigation, accepted ADR-001, and recorded the Shipyard research-artifact handoff blocker
+stopped_at: INV-001 closed and ADR-001 accepted; Phase 9 decomposition is pending a supported typed-dispatch path for the configured GSD UI and pattern-mapper hooks
+last_updated: "2026-10-15T14:32:54Z"
+last_activity: 2026-10-15
+last_activity_desc: Revalidated the current GSD and Shipyard host contracts; corrected the Phase 9 planning blocker and recorded the historical sandbox discrepancy
 state_head: b31a250374327d13f07acd13b5f48fb918a47baa
 progress:
   total_phases: 9
@@ -30,8 +30,8 @@ See: .planning/PROJECT.md (updated 2026-09-24)
 
 Phase: 9 (Controlled Native PDF Editing) — PLANNING
 Plan: No executable Phase 9 plan yet; investigation INV-001 is closed and ADR-001 is accepted.
-Status: Phase 9 scope and technical decisions are recorded. The prior blocker note was inaccurate: the installed Codex decomposition host grants `gsd-phase-researcher` `workspace-write`. The remaining planning integration gap is that Phase 9 enables GSD UI and pattern-mapping hooks, while the Shipyard decomposition/context hosts accept only `gsd-phase-researcher`, `gsd-planner`, and `gsd-plan-checker`; the newly enabled GSD 1.17.0 plugin exposes additional typed roles in Codex but does not change those host allowlists or receipt contracts. No Phase 9 callbacks, executable plans, or implementation have been recorded. Earlier Phase 5–8 local implementation status and outstanding external evidence remain as recorded below and in their closure files.
-Last activity: 2026-10-15 — Revalidated the Phase 9 host contract, corrected the stale researcher-sandbox blocker, and recorded the remaining role-coverage gap
+Status: Phase 9 scope and technical decisions are recorded. The current Shipyard host and installed `gsd-phase-researcher` agent declare `workspace-write`, and the launcher maps that permission to `:workspace`; however, a historical 2026-09-24 INV-001 receipt records an effective `:read-only` launch, so the current behavior has not been verified by a fresh Phase 9 callback. Separately, GSD 1.17 plan-phase hooks require UI researcher/checker and pattern-mapper roles, while the installed Shipyard decomposition/context hosts accept only `gsd-phase-researcher`, `gsd-planner`, and `gsd-plan-checker`. The newly enabled GSD plugin exposes additional typed roles but does not extend those host allowlists or receipt contracts. No Phase 9 callbacks, executable plans, or implementation have been recorded. Earlier Phase 5–8 local implementation status and outstanding external evidence remain as recorded below and in their closure files.
+Last activity: 2026-10-15 — Revalidated the current GSD and Shipyard dispatch paths, including the historical effective sandbox evidence and Phase 9 role-coverage gap
 
 Progress: Phase 2 — 18/18 implementation plans complete; Phase 3 — 6/6 local implementation plans executed; Phase 4 — 6/6 plans executed; Phase 5 — 26/26 local plans executed and locally gated, with target-viewer/import evidence explicitly pending; Phase 6 — 6/6 local plans executed and gated, with speech-service and external AT evidence explicitly pending; Phase 7 — 4/4 plans executed and complete locally for the controlled reader subset, with qpdf/Poppler/target-viewer/AT evidence explicitly unavailable; Phase 8 — 4/4 plans executed and complete locally for the bounded reconstruction/OCR-adapter subset, with external provider/reference/viewer/AT evidence explicitly unavailable. Phase 9 investigation/ADR are complete, but there are no executable plans or implementation yet; decomposition is awaiting host support for the GSD UI and pattern-mapper hooks. Phase 2/3 phase-level closure remains honest about inherited external AT evidence, and Phase 4/5 remain open for unavailable external PDF/reference evidence.
 

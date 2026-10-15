@@ -385,7 +385,7 @@ Plans:
   3. Strictly recognized text islands, supported annotations/widgets/page objects, and transactional page operations are admitted only within the limits recorded in ADR-001; stale commands and operations that break references are refused.
   4. Redaction removes recognized content through a fresh complete rewrite and returns output only after internal post-save checks and required independent structure, text-extraction, and raster validators pass; otherwise no redacted output is published.
 
-**Plans**: Not created. Investigation `INV-001-native-pdf-editing` is closed and ADR-001 is accepted; plan decomposition is pending because the installed Codex typed host cannot provide the required writable research artifact.
+**Plans**: Not created. Investigation `INV-001-native-pdf-editing` is closed and ADR-001 is accepted. The current host source declares a writable researcher, but the prior INV-001 receipt records a read-only launch; current Phase 9 permissions therefore need fresh receipt-backed verification. Decomposition also needs a supported typed-dispatch path for the GSD 1.17 UI and pattern-mapper hooks, which are not in the installed Shipyard host allowlists.
 **UI hint**: yes
 
 ## Progress
