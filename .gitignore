@@ -51,3 +51,4 @@ vendor/
 *.log
 .cache/
 tmp/
+/.planning/
