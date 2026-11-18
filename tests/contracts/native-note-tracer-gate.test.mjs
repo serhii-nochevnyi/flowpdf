@@ -3,7 +3,6 @@ import { readFileSync } from 'node:fs'
 import { test } from 'node:test'
 import { buildArgv, browserArgv, bundleArgv, builtBrowserArgv, requirePassedCi, runTracer } from '../../scripts/check-native-note-tracer.mjs'
 
-const workflowText = readFileSync(new URL('../../.github/workflows/pdf-native-note-tracer.yml', import.meta.url), 'utf8')
 const sha = 'a'.repeat(40)
 const repo = 'serhii-nochevnyi/flowpdf'
 const workflow = 'Native PDF note tracer'
@@ -29,13 +28,18 @@ function fixture() {
     name, head_sha: sha, url, status: 'completed', conclusion: 'success',
     app: { slug: 'github-actions', owner: { login: 'github' } },
   }
-  const state = { runs: [run], jobs: [job], checks: [check], origin: `git@github.com:${repo}.git`, auth: true, workflowText }
+  const state = { runs: [run], jobs: [job], checks: [check], origin: `git@github.com:${repo}.git`, auth: true, changedPath: null }
   function command(argv) {
     if (argv[1] === 'rev-parse') {
       assert.deepEqual(argv, ['git', 'rev-parse', '--verify', '--end-of-options', 'HEAD^{commit}'])
       return sha
     }
-    if (argv[1] === 'show') return state.workflowText
+    if (argv[1] === 'show') {
+      assert.ok(argv[2].startsWith(`${sha}:`))
+      const path = argv[2].slice(sha.length + 1)
+      const bytes = readFileSync(new URL(`../../${path}`, import.meta.url), 'utf8')
+      return path === state.changedPath ? bytes + ' ' : bytes
+    }
     if (argv[1] === 'remote') return state.origin
     if (argv[1] === 'auth') {
       if (!state.auth) throw new Error('auth unavailable')
@@ -68,7 +72,11 @@ const refusals = [
   ['missing run', ({ state }) => { state.runs = [] }],
   ['wrong run SHA', ({ run }) => { run.head_sha = 'b'.repeat(40) }],
   ['wrong run repository', ({ run }) => { run.repository.full_name = 'another/flowpdf' }],
-  ['modified workflow bytes', ({ state }) => { state.workflowText += ' ' }],
+  ['modified workflow bytes', ({ state }) => { state.changedPath = '.github/workflows/pdf-native-note-tracer.yml' }],
+  ['modified build definition', ({ state }) => { state.changedPath = 'package.json' }],
+  ['modified browser configuration', ({ state }) => { state.changedPath = 'vitest.config.ts' }],
+  ['modified bilingual browser assertions', ({ state }) => { state.changedPath = 'web/tests/pdf-native-edit.browser.test.ts' }],
+  ['modified built smoke assertions', ({ state }) => { state.changedPath = 'scripts/check-native-note-built.mjs' }],
   ['pull request run', ({ run }) => { run.event = 'pull_request' }],
   ['missing mandatory step', ({ job }) => { job.steps.pop() }],
   ['duplicate mandatory step', ({ job }) => { job.steps.push(job.steps[0]) }],

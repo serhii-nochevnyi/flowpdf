@@ -9,7 +9,27 @@ const workflowFile = 'pdf-native-note-tracer.yml'
 const workflowPath = `.github/workflows/${workflowFile}`
 const workflowName = 'Native PDF note tracer'
 const jobName = 'native-pdf-note-tracer'
-const workflowSha256 = '62f76deaa269fe69c7e44dcd54458f26ab4d65ea0b195fc1636a6c65788cd2d4'
+const approvedHarness = [
+  ['.github/workflows/pdf-native-note-tracer.yml', '62f76deaa269fe69c7e44dcd54458f26ab4d65ea0b195fc1636a6c65788cd2d4'],
+  ['package.json', 'a5686497377219cf6c5279e057fa831e445547226a39dc5418a31d5a4be9ab74'],
+  ['package-lock.json', 'f1e5575f8687ea0fbf7f5abffddaa640116c8f24d09a724009d1b5210bceb3fd'],
+  ['Cargo.lock', 'c04f2deac969c598caf8bc3b8e8b0ef23248115d3cf5492d06ac3ff366188be2'],
+  ['rust-toolchain.toml', '683619e182e9d4e060bf754a8385eed1a1220cbc3e5a09e8c2dd22520af25dc6'],
+  ['tsconfig.json', '8b048c299a7d6e709b15625b92a2bc4969f6891ee2eeb8176e6f05379dbb8a75'],
+  ['tsconfig.web.json', 'c8fdaf6db3e965a6bdd4157bb88de4edb9c6a8976bf1b4233d08de1c7690c38f'],
+  ['config/dependency-provenance.json', 'dbfb8e57d8f131f98b269729568e920b0e98a1d81379859cdd8d45091a5f45e0'],
+  ['artifacts/provenance/phase1-dependencies.json', '7f3c1e134e955d2bfae6e696a2419164d92f0e19938793a7a61ccd19f5a3ba10'],
+  ['scripts/build-web.mjs', 'f7c8e5fb15b200bad752c4c9d771a6b14b099d129f06bb51e5794595b7d49467'],
+  ['scripts/verify-wasm-bindgen-tool.mjs', 'b80611196dcf834dd5ff2042bc58659539ae616529f14720d220eb740384c6c4'],
+  ['scripts/node-version.mjs', '012d4782d3bef70f1cf7b4fa38eac1a550b8cb0b08bf7b8ebdce4f7a6de1a1db'],
+  ['vite.config.ts', '2cbce239e60967b1e1418ad31be515168dcbdb61f0c62994103b926358b9652b'],
+  ['vitest.config.ts', 'ec28afa609c9842929e91a4804c0b4b272e5bf0b7b7648b296d8c0b139cb60f8'],
+  ['web/index.html', 'b822d2d54af4513d06170efce5b41fa450636a8e9ab85638c474d72b8e37f6c2'],
+  ['web/editor.html', '1827eb7316907e5b0fabad0b7da31ea19172f65056d969ee05bbd9e01f8f5063'],
+  ['web/tests/pdf-native-edit.browser.test.ts', 'e1b9dec38bbc3fe7dcc981c28c45576e22e419da4d8d230e5c739ccf6ff81410'],
+  ['scripts/check-native-note-built.mjs', 'aa9ae9e33f53a1ea00a92163ad9f2951d30705ce6892abd8f055b2877faed105'],
+  ['scripts/serve-inspector.mjs', '07e3f482d39f79c3e4e3423e2627c5971477e492fc26855583ce37c77fe98376'],
+]
 const requiredSteps = [
   'Verify exact checkout',
   'Build generated WASM and web output',
@@ -71,10 +91,12 @@ export function requirePassedCi(ref, command = execute) {
     }
   }
 
-  const workflow = call(command, ['git', 'show', `${sha}:${workflowPath}`],
-    'NATIVE_NOTE_TRACER_WORKFLOW_UNAVAILABLE', { raw: true })
-  requireEvidence(createHash('sha256').update(workflow).digest('hex') === workflowSha256,
-    'NATIVE_NOTE_TRACER_WORKFLOW_NOT_APPROVED')
+  for (const [path, digest] of approvedHarness) {
+    const contents = call(command, ['git', 'show', `${sha}:${path}`],
+      'NATIVE_NOTE_TRACER_HARNESS_UNAVAILABLE', { raw: true })
+    requireEvidence(createHash('sha256').update(contents).digest('hex') === digest,
+      'NATIVE_NOTE_TRACER_HARNESS_NOT_APPROVED')
+  }
   const { workflow_runs: runs, total_count: runCount } = get(`actions/workflows/${workflowFile}/runs?event=push&head_sha=${sha}&per_page=100`)
   requireEvidence(Array.isArray(runs) && runs.length > 0 && runs.length < 100 && runCount === runs.length &&
     runs.every((run) => Number.isSafeInteger(run.run_number)), 'NATIVE_NOTE_TRACER_RUN_UNAVAILABLE')
