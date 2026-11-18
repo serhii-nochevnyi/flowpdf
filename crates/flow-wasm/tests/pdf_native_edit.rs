@@ -296,3 +296,152 @@ fn registry_reserves_two_sessions_and_releases_capacity_on_close() {
         "unseen"
     );
 }
+
+fn embedded_text_pdf() -> Vec<u8> {
+    fn stream(bytes: &[u8], extra: &str) -> Vec<u8> {
+        let mut data = format!("<< /Length {} {extra} >>\nstream\n", bytes.len()).into_bytes();
+        data.extend_from_slice(bytes);
+        data.extend_from_slice(b"\nendstream");
+        data
+    }
+    let font = include_bytes!("../../flow-core/data/NotoSans-Regular.ttf");
+    let cmap = b"/CIDInit /ProcSet findresource begin 12 dict begin begincmap\n/CMapName /Fixture def /CMapType 2 def\n1 begincodespacerange <00> <FF> endcodespacerange\n1 beginbfchar <41> <0041> endbfchar\nendcmap CMapName currentdict /CMap defineresource pop end end";
+    let mut pdf = b"%PDF-1.7\n".to_vec();
+    let objects = [
+        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>".to_vec(),
+        stream(b"BT /F1 12 Tf 20 100 Td (AAA) Tj ET", ""),
+        b"<< /Type /Font /Subtype /TrueType /BaseFont /NotoSans-Regular /Encoding /WinAnsiEncoding /FirstChar 65 /LastChar 65 /Widths [639] /FontDescriptor 6 0 R /ToUnicode 7 0 R >>".to_vec(),
+        b"<< /Type /FontDescriptor /FontName /NotoSans-Regular /Flags 32 /FontFile2 8 0 R >>".to_vec(),
+        stream(cmap, ""),
+        stream(font, &format!("/Length1 {}", font.len())),
+    ];
+    let mut offsets = Vec::new();
+    for (index, object) in objects.iter().enumerate() {
+        offsets.push(pdf.len());
+        pdf.extend_from_slice(format!("{} 0 obj\n", index + 1).as_bytes());
+        pdf.extend_from_slice(object);
+        pdf.extend_from_slice(b"\nendobj\n");
+    }
+    let xref = pdf.len();
+    pdf.extend_from_slice(b"xref\n0 9\n0000000000 65535 f \n");
+    for offset in offsets {
+        pdf.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+    }
+    pdf.extend_from_slice(
+        format!("trailer\n<< /Size 9 /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n").as_bytes(),
+    );
+    pdf
+}
+
+#[test]
+fn serialized_text_replacement_checks_capability_revision_and_output_identity() {
+    let bytes = embedded_text_pdf();
+    let request = open_request(&bytes);
+    let original = call(native_pdf_open, request.clone())["snapshot"].clone();
+    let target = &original["scene"]["textPages"][0]["islands"][0];
+    assert_eq!(target["text"], "AAA");
+    assert_eq!(target["profile"], "trueTypeWinAnsi");
+    let mut command = bound("command", 2, &original);
+    command["outputHash"] = original["outputHash"].clone();
+    command["command"] = json!({"kind":"replaceText","island":target["id"],"text":"AA"});
+    for (text, code) in [
+        ("secret", "FLOW_PDF_NATIVE_TEXT_MAPPING"),
+        ("AAAA", "FLOW_PDF_NATIVE_TEXT_OVERFLOW"),
+    ] {
+        let mut bad = command.clone();
+        bad["command"]["text"] = json!(text);
+        let refusal = call(native_pdf_command, bad);
+        assert_eq!(refusal["code"], code);
+        assert!(refusal["snapshot"].is_null());
+        assert!(!refusal.to_string().contains("secret"));
+    }
+    let mut forged = command.clone();
+    forged["command"]["island"] = json!(vec![0; 32]);
+    assert_eq!(
+        call(native_pdf_command, forged)["code"],
+        "FLOW_PDF_NATIVE_TARGET_UNAVAILABLE"
+    );
+    let unchanged = call(native_pdf_snapshot, bound("snapshot", 2, &original));
+    assert_eq!(unchanged["snapshot"], original);
+
+    let applied = call(native_pdf_command, command.clone());
+    assert_eq!(applied["status"], "applied");
+    let current = &applied["snapshot"];
+    let current_target = &current["scene"]["textPages"][0]["islands"][0];
+    assert_eq!(current_target["text"], "AA");
+    assert_ne!(current_target["id"], target["id"]);
+    assert_eq!(current["binding"]["revision"], 1);
+    assert_eq!(
+        current["binding"]["originHash"],
+        original["binding"]["originHash"]
+    );
+    assert_eq!(current["originStoreHash"], original["originStoreHash"]);
+    assert_ne!(current["outputHash"], original["outputHash"]);
+    assert_eq!(
+        call(native_pdf_command, command.clone())["snapshot"],
+        *current
+    );
+    command["requestId"] = json!(3);
+    assert_eq!(
+        call(native_pdf_command, command.clone())["code"],
+        "FLOW_PDF_NATIVE_REVISION_MISMATCH"
+    );
+    command["binding"] = current["binding"].clone();
+    assert_eq!(
+        call(native_pdf_command, command.clone())["code"],
+        "FLOW_PDF_NATIVE_BINDING_MISMATCH"
+    );
+    command["outputHash"] = current["outputHash"].clone();
+    assert_eq!(
+        call(native_pdf_command, command)["code"],
+        "FLOW_PDF_NATIVE_TARGET_UNAVAILABLE"
+    );
+}
+
+#[test]
+fn wire_verifier_rejects_rehashed_capability_that_disagrees_with_output() {
+    use flow_core::pdf::{PdfObjectRef, native::NativeTextPage};
+
+    fn result_hash(json: &str, old_hash: &str) -> String {
+        let mut hash = blake3::Hasher::new();
+        hash.update(b"flowpdf:native-wire:v1");
+        hash.update(json.replace(old_hash, "").as_bytes());
+        hash.finalize().to_hex().to_string()
+    }
+
+    let response = native_pdf_open(open_request(&embedded_text_pdf()).to_string());
+    let value: Value = serde_json::from_str(&response).unwrap();
+    let old_result = value["resultHash"].as_str().unwrap();
+    assert_eq!(result_hash(&response, old_result), old_result);
+    assert!(verify_native_pdf_response(response.clone()));
+
+    let scene = &value["snapshot"]["scene"];
+    let page = &scene["pages"][0];
+    let object: PdfObjectRef = serde_json::from_value(page["object"].clone()).unwrap();
+    let output_hash: [u8; 32] = serde_json::from_value(scene["outputHash"].clone()).unwrap();
+    let old_scene = serde_json::to_string(&scene["sceneHash"]).unwrap();
+    let mut text_pages: Vec<NativeTextPage> =
+        serde_json::from_value(scene["textPages"].clone()).unwrap();
+    let derive_scene_hash = |text_pages: &[NativeTextPage]| {
+        let mut hash = blake3::Hasher::new();
+        hash.update(b"flowpdf:accepted-note-scene:v2");
+        hash.update(&output_hash);
+        hash.update(&serde_json::to_vec(&(object, &page["geometry"], true)).unwrap());
+        hash.update(b"flowpdf:native-text-pages:v1");
+        hash.update(&serde_json::to_vec(text_pages).unwrap());
+        serde_json::to_string(hash.finalize().as_bytes()).unwrap()
+    };
+    assert_eq!(derive_scene_hash(&text_pages), old_scene);
+    text_pages[0].islands[0].text = "forged replacement capability".into();
+    let tampered = response
+        .replace(
+            r#""text":"AAA""#,
+            r#""text":"forged replacement capability""#,
+        )
+        .replace(&old_scene, &derive_scene_hash(&text_pages));
+    let forged = tampered.replace(old_result, &result_hash(&tampered, old_result));
+    assert_ne!(forged, response);
+    assert!(!verify_native_pdf_response(forged));
+}

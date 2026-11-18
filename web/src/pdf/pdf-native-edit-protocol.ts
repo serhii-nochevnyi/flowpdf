@@ -19,6 +19,39 @@ export type NativePdfNoteCommand =
   | { readonly kind: 'move'; readonly note: number; readonly page: number; readonly rect: NativePdfRect }
   | { readonly kind: 'remove'; readonly note: number }
 
+export type NativePdfTextCommand = {
+  readonly kind: 'replaceText'
+  readonly island: readonly number[]
+  readonly text: string
+}
+
+export type NativePdfCommand = NativePdfNoteCommand | NativePdfTextCommand
+
+const textRefusals = [
+  'FLOW_PDF_NATIVE_TEXT_FONT',
+  'FLOW_PDF_NATIVE_TEXT_MAPPING',
+  'FLOW_PDF_NATIVE_TEXT_LAYOUT',
+  'FLOW_PDF_NATIVE_TEXT_OWNERSHIP',
+  'FLOW_PDF_NATIVE_TEXT_OVERFLOW',
+] as const
+
+export type NativePdfTextRefusal = typeof textRefusals[number]
+
+export interface NativePdfTextIsland {
+  readonly id: readonly number[]
+  readonly text: string
+  readonly bounds: NativePdfRect
+  readonly profile: 'trueTypeWinAnsi' | 'identityHCidFontType2'
+  readonly operator: 'Tj' | 'TJ'
+  readonly maxAdvance: number
+}
+
+export interface NativePdfTextPage {
+  readonly page: number
+  readonly islands: readonly NativePdfTextIsland[]
+  readonly refusal: NativePdfTextRefusal | null
+}
+
 export interface NativePdfBinding {
   readonly epoch: readonly number[]
   readonly sessionId: number
@@ -38,6 +71,7 @@ export type NativePdfAnnotation =
 export interface NativePdfNoteScene {
   readonly outputHash: readonly number[]
   readonly sceneHash: readonly number[]
+  readonly textPages?: readonly NativePdfTextPage[]
   readonly pages: readonly {
     readonly id: number
     readonly object: NativePdfObjectRef
@@ -68,7 +102,7 @@ interface BoundRequest extends RequestIdentity {
 
 export type NativePdfRequest =
   | (RequestIdentity & { readonly operation: 'open'; readonly epoch: readonly number[]; readonly bytesHex: string })
-  | (BoundRequest & { readonly operation: 'command'; readonly outputHash: readonly number[]; readonly command: NativePdfNoteCommand })
+  | (BoundRequest & { readonly operation: 'command'; readonly outputHash: readonly number[]; readonly command: NativePdfCommand })
   | (BoundRequest & { readonly operation: 'snapshot' })
   | (BoundRequest & { readonly operation: 'close' })
 
@@ -123,7 +157,9 @@ export type NativePdfTransportCode =
   | 'FLOW_PDF_NATIVE_RESPONSE_INVALID'
 
 const hexDigits = '0123456789abcdef'
+const textRefusalCodes = new Set<string>(textRefusals)
 const rustErrorCodes = new Set([
+  ...textRefusals,
   'FLOW_PDF_NATIVE_REQUEST_DECODE',
   'FLOW_PDF_NATIVE_BINDING_MISMATCH',
   'FLOW_PDF_NATIVE_REVISION_MISMATCH',
@@ -223,6 +259,12 @@ export function isNativeNoteCommand(value: unknown): value is NativePdfNoteComma
   return shape(value, 'kind', 'note') && value.kind === 'remove' && isNativeRequestId(value.note)
 }
 
+function isNativeCommand(value: unknown): value is NativePdfCommand {
+  return isNativeNoteCommand(value)
+    || (shape(value, 'kind', 'island', 'text') && value.kind === 'replaceText'
+      && hash(value.island) && contents(value.text))
+}
+
 export function isNativeWorkerRequest(value: unknown): value is NativePdfWorkerRequest {
   if (!shape(value, 'dispatchId', 'request') || !isNativeRequestId(value.dispatchId)) return false
   if (typeof value.request !== 'object' || value.request === null) return false
@@ -236,7 +278,7 @@ export function isNativeWorkerRequest(value: unknown): value is NativePdfWorkerR
       break
     case 'command':
       if (!shape(request, ...bound, 'outputHash', 'command') || !binding(request.binding)
-        || !hash(request.outputHash) || !isNativeNoteCommand(request.command)) return false
+        || !hash(request.outputHash) || !isNativeCommand(request.command)) return false
       break
     case 'snapshot':
     case 'close':
@@ -285,9 +327,34 @@ function geometry(value: unknown): boolean {
     && (value.rotation === 0 || value.rotation === 90 || value.rotation === 180 || value.rotation === 270)
 }
 
+function textIsland(value: unknown): boolean {
+  return shape(value, 'id', 'text', 'bounds', 'profile', 'operator', 'maxAdvance') && hash(value.id)
+    && typeof value.text === 'string' && value.text.length > 0 && contents(value.text)
+    && rect(value.bounds) && value.bounds[0] < value.bounds[2] && value.bounds[1] < value.bounds[3]
+    && (value.profile === 'trueTypeWinAnsi' || value.profile === 'identityHCidFontType2')
+    && (value.operator === 'Tj' || value.operator === 'TJ') && integer(value.maxAdvance, 0)
+}
+
+function textPages(value: unknown, pageCount: number): boolean {
+  if (!Array.isArray(value) || value.length === 0 || value.length > pageCount) return false
+  let previous = -1
+  for (const page of value) {
+    if (!shape(page, 'page', 'islands', 'refusal') || !integer(page.page, previous + 1, pageCount - 1)
+      || !Array.isArray(page.islands) || page.islands.length > 128) return false
+    if (page.refusal === null) {
+      if (page.islands.length === 0 || !page.islands.every(textIsland)) return false
+    } else if (page.islands.length !== 0 || typeof page.refusal !== 'string'
+      || !textRefusalCodes.has(page.refusal)) return false
+    previous = page.page
+  }
+  return true
+}
+
 function scene(value: unknown): value is NativePdfNoteScene {
-  return shape(value, 'sceneHash', 'outputHash', 'pages') && hash(value.sceneHash) && hash(value.outputHash)
+  return (shape(value, 'sceneHash', 'outputHash', 'pages') || shape(value, 'sceneHash', 'outputHash', 'pages', 'textPages'))
+    && hash(value.sceneHash) && hash(value.outputHash)
     && Array.isArray(value.pages) && value.pages.length <= 4096
+    && (!Object.hasOwn(value, 'textPages') || textPages(value.textPages, value.pages.length))
     && value.pages.every((page: unknown, index) => shape(page, 'id', 'object', 'geometry', 'canAddNote', 'annotations')
       && page.id === index && objectRef(page.object) && (page.geometry === null || geometry(page.geometry))
       && typeof page.canAddNote === 'boolean' && Array.isArray(page.annotations)
@@ -325,6 +392,7 @@ function isNativeResponse(value: unknown): value is NativePdfResponse {
 
   if (value.status === 'failed') {
     return value.snapshot === null && typeof value.code === 'string' && rustErrorCodes.has(value.code)
+      && (!textRefusalCodes.has(value.code) || (value.operation === 'command' && value.requestId > 0))
       && (value.code !== 'FLOW_PDF_NATIVE_IMPORT_REFUSED' || (value.operation === 'open' && value.requestId > 0))
       && (value.requestId === 0 ? value.binding === null && value.originStoreHash === null
         : isNativeStoreHash(value.originStoreHash) && (value.operation === 'open' ? value.binding === null : binding(value.binding)))
