@@ -5,7 +5,12 @@
 //! reader boundary, not a general-purpose PDF repair engine: unsupported
 //! syntax is classified explicitly and active content is never interpreted.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    io::Cursor as IoCursor,
+};
+
+use image::{ColorType, ImageDecoder, Limits, codecs::jpeg::JpegDecoder};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -1032,6 +1037,9 @@ fn decode_stream(
             .ok_or(PdfReadError::FilterUnsupported)?,
         _ => return Err(PdfReadError::FilterUnsupported),
     };
+    if exact && matches!(filter, "DCTDecode" | "DCT") {
+        return decode_retained_jpeg(dictionary, &raw, limits);
+    }
     match filter {
         "Identity" => {
             if raw.len() > limits.max_decoded_stream_bytes {
@@ -1039,7 +1047,6 @@ fn decode_stream(
             }
             Ok(raw)
         }
-        "DCTDecode" | "DCT" if exact => Err(PdfReadError::FilterUnsupported),
         "DCTDecode" | "DCT" => {
             if raw.len() > limits.max_decoded_stream_bytes {
                 return Err(PdfReadError::DecodedStreamLimit);
@@ -1069,6 +1076,117 @@ fn decode_stream(
         }
         _ => Err(PdfReadError::FilterUnsupported),
     }
+}
+
+pub(super) fn jpeg_frame(bytes: &[u8]) -> Option<(u32, u32, ColorType)> {
+    let mut segments = bytes
+        .strip_prefix(&[0xff, 0xd8])?
+        .strip_suffix(&[0xff, 0xd9])?;
+    loop {
+        segments = segments.strip_prefix(&[0xff])?;
+        while let Some(rest) = segments.strip_prefix(&[0xff]) {
+            segments = rest;
+        }
+        let (&marker, rest) = segments.split_first()?;
+        if matches!(marker, 0x00 | 0x01 | 0xd0..=0xda) {
+            return None;
+        }
+        let length = usize::from(u16::from_be_bytes(rest.get(..2)?.try_into().ok()?));
+        let segment = rest.get(2..length)?;
+        if matches!(marker, 0xc0..=0xcf) && !matches!(marker, 0xc4 | 0xc8 | 0xcc) {
+            let &[8, h1, h2, w1, w2, components, ..] = segment else {
+                return None;
+            };
+            if !matches!(marker, 0xc0..=0xc2) || segment.len() != 6 + 3 * usize::from(components) {
+                return None;
+            }
+            let color = match components {
+                1 => ColorType::L8,
+                3 => ColorType::Rgb8,
+                _ => return None,
+            };
+            return Some((
+                u16::from_be_bytes([w1, w2]).into(),
+                u16::from_be_bytes([h1, h2]).into(),
+                color,
+            ));
+        }
+        segments = rest.get(length..)?;
+    }
+}
+
+fn decode_retained_jpeg(
+    dictionary: &BTreeMap<String, PdfValue>,
+    raw: &[u8],
+    limits: &PdfReaderLimits,
+) -> Result<Vec<u8>, PdfReadError> {
+    use super::native::{NATIVE_MAX_IMAGE_DIMENSION, NATIVE_MAX_IMAGE_PIXELS};
+
+    let name = |key| dictionary.get(key).and_then(PdfValue::as_name);
+    let integer = |key| dictionary.get(key).and_then(PdfValue::as_integer);
+    if (dictionary.contains_key("Type") && name("Type") != Some("XObject"))
+        || dictionary
+            .get("Interpolate")
+            .is_some_and(|value| !matches!(value, PdfValue::Boolean(_)))
+        || name("Subtype") != Some("Image")
+        || !matches!(name("Filter"), Some("DCTDecode" | "DCT"))
+        || integer("BitsPerComponent") != Some(8)
+        || dictionary.keys().any(|key| {
+            !matches!(
+                key.as_str(),
+                "Type"
+                    | "Subtype"
+                    | "Length"
+                    | "Width"
+                    | "Height"
+                    | "BitsPerComponent"
+                    | "ColorSpace"
+                    | "Filter"
+                    | "Interpolate"
+            )
+        })
+    {
+        return Err(PdfReadError::FilterUnsupported);
+    }
+    let (width, height, color) = jpeg_frame(raw).ok_or(PdfReadError::Syntax)?;
+    let expected_color = match name("ColorSpace") {
+        Some("DeviceGray") => ColorType::L8,
+        Some("DeviceRGB") => ColorType::Rgb8,
+        _ => return Err(PdfReadError::FilterUnsupported),
+    };
+    if integer("Width") != Some(width.into())
+        || integer("Height") != Some(height.into())
+        || color != expected_color
+    {
+        return Err(PdfReadError::Syntax);
+    }
+    let pixels = u64::from(width) * u64::from(height);
+    if pixels == 0
+        || pixels > limits.max_image_pixels.min(NATIVE_MAX_IMAGE_PIXELS)
+        || width.max(height) > NATIVE_MAX_IMAGE_DIMENSION
+    {
+        return Err(PdfReadError::ImageLimit);
+    }
+    let samples = (pixels * u64::from(color.bytes_per_pixel())) as usize;
+    if samples > limits.max_decoded_stream_bytes {
+        return Err(PdfReadError::DecodedStreamLimit);
+    }
+    let mut decoder = JpegDecoder::new(IoCursor::new(raw)).map_err(|_| PdfReadError::Syntax)?;
+    if decoder.dimensions() != (width, height) || decoder.color_type() != color {
+        return Err(PdfReadError::Syntax);
+    }
+    let mut image_limits = Limits::default();
+    image_limits.max_image_width = Some(width);
+    image_limits.max_image_height = Some(height);
+    image_limits.max_alloc = Some(limits.max_decoded_stream_bytes as u64);
+    decoder
+        .set_limits(image_limits)
+        .map_err(|_| PdfReadError::ImageLimit)?;
+    let mut data = vec![0; samples];
+    decoder
+        .read_image(&mut data)
+        .map_err(|_| PdfReadError::Syntax)?;
+    Ok(data)
 }
 
 fn decode_ascii_hex(mut bytes: Vec<u8>, limit: usize) -> Result<Vec<u8>, PdfReadError> {
@@ -1696,6 +1814,42 @@ fn parse_signed_i64(bytes: &[u8]) -> Result<i64, PdfReadError> {
 #[cfg(test)]
 mod retained_reader_tests {
     use super::*;
+
+    #[test]
+    fn retained_jpeg_checks_decoded_budget_and_dictionary_before_returning_samples() {
+        let mut bytes = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new(&mut bytes)
+            .encode(&[30, 60, 90, 120], 2, 2, image::ExtendedColorType::L8)
+            .unwrap();
+        let mut dictionary = BTreeMap::from([
+            ("Subtype".into(), PdfValue::Name("Image".into())),
+            ("Filter".into(), PdfValue::Name("DCTDecode".into())),
+            ("ColorSpace".into(), PdfValue::Name("DeviceGray".into())),
+            ("BitsPerComponent".into(), PdfValue::Integer(8)),
+            ("Width".into(), PdfValue::Integer(2)),
+            ("Height".into(), PdfValue::Integer(2)),
+        ]);
+        let mut limits = PdfReaderLimits {
+            max_decoded_stream_bytes: 3,
+            ..Default::default()
+        };
+        assert_eq!(
+            decode_stream(&dictionary, bytes.clone(), &limits, true),
+            Err(PdfReadError::DecodedStreamLimit)
+        );
+        limits.max_decoded_stream_bytes = 4;
+        assert_eq!(
+            decode_stream(&dictionary, bytes.clone(), &limits, true)
+                .unwrap()
+                .len(),
+            4
+        );
+        dictionary.insert("Width".into(), PdfValue::Integer(1));
+        assert_eq!(
+            decode_stream(&dictionary, bytes, &limits, true),
+            Err(PdfReadError::Syntax)
+        );
+    }
 
     #[test]
     fn scene_names_decode_utf8_while_retained_names_keep_encoded_bytes() {

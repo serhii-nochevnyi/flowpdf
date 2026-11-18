@@ -1166,12 +1166,12 @@ impl<'a> SceneBuilder<'a> {
             .and_then(PdfValue::as_name)
             .unwrap_or("Identity")
             .to_owned();
-        let media_type = if filter == "DCTDecode" || filter == "DCT" {
-            "image/jpeg"
+        let (media_type, data) = if filter == "DCTDecode" || filter == "DCT" {
+            ("image/jpeg", &stream.encoded)
         } else {
-            "application/octet-stream"
+            ("application/octet-stream", &stream.data)
         };
-        if stream.data.len() > self.limits.max_stream_bytes / 2 {
+        if data.len() > self.limits.max_stream_bytes / 2 {
             self.report.push(PdfReadDiagnostic::blocked(
                 PdfReadDiagnosticCode::ImageLimit,
                 Some(self.page_index),
@@ -1197,7 +1197,7 @@ impl<'a> SceneBuilder<'a> {
                 height,
                 media_type: media_type.to_owned(),
                 filter,
-                data_hex: hex_encode(&stream.data),
+                data_hex: hex_encode(data),
                 rect,
                 provenance: PdfSourceProvenance {
                     object_ref,

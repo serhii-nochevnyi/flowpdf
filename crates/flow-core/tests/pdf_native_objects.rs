@@ -232,6 +232,12 @@ fn jpeg_asset_replaces_only_one_use_of_a_shared_raster() {
     )
     .unwrap();
     let reopened = open(session.output_bytes());
+    assert!(
+        session
+            .output_bytes()
+            .windows(jpeg.len())
+            .any(|bytes| bytes == jpeg)
+    );
     assert_eq!(objects(&reopened, 0)[0]["profile"], "rasterRgb8");
     assert_eq!(objects(&reopened, 1)[0]["profile"], "rasterGray8");
     assert_eq!(
@@ -244,4 +250,61 @@ fn jpeg_asset_replaces_only_one_use_of_a_shared_raster() {
             .windows(pixels.len())
             .any(|bytes| bytes == pixels)
     );
+}
+
+#[test]
+fn retained_jpeg_move_preserves_encoded_stream_and_rejects_invalid_profiles() {
+    let mut jpeg = Vec::new();
+    image::codecs::jpeg::JpegEncoder::new(&mut jpeg)
+        .encode(&[12, 34, 56, 78], 2, 2, image::ExtendedColorType::L8)
+        .unwrap();
+    let make_pdf = |width, color, extra, bytes: &[u8]| {
+        let image = stream(
+            &format!(
+                "/Type /XObject /Subtype /Image /ColorSpace /{color} /Width {width} /Height 2 /BitsPerComponent 8 /Filter /DCTDecode {extra}"
+            ),
+            bytes,
+        );
+        fixture(
+            b"q 10 0 0 10 5 5 cm /I Do Q",
+            true,
+            "/Resources << /XObject << /I 6 0 R >> >>",
+            &[image],
+        )
+    };
+    let source = make_pdf(2, "DeviceGray", "", &jpeg);
+    let mut session = open(&source);
+    let before = objects(&session, 1)[0]["bounds"].clone();
+    let selected = target(&session, 0, 0);
+    apply(
+        &mut session,
+        json!({"kind":"moveObject","target":selected,"transform":[1,0,0,1,5,0]}),
+    )
+    .unwrap();
+    let reopened = open(session.output_bytes());
+    assert_eq!(objects(&reopened, 0)[0]["profile"], "rasterGray8");
+    assert_eq!(
+        objects(&reopened, 0)[0]["bounds"],
+        json!([10000, 5000, 20000, 15000])
+    );
+    assert_eq!(objects(&reopened, 1)[0]["bounds"], before);
+    assert_eq!(
+        session
+            .output_bytes()
+            .windows(jpeg.len())
+            .filter(|bytes| *bytes == jpeg)
+            .count(),
+        1
+    );
+
+    for invalid in [
+        make_pdf(3, "DeviceGray", "", &jpeg),
+        make_pdf(2, "DeviceRGB", "", &jpeg),
+        make_pdf(2, "DeviceGray", "/Mask [0 0]", &jpeg),
+        make_pdf(2, "DeviceGray", "", &jpeg[..12]),
+    ] {
+        assert!(
+            NativePdfSession::open_scoped(&invalid, NativeEditLimits::default(), [7; 16]).is_err()
+        );
+    }
 }

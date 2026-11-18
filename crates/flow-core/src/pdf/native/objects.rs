@@ -9,7 +9,7 @@ use image::{ImageDecoder, ImageFormat, ImageReader, Limits};
 use serde::{Deserialize, Serialize};
 
 use super::super::{
-    reader::{PdfObjectRef, PdfReaderLimits, PdfStream, PdfValue},
+    reader::{PdfObjectRef, PdfReaderLimits, PdfStream, PdfValue, jpeg_frame},
     scene::{ContentCursor, ContentToken, NativePdfNotePage},
 };
 use super::{
@@ -415,25 +415,35 @@ fn array<const N: usize>(value: Option<&PdfValue>) -> Option<[f64; N]> {
 }
 
 fn image_profile(image: &PdfStream) -> Result<NativeObjectProfile> {
-    if image.dict.keys().any(|key| {
-        !matches!(
-            key.as_str(),
-            "Type"
-                | "Subtype"
-                | "Length"
-                | "Width"
-                | "Height"
-                | "BitsPerComponent"
-                | "ColorSpace"
-                | "Filter"
-                | "Interpolate"
-        )
-    }) || image
-        .dict
-        .get("BitsPerComponent")
-        .and_then(PdfValue::as_integer)
-        != Some(8)
-        || (image.dict.contains_key("Filter") && name(&image.dict, "Filter") != Some("FlateDecode"))
+    if (image.dict.contains_key("Type") && name(&image.dict, "Type") != Some("XObject"))
+        || image
+            .dict
+            .get("Interpolate")
+            .is_some_and(|value| !matches!(value, PdfValue::Boolean(_)))
+        || image.dict.keys().any(|key| {
+            !matches!(
+                key.as_str(),
+                "Type"
+                    | "Subtype"
+                    | "Length"
+                    | "Width"
+                    | "Height"
+                    | "BitsPerComponent"
+                    | "ColorSpace"
+                    | "Filter"
+                    | "Interpolate"
+            )
+        })
+        || image
+            .dict
+            .get("BitsPerComponent")
+            .and_then(PdfValue::as_integer)
+            != Some(8)
+        || (image.dict.contains_key("Filter")
+            && !matches!(
+                name(&image.dict, "Filter"),
+                Some("FlateDecode" | "DCTDecode" | "DCT")
+            ))
     {
         return Err(Profile.into());
     }
@@ -637,6 +647,9 @@ impl<'a> Scan<'a> {
         clip: [f64; 4],
     ) -> Result<GraphicsState> {
         let source = stream(self.graph, reference)?;
+        if matches!(name(&source.dict, "Filter"), Some("DCTDecode" | "DCT")) {
+            return Err(State.into());
+        }
         check_device_colors(self.graph, resources)?;
         if source.data.len() > MAX_CONTENT_BYTES
             || ["F", "FFilter", "FDecodeParms", "DecodeParms"]
@@ -1047,6 +1060,11 @@ fn image_source(hex: &str, graph: &NativePdfGraph, remaining: &mut usize) -> Res
     } else {
         return Err(Asset.into());
     };
+    let jpeg = if format == ImageFormat::Jpeg {
+        Some(jpeg_frame(&bytes).ok_or(Asset)?)
+    } else {
+        None
+    };
     let mut limits = Limits::default();
     limits.max_image_width = Some(NATIVE_MAX_IMAGE_DIMENSION);
     limits.max_image_height = Some(NATIVE_MAX_IMAGE_DIMENSION);
@@ -1061,7 +1079,7 @@ fn image_source(hex: &str, graph: &NativePdfGraph, remaining: &mut usize) -> Res
     }
     let color = decoder.color_type();
     if !matches!(color, image::ColorType::L8 | image::ColorType::Rgb8)
-        || decoder.original_color_type() == image::ExtendedColorType::Cmyk8
+        || jpeg.is_some_and(|frame| frame != (width, height, color))
     {
         return Err(Asset.into());
     }
@@ -1072,7 +1090,13 @@ fn image_source(hex: &str, graph: &NativePdfGraph, remaining: &mut usize) -> Res
     spend(remaining, samples * 3 + 4096)?;
     let mut data = vec![0; samples];
     decoder.read_image(&mut data).map_err(|_| Asset)?;
-    let encoded = miniz_oxide::deflate::compress_to_vec_zlib(&data, 6);
+    let (filter, encoded) = match format {
+        ImageFormat::Jpeg => ("DCTDecode", bytes),
+        _ => (
+            "FlateDecode",
+            miniz_oxide::deflate::compress_to_vec_zlib(&data, 6),
+        ),
+    };
     if encoded.len() > graph.limits.max_output_bytes {
         return Err(NativeSessionError::Budget);
     }
@@ -1088,7 +1112,7 @@ fn image_source(hex: &str, graph: &NativePdfGraph, remaining: &mut usize) -> Res
             ("Height".into(), PdfValue::Integer(height.into())),
             ("BitsPerComponent".into(), PdfValue::Integer(8)),
             ("ColorSpace".into(), PdfValue::Name(color_space.into())),
-            ("Filter".into(), PdfValue::Name("FlateDecode".into())),
+            ("Filter".into(), PdfValue::Name(filter.into())),
             ("Length".into(), PdfValue::Integer(encoded.len() as i64)),
         ]),
         data,
