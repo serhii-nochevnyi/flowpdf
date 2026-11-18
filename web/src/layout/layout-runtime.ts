@@ -1,6 +1,7 @@
-import { verify_native_pdf_response } from '../../generated/flow_wasm.js'
+import * as generatedWasm from '../../generated/flow_wasm.js'
 import { PdfSourceStore } from '../../persistence/pdf-source-store.js'
 import type { PdfNativeEditPanelProps } from '../pdf/pdf-native-edit-panel.js'
+import type { NativePdfWasmBoundary } from '../pdf/pdf-native-edit-protocol.js'
 import { NativePdfEditCoordinator, NativePdfWorkerError, type NativePdfWorkerPort } from '../pdf/pdf-native-edit-worker.js'
 import type { EditorAcceptedSnapshot } from '../editor/editor-store.js'
 import type { EditorControllerDependencies } from '../editor/editor-controller.js'
@@ -44,6 +45,10 @@ export function createNativePdfRuntime(
   let disposed = false
   function createCoordinator() {
     if (disposed) throw new NativePdfWorkerError('FLOW_PDF_NATIVE_WORKER_FAILED')
+    const { verify_native_pdf_response } = generatedWasm as Partial<NativePdfWasmBoundary>
+    if (typeof verify_native_pdf_response !== 'function') {
+      throw new NativePdfWorkerError('FLOW_PDF_NATIVE_WORKER_STARTUP')
+    }
     let worker: Worker
     try {
       worker = workerConstructor === undefined

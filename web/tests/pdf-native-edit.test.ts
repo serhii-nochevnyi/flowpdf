@@ -447,6 +447,35 @@ describe('native worker scope', () => {
 })
 
 describe('native PDF runtime composition', () => {
+  it('reports startup failure and allows another attempt without restarting the app', async () => {
+    const { createNativePdfRuntime } = await import('../src/layout/layout-runtime.js')
+    const terminate = vi.fn()
+    const construct = vi.fn()
+      .mockImplementationOnce(() => { throw new Error('unavailable') })
+      .mockImplementationOnce(() => { throw new Error('still unavailable') })
+    class RuntimeWorker {
+      onmessage = null
+      onerror = null
+      onmessageerror = null
+      postMessage = vi.fn()
+      terminate = terminate
+
+      constructor() {
+        construct()
+      }
+    }
+    const runtime = createNativePdfRuntime(RuntimeWorker as unknown as typeof Worker)
+    try {
+      expect(() => runtime.createCoordinator()).toThrow('FLOW_PDF_NATIVE_WORKER_STARTUP')
+      const coordinator = runtime.createCoordinator()
+      expect(coordinator.snapshot().phase).toBe('idle')
+      expect(construct).toHaveBeenCalledTimes(3)
+    } finally {
+      runtime.dispose()
+    }
+    expect(terminate).toHaveBeenCalledOnce()
+  })
+
   it('prepares one worker, isolates replacement admission and tears down owned sessions', async () => {
     const { createNativePdfRuntime } = await import('../src/layout/layout-runtime.js')
     const { PdfSourceStore } = await import('../persistence/pdf-source-store.js')
