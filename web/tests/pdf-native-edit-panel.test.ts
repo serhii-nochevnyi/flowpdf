@@ -5,6 +5,8 @@ import {
   NativeNoteDraftRecovery,
   PdfNativeEditPanel,
   nativeDownloadName,
+  nativeObjectBounds,
+  rebindNativeObject,
   nativeMarkerPosition,
   nativeNoteDraftAfter,
   nativeNoteDraftAfterAcceptance,
@@ -353,6 +355,46 @@ describe('native text replacement', () => {
         expect(markup).toContain(`<p id="${description}" class="native-help native-text-feedback">`)
         expect(markup).not.toContain(nativePdfText(locale, 'text.apply'))
       }
+    }
+  })
+})
+
+describe('native object tools', () => {
+  it('converts page-local points and rejects incomplete, excessive, or off-page geometry', () => {
+    const pageBounds = [-10, 20, 190, 120] as const
+    expect(nativeObjectBounds(['1.125', '2', '40', '30'], pageBounds)).toEqual([-8875, 22000, 31125, 52000])
+    for (const draft of [
+      ['', '2', '40', '30'], ['0', '0', '0', '30'], ['-1', '2', '40', '30'],
+      ['1.0001', '2', '40', '30'], ['180', '2', '40', '30'],
+    ] as const) expect(nativeObjectBounds(draft, pageBounds)).toBeNull()
+  })
+
+  it('rebinds the exact invocation slot through verified insertions and removals', () => {
+    const first = { id: hash, kind: 'graphic', profile: 'rectangle', bounds: [0, 30000, 24000, 54000],
+      operations: ['replace', 'move', 'remove'] } as const
+    const second = { ...first, id: hash.map(() => 43) }
+    const inserted = { ...first, id: hash.map(() => 44) }
+    const before = documentWith([]).snapshot
+    const withObjects = (objects: readonly typeof first[]) => ({
+      ...before, scene: { ...before.scene, objectPages: [{ page: 0, canAdd: true, refusal: null, objects }] },
+    })
+    expect(rebindNativeObject(withObjects([first]), withObjects([inserted, second]), 0, first,
+      { kind: 'addImage', page: 0, bounds: first.bounds, assetHex: '00' })).toBe(second)
+    expect(rebindNativeObject(withObjects([first]), withObjects([]), 0, first,
+      { kind: 'removeObject', target: { page: 0, id: first.id, profile: first.profile } })).toBeUndefined()
+  })
+
+  it('renders only admitted profile controls and localized refusal details', () => {
+    for (const locale of ['en', 'uk'] as const) {
+      const document = documentWith([])
+      const markup = (refusal: 'FLOW_PDF_NATIVE_OBJECT_STATE' | null) => renderToStaticMarkup(createElement(PdfNativeEditPanel, {
+        ...dependencies, locale, initialDocument: { ...document, snapshot: { ...document.snapshot,
+          scene: { ...document.snapshot.scene, objectPages: [{ page: 0, objects: [], canAdd: !refusal, refusal }] } } },
+      }))
+      expect(markup(null)).toContain(nativePdfText(locale, 'object.profile.image'))
+      expect(markup(null)).toContain(nativePdfText(locale, 'object.profile.polygon'))
+      expect(markup('FLOW_PDF_NATIVE_OBJECT_STATE')).not.toContain(nativePdfText(locale, 'object.profile.polygon'))
+      expect(markup('FLOW_PDF_NATIVE_OBJECT_STATE')).toContain(nativePdfText(locale, 'object.reason.state'))
     }
   })
 })

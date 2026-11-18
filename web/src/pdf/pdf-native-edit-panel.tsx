@@ -9,7 +9,8 @@ import {
   NATIVE_PDF_LIMITS, fitsNativeJson, isNativeNoteCommand, nativeBytesHex, nativeHexBytes, sameNativeBytes,
   type NativePdfAnnotation, type NativePdfNoteCommand, type NativePdfRect,
   type NativePdfCommand, type NativePdfSnapshot, type NativePdfTextCommand, type NativePdfTextIsland,
-  type NativePdfTextRefusal,
+  type NativePdfTextRefusal, type NativePdfGraphic, type NativePdfObjectCommand, type NativePdfObjectPage,
+  type NativePdfObjectTarget,
 } from './pdf-native-edit-protocol.js'
 import {
   confirmedNativeReplacement, NativePdfWorkerError, type NativePdfEditCoordinator,
@@ -69,9 +70,137 @@ interface TextDraft {
 }
 
 type PendingAction = PendingNoteAction | {
-  readonly command: NativePdfTextCommand
+  readonly command: NativePdfTextCommand | NativePdfObjectCommand
   readonly before: NativePdfSnapshot
   readonly pageId: number
+}
+
+type ObjectView = NativePdfObjectPage['objects'][number]
+type ObjectProfile = 'image' | NativePdfGraphic['shape']
+type ObjectCoordinates = readonly [string, string, string, string]
+type ObjectAsset = { readonly name: string } & (
+  | { readonly status: 'loading' }
+  | { readonly status: 'ready'; readonly hex: string }
+  | { readonly status: 'failed'; readonly reason: 'object.file.limit' | 'object.file.failed' }
+)
+const objectProfiles = ['image', 'rectangle', 'line', 'polygon'] as const
+const coordinateLabels = ['x', 'y', 'width', 'height'] as const
+
+function objectUnits(value: string) {
+  if (!/^(?:\d+(?:[.,]\d{0,3})?|[.,]\d{1,3})$/u.test(value)) return NaN
+  return Math.round(Number(value.replace(',', '.')) * 1000)
+}
+
+export function nativeObjectBounds(values: ObjectCoordinates, page: NativePdfRect): NativePdfRect | null {
+  const [x, y, width, height] = values
+  const [left, bottom, right, top] = page
+  const l = left * 1000 + objectUnits(x)
+  const b = bottom * 1000 + objectUnits(y)
+  const w = objectUnits(width)
+  const h = objectUnits(height)
+  const bounds = [l, b, l + w, b + h] as const
+  return w > 0 && h > 0 && bounds[2] <= right * 1000 && bounds[3] <= top * 1000
+    && bounds.every((point) => Number.isInteger(point) && Math.abs(point) <= 1_000_000_000)
+    ? bounds : null
+}
+
+function objectCoordinates([l, b, r, t]: NativePdfRect, page: NativePdfRect): ObjectCoordinates {
+  return [String((l - page[0] * 1000) / 1000), String((b - page[1] * 1000) / 1000), String((r - l) / 1000), String((t - b) / 1000)]
+}
+
+function objectKey(object: ObjectView) {
+  return nativeBytesHex(Uint8Array.from(object.id))
+}
+
+function moveObjectTransform([l, b, r, t]: NativePdfRect, [x, y, right, top]: NativePdfRect) {
+  const sx = (right - x) / (r - l)
+  const sy = (top - y) / (t - b)
+  const transform = [sx, 0, 0, sy, (x - sx * l) / 1000, (y - sy * b) / 1000] as const
+  return sx >= 1e-6 && sy >= 1e-6 && sx * sy >= 1e-10
+    && transform.every((entry) => Math.abs(entry) <= 1_000_000) ? transform : null
+}
+
+function graphicDraft(shape: NativePdfGraphic['shape'], bounds: NativePdfRect, color: string, width: number): NativePdfGraphic {
+  const [l, b, r, t] = bounds
+  const rgb = [1, 3, 5].map((start) => Number.parseInt(color.slice(start, start + 2), 16)) as [number, number, number]
+  // Keep painted line bounds inside the requested rectangle, including half the stroke.
+  const pad = Math.ceil(width / 2)
+  const points: NativePdfGraphic['points'] = shape === 'polygon'
+    ? [[l, b], [r, b], [Math.floor((l + r) / 2), t]]
+    : [[l + pad, b + pad], [r - pad, t - pad]]
+  return { shape, points, fill: shape === 'line' ? null : rgb, stroke: shape === 'line' ? rgb : null, strokeWidth: width }
+}
+
+function pageObjects(snapshot: NativePdfSnapshot, pageId: number) {
+  return snapshot.scene.objectPages?.find((entry) => entry.page === pageId)?.objects ?? []
+}
+
+// Rust verifies the ordered invocation sequence around the edited slot. IDs are revision-bound.
+export function rebindNativeObject(
+  before: NativePdfSnapshot, after: NativePdfSnapshot, pageId: number, selected: ObjectView, command: NativePdfCommand,
+): ObjectView | undefined {
+  const previous = pageObjects(before, pageId)
+  const next = pageObjects(after, pageId)
+  let index = previous.findIndex((entry) => sameNativeBytes(entry.id, selected.id))
+  if (index < 0) return undefined
+  if ((command.kind === 'addImage' || command.kind === 'addGraphic') && command.page === pageId) {
+    return next.length === previous.length + 1 ? next[index + 1] : undefined
+  }
+  if (command.kind === 'removeObject' && command.target.page === pageId) {
+    const removed = previous.findIndex((entry) => sameNativeBytes(entry.id, command.target.id))
+    if (removed < 0 || index === removed || next.length !== previous.length - 1) return undefined
+    if (index > removed) index--
+    return next[index]
+  }
+  const candidate = next[index]
+  if (next.length !== previous.length || !candidate || candidate.kind !== selected.kind) return undefined
+  const changesSelection = 'target' in command && command.target.page === pageId
+    && sameNativeBytes(command.target.id, selected.id)
+  return changesSelection || (candidate.profile === selected.profile && sameNativeBytes(candidate.bounds, selected.bounds))
+    ? candidate : undefined
+}
+
+function imageHeader(bytes: Uint8Array): Size | null {
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
+  if (bytes.length >= 33 && view.getUint32(0) === 0x89504e47 && view.getUint32(4) === 0x0d0a1a0a
+    && view.getUint32(8) === 13 && view.getUint32(12) === 0x49484452) {
+    return bytes[24] === 8 && (bytes[25] === 0 || bytes[25] === 2)
+      ? [view.getUint32(16), view.getUint32(20)] : null
+  }
+  if (bytes[0] !== 0xff || bytes[1] !== 0xd8) return null
+  let offset = 2
+  while (offset + 4 <= bytes.length && bytes[offset++] === 0xff) {
+    while (bytes[offset] === 0xff) offset++
+    const marker = bytes[offset++]
+    if (offset + 2 > bytes.length || marker === 0xda || marker === 0xd9) break
+    const length = view.getUint16(offset)
+    if (length < 2 || offset + length > bytes.length) break
+    if (marker === 0xc0 || marker === 0xc1 || marker === 0xc2) {
+      if (length < 8 || bytes[offset + 2] !== 8 || ![1, 3].includes(bytes[offset + 7]!)) return null
+      return [view.getUint16(offset + 5), view.getUint16(offset + 3)]
+    }
+    offset += length
+  }
+  return null
+}
+
+async function readObjectAsset(file: File): Promise<Exclude<ObjectAsset, { status: 'loading' }>> {
+  const failed = (reason: 'object.file.limit' | 'object.file.failed') => ({ name: file.name, status: 'failed', reason } as const)
+  const { imageBytes, imageDimension, imagePixels } = NATIVE_PDF_LIMITS
+  if (file.size > imageBytes) return failed('object.file.limit')
+  try {
+    const bytes = new Uint8Array(await file.arrayBuffer())
+    if (bytes.byteLength > imageBytes) return failed('object.file.limit')
+    const dimensions = imageHeader(bytes)
+    if (!dimensions || dimensions.some((size) => size === 0)) return failed('object.file.failed')
+    const [width, height] = dimensions
+    if (Math.max(width, height) > imageDimension || width * height > imagePixels) return failed('object.file.limit')
+    const decoded = await createImageBitmap(new Blob([bytes]))
+    decoded.close()
+    return { name: file.name, status: 'ready', hex: nativeBytesHex(bytes) }
+  } catch {
+    return failed('object.file.failed')
+  }
 }
 
 function islandKey(island: NativePdfTextIsland): string {
@@ -280,8 +409,16 @@ const textRefusalReasons = {
   FLOW_PDF_NATIVE_TEXT_OVERFLOW: 'reason.overflow',
 } as const satisfies Record<NativePdfTextRefusal, NativePdfMessage>
 
+const objectRefusalReasons = {
+  FLOW_PDF_NATIVE_OBJECT_STATE: 'object.reason.state',
+  FLOW_PDF_NATIVE_OBJECT_GEOMETRY: 'object.reason.geometry',
+  FLOW_PDF_NATIVE_OBJECT_ASSET: 'object.reason.asset',
+  FLOW_PDF_NATIVE_OBJECT_PROFILE: 'object.reason.profile',
+} as const satisfies Record<NonNullable<NativePdfObjectPage['refusal']>, NativePdfMessage>
+
 const refusalReasons = new Map<string, NativePdfMessage>([
   ...Object.entries(textRefusalReasons),
+  ...Object.entries(objectRefusalReasons),
   ['FLOW_PDF_NATIVE_IMPORT_REFUSED', 'error.importRefused'],
   ['FLOW_PDF_NATIVE_BINDING_MISMATCH', 'error.stale'],
   ['FLOW_PDF_NATIVE_REVISION_MISMATCH', 'error.stale'],
@@ -319,7 +456,7 @@ function refusal(cause: unknown): readonly [string | undefined, NativePdfMessage
 
 const unsubscribeIdle = () => undefined
 const idle = () => null
-const familyKeys = ['objects', 'pages', 'fields', 'redaction'] as const
+const familyKeys = ['pages', 'fields', 'redaction'] as const
 
 export function PdfNativeEditPanel({
   createCoordinator, sourceStore, locale = 'uk', initialDocument, pageText,
@@ -342,9 +479,17 @@ export function PdfNativeEditPanel({
   const [zoom, setZoom] = useState(0)
   const [draft, setDraft] = useState<Draft | null>(null)
   const [textDrafts, setTextDrafts] = useState<readonly TextDraft[]>([])
+  const [objectId, setObjectId] = useState<readonly number[] | null>(null)
+  const [objectProfile, setObjectProfile] = useState<ObjectProfile>('image')
+  const [coordinates, setCoordinates] = useState<ObjectCoordinates>(['', '', '', ''])
+  const [color, setColor] = useState('#334155')
+  const [stroke, setStroke] = useState('1')
+  const [asset, setAsset] = useState<ObjectAsset | null>(null)
+  const assetGeneration = useRef(0)
   const [composing, setComposing] = useState(false)
   const composition = useRef(false)
-  const [confirm, setConfirm] = useState<{ readonly snapshot: NativePdfSnapshot; readonly note: number } | null>(null)
+  const [confirm, setConfirm] = useState<({ readonly snapshot: NativePdfSnapshot } &
+    ({ readonly note: number } | { readonly target: NativePdfObjectTarget; readonly label: string })) | null>(null)
   const uncertain = useRef<PendingAction | null>(null)
   const recoveredDrafts = useRef(new NativeNoteDraftRecovery())
   const focusAfterRender = useRef<string | HTMLElement | null>(null)
@@ -376,6 +521,16 @@ export function PdfNativeEditPanel({
   const notes = notesOf(page)
   const selected = notes.find((note) => note.id === draft?.note)
   const canEdit = busy === null && service?.phase === 'ready' && snapshot === service.accepted
+  const objectPage = snapshot?.scene.objectPages?.find((entry) => entry.page === pageId)
+  const selectedObject = objectPage?.objects.find((entry) => objectId && sameNativeBytes(entry.id, objectId))
+  const objectTarget = selectedObject && { page: pageId, id: selectedObject.id, profile: selectedObject.profile }
+  const objectBounds = geometry && nativeObjectBounds(coordinates, geometry.bounds)
+  const objectMove = selectedObject && objectBounds && moveObjectTransform(selectedObject.bounds, objectBounds)
+  const strokeWidth = objectProfile === 'line' ? objectUnits(stroke) : 0
+  const canPaint = !!objectBounds && (objectProfile === 'image' ? asset?.status === 'ready'
+    : objectProfile !== 'line' || (strokeWidth >= 1 && strokeWidth <= NATIVE_PDF_LIMITS.graphicStrokeWidth
+      && 2 * Math.ceil(strokeWidth / 2) < Math.min(objectBounds[2] - objectBounds[0], objectBounds[3] - objectBounds[1])))
+  const objectForm = !!geometry && (objectPage?.canAdd === true || !!selectedObject)
   const textPage = snapshot?.scene.textPages?.find((entry) => entry.page === page?.id)
   const islands = verifiedIslands(snapshot, pageId)
   const textDraft = textDrafts.find((entry) => entry.pageId === pageId && entry.selected)
@@ -418,6 +573,7 @@ export function PdfNativeEditPanel({
     focusAfterRender.current = null
     const element = typeof target === 'string' ? document.getElementById(target) : target
     if (element?.isConnected && !element.matches(':disabled')) element.focus()
+    else if (target === `${id}-object-selector`) document.getElementById(`${id}-objects`)?.focus()
     else document.getElementById(`${id}-notes`)?.focus()
   })
 
@@ -474,6 +630,7 @@ export function PdfNativeEditPanel({
       setZoom(0)
       setDraft(null)
       setTextDrafts([])
+      resetObject()
       setComposition(false)
       setStatus([originalHash === undefined ? 'status.ready' : 'status.reopened'])
     } catch (cause) {
@@ -490,12 +647,52 @@ export function PdfNativeEditPanel({
     if (locked.current || destination === undefined || destination.id === pageId) return
     const recovered = recoveredDrafts.current.get(destination.id)
     setPageId(destination.id)
+    resetObject()
     setDraft(recovered)
     setComposition(false)
     setStatus([recovered ? 'status.draftRestored' : 'navigation.position', {
       page: pages.indexOf(destination) + 1,
       total: pages.length,
     }])
+  }
+
+  function resetObject(target?: ObjectView) {
+    assetGeneration.current++
+    setAsset(null)
+    setObjectId(target?.id ?? null)
+    setObjectProfile(target?.profile === 'line' || target?.profile === 'polygon' || target?.profile === 'rectangle'
+      ? target.profile : 'image')
+    setCoordinates(target && geometry ? objectCoordinates(target.bounds, geometry.bounds) : ['', '', '', ''])
+    setColor('#334155')
+    setStroke('1')
+  }
+
+  async function chooseImage(file: File) {
+    const generation = ++assetGeneration.current
+    clearFeedback()
+    setAsset({ name: file.name, status: 'loading' })
+    const result = await readObjectAsset(file)
+    if (mounted.current && generation === assetGeneration.current) setAsset(result)
+  }
+
+  function submitObject(operation: 'add' | 'replace' | 'move', invoker: HTMLElement) {
+    if (!canEdit || !objectPage || !objectBounds || asset?.status === 'loading') return
+    if (operation === 'move') {
+      if (!objectTarget || !objectMove || !selectedObject?.operations.includes('move')) return
+      void act({ kind: 'moveObject', target: objectTarget, transform: objectMove }, invoker)
+      return
+    }
+    if (operation === 'add' ? !objectPage.canAdd || !!objectTarget : !selectedObject?.operations.includes('replace')) return
+    if (objectProfile === 'image') {
+      if (asset?.status !== 'ready') return
+      void act(objectTarget
+        ? { kind: 'replaceImage', target: objectTarget, assetHex: asset.hex }
+        : { kind: 'addImage', page: pageId, bounds: objectBounds, assetHex: asset.hex }, invoker)
+    } else if (canPaint) {
+      const graphic = graphicDraft(objectProfile, objectBounds, color, strokeWidth)
+      void act(objectTarget ? { kind: 'replaceGraphic', target: objectTarget, graphic }
+        : { kind: 'addGraphic', page: pageId, graphic }, invoker)
+    }
   }
 
   function chooseNote(note: Note) {
@@ -555,8 +752,21 @@ export function PdfNativeEditPanel({
       return command.kind !== 'replaceText' || entry.pageId !== pending.pageId
         || !sameNativeBytes(entry.island, command.island)
     }), pending.before, result))
+    if (selectedObject) {
+      const rebound = rebindNativeObject(pending.before, result, pageId, selectedObject, pending.command)
+      if (!rebound) resetObject()
+      else if ('target' in pending.command) resetObject(rebound)
+      else setObjectId(rebound.id)
+    }
     if (!('draft' in pending)) {
       const { command, before } = pending
+      if (command.kind !== 'replaceText') {
+        if (command.kind === 'addImage' || command.kind === 'addGraphic') {
+          const next = pageObjects(result, pageId)
+          if (pageId === command.page && next.length === pageObjects(before, pageId).length + 1) resetObject(next[0])
+        }
+        return `${id}-object-selector`
+      }
       const replacement = confirmedNativeReplacement(command, before, result)
       if (replacement && pageId === pending.pageId) return `${id}-island-button-${islandKey(replacement)}`
       return `${id}-text-islands`
@@ -575,16 +785,21 @@ export function PdfNativeEditPanel({
     if (command.kind === 'replaceText') {
       if (!selectedIsland || !sameNativeBytes(selectedIsland.id, command.island)
         || nativeReplacementError(command.text, false) !== null) return
-    } else if (!isNativeNoteCommand(command)) return
+    } else if (!isNativeNoteCommand(command)) {
+      if ('target' in command) {
+        if (!objectTarget || command.target.page !== objectTarget.page || command.target.profile !== objectTarget.profile
+          || !sameNativeBytes(command.target.id, objectTarget.id)) return
+      } else if (!objectPage?.canAdd || command.page !== pageId) return
+    }
     const live = coordinator.snapshot()
     if (live.phase !== 'ready' || live.accepted !== snapshot) {
       setError(['error.stale'])
       return
     }
     locked.current = true
-    const pending: PendingAction = command.kind === 'replaceText'
-      ? { command, before: snapshot, pageId }
-      : { command, before: snapshot, pageId, draft }
+    const pending: PendingAction = isNativeNoteCommand(command)
+      ? { command, before: snapshot, pageId, draft }
+      : { command, before: snapshot, pageId }
     clearFeedback()
     setBusy('mutating')
     try {
@@ -619,19 +834,22 @@ export function PdfNativeEditPanel({
       const result = await coordinator.reconcile()
       if (!mounted.current) return
       uncertain.current = null
-      let focusTarget = `${id}-${'draft' in pending ? 'notes' : 'text-islands'}`
+      let focusTarget = `${id}-${'draft' in pending ? 'notes' : pending.command.kind === 'replaceText' ? 'text-islands' : 'object-selector'}`
       if (result.status === 'unseen') {
         setAccepted((current) => current && { ...current, snapshot: result.snapshot })
-        if (!('draft' in pending)) {
+        if (!('draft' in pending) && pending.command.kind !== 'replaceText') {
+          setStatus(['status.unseen'])
+        } else if (!('draft' in pending) && pending.command.kind === 'replaceText') {
+          const command = pending.command
           const target = verifiedIslands(result.snapshot, pending.pageId)
-            .find(({ id }) => sameNativeBytes(id, pending.command.island))
+            .find(({ id }) => sameNativeBytes(id, command.island))
           if (target) {
             const isSelected = pageId === pending.pageId && selectedIsland !== undefined
               && sameNativeBytes(selectedIsland.id, target.id)
             const saved = textDrafts.find((entry) => entry.pageId === pending.pageId
               && sameNativeBytes(entry.island, target.id))
             updateTextDraft({
-              pageId: pending.pageId, island: target.id, replacement: pending.command.text,
+              pageId: pending.pageId, island: target.id, replacement: command.text,
               selected: saved?.selected ?? false, refusal: null,
             })
             if (isSelected) {
@@ -645,7 +863,7 @@ export function PdfNativeEditPanel({
           } else {
             setStatus(['status.unseenNoDraft'])
           }
-        } else {
+        } else if ('draft' in pending) {
           const recovered = recoveredDrafts.current.restoreUnseen(pending, pageId, draft)
           if (recovered !== draft) {
             setDraft(recovered)
@@ -668,6 +886,7 @@ export function PdfNativeEditPanel({
         recoveredDrafts.current.prune(result.snapshot)
         setDraft(null)
         setTextDrafts([])
+        resetObject()
         setError(['error.stale'])
       }
       if (document.activeElement === invoker) focusAfterRender.current = focusTarget
@@ -832,6 +1051,109 @@ export function PdfNativeEditPanel({
               <p key={index} lang={fragment.lang} dir="auto">{fragment.value}</p>)}
           </div>
           <p>{extracted ? t(extracted.text.length ? 'projection.partial' : 'projection.empty') : t('projection.unavailable')}</p>
+          {objectPage && <section className="native-stack" aria-labelledby={`${id}-objects`}>
+            <h3 id={`${id}-objects`} tabIndex={-1}>{t('object.title')}</h3>
+            {objectPage.refusal && <p className="native-help">{t(objectRefusalReasons[objectPage.refusal])}</p>}
+            {!objectPage.refusal && !objectPage.canAdd && <p className="native-help">{t('object.addUnavailable')}</p>}
+            {(objectPage.canAdd || objectPage.objects.length > 0) && <label>{t('object.title')}
+              <select id={`${id}-object-selector`} value={selectedObject ? objectKey(selectedObject) : ''}
+                disabled={busy !== null}
+                onChange={(event) => {
+                  if (locked.current) return
+                  resetObject(objectPage.objects.find((entry) => objectKey(entry) === event.target.value))
+                  clearFeedback()
+                }}>
+                <option value="" disabled={!objectPage.canAdd}>{t(objectPage.canAdd ? 'object.new' : 'object.unavailable')}</option>
+                {objectPage.objects.map((entry, index) => <option key={objectKey(entry)} value={objectKey(entry)}>
+                  {t('object.target', { number: index + 1, page: pageIndex + 1, profile: t(`object.profile.${entry.profile}`) })}
+                </option>)}
+              </select>
+            </label>}
+            {objectForm && <fieldset className="native-stack" disabled={!canEdit}>
+              <legend>{t('object.geometry')}</legend>
+              <label>{t('object.profile.label')}
+                <select value={objectProfile} disabled={selectedObject?.kind === 'image'} onChange={(event) => {
+                  const next = objectProfiles.find((profile) => profile === event.target.value)
+                  if (next) {
+                    setObjectProfile(next)
+                    assetGeneration.current++
+                    setAsset(null)
+                    clearFeedback()
+                  }
+                }}>
+                  {objectProfiles.filter((profile) => selectedObject === undefined
+                    || (profile === 'image') === (selectedObject.kind === 'image')).map((profile) =>
+                    <option key={profile} value={profile}>{t(`object.profile.${profile}`)}</option>)}
+                </select>
+              </label>
+              <p id={`${id}-object-bounds`} className="native-help">{t('object.geometry.help')}</p>
+              <div className="native-coordinates">
+                {coordinateLabels.map((label, index) => <label key={label}>{t(`object.${label}`)}
+                  <input type="text" inputMode="decimal" className="native-text-line" value={coordinates[index]}
+                    aria-invalid={!objectBounds} aria-describedby={`${id}-object-bounds${objectBounds ? '' : ` ${id}-object-invalid`}`}
+                    onChange={(event) => {
+                      const next = [...coordinates] as [string, string, string, string]
+                      next[index] = event.currentTarget.value
+                      setCoordinates(next)
+                      clearFeedback()
+                    }} />
+                </label>)}
+              </div>
+              {!objectBounds && <p id={`${id}-object-invalid`} className="native-help">{t('object.geometry.invalid')}</p>}
+              {objectProfile === 'image' ? <>
+                <label className="native-file">{t('object.file')}
+                  <input type="file" accept=".png,.jpg,.jpeg,image/png,image/jpeg"
+                    aria-describedby={`${id}-object-file-help ${id}-object-file-feedback`}
+                    onChange={(event) => {
+                      const file = event.currentTarget.files?.[0]
+                      event.currentTarget.value = ''
+                      if (file) void chooseImage(file)
+                    }} />
+                </label>
+                <p id={`${id}-object-file-help`} className="native-help">{t('object.file.help', {
+                  bytes: NATIVE_PDF_LIMITS.imageBytes, dimension: NATIVE_PDF_LIMITS.imageDimension,
+                  pixels: NATIVE_PDF_LIMITS.imagePixels,
+                })}</p>
+                {selectedObject && <p className="native-help">{t('object.replaceImage.help')}</p>}
+                <p id={`${id}-object-file-feedback`} className="native-help" aria-live="polite">{asset && <>
+                  <bdi>{asset.name}</bdi>{' — '}{t(asset.status === 'failed' ? asset.reason : `object.file.${asset.status}`)}
+                </>}</p>
+              </> : <>
+                <label>{t('object.color')}<input type="color" value={color}
+                  onChange={(event) => { setColor(event.currentTarget.value); clearFeedback() }} /></label>
+                {objectProfile === 'line' && <label>{t('object.stroke')}
+                  <input type="text" inputMode="decimal" className="native-text-line" value={stroke}
+                    aria-describedby={!canPaint && objectBounds ? `${id}-object-stroke-error` : undefined}
+                    onChange={(event) => { setStroke(event.currentTarget.value); clearFeedback() }} />
+                </label>}
+                {objectProfile === 'line' && objectBounds && !canPaint &&
+                  <p id={`${id}-object-stroke-error`} className="native-help">{t('object.stroke.invalid')}</p>}
+              </>}
+              {selectedObject && objectBounds && !objectMove && <p className="native-help">{t('object.reason.geometry')}</p>}
+              {unavailable && <p className="native-help">{unavailable}</p>}
+              {operationError?.code && operationError.code in objectRefusalReasons &&
+                <p className="native-help">{t(operationError.reason)}</p>}
+              <div className="native-actions">
+                {!selectedObject && objectPage.canAdd && <button type="button" disabled={!canPaint}
+                  onClick={(event) => submitObject('add', event.currentTarget)}>{t('object.add')}</button>}
+                {selectedObject?.operations.includes('replace') && <button type="button" disabled={!canPaint}
+                  onClick={(event) => submitObject('replace', event.currentTarget)}>{t('object.replace')}</button>}
+                {selectedObject?.operations.includes('move') && <button type="button"
+                  disabled={!objectMove || asset?.status === 'loading'}
+                  onClick={(event) => submitObject('move', event.currentTarget)}>{t('object.move')}</button>}
+                {selectedObject?.operations.includes('remove') && <button type="button"
+                  disabled={asset?.status === 'loading'} onClick={(event) => {
+                  if (!snapshot || !objectTarget || locked.current || composition.current) return
+                  removeTrigger.current = event.currentTarget
+                  setConfirm({ snapshot, target: objectTarget, label: t('object.target', {
+                    number: objectPage.objects.indexOf(selectedObject) + 1, page: pageIndex + 1,
+                    profile: t(`object.profile.${selectedObject.profile}`),
+                  }) })
+                }}>{t('object.remove')}</button>}
+                <button type="button" onClick={() => { resetObject(selectedObject); clearFeedback() }}>{t('object.cancel')}</button>
+              </div>
+            </fieldset>}
+          </section>}
           <section className="native-stack" aria-labelledby={`${id}-text-islands`}>
             <h3 id={`${id}-text-islands`} tabIndex={-1}
               aria-describedby={islands.length === 0 ? `${id}-text-capability` : undefined}>{t('text.title')}</h3>
@@ -974,20 +1296,33 @@ export function PdfNativeEditPanel({
       <dialog ref={dialog} onCancel={(event) => { event.preventDefault(); setConfirm(null) }}
         aria-labelledby={`${id}-remove-title`} aria-describedby={`${id}-remove-body ${id}-remove-target`}>
         <div className="native-stack">
-          <h3 id={`${id}-remove-title`}>{t('note.remove.heading')}</h3>
-          <p id={`${id}-remove-body`}>{t('note.remove.body')}</p>
-          <p id={`${id}-remove-target`}>{confirm && t('note.confirmTarget', { number: confirm.note, page: pageIndex + 1 })}</p>
+          <h3 id={`${id}-remove-title`}>{t(confirm && 'target' in confirm ? 'object.remove' : 'note.remove.heading')}</h3>
+          <p id={`${id}-remove-body`}>{t(confirm && 'target' in confirm ? 'object.remove.body' : 'note.remove.body')}</p>
+          <p id={`${id}-remove-target`}>{confirm && ('target' in confirm ? confirm.label : t('note.confirmTarget', { number: confirm.note, page: pageIndex + 1 }))}</p>
           <div className="native-actions">
             <button type="button" ref={cancelConfirmation} onClick={() => setConfirm(null)}>{t('note.remove.cancel')}</button>
             <button type="button" className="native-destructive" onClick={() => {
               if (confirm === null) return
               setConfirm(null)
-              if (confirm.snapshot !== snapshot || selected?.id !== confirm.note || !canEdit) {
+              if (confirm.snapshot !== snapshot || !canEdit) {
+                setError(['error.stale'])
+                return
+              }
+              if ('target' in confirm) {
+                if (!objectTarget || objectTarget.page !== confirm.target.page
+                  || !sameNativeBytes(objectTarget.id, confirm.target.id)) {
+                  setError(['error.stale'])
+                  return
+                }
+                void act({ kind: 'removeObject', target: confirm.target }, removeTrigger.current)
+                return
+              }
+              if (selected?.id !== confirm.note) {
                 setError(['error.stale'])
                 return
               }
               void act({ kind: 'remove', note: confirm.note }, removeTrigger.current)
-            }}>{t('note.remove')}</button>
+            }}>{t(confirm && 'target' in confirm ? 'object.remove' : 'note.remove')}</button>
           </div>
         </div>
       </dialog>
