@@ -56,7 +56,10 @@ fn open_verifies_source_bytes_and_returns_verifiable_reader_refusals() {
 
     for (request, code) in [
         (stale, "FLOW_PDF_NATIVE_BINDING_MISMATCH"),
-        (open_request(b"ordinary text"), "FLOW_PDF_NATIVE_IMPORT_REFUSED"),
+        (
+            open_request(b"ordinary text"),
+            "FLOW_PDF_NATIVE_IMPORT_REFUSED",
+        ),
     ] {
         let response = call(native_pdf_open, request.clone());
         assert_eq!(response["status"], "failed");
@@ -69,12 +72,18 @@ fn open_verifies_source_bytes_and_returns_verifiable_reader_refusals() {
 
     let response = call(native_pdf_open, replacement_request.clone());
     assert_eq!(response["status"], "opened", "{response}");
-    assert_eq!(response["originStoreHash"], replacement_request["originStoreHash"]);
+    assert_eq!(
+        response["originStoreHash"],
+        replacement_request["originStoreHash"]
+    );
     assert_eq!(
         response["binding"]["originHash"],
         json!(blake3::hash(replacement.as_bytes()).as_bytes())
     );
-    assert_eq!(call(native_pdf_open, open_request(original.as_bytes()))["status"], "opened");
+    assert_eq!(
+        call(native_pdf_open, open_request(original.as_bytes()))["status"],
+        "opened"
+    );
 }
 
 fn open() -> (Value, Value) {
@@ -402,7 +411,10 @@ fn serialized_text_replacement_checks_capability_revision_and_output_identity() 
 
 #[test]
 fn wire_verifier_rejects_rehashed_capability_that_disagrees_with_output() {
-    use flow_core::pdf::{PdfObjectRef, native::NativeTextPage};
+    use flow_core::pdf::{
+        PdfObjectRef,
+        native::{NativeObjectPage, NativeTextPage},
+    };
 
     fn result_hash(json: &str, old_hash: &str) -> String {
         let mut hash = blake3::Hasher::new();
@@ -424,6 +436,8 @@ fn wire_verifier_rejects_rehashed_capability_that_disagrees_with_output() {
     let old_scene = serde_json::to_string(&scene["sceneHash"]).unwrap();
     let mut text_pages: Vec<NativeTextPage> =
         serde_json::from_value(scene["textPages"].clone()).unwrap();
+    let object_pages: Vec<NativeObjectPage> =
+        serde_json::from_value(scene["objectPages"].clone()).unwrap();
     let derive_scene_hash = |text_pages: &[NativeTextPage]| {
         let mut hash = blake3::Hasher::new();
         hash.update(b"flowpdf:accepted-note-scene:v2");
@@ -431,6 +445,8 @@ fn wire_verifier_rejects_rehashed_capability_that_disagrees_with_output() {
         hash.update(&serde_json::to_vec(&(object, &page["geometry"], true)).unwrap());
         hash.update(b"flowpdf:native-text-pages:v1");
         hash.update(&serde_json::to_vec(text_pages).unwrap());
+        hash.update(b"flowpdf:native-object-pages:v1");
+        hash.update(&serde_json::to_vec(&object_pages).unwrap());
         serde_json::to_string(hash.finalize().as_bytes()).unwrap()
     };
     assert_eq!(derive_scene_hash(&text_pages), old_scene);
@@ -444,4 +460,127 @@ fn wire_verifier_rejects_rehashed_capability_that_disagrees_with_output() {
     let forged = tampered.replace(old_result, &result_hash(&tampered, old_result));
     assert_ne!(forged, response);
     assert!(!verify_native_pdf_response(forged));
+}
+
+#[test]
+fn serialized_graphic_commands_bind_targets_and_preserve_failed_state() {
+    let (_, mut snapshot) = open();
+    let graphic = json!({"shape":"rectangle","points":[[10000,10000],[30000,30000]],"fill":[0,0,0],"stroke":null,"strokeWidth":0});
+    let mut request = bound("command", 2, &snapshot);
+    request["outputHash"] = snapshot["outputHash"].clone();
+    request["command"] = json!({"kind":"addGraphic","page":0,"graphic":graphic});
+    let response = call(native_pdf_command, request);
+    assert_eq!(response["status"], "applied", "{response}");
+    snapshot = response["snapshot"].clone();
+    let object = &snapshot["scene"]["objectPages"][0]["objects"][0];
+    assert_eq!(object["bounds"], json!([10000, 10000, 30000, 30000]));
+    let target = json!({"id":object["id"],"page":0,"profile":object["profile"]});
+    for (index, command) in [
+        json!({"kind":"replaceGraphic","target":target,"graphic":graphic}),
+        json!({"kind":"moveObject","target":target,"transform":[1,0,0,1,3,5]}),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let object = &snapshot["scene"]["objectPages"][0]["objects"][0];
+        let mut command = command;
+        command["target"]["id"] = object["id"].clone();
+        let mut request = bound("command", 3 + index as u64, &snapshot);
+        request["outputHash"] = snapshot["outputHash"].clone();
+        request["command"] = command;
+        let response = call(native_pdf_command, request);
+        assert_eq!(response["status"], "applied", "{response}");
+        snapshot = response["snapshot"].clone();
+    }
+    let mut request = bound("command", 5, &snapshot);
+    request["outputHash"] = snapshot["outputHash"].clone();
+    request["command"] = json!({"kind":"removeObject","target":target});
+    assert_eq!(
+        call(native_pdf_command, request.clone())["code"],
+        "FLOW_PDF_NATIVE_TARGET_UNAVAILABLE"
+    );
+    request["command"]["target"]["id"] =
+        snapshot["scene"]["objectPages"][0]["objects"][0]["id"].clone();
+    let response = call(native_pdf_command, request);
+    assert_eq!(response["status"], "applied", "{response}");
+    assert_eq!(
+        response["snapshot"]["scene"]["objectPages"][0]["objects"],
+        json!([])
+    );
+}
+
+#[test]
+fn serialized_image_crud_rejects_forged_profiles_and_malformed_assets() {
+    const FIRST: &str = "89504e470d0a1a0a0000000d49484452000000010000000108000000003a7e9b550000000a49444154789c63600700000900082023c38c0000000049454e44ae426082";
+    const SECOND: &str = "89504e470d0a1a0a0000000d49484452000000010000000108000000003a7e9b550000000a49444154789c63880600005d005cdc83ebd80000000049454e44ae426082";
+    let (_, mut snapshot) = open();
+    let bounds = json!([20000, 30000, 40000, 60000]);
+    let mut request = bound("command", 2, &snapshot);
+    request["outputHash"] = snapshot["outputHash"].clone();
+    request["command"] = json!({"kind":"addImage","page":0,"bounds":bounds,"assetHex":FIRST});
+    let response = call(native_pdf_command, request.clone());
+    assert_eq!(response["status"], "applied", "{response}");
+    assert_eq!(response["limits"]["imagePixels"], 16_000_000);
+    snapshot = response["snapshot"].clone();
+    let original_hex = snapshot["outputHex"].clone();
+    request["command"]["assetHex"] = json!(SECOND);
+    assert_eq!(
+        call(native_pdf_command, request)["code"],
+        "FLOW_PDF_NATIVE_REQUEST_CONFLICT"
+    );
+
+    let target = |snapshot: &Value| {
+        let object = &snapshot["scene"]["objectPages"][0]["objects"][0];
+        assert_eq!(object["profile"], "rasterGray8");
+        json!({"page":0,"id":object["id"],"profile":object["profile"]})
+    };
+    let image = target(&snapshot);
+    let mut request = bound("command", 3, &snapshot);
+    request["outputHash"] = snapshot["outputHash"].clone();
+    request["command"] =
+        json!({"kind":"replaceImage","target":image,"assetHex":"89504e470d0a1a0a"});
+    assert_eq!(
+        call(native_pdf_command, request.clone())["code"],
+        "FLOW_PDF_NATIVE_OBJECT_ASSET"
+    );
+    request["command"]["assetHex"] = json!(SECOND);
+    request["command"]["target"]["profile"] = json!("line");
+    assert_eq!(
+        call(native_pdf_command, request.clone())["code"],
+        "FLOW_PDF_NATIVE_OBJECT_PROFILE"
+    );
+    let current = call(native_pdf_snapshot, bound("snapshot", 3, &snapshot));
+    assert_eq!(current["status"], "unseen");
+    assert_eq!(current["snapshot"], snapshot);
+    request["command"]["target"] = image;
+    let response = call(native_pdf_command, request);
+    assert_eq!(response["status"], "applied", "{response}");
+    snapshot = response["snapshot"].clone();
+    assert_ne!(snapshot["outputHex"], original_hex);
+    assert_eq!(
+        snapshot["scene"]["objectPages"][0]["objects"][0]["bounds"],
+        bounds
+    );
+
+    let mut request = bound("command", 4, &snapshot);
+    request["outputHash"] = snapshot["outputHash"].clone();
+    request["command"] =
+        json!({"kind":"moveObject","target":target(&snapshot),"transform":[1,0,0,1,1,2]});
+    let response = call(native_pdf_command, request);
+    assert_eq!(response["status"], "applied", "{response}");
+    snapshot = response["snapshot"].clone();
+    assert_eq!(
+        snapshot["scene"]["objectPages"][0]["objects"][0]["bounds"],
+        json!([21000, 32000, 41000, 62000])
+    );
+
+    let mut request = bound("command", 5, &snapshot);
+    request["outputHash"] = snapshot["outputHash"].clone();
+    request["command"] = json!({"kind":"removeObject","target":target(&snapshot)});
+    let response = call(native_pdf_command, request);
+    assert_eq!(response["status"], "applied", "{response}");
+    assert_eq!(
+        response["snapshot"]["scene"]["objectPages"][0]["objects"],
+        json!([])
+    );
 }

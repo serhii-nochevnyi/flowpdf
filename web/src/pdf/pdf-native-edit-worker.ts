@@ -15,6 +15,7 @@ import {
   sameNativeBytes,
   type NativePdfCommand,
   type NativePdfNoteScene,
+  type NativePdfObjectCommand,
   type NativePdfRequest,
   type NativePdfResponse,
   type NativePdfSnapshot,
@@ -166,8 +167,77 @@ export function confirmedNativeReplacement(
   return l <= left && b <= bottom && right <= r && top <= t ? replacement : null
 }
 
+function confirmsObjectCommand(
+  command: NativePdfObjectCommand, previous: NativePdfSnapshot, snapshot: NativePdfSnapshot,
+): boolean {
+  const target = 'target' in command ? command.target : null
+  const page = 'page' in command ? command.page : command.target.page
+  const before = previous.scene.objectPages?.[page]
+  const after = snapshot.scene.objectPages?.[page]
+  if (before?.refusal !== null || after?.refusal !== null) return false
+  const selected = target === null ? 0 : before.objects.findIndex((object) =>
+    object.profile === target.profile && sameNativeBytes(object.id, target.id))
+  if (selected < 0 || (target === null && !before.canAdd)) return false
+
+  const removed = command.kind === 'removeObject'
+  const original = before.objects[selected]
+  const result = after.objects[selected]
+  const siblingsBefore = before.objects.filter((_, index) => target === null || index !== selected)
+  const siblingsAfter = after.objects.filter((_, index) => removed || index !== selected)
+  if (siblingsBefore.length !== siblingsAfter.length || siblingsBefore.some((object, index) => {
+    const sibling = siblingsAfter[index]
+    return sibling === undefined || sibling.profile !== object.profile || !sameNativeBytes(sibling.bounds, object.bounds)
+  })) return false
+  if (target !== null && after.objects.some((object) => sameNativeBytes(object.id, target.id))) return false
+  if (removed) return true
+  if (result === undefined) return false
+
+  switch (command.kind) {
+    case 'addImage':
+      return result.kind === 'image' && sameNativeBytes(result.bounds, command.bounds)
+    case 'replaceImage':
+      return original?.kind === 'image' && result.kind === 'image' && sameNativeBytes(result.bounds, original.bounds)
+    case 'addGraphic':
+    case 'replaceGraphic': {
+      if (command.kind === 'replaceGraphic' && original?.kind !== 'graphic') return false
+      const { shape, points, stroke, strokeWidth } = command.graphic
+      const padding = stroke === null ? 0 : strokeWidth * (shape === 'polygon' ? 10 : 0.5)
+      const xs = points.map(([x]) => x)
+      const ys = points.map(([, y]) => y)
+      const expected = [Math.min(...xs) - padding, Math.min(...ys) - padding,
+        Math.max(...xs) + padding, Math.max(...ys) + padding]
+      return result.profile === shape && result.bounds.every((value, index) => {
+        const bound = expected[index]
+        return bound !== undefined && Math.abs(value - bound) <= 0.500001
+      })
+    }
+    case 'moveObject': {
+      if (original === undefined || result.profile !== original.profile) return false
+      const [a, b, c, d, e, f] = command.transform
+      const [l, bottom, r, t] = original.bounds
+      const x = a * l + c * bottom + e * 1000
+      const y = b * l + d * bottom + f * 1000
+      const z = a * r + c * t + e * 1000
+      const w = b * r + d * t + f * 1000
+      const expected = [Math.min(x, z), Math.min(y, w), Math.max(x, z), Math.max(y, w)]
+      const tolerance = [(Math.abs(a) + Math.abs(c) + 1) / 2, (Math.abs(b) + Math.abs(d) + 1) / 2]
+      return result.bounds.every((value, index) =>
+        Math.abs(value - expected[index]!) <= tolerance[index % 2]! + 0.000001)
+    }
+  }
+}
+
+function isObjectCommand(command: NativePdfCommand): command is NativePdfObjectCommand {
+  return 'target' in command || command.kind === 'addImage' || command.kind === 'addGraphic'
+}
+
 function confirmsCommand(request: CommandRequest, previous: NativePdfSnapshot, snapshot: NativePdfSnapshot): boolean {
   const command = request.command
+  if (isObjectCommand(command)) {
+    return snapshot.binding.revision === previous.binding.revision + 1
+      && snapshot.consumedRequest === request.requestId
+      && confirmsObjectCommand(command, previous, snapshot)
+  }
   if (command.kind === 'replaceText') return confirmedNativeReplacement(command, previous, snapshot) !== null
   for (const page of snapshot.scene.pages) {
     for (const note of page.annotations) {
@@ -308,7 +378,9 @@ export class NativePdfEditCoordinator {
       if ((reply.status === 'unseen' && (!sameNativeBytes(current.outputHash, previous.outputHash)
         || !sameNativeBytes(current.scene.sceneHash, previous.scene.sceneHash)
         || current.consumedRequest !== previous.consumedRequest))
-        || (reply.status === 'accepted' && current.consumedRequest === requestId && !confirmsCommand(command, previous, current))) {
+        || (reply.status === 'accepted'
+          && (current.consumedRequest === requestId || isObjectCommand(command.command))
+          && !confirmsCommand(command, previous, current))) {
         throw new NativePdfWorkerError(RESPONSE_INVALID, requestId)
       }
       this.uncertain = null

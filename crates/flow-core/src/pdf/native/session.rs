@@ -9,6 +9,7 @@ use super::super::scene::{NativePdfAnnotation, NativePdfNoteScene};
 use super::graph::{NativeEditError, NativeEditLimits, NativePdfGraph, collect_refs, spend};
 use super::notes::{self, ExpectedNote, NativeNoteCommand, NativeNoteId};
 
+use super::objects::{self, NativeObjectCommand, NativeObjectPage, NativeObjectRefusal};
 use super::text::{self, NativeTextCommand, NativeTextPage, NativeTextRefusal};
 
 pub const NATIVE_REQUEST_HISTORY: usize = 128;
@@ -36,6 +37,8 @@ pub struct NativeEditReceipt {
     pub note: NativeNoteId,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub text_island: Option<[u8; 32]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub object: Option<[u8; 32]>,
     pub output_hash: [u8; 32],
     pub scene_hash: [u8; 32],
 }
@@ -76,6 +79,8 @@ pub enum NativeSessionError {
     TargetUnavailable,
     #[error("native PDF text replacement refused")]
     Text(NativeTextRefusal),
+    #[error("native PDF object edit refused")]
+    Object(NativeObjectRefusal),
     #[error("native PDF note is invalid")]
     InvalidNote,
     #[error("native PDF session budget exhausted")]
@@ -99,6 +104,12 @@ impl From<NativeTextRefusal> for NativeSessionError {
     }
 }
 
+impl From<NativeObjectRefusal> for NativeSessionError {
+    fn from(error: NativeObjectRefusal) -> Self {
+        Self::Object(error)
+    }
+}
+
 impl NativeSessionError {
     pub const fn code(&self) -> &'static str {
         match self {
@@ -110,6 +121,7 @@ impl NativeSessionError {
             Self::ReconciliationRequired => "FLOW_PDF_NATIVE_RECONCILIATION_REQUIRED",
             Self::TargetUnavailable => "FLOW_PDF_NATIVE_TARGET_UNAVAILABLE",
             Self::Text(error) => error.code(),
+            Self::Object(error) => error.code(),
             Self::InvalidNote => "FLOW_PDF_NATIVE_NOTE_INVALID",
             Self::Budget => "FLOW_PDF_NATIVE_BUDGET_EXHAUSTED",
             Self::Postcondition => "FLOW_PDF_NATIVE_POSTCONDITION_FAILED",
@@ -121,11 +133,13 @@ impl NativeSessionError {
 enum Command<'a> {
     Note(&'a NativeNoteCommand),
     Text(&'a NativeTextCommand),
+    Object(&'a NativeObjectCommand),
 }
 
 enum Expected<'a> {
     Note(ExpectedNote<'a>),
     Text(text::ExpectedText<'a>),
+    Object(objects::ExpectedObject),
 }
 
 struct RequestRecord {
@@ -266,6 +280,29 @@ impl NativePdfSession {
         self.apply_command(binding, request_id, Command::Text(command))
     }
 
+    pub fn apply_object(
+        &mut self,
+        binding: NativeBinding,
+        request_id: u64,
+        command: &NativeObjectCommand,
+    ) -> Result<NativeEditReceipt, NativeSessionError> {
+        self.apply_command(binding, request_id, Command::Object(command))
+    }
+
+    pub fn verify_edit_projection(
+        bytes: &[u8],
+        limits: NativeEditLimits,
+        binding: NativeBinding,
+        claimed_text: &[NativeTextPage],
+        claimed_objects: &[NativeObjectPage],
+    ) -> Result<bool, NativeSessionError> {
+        let graph = NativePdfGraph::open(bytes, limits)?;
+        let ids = initial_ids(&graph);
+        let hash = *blake3::hash(bytes).as_bytes();
+        let (scene, _) = accepted_scene(&graph, &ids, hash, binding, 0, 0)?;
+        Ok(scene.text_pages == claimed_text && scene.object_pages == claimed_objects)
+    }
+
     pub fn verify_text_projection(
         bytes: &[u8],
         limits: NativeEditLimits,
@@ -346,7 +383,7 @@ impl NativePdfSession {
         let digest = command_digest(command)?;
         // @security: Reserve output bytes separately from the writer workspace and reopen graph.
         let output_share = match command {
-            Command::Text(_) => remaining / 5,
+            Command::Text(_) | Command::Object(_) => remaining / 5,
             Command::Note(_) => remaining / 4,
         };
         let output_budget = self.snapshot.limits.max_output_bytes.min(output_share);
@@ -362,6 +399,7 @@ impl NativePdfSession {
         staged_limits.max_output_bytes = output_budget;
         let mut staged = NativePdfGraph::open(self.output_bytes(), staged_limits)?;
         let mut ids = self.ids.clone();
+        let mut staged_remaining = None;
         let expected = match command {
             Command::Note(command) => Expected::Note(notes::stage(
                 &mut staged,
@@ -391,6 +429,42 @@ impl NativePdfSession {
                 }
                 Expected::Text(expected)
             }
+            Command::Object(command) => {
+                use NativeObjectCommand::*;
+                let page_id = match command {
+                    AddGraphic { page, .. } | AddImage { page, .. } => *page,
+                    ReplaceGraphic { target, .. }
+                    | ReplaceImage { target, .. }
+                    | MoveObject { target, .. }
+                    | RemoveObject { target } => target.page,
+                };
+                let page = self
+                    .snapshot
+                    .scene
+                    .pages
+                    .get(page_id.0 as usize)
+                    .ok_or(NativeSessionError::TargetUnavailable)?;
+                let capabilities = &self.snapshot.scene.object_pages[page_id.0 as usize];
+                if let Some(reason) = capabilities.refusal {
+                    return Err(reason.into());
+                }
+                if !capabilities.can_add && matches!(command, AddGraphic { .. } | AddImage { .. }) {
+                    return Err(NativeSessionError::Budget);
+                }
+                let (expected, remaining) = objects::stage(
+                    &mut staged,
+                    page,
+                    binding,
+                    self.snapshot.output_hash,
+                    command,
+                )?;
+                staged_remaining = Some(remaining);
+                ids.retain(|reference, _| staged.objects.contains_key(reference));
+                for reference in staged.objects.keys() {
+                    ids.entry(*reference).or_insert(NativeNoteId(0));
+                }
+                Expected::Object(expected)
+            }
         };
         #[cfg(test)]
         if self.fail_at == Some(FailurePoint::Serialize) {
@@ -407,8 +481,9 @@ impl NativePdfSession {
         let mut reopen_limits = self.snapshot.limits;
         reopen_limits.max_source_bytes = reopen_limits.max_output_bytes;
         reopen_limits.max_total_decoded_bytes = staged.remaining_decoded();
-        reopen_limits.max_retained_bytes =
-            staged.remaining_retained() + (output_budget - output.len());
+        reopen_limits.max_retained_bytes = staged_remaining
+            .unwrap_or_else(|| staged.remaining_retained())
+            + (output_budget - output.len());
         if reopen_limits.max_retained_bytes == 0 {
             return Err(NativeSessionError::Budget);
         }
@@ -429,14 +504,19 @@ impl NativePdfSession {
             self.origin_bytes().len(),
             record_count,
         )?;
-        let (note, text_island) = match expected {
+        let (note, text_island, object) = match expected {
             Expected::Note(expected) => {
                 verify_note(&scene, &expected)?;
-                (expected.id, None)
+                (expected.id, None, None)
             }
             Expected::Text(expected) => {
                 let island = text::verify(&scene.text_pages, &expected)?;
-                (NativeNoteId(0), Some(island))
+                (NativeNoteId(0), Some(island), None)
+            }
+            Expected::Object(expected) => {
+                let object =
+                    objects::verify(&reopened, &scene.pages, &scene.object_pages, &expected)?;
+                (NativeNoteId(0), None, object)
             }
         };
         let receipt = NativeEditReceipt {
@@ -444,6 +524,7 @@ impl NativePdfSession {
             request_id,
             note,
             text_island,
+            object,
             output_hash,
             scene_hash: scene.scene_hash,
         };
@@ -493,6 +574,10 @@ fn command_digest(command: Command<'_>) -> Result<[u8; 32], NativeSessionError> 
             }
             serde_json::to_writer(&mut digest, command)
         }
+        Command::Object(command) => {
+            command.validate_size()?;
+            serde_json::to_writer(&mut digest, command)
+        }
     }
     .map_err(|_| NativeSessionError::InvalidRequest)?;
     Ok(*digest.finalize().as_bytes())
@@ -529,8 +614,9 @@ fn accepted_scene(
     )?;
     let pages = notes::project(graph, ids, &mut remaining)?;
     let text_pages = text::project(graph, &pages, output_hash, binding, &mut remaining)?;
+    let object_pages = objects::project(graph, &pages, output_hash, binding, &mut remaining)?;
     Ok((
-        NativePdfNoteScene::new(output_hash, pages, text_pages)?,
+        NativePdfNoteScene::new(output_hash, pages, text_pages, object_pages)?,
         remaining,
     ))
 }

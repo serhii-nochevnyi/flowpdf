@@ -10,6 +10,12 @@ export const NATIVE_PDF_LIMITS = Object.freeze({
   requestHistory: 128,
   sessions: 2,
   retainedBytes: 16 * 1024 * 1024,
+  imageBytes: 60 * 1024,
+  imagePixels: 16_000_000,
+  imageDimension: 8192,
+  graphicPoints: 32,
+  graphicStrokeWidth: 32_000,
+  imageFormats: Object.freeze(['png', 'jpeg'] as const),
 } as const)
 
 export type NativePdfRect = readonly [number, number, number, number]
@@ -25,7 +31,52 @@ export type NativePdfTextCommand = {
   readonly text: string
 }
 
-export type NativePdfCommand = NativePdfNoteCommand | NativePdfTextCommand
+export type NativePdfObjectProfile = 'rasterRgb8' | 'rasterGray8' | 'line' | 'rectangle' | 'polygon'
+
+export interface NativePdfObjectTarget {
+  readonly page: number
+  readonly id: readonly number[]
+  readonly profile: NativePdfObjectProfile
+}
+
+// @contract: Object bounds, points, and stroke widths use thousandths of a PDF point in unrotated page space.
+export interface NativePdfGraphic {
+  readonly shape: 'line' | 'rectangle' | 'polygon'
+  readonly points: readonly (readonly [number, number])[]
+  readonly fill: readonly [number, number, number] | null
+  readonly stroke: readonly [number, number, number] | null
+  readonly strokeWidth: number
+}
+
+export type NativePdfObjectCommand =
+  | { readonly kind: 'addGraphic'; readonly page: number; readonly graphic: NativePdfGraphic }
+  | { readonly kind: 'replaceGraphic'; readonly target: NativePdfObjectTarget; readonly graphic: NativePdfGraphic }
+  | { readonly kind: 'addImage'; readonly page: number; readonly bounds: NativePdfRect; readonly assetHex: string }
+  | { readonly kind: 'replaceImage'; readonly target: NativePdfObjectTarget; readonly assetHex: string }
+  | { readonly kind: 'moveObject'; readonly target: NativePdfObjectTarget; readonly transform: readonly [number, number, number, number, number, number] }
+  | { readonly kind: 'removeObject'; readonly target: NativePdfObjectTarget }
+
+export type NativePdfCommand = NativePdfNoteCommand | NativePdfTextCommand | NativePdfObjectCommand
+
+const objectRefusals = [
+  'FLOW_PDF_NATIVE_OBJECT_STATE',
+  'FLOW_PDF_NATIVE_OBJECT_GEOMETRY',
+  'FLOW_PDF_NATIVE_OBJECT_ASSET',
+  'FLOW_PDF_NATIVE_OBJECT_PROFILE',
+] as const
+
+export interface NativePdfObjectPage {
+  readonly page: number
+  readonly canAdd: boolean
+  readonly objects: readonly {
+    readonly id: readonly number[]
+    readonly kind: 'image' | 'graphic'
+    readonly profile: NativePdfObjectProfile
+    readonly bounds: NativePdfRect
+    readonly operations: readonly ['replace', 'move', 'remove']
+  }[]
+  readonly refusal: typeof objectRefusals[number] | null
+}
 
 const textRefusals = [
   'FLOW_PDF_NATIVE_TEXT_FONT',
@@ -72,6 +123,7 @@ export interface NativePdfNoteScene {
   readonly outputHash: readonly number[]
   readonly sceneHash: readonly number[]
   readonly textPages?: readonly NativePdfTextPage[]
+  readonly objectPages?: readonly NativePdfObjectPage[]
   readonly pages: readonly {
     readonly id: number
     readonly object: NativePdfObjectRef
@@ -158,8 +210,10 @@ export type NativePdfTransportCode =
 
 const hexDigits = '0123456789abcdef'
 const textRefusalCodes = new Set<string>(textRefusals)
+const objectRefusalCodes = new Set<string>(objectRefusals)
 const rustErrorCodes = new Set([
   ...textRefusals,
+  ...objectRefusals,
   'FLOW_PDF_NATIVE_REQUEST_DECODE',
   'FLOW_PDF_NATIVE_BINDING_MISMATCH',
   'FLOW_PDF_NATIVE_REVISION_MISMATCH',
@@ -259,10 +313,73 @@ export function isNativeNoteCommand(value: unknown): value is NativePdfNoteComma
   return shape(value, 'kind', 'note') && value.kind === 'remove' && isNativeRequestId(value.note)
 }
 
+function rasterProfile(value: unknown): boolean {
+  return value === 'rasterRgb8' || value === 'rasterGray8'
+}
+
+function graphicShape(value: unknown): boolean {
+  return value === 'line' || value === 'rectangle' || value === 'polygon'
+}
+
+function objectTarget(value: unknown): boolean {
+  return shape(value, 'page', 'id', 'profile') && pageId(value.page) && hash(value.id)
+    && (rasterProfile(value.profile) || graphicShape(value.profile))
+}
+
+const objectCoordinateLimit = 1_000_000_000
+
+function objectBounds(value: unknown): value is NativePdfRect {
+  return rect(value) && value.every((coordinate) => Math.abs(coordinate) <= objectCoordinateLimit)
+    && value[0] < value[2] && value[1] < value[3]
+}
+
+function graphic(value: unknown): boolean {
+  if (!shape(value, 'shape', 'points', 'fill', 'stroke', 'strokeWidth') || !graphicShape(value.shape)
+    || !Array.isArray(value.points)
+    || (value.shape === 'polygon'
+      ? value.points.length < 3 || value.points.length > NATIVE_PDF_LIMITS.graphicPoints
+      : value.points.length !== 2)) return false
+  return value.points.every((point: unknown) => tuple(point, 2, -objectCoordinateLimit, objectCoordinateLimit))
+    && (value.fill === null || (value.shape !== 'line' && tuple(value.fill, 3, 0, 255)))
+    && (value.stroke === null
+      ? value.fill !== null && value.strokeWidth === 0
+      : tuple(value.stroke, 3, 0, 255) && integer(value.strokeWidth, 1, NATIVE_PDF_LIMITS.graphicStrokeWidth))
+}
+
+function imageHex(value: unknown): boolean {
+  return typeof value === 'string' && value.length <= 2 * NATIVE_PDF_LIMITS.imageBytes && bytesHex(value)
+}
+
+function objectCommand(value: unknown): boolean {
+  if (typeof value !== 'object' || value === null) return false
+  const command = value as Record<string, unknown>
+  switch (command.kind) {
+    case 'addGraphic':
+      return shape(command, 'kind', 'page', 'graphic') && pageId(command.page) && graphic(command.graphic)
+    case 'replaceGraphic':
+      return shape(command, 'kind', 'target', 'graphic') && objectTarget(command.target) && graphic(command.graphic)
+    case 'addImage':
+      return shape(command, 'kind', 'page', 'bounds', 'assetHex') && pageId(command.page)
+        && objectBounds(command.bounds) && imageHex(command.assetHex)
+    case 'replaceImage':
+      return shape(command, 'kind', 'target', 'assetHex') && objectTarget(command.target) && imageHex(command.assetHex)
+    case 'moveObject':
+      return shape(command, 'kind', 'target', 'transform') && objectTarget(command.target)
+        && Array.isArray(command.transform) && command.transform.length === 6
+        && Array.from(command.transform).every((number: unknown) => typeof number === 'number'
+          && Number.isFinite(number) && Math.abs(number) <= 1_000_000)
+    case 'removeObject':
+      return shape(command, 'kind', 'target') && objectTarget(command.target)
+    default:
+      return false
+  }
+}
+
 function isNativeCommand(value: unknown): value is NativePdfCommand {
   return isNativeNoteCommand(value)
     || (shape(value, 'kind', 'island', 'text') && value.kind === 'replaceText'
       && hash(value.island) && contents(value.text))
+    || objectCommand(value)
 }
 
 export function isNativeWorkerRequest(value: unknown): value is NativePdfWorkerRequest {
@@ -350,10 +467,32 @@ function textPages(value: unknown, pageCount: number): boolean {
   return true
 }
 
+function objectPages(value: unknown, count: number): boolean {
+  return Array.isArray(value) && value.length === count && value.every((page: unknown, index) =>
+    shape(page, 'page', 'canAdd', 'objects', 'refusal') && page.page === index
+    && Array.isArray(page.objects) && page.objects.length <= 128
+    && typeof page.canAdd === 'boolean'
+    && (page.refusal === null
+      ? page.objects.every((object: unknown) =>
+        shape(object, 'id', 'kind', 'profile', 'bounds', 'operations') && hash(object.id)
+        && (object.kind === 'image' ? rasterProfile(object.profile)
+          : object.kind === 'graphic' && graphicShape(object.profile))
+        && objectBounds(object.bounds) && Array.isArray(object.operations)
+        && object.operations.length === 3 && object.operations[0] === 'replace'
+        && object.operations[1] === 'move' && object.operations[2] === 'remove')
+      : page.canAdd === false && page.objects.length === 0 && typeof page.refusal === 'string'
+        && objectRefusalCodes.has(page.refusal)))
+}
+
 function scene(value: unknown): value is NativePdfNoteScene {
-  return (shape(value, 'sceneHash', 'outputHash', 'pages') || shape(value, 'sceneHash', 'outputHash', 'pages', 'textPages'))
+  const keys = ['sceneHash', 'outputHash', 'pages']
+  if (typeof value !== 'object' || value === null) return false
+  if (Object.hasOwn(value, 'objectPages')) keys.push('objectPages')
+  if (Object.hasOwn(value, 'textPages')) keys.push('textPages')
+  return shape(value, ...keys)
     && hash(value.sceneHash) && hash(value.outputHash)
     && Array.isArray(value.pages) && value.pages.length <= 4096
+    && (!Object.hasOwn(value, 'objectPages') || objectPages(value.objectPages, value.pages.length))
     && (!Object.hasOwn(value, 'textPages') || textPages(value.textPages, value.pages.length))
     && value.pages.every((page: unknown, index) => shape(page, 'id', 'object', 'geometry', 'canAddNote', 'annotations')
       && page.id === index && objectRef(page.object) && (page.geometry === null || geometry(page.geometry))
@@ -388,11 +527,16 @@ function isNativeResponse(value: unknown): value is NativePdfResponse {
   const limits = value.limits
   const knownLimits = Object.entries(NATIVE_PDF_LIMITS)
   if (!shape(limits, ...knownLimits.map(([key]) => key))
-    || !knownLimits.every(([key, expected]) => limits[key] === expected)) return false
+    || !knownLimits.every(([key, expected]) => {
+      const actual = limits[key]
+      return Array.isArray(expected) ? Array.isArray(actual) && actual.length === expected.length
+        && expected.every((element, index) => actual[index] === element) : actual === expected
+    })) return false
 
   if (value.status === 'failed') {
     return value.snapshot === null && typeof value.code === 'string' && rustErrorCodes.has(value.code)
-      && (!textRefusalCodes.has(value.code) || (value.operation === 'command' && value.requestId > 0))
+      && (!(textRefusalCodes.has(value.code) || objectRefusalCodes.has(value.code))
+        || (value.operation === 'command' && value.requestId > 0))
       && (value.code !== 'FLOW_PDF_NATIVE_IMPORT_REFUSED' || (value.operation === 'open' && value.requestId > 0))
       && (value.requestId === 0 ? value.binding === null && value.originStoreHash === null
         : isNativeStoreHash(value.originStoreHash) && (value.operation === 'open' ? value.binding === null : binding(value.binding)))
