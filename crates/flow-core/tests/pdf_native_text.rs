@@ -203,6 +203,30 @@ fn core_refuses_missing_codes_and_overflow_atomically() {
 }
 
 #[test]
+fn core_refuses_replacement_when_shared_decoded_budget_is_exhausted() {
+    let content = format!("{}{CID_CONTENT}", " ".repeat(1024));
+    let bytes = build_fixture(&content, false, true, "", false, true);
+    let limits = NativeEditLimits {
+        max_total_decoded_bytes: 2 * include_bytes!("../data/NotoSans-Regular.ttf").len() + 4500,
+        ..NativeEditLimits::default()
+    };
+    let mut session = NativePdfSession::open_scoped(&bytes, limits, [7; 16]).unwrap();
+    let binding = session.snapshot().binding;
+    let command = NativeTextCommand::ReplaceText {
+        island: session.snapshot().scene.text_pages[0].islands[0].id,
+        text: "ЇA".into(),
+    };
+
+    assert_eq!(
+        session.apply_text(binding, 1, &command).unwrap_err().code(),
+        "FLOW_PDF_READER_DECODED_STREAM_LIMIT"
+    );
+    assert_eq!(session.output_bytes(), bytes);
+    assert_eq!(session.snapshot().binding, binding);
+    assert_eq!(session.snapshot().consumed_request, 0);
+}
+
+#[test]
 fn core_refuses_unproven_fonts_mappings_and_layout() {
     for (content, embedded, mapping, shared, reason) in [
         (CID_CONTENT, false, "", false, NativeTextRefusal::Font),

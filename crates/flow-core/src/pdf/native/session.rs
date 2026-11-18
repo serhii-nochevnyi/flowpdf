@@ -406,6 +406,7 @@ impl NativePdfSession {
         };
         let mut reopen_limits = self.snapshot.limits;
         reopen_limits.max_source_bytes = reopen_limits.max_output_bytes;
+        reopen_limits.max_total_decoded_bytes = staged.remaining_decoded();
         reopen_limits.max_retained_bytes =
             staged.remaining_retained() + (output_budget - output.len());
         if reopen_limits.max_retained_bytes == 0 {

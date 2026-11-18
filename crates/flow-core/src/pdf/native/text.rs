@@ -1252,14 +1252,25 @@ pub(super) fn stage<'a>(
     if island.show.array {
         operand.push(b']');
     }
-    let span = &island.show.operand;
-    let data = &content.stream.data;
-    let size = data.len() - span.len() + operand.len();
+    let span = island.show.operand.clone();
+    let size = content
+        .stream
+        .data
+        .len()
+        .checked_sub(span.len())
+        .and_then(|bytes| bytes.checked_add(operand.len()))
+        .ok_or(Budget)?;
     if size > MAX_CONTENT_BYTES || size > graph.limits.max_decoded_stream_bytes {
         return Err(Budget);
     }
-    let mut remaining = graph.remaining_retained();
-    spend(&mut remaining, 1024 + size * 2)?;
+    let original_reference = content.reference;
+    let copy_on_write = content.copy_on_write;
+    let original_bounds = island.view.bounds;
+    graph.reserve_replacement_stream(size)?;
+    let Some(PdfValue::Stream(original)) = graph.objects.get(&original_reference) else {
+        return Err(TargetUnavailable);
+    };
+    let data = &original.data;
     let mut updated = Vec::with_capacity(size);
     updated.extend_from_slice(&data[..span.start]);
     updated.extend_from_slice(&operand);
@@ -1270,9 +1281,7 @@ pub(super) fn stage<'a>(
         data: updated,
         source_offset: 0,
     });
-    let original_reference = content.reference;
-    let original_bounds = island.view.bounds;
-    let new_object = if content.copy_on_write {
+    let new_object = if copy_on_write {
         if graph.objects.len() >= graph.limits.max_objects {
             return Err(Budget);
         }
