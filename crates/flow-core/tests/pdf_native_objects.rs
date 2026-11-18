@@ -253,6 +253,49 @@ fn jpeg_asset_replaces_only_one_use_of_a_shared_raster() {
 }
 
 #[test]
+fn display_p3_png_refuses_without_mutating_the_accepted_snapshot() {
+    let header = "89504e470d0a1a0a0000000d4948445200000001000000010802000000907753de";
+    let display_p3 = "00000004634943500c0d00016e03e3ef";
+    let pixels = "0000000c49444154789c63f8cfc0000003010100c9fe92ef0000000049454e44ae426082";
+    let tagged = format!("{header}{display_p3}{pixels}");
+    let encoded: Vec<_> = tagged
+        .as_bytes()
+        .chunks_exact(2)
+        .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
+        .collect();
+    let decoded = image::load_from_memory_with_format(&encoded, image::ImageFormat::Png).unwrap();
+    assert_eq!(decoded.into_rgb8().into_raw(), [255, 0, 0]);
+
+    let source = fixture(b"", false, "", &[]);
+    let mut session = open(&source);
+    apply(
+        &mut session,
+        json!({"kind":"addImage","page":0,"bounds":[1000,1000,5000,5000],"assetHex":format!("{header}{pixels}")}),
+    )
+    .unwrap();
+    let selected = target(&session, 0, 0);
+    let state = |session: &NativePdfSession| {
+        let snapshot = session.snapshot();
+        (
+            snapshot.binding,
+            snapshot.output_hash,
+            snapshot.scene.scene_hash,
+            snapshot.consumed_request,
+        )
+    };
+    let before = state(&session);
+    let bytes = session.output_bytes().to_vec();
+    let error = apply(
+        &mut session,
+        json!({"kind":"replaceImage","target":selected,"assetHex":tagged}),
+    )
+    .unwrap_err();
+    assert_eq!(error.code(), "FLOW_PDF_NATIVE_OBJECT_ASSET");
+    assert_eq!(state(&session), before);
+    assert_eq!(session.output_bytes(), bytes);
+}
+
+#[test]
 fn oversized_jpeg_frame_refuses_without_mutating_session() {
     let mut jpeg = Vec::new();
     image::codecs::jpeg::JpegEncoder::new(&mut jpeg)

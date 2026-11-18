@@ -169,6 +169,66 @@ describe('native PDF edit coordinator', () => {
     lane.coordinator.dispose()
   })
 
+  it.each([
+    ['image', 'applied'], ['graphic', 'applied'], ['image', 'reconciled'], ['graphic', 'reconciled'],
+  ] as const)('confirms an ordinary %s change (%s)', async (kind, mode) => {
+    const lane = fakePort()
+    const opening = lane.coordinator.open(original())
+    const openDispatch = await lane.take()
+    const openedReply = openReply(openDispatch.request)
+    const selected = { id: hash(51), kind: 'graphic', profile: 'rectangle',
+      bounds: [1000, 1000, 3000, 4000], operations: ['replace', 'move', 'remove'] } as const
+    const sibling = { ...selected, id: hash(52), bounds: [7000, 7000, 8000, 9000] } as const
+    const objectPage = { page: 0, canAdd: true, refusal: null, objects: [sibling, selected] } as const
+    lane.deliver(openDispatch, { ...openedReply, snapshot: { ...openedReply.snapshot,
+      scene: { ...openedReply.snapshot.scene, objectPages: [objectPage] },
+    } })
+    const initial = await opening
+    const command = kind === 'image'
+      ? { kind: 'addImage', page: 0, bounds: [2000, 2000, 6000, 6000],
+          assetHex: '89504e470d0a1a0a0000000d4948445200000001000000010802000000907753de'
+            + '0000000c49444154789c63f8cfc0000003010100c9fe92ef0000000049454e44ae426082' } as const
+      : { kind: 'moveObject', target: { page: 0, id: selected.id, profile: selected.profile },
+          transform: [1, 0, 0, 1, 1, 2] } as const
+    const applying = lane.coordinator.command(command)
+    const dispatch = await lane.take()
+    const changed = kind === 'image'
+      ? { ...selected, id: hash(53), kind, profile: 'rasterRgb8', bounds: [2000, 2000, 6000, 6000] } as const
+      : { ...selected, id: hash(53), bounds: [2000, 3000, 4000, 6000] } as const
+    const unchangedSibling = { ...sibling, id: hash(54) }
+    const unchangedTarget = { ...selected, id: hash(55) }
+    const objects = kind === 'image' ? [changed, unchangedSibling, unchangedTarget] : [unchangedSibling, changed]
+    const outputHash = hash(56)
+    const snapshot = {
+      ...initial, binding: { ...initial.binding, revision: 1 }, outputHash, outputHex: '04',
+      consumedRequest: dispatch.request.requestId, scene: { ...initial.scene, outputHash,
+        sceneHash: hash(57), objectPages: [{ ...objectPage, objects }] },
+    }
+    const receipt = { ...openedReply, operation: 'command', status: 'applied',
+      requestId: dispatch.request.requestId, snapshot } as const
+    if (mode === 'reconciled') {
+      const refused = expect(applying).rejects.toMatchObject({ code: 'FLOW_PDF_NATIVE_RESPONSE_INVALID' })
+      const wrongObjects = kind === 'image' ? [unchangedSibling, changed, unchangedTarget] : [changed, unchangedTarget]
+      const wrong = { ...snapshot, scene: { ...snapshot.scene, objectPages: [{ ...objectPage, objects: wrongObjects }] } }
+      lane.deliver(dispatch, { ...receipt, snapshot: wrong })
+      await refused
+      const retry = lane.coordinator.reconcile()
+      const lookup = await lane.take()
+      const rejected = expect(retry).rejects.toMatchObject({ code: 'FLOW_PDF_NATIVE_RESPONSE_INVALID' })
+      lane.deliver(lookup, { ...receipt, operation: 'snapshot', status: 'accepted', snapshot: wrong })
+      await rejected
+      expect(lane.coordinator.snapshot()).toMatchObject({ phase: 'reconciliationRequired', accepted: initial })
+      const reconciling = lane.coordinator.reconcile()
+      lane.deliver(await lane.take(), { ...receipt, operation: 'snapshot', status: 'accepted' })
+      await expect(reconciling).resolves.toMatchObject({ status: 'accepted', snapshot })
+    } else {
+      lane.deliver(dispatch, receipt)
+      await expect(applying).resolves.toEqual(snapshot)
+    }
+    expect(lane.coordinator.snapshot()).toMatchObject({ phase: 'ready', accepted: snapshot })
+    lane.coordinator.dispose()
+  })
+
   it('requires a current verified text island before dispatch', async () => {
     const lane = fakePort()
     const initial = await opened(lane)
