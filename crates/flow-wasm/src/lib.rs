@@ -2,6 +2,11 @@
 
 #![forbid(unsafe_code)]
 
+use flow_core::pdf::{
+    NATIVE_MAX_NOTE_BYTES, NATIVE_REQUEST_HISTORY, NativeBinding, NativeEditError, NativeEditLimits,
+    NativeNoteCommand, NativePdfNoteScene, NativePdfSession, NativeRequestLookup,
+    NativeSessionError, PdfObjectRef,
+};
 use flow_core::{
     ApiResponse, ApplyCommandRequest, AssetStageRequest, AssetStageResponse, AuditedRecoverRequest,
     AuditedRecoverResult, CommandKind, CreateSampleRequest, EditorSessionRequest,
@@ -10,7 +15,7 @@ use flow_core::{
     MigrateDocumentRequest, MigrateDocumentResult, OperationResult, PdfDocumentCandidate,
     PdfDocumentSummary, PdfExportManifest, PdfExportOptions, PdfExportRequest,
     PdfFontManifestIdentity, PdfFormPlan, PdfInternalLink, PdfMetadataOptions, PdfOcrCandidate,
-    PdfOutlineEntry, PdfPagePlan, PdfReaderLimits, PdfReconstructionRequest,
+    PdfOutlineEntry, PdfPagePlan, PdfReadError, PdfReaderLimits, PdfReconstructionRequest,
     PdfReconstructionResult, PdfRecoveryExpectation, PdfReproducibilityInputs, PdfReviewDecision,
     PdfScene, PdfSceneRequest, PlanPersistenceCommitRequest, PlanStandaloneAuditRequest,
     RecoverRequest, RecoverResult, UkrainianHyphenation, VOICE_PROTOCOL_VERSION,
@@ -20,6 +25,8 @@ use flow_core::{
     verify_pdf_document_candidate, verify_pdf_reconstruction_result,
 };
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use std::{cell::RefCell, collections::VecDeque, io::Write};
 use wasm_bindgen::prelude::*;
 
 const SUPPORTED_OLDER_FIXTURE: &str = include_str!("../../../fixtures/flowdoc/older.json");
@@ -1242,9 +1249,11 @@ fn serialize_json_response<T: Serialize>(response: &ApiResponse<T>) -> String {
 }
 
 fn encode_hex(bytes: &[u8]) -> String {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
     let mut output = String::with_capacity(bytes.len().saturating_mul(2));
-    for byte in bytes {
-        output.push_str(&format!("{byte:02x}"));
+    for &byte in bytes {
+        output.push(char::from(DIGITS[usize::from(byte >> 4)]));
+        output.push(char::from(DIGITS[usize::from(byte & 15)]));
     }
     output
 }
@@ -1297,4 +1306,843 @@ fn serialize_response<T: serde::Serialize>(response: &ApiResponse<T>) -> JsValue
     let serializer = serde_wasm_bindgen::Serializer::json_compatible();
     serde::Serialize::serialize(response, &serializer)
         .expect("serializing a fixed response DTO cannot fail")
+}
+
+const NATIVE_PDF_VERSION: u32 = 1;
+const NATIVE_PDF_BYTES: usize = 8 * 1024 * 1024;
+const NATIVE_PDF_REQUEST: usize = 2 * NATIVE_PDF_BYTES + 4096;
+const NATIVE_PDF_COMMAND: usize = 128 * 1024;
+const NATIVE_PDF_RESULT: usize = 64 * 1024 * 1024;
+const NATIVE_PDF_SESSIONS: usize = 2;
+const NATIVE_PDF_RETAINED: usize = 8 * 1024 * 1024;
+const MAX_WIRE_ID: u64 = (1 << 53) - 1;
+const MAX_NATIVE_REVISION: u64 = MAX_WIRE_ID - (1 << 48);
+const NATIVE_IMPORT_REFUSED: &str = "FLOW_PDF_NATIVE_IMPORT_REFUSED";
+const NATIVE_DECODE: &str = "FLOW_PDF_NATIVE_REQUEST_DECODE";
+const NATIVE_BINDING: &str = "FLOW_PDF_NATIVE_BINDING_MISMATCH";
+const NATIVE_REVISION: &str = "FLOW_PDF_NATIVE_REVISION_MISMATCH";
+const NATIVE_RECONCILE: &str = "FLOW_PDF_NATIVE_RECONCILIATION_REQUIRED";
+const NATIVE_BUDGET: &str = "FLOW_PDF_NATIVE_BUDGET_EXHAUSTED";
+const NATIVE_POSTCONDITION: &str = "FLOW_PDF_NATIVE_POSTCONDITION_FAILED";
+
+#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+enum NativeOperation {
+    Open,
+    Command,
+    Snapshot,
+    Close,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+enum NativeStatus {
+    Opened,
+    Applied,
+    Accepted,
+    Unseen,
+    Evicted,
+    Closed,
+    Failed,
+}
+
+#[derive(Deserialize)]
+#[serde(
+    tag = "operation",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
+)]
+enum NativeRequest {
+    Open {
+        protocol_version: u32,
+        request_id: u64,
+        epoch: [u8; 16],
+        origin_store_hash: String,
+        bytes_hex: String,
+    },
+    Command {
+        protocol_version: u32,
+        request_id: u64,
+        binding: NativeBinding,
+        origin_store_hash: String,
+        output_hash: [u8; 32],
+        command: NativeNoteCommand,
+    },
+    Snapshot {
+        protocol_version: u32,
+        request_id: u64,
+        binding: NativeBinding,
+        origin_store_hash: String,
+    },
+    Close {
+        protocol_version: u32,
+        request_id: u64,
+        binding: NativeBinding,
+        origin_store_hash: String,
+    },
+}
+
+impl NativeRequest {
+    fn identity(&self) -> (NativeOperation, u32, u64, Option<NativeBinding>, &str) {
+        match self {
+            Self::Open {
+                protocol_version,
+                request_id,
+                origin_store_hash,
+                ..
+            } => (
+                NativeOperation::Open,
+                *protocol_version,
+                *request_id,
+                None,
+                origin_store_hash,
+            ),
+            Self::Command {
+                protocol_version,
+                request_id,
+                binding,
+                origin_store_hash,
+                ..
+            } => (
+                NativeOperation::Command,
+                *protocol_version,
+                *request_id,
+                Some(*binding),
+                origin_store_hash,
+            ),
+            Self::Snapshot {
+                protocol_version,
+                request_id,
+                binding,
+                origin_store_hash,
+            } => (
+                NativeOperation::Snapshot,
+                *protocol_version,
+                *request_id,
+                Some(*binding),
+                origin_store_hash,
+            ),
+            Self::Close {
+                protocol_version,
+                request_id,
+                binding,
+                origin_store_hash,
+            } => (
+                NativeOperation::Close,
+                *protocol_version,
+                *request_id,
+                Some(*binding),
+                origin_store_hash,
+            ),
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct NativeWireLimits {
+    identity_version: u32,
+    count_unit: NativeCountUnit,
+    request_bytes: usize,
+    command_bytes: usize,
+    result_bytes: usize,
+    pdf_bytes: usize,
+    note_bytes: usize,
+    request_history: usize,
+    sessions: usize,
+    retained_bytes: usize,
+}
+
+#[derive(Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+enum NativeCountUnit {
+    Utf8Bytes,
+}
+
+fn native_wire_limits() -> NativeWireLimits {
+    NativeWireLimits {
+        identity_version: 1,
+        count_unit: NativeCountUnit::Utf8Bytes,
+        request_bytes: NATIVE_PDF_REQUEST,
+        command_bytes: NATIVE_PDF_COMMAND,
+        result_bytes: NATIVE_PDF_RESULT,
+        pdf_bytes: NATIVE_PDF_BYTES,
+        note_bytes: NATIVE_MAX_NOTE_BYTES,
+        request_history: NATIVE_REQUEST_HISTORY,
+        sessions: NATIVE_PDF_SESSIONS,
+        retained_bytes: NATIVE_PDF_SESSIONS * NATIVE_PDF_RETAINED,
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct NativeWireSnapshot<S> {
+    binding: NativeBinding,
+    origin_store_hash: String,
+    output_hash: [u8; 32],
+    consumed_request: u64,
+    scene: S,
+    output_hex: String,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(
+    rename_all = "camelCase",
+    deny_unknown_fields,
+    bound(deserialize = "S: Deserialize<'de>")
+)]
+struct NativeResponse<S> {
+    protocol_version: u32,
+    operation: NativeOperation,
+    request_id: u64,
+    #[serde(deserialize_with = "native_required_option")]
+    binding: Option<NativeBinding>,
+    #[serde(deserialize_with = "native_required_option")]
+    origin_store_hash: Option<String>,
+    status: NativeStatus,
+    limits: NativeWireLimits,
+    #[serde(deserialize_with = "native_required_option")]
+    snapshot: Option<NativeWireSnapshot<S>>,
+    #[serde(deserialize_with = "native_required_option")]
+    code: Option<String>,
+    result_hash: String,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct NativeVerifiedScene {
+    output_hash: [u8; 32],
+    scene_hash: [u8; 32],
+    pages: Vec<NativeVerifiedPage>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct NativeVerifiedPage {
+    id: u32,
+    object: PdfObjectRef,
+    #[serde(deserialize_with = "native_required_option")]
+    geometry: Option<NativeVerifiedGeometry>,
+    can_add_note: bool,
+    annotations: Vec<NativeVerifiedAnnotation>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NativeVerifiedGeometry {
+    bounds: [i64; 4],
+    rotation: i64,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
+enum NativeVerifiedAnnotation {
+    PlainNote {
+        id: u64,
+        object: PdfObjectRef,
+        contents: String,
+        rect: [i64; 4],
+    },
+    ReadOnly {
+        #[serde(deserialize_with = "native_required_option")]
+        object: Option<PdfObjectRef>,
+        profile: NativeVerifiedProfile,
+        #[serde(deserialize_with = "native_required_option")]
+        rect: Option<[i64; 4]>,
+    },
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+enum NativeVerifiedProfile {
+    Text,
+    Appearance,
+    Link,
+    Widget,
+    Other,
+}
+
+struct NativeRegistryEntry {
+    session: NativePdfSession,
+    origin_store_hash: String,
+    base_outputs: VecDeque<(u64, [u8; 32])>,
+}
+
+#[derive(Default)]
+struct NativeRegistry {
+    sessions: Vec<NativeRegistryEntry>,
+    closed: VecDeque<NativeClosedSession>,
+}
+
+struct NativeClosedSession {
+    binding: NativeBinding,
+    origin_store_hash: String,
+    request_id: u64,
+    consumed_request: u64,
+}
+
+thread_local! {
+    static NATIVE_REGISTRY: RefCell<NativeRegistry> = RefCell::new(NativeRegistry::default());
+}
+
+fn native_same_session(left: NativeBinding, right: NativeBinding) -> bool {
+    left.session_id == right.session_id
+        && left.origin_hash == right.origin_hash
+        && left.epoch == right.epoch
+}
+
+fn native_hash_text(value: &str) -> bool {
+    value.len() == 64 && native_lower_hex(value)
+}
+
+fn native_lower_hex(value: &str) -> bool {
+    value
+        .bytes()
+        .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+}
+
+fn native_decode_pdf(value: &str) -> Result<Vec<u8>, ()> {
+    if value.is_empty() || value.len() > 2 * NATIVE_PDF_BYTES || !native_lower_hex(value) {
+        return Err(());
+    }
+    decode_hex(value, NATIVE_PDF_BYTES)
+}
+
+fn native_binding_valid(binding: NativeBinding) -> bool {
+    binding.session_id > 0
+        && binding.session_id <= MAX_WIRE_ID
+        && binding.revision <= MAX_NATIVE_REVISION
+}
+
+fn native_required_option<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::deserialize(deserializer)
+}
+
+struct NativeHashWriter(blake3::Hasher, usize);
+
+impl Write for NativeHashWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        if bytes.len() > NATIVE_PDF_RESULT - self.1 {
+            return Err(std::io::Error::other("native result limit"));
+        }
+        self.1 += bytes.len();
+        self.0.update(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+struct NativeBoundedJson(Vec<u8>);
+
+impl Write for NativeBoundedJson {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        if bytes.len() > NATIVE_PDF_RESULT - self.0.len() {
+            return Err(std::io::Error::other("native result limit"));
+        }
+        self.0.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn native_result_hash(response: &impl Serialize) -> Result<String, serde_json::Error> {
+    let mut writer = NativeHashWriter(blake3::Hasher::new(), 0);
+    writer.0.update(b"flowpdf:native-wire:v1");
+    serde_json::to_writer(&mut writer, response)?;
+    Ok(writer.0.finalize().to_hex().to_string())
+}
+
+fn native_session_error_code(error: NativeSessionError, reader_refusal: &'static str) -> &'static str {
+    match error {
+        NativeSessionError::Graph(NativeEditError::Reader(
+            PdfReadError::InputSizeLimit
+            | PdfReadError::ObjectLimit
+            | PdfReadError::NestingLimit
+            | PdfReadError::TokenLimit
+            | PdfReadError::StreamLimit
+            | PdfReadError::DecodedStreamLimit
+            | PdfReadError::PageCountLimit
+            | PdfReadError::NumericLimit
+            | PdfReadError::ImageLimit,
+        )) => NATIVE_BUDGET,
+        NativeSessionError::Graph(NativeEditError::Reader(_)) => reader_refusal,
+        error => error.code(),
+    }
+}
+
+impl NativeRegistry {
+    fn execute<'a>(
+        &'a mut self,
+        request: NativeRequest,
+        response: &mut NativeResponse<&'a NativePdfNoteScene>,
+    ) -> Result<(), &'static str> {
+        let (_, _, request_id, binding, store_hash) = request.identity();
+        if let NativeRequest::Open {
+            epoch,
+            bytes_hex,
+            origin_store_hash,
+            ..
+        } = request
+        {
+            if self.sessions.len() == NATIVE_PDF_SESSIONS {
+                return Err(NATIVE_BUDGET);
+            }
+            let bytes = native_decode_pdf(&bytes_hex).map_err(|()| NATIVE_DECODE)?;
+            if encode_hex(&Sha256::digest(&bytes)) != origin_store_hash {
+                return Err(NATIVE_BINDING);
+            }
+            let limits = NativeEditLimits {
+                max_source_bytes: NATIVE_PDF_BYTES,
+                max_output_bytes: NATIVE_PDF_BYTES,
+                max_retained_bytes: NATIVE_PDF_RETAINED
+                    - (NATIVE_REQUEST_HISTORY * size_of::<(u64, [u8; 32])>() + 1024),
+                ..NativeEditLimits::default()
+            };
+            let session = NativePdfSession::open_scoped(&bytes, limits, epoch)
+                .map_err(|error| native_session_error_code(error, NATIVE_IMPORT_REFUSED))?;
+            if !native_binding_valid(session.snapshot().binding) {
+                return Err(NATIVE_BUDGET);
+            }
+            self.sessions.push(NativeRegistryEntry {
+                session,
+                origin_store_hash,
+                base_outputs: VecDeque::with_capacity(NATIVE_REQUEST_HISTORY),
+            });
+            let entry = self.sessions.last().expect("session just inserted");
+            response.binding = Some(entry.session.snapshot().binding);
+            response.status = NativeStatus::Opened;
+            response.snapshot = Some(entry.wire_snapshot());
+            return Ok(());
+        }
+        let binding = binding.ok_or(NATIVE_BINDING)?;
+        let index = self.sessions.iter().position(|entry| {
+            native_same_session(entry.session.snapshot().binding, binding)
+                && entry.origin_store_hash == store_hash
+        });
+        if matches!(request, NativeRequest::Close { .. }) {
+            if let Some(index) = index {
+                let current = self.sessions[index].session.snapshot();
+                if current.binding != binding {
+                    return Err(NATIVE_REVISION);
+                }
+                let consumed_request = current.consumed_request;
+                if request_id <= consumed_request {
+                    return Err("FLOW_PDF_NATIVE_REQUEST_INVALID");
+                }
+                let entry = self.sessions.swap_remove(index);
+                if self.closed.len() == NATIVE_PDF_SESSIONS {
+                    self.closed.pop_front();
+                }
+                self.closed.push_back(NativeClosedSession {
+                    binding,
+                    origin_store_hash: entry.origin_store_hash,
+                    request_id,
+                    consumed_request,
+                });
+            } else {
+                let closed = self
+                    .closed
+                    .iter()
+                    .find(|closed| {
+                        closed.binding == binding && closed.origin_store_hash == store_hash
+                    })
+                    .ok_or(NATIVE_BINDING)?;
+                if request_id <= closed.consumed_request {
+                    return Err("FLOW_PDF_NATIVE_REQUEST_INVALID");
+                }
+                if request_id != closed.request_id {
+                    return Err(NATIVE_BINDING);
+                }
+            }
+            response.status = NativeStatus::Closed;
+            return Ok(());
+        }
+
+        let entry = &mut self.sessions[index.ok_or(NATIVE_BINDING)?];
+        let current = entry.session.snapshot();
+        response.status = match request {
+            NativeRequest::Command {
+                output_hash,
+                command,
+                ..
+            } => {
+                entry.apply(binding, request_id, output_hash, &command)?;
+                NativeStatus::Applied
+            }
+            NativeRequest::Snapshot { .. } => {
+                match entry
+                    .session
+                    .lookup(binding, request_id)
+                    .map_err(|error| error.code())?
+                {
+                    NativeRequestLookup::Accepted(_) => NativeStatus::Accepted,
+                    NativeRequestLookup::Unseen => NativeStatus::Unseen,
+                    NativeRequestLookup::ReconciliationRequired
+                        if current.binding.revision.saturating_sub(binding.revision)
+                            > NATIVE_REQUEST_HISTORY as u64 =>
+                    {
+                        NativeStatus::Evicted
+                    }
+                    NativeRequestLookup::ReconciliationRequired => return Err(NATIVE_REVISION),
+                }
+            }
+            _ => return Err(NATIVE_DECODE),
+        };
+        response.snapshot = Some(entry.wire_snapshot());
+        Ok(())
+    }
+}
+
+impl NativeRegistryEntry {
+    fn apply(
+        &mut self,
+        binding: NativeBinding,
+        request_id: u64,
+        output_hash: [u8; 32],
+        command: &NativeNoteCommand,
+    ) -> Result<(), &'static str> {
+        let current = self.session.snapshot();
+        let previous_revision = current.binding.revision;
+        let expected_output = match self
+            .session
+            .lookup(binding, request_id)
+            .map_err(|error| error.code())?
+        {
+            NativeRequestLookup::Unseen if previous_revision == MAX_NATIVE_REVISION => {
+                return Err(NATIVE_BUDGET);
+            }
+            NativeRequestLookup::Unseen => current.output_hash,
+            NativeRequestLookup::Accepted(_) => self
+                .base_outputs
+                .iter()
+                .find(|(id, _)| *id == request_id)
+                .map(|(_, output)| *output)
+                .ok_or(NATIVE_RECONCILE)?,
+            NativeRequestLookup::ReconciliationRequired => return Err(NATIVE_RECONCILE),
+        };
+        if output_hash != expected_output {
+            return Err(NATIVE_BINDING);
+        }
+        let receipt = self
+            .session
+            .apply(binding, request_id, command)
+            .map_err(|error| native_session_error_code(error, NATIVE_POSTCONDITION))?;
+        if receipt.binding.revision < previous_revision {
+            return Err(NATIVE_RECONCILE);
+        }
+        if receipt.binding.revision > previous_revision {
+            if self.base_outputs.len() == NATIVE_REQUEST_HISTORY {
+                self.base_outputs.pop_front();
+            }
+            self.base_outputs.push_back((request_id, output_hash));
+        }
+        Ok(())
+    }
+
+    fn wire_snapshot(&self) -> NativeWireSnapshot<&NativePdfNoteScene> {
+        let snapshot = self.session.snapshot();
+        NativeWireSnapshot {
+            binding: snapshot.binding,
+            origin_store_hash: self.origin_store_hash.clone(),
+            output_hash: snapshot.output_hash,
+            consumed_request: snapshot.consumed_request,
+            scene: &snapshot.scene,
+            output_hex: encode_hex(self.session.output_bytes()),
+        }
+    }
+}
+
+fn native_response<S>(operation: NativeOperation) -> NativeResponse<S> {
+    NativeResponse {
+        protocol_version: NATIVE_PDF_VERSION,
+        operation,
+        request_id: 0,
+        binding: None,
+        origin_store_hash: None,
+        status: NativeStatus::Failed,
+        limits: native_wire_limits(),
+        snapshot: None,
+        code: Some(NATIVE_DECODE.to_owned()),
+        result_hash: String::new(),
+    }
+}
+
+fn serialize_native_response<S: Serialize>(mut response: NativeResponse<S>) -> String {
+    fn encode<S: Serialize>(response: &mut NativeResponse<S>) -> Result<String, serde_json::Error> {
+        response.result_hash = native_result_hash(response)?;
+        let mut output = NativeBoundedJson(Vec::new());
+        serde_json::to_writer(&mut output, response)?;
+        Ok(String::from_utf8(output.0).expect("JSON is UTF-8"))
+    }
+
+    encode(&mut response).unwrap_or_else(|_| {
+        response.status = NativeStatus::Failed;
+        response.snapshot = None;
+        response.code = Some(NATIVE_BUDGET.to_owned());
+        response.result_hash.clear();
+        encode(&mut response).expect("bounded native error")
+    })
+}
+
+fn native_dispatch(operation: NativeOperation, json: &str) -> String {
+    let mut response = native_response::<&NativePdfNoteScene>(operation);
+    let limit = if operation == NativeOperation::Open {
+        NATIVE_PDF_REQUEST
+    } else {
+        NATIVE_PDF_COMMAND
+    };
+    if json.len() > limit {
+        response.code = Some(NATIVE_BUDGET.to_owned());
+        return serialize_native_response(response);
+    }
+    let Ok(request) = serde_json::from_str::<NativeRequest>(json) else {
+        return serialize_native_response(response);
+    };
+    let (kind, version, request_id, binding, hash) = request.identity();
+    if kind != operation
+        || version != NATIVE_PDF_VERSION
+        || request_id == 0
+        || request_id > MAX_WIRE_ID
+        || !native_hash_text(hash)
+        || binding.is_some_and(|binding| !native_binding_valid(binding))
+    {
+        return serialize_native_response(response);
+    }
+    let origin_store_hash = hash.to_owned();
+    NATIVE_REGISTRY.with(|registry| {
+        let mut registry = registry.borrow_mut();
+        let mut response = native_response(operation);
+        response.request_id = request_id;
+        response.binding = binding;
+        response.origin_store_hash = Some(origin_store_hash);
+        response.code = registry
+            .execute(request, &mut response)
+            .err()
+            .map(str::to_owned);
+        serialize_native_response(response)
+    })
+}
+
+#[wasm_bindgen]
+pub fn native_pdf_open(request_json: String) -> String {
+    native_dispatch(NativeOperation::Open, &request_json)
+}
+
+#[wasm_bindgen]
+pub fn native_pdf_command(request_json: String) -> String {
+    native_dispatch(NativeOperation::Command, &request_json)
+}
+
+#[wasm_bindgen]
+pub fn native_pdf_snapshot(request_json: String) -> String {
+    native_dispatch(NativeOperation::Snapshot, &request_json)
+}
+
+#[wasm_bindgen]
+pub fn native_pdf_close(request_json: String) -> String {
+    native_dispatch(NativeOperation::Close, &request_json)
+}
+
+impl NativeVerifiedScene {
+    fn verify(&self) -> Option<()> {
+        let mut writer = NativeHashWriter(blake3::Hasher::new(), 0);
+        writer.0.update(b"flowpdf:accepted-note-scene:v2");
+        writer.0.update(&self.output_hash);
+        for (index, page) in self.pages.iter().enumerate() {
+            if page.id as usize != index {
+                return None;
+            }
+            serde_json::to_writer(
+                &mut writer,
+                &(page.object, &page.geometry, page.can_add_note),
+            )
+            .ok()?;
+            for annotation in &page.annotations {
+                match annotation {
+                    NativeVerifiedAnnotation::PlainNote {
+                        id,
+                        object,
+                        contents,
+                        rect,
+                    } => {
+                        if *id > MAX_WIRE_ID {
+                            return None;
+                        }
+                        serde_json::to_writer(&mut writer, &(object, rect, contents))
+                    }
+                    NativeVerifiedAnnotation::ReadOnly {
+                        object,
+                        profile,
+                        rect,
+                    } => serde_json::to_writer(&mut writer, &(object, profile, rect)),
+                }
+                .ok()?;
+            }
+        }
+        (writer.0.finalize().as_bytes() == &self.scene_hash).then_some(())
+    }
+}
+
+fn verify_native_snapshot(response: &NativeResponse<NativeVerifiedScene>) -> Option<()> {
+    let snapshot = response.snapshot.as_ref()?;
+    let binding = response.binding?;
+    if !native_binding_valid(snapshot.binding)
+        || !native_same_session(snapshot.binding, binding)
+        || Some(&snapshot.origin_store_hash) != response.origin_store_hash.as_ref()
+        || snapshot.consumed_request > MAX_WIRE_ID
+        || snapshot.binding.revision > snapshot.consumed_request
+        || snapshot.output_hash != snapshot.scene.output_hash
+        || (snapshot.binding.revision == 0) != (snapshot.consumed_request == 0)
+        || (snapshot.binding.revision == 0 && snapshot.binding.origin_hash != snapshot.output_hash)
+    {
+        return None;
+    }
+    let revision = snapshot.binding.revision;
+    let base = binding.revision;
+    let consumed = snapshot.consumed_request;
+    let request = response.request_id;
+    let correlated = match (response.operation, response.status) {
+        (NativeOperation::Open, NativeStatus::Opened) => revision == 0 && base == 0,
+        (NativeOperation::Command, NativeStatus::Applied) => {
+            revision == base + 1 && consumed == request
+        }
+        (NativeOperation::Snapshot, NativeStatus::Accepted) => {
+            (revision == base + 1 && consumed == request)
+                || (revision > base + 1 && consumed > request)
+        }
+        (NativeOperation::Snapshot, NativeStatus::Evicted) => {
+            revision.saturating_sub(base) > NATIVE_REQUEST_HISTORY as u64 && consumed > request
+        }
+        (NativeOperation::Snapshot, NativeStatus::Unseen) => revision == base && consumed < request,
+        _ => false,
+    };
+    if !correlated {
+        return None;
+    }
+    let bytes = native_decode_pdf(&snapshot.output_hex).ok()?;
+    if blake3::hash(&bytes).as_bytes() != &snapshot.output_hash {
+        return None;
+    }
+    snapshot.scene.verify()
+}
+
+#[wasm_bindgen]
+pub fn verify_native_pdf_response(response_json: String) -> bool {
+    if response_json.len() > NATIVE_PDF_RESULT {
+        return false;
+    }
+    let Ok(mut response) =
+        serde_json::from_str::<NativeResponse<NativeVerifiedScene>>(&response_json)
+    else {
+        return false;
+    };
+    let supplied = std::mem::take(&mut response.result_hash);
+    if response.protocol_version != NATIVE_PDF_VERSION
+        || response.limits != native_wire_limits()
+        || response.request_id > MAX_WIRE_ID
+        || response
+            .binding
+            .is_some_and(|binding| !native_binding_valid(binding))
+        || response
+            .origin_store_hash
+            .as_ref()
+            .is_some_and(|hash| !native_hash_text(hash))
+        || !native_hash_text(&supplied)
+    {
+        return false;
+    }
+    let binding_present = response.binding.is_some();
+    let store_present = response.origin_store_hash.is_some();
+    let valid = match (response.operation, response.status) {
+        (_, NativeStatus::Failed) => {
+            response.snapshot.is_none()
+                && response.code.as_ref().is_some_and(|code| {
+                    if code == NATIVE_IMPORT_REFUSED {
+                        return response.operation == NativeOperation::Open
+                            && response.request_id > 0;
+                    }
+                    matches!(
+                        code.as_str(),
+                        NATIVE_DECODE
+                            | NATIVE_BINDING
+                            | NATIVE_REVISION
+                            | NATIVE_RECONCILE
+                            | NATIVE_BUDGET
+                            | "FLOW_PDF_NATIVE_LIMITS_INVALID"
+                            | "FLOW_PDF_NATIVE_UNSUPPORTED"
+                            | "FLOW_PDF_NATIVE_GRAPH_MALFORMED"
+                            | "FLOW_PDF_NATIVE_NOTE_INVALID"
+                            | "FLOW_PDF_NATIVE_REQUEST_INVALID"
+                            | "FLOW_PDF_NATIVE_REQUEST_CONFLICT"
+                            | "FLOW_PDF_NATIVE_TARGET_UNAVAILABLE"
+                            | NATIVE_POSTCONDITION
+                    )
+                })
+                && if response.request_id == 0 {
+                    !binding_present && !store_present
+                } else {
+                    store_present
+                        && (binding_present == (response.operation != NativeOperation::Open))
+                }
+        }
+        (NativeOperation::Close, NativeStatus::Closed) => {
+            response.request_id > 0
+                && binding_present
+                && store_present
+                && response.snapshot.is_none()
+                && response.code.is_none()
+        }
+        _ => {
+            response.request_id > 0
+                && response.code.is_none()
+                && verify_native_snapshot(&response).is_some()
+        }
+    };
+    valid && native_result_hash(&response).is_ok_and(|actual| actual == supplied)
+}
+
+#[cfg(test)]
+mod native_wire_tests {
+    use super::*;
+
+    #[test]
+    fn nested_reader_failures_use_verifiable_native_codes() {
+        let binding = NativeBinding {
+            epoch: [1; 16],
+            session_id: 1,
+            origin_hash: [2; 32],
+            revision: 0,
+        };
+        for (operation, reader_refusal) in [
+            (NativeOperation::Open, NATIVE_IMPORT_REFUSED),
+            (NativeOperation::Command, NATIVE_POSTCONDITION),
+        ] {
+            for (reader_error, expected) in [
+                (PdfReadError::DecodedStreamLimit, NATIVE_BUDGET),
+                (PdfReadError::TokenLimit, NATIVE_BUDGET),
+                (PdfReadError::Syntax, reader_refusal),
+            ] {
+                let mut response = native_response::<NativeVerifiedScene>(operation);
+                response.request_id = 2;
+                response.binding = (operation == NativeOperation::Command).then_some(binding);
+                response.origin_store_hash = Some("ab".repeat(32));
+                let error = NativeEditError::Reader(reader_error).into();
+                let code = native_session_error_code(error, reader_refusal);
+                assert_eq!(code, expected);
+                response.code = Some(code.to_owned());
+                assert!(verify_native_pdf_response(serialize_native_response(response)));
+            }
+        }
+    }
 }
