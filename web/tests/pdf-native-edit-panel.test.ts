@@ -10,10 +10,12 @@ import {
   nativeNoteDraftAfterAcceptance,
   nativeNoteRect,
   nativeNoteTextError,
+  nativeReplacementError,
+  rebindNativeTextDrafts,
   type NativePdfAcceptedDocument,
 } from '../src/pdf/pdf-native-edit-panel.js'
 import { nativePdfMessages, nativePdfText } from '../src/pdf/pdf-native-edit-messages.js'
-import { NATIVE_PDF_LIMITS, type NativePdfAnnotation } from '../src/pdf/pdf-native-edit-protocol.js'
+import { NATIVE_PDF_LIMITS, type NativePdfAnnotation, type NativePdfTextIsland } from '../src/pdf/pdf-native-edit-protocol.js'
 
 const geometry = { bounds: [-10, 20, 190, 120], rotation: 90 } as const
 const hash = Array<number>(32).fill(42)
@@ -35,6 +37,32 @@ const dependencies = {
   createCoordinator: () => { throw Error('SSR must not create a worker') },
   sourceStore: { put: async () => { throw Error('unexpected write') }, get: async () => null },
 }
+
+describe('text draft readback', () => {
+  it('rebinds unique matches on the original page and discards ambiguous or missing targets', () => {
+    const island: NativePdfTextIsland = {
+      id: hash, text: 'Hello', bounds: [0, 30, 24, 54],
+      profile: 'trueTypeWinAnsi', operator: 'Tj', maxAdvance: 24,
+    }
+    const revised = { ...island, id: Array<number>(32).fill(43) }
+    const duplicate = { ...island, id: Array<number>(32).fill(44) }
+    const draft = { pageId: 0, island: island.id, replacement: 'Draft', selected: true, refusal: null }
+    const snapshot = documentWith([]).snapshot
+    const withIslands = (islands: readonly NativePdfTextIsland[]) => ({
+      ...snapshot,
+      scene: { ...snapshot.scene, textPages: [
+        { page: 0, islands, refusal: null },
+        { page: 1, islands: [duplicate], refusal: null },
+      ] },
+    })
+
+    expect(rebindNativeTextDrafts([draft], withIslands([island]), withIslands([revised])))
+      .toEqual([{ ...draft, island: revised.id }])
+    expect(rebindNativeTextDrafts([draft], withIslands([island]), withIslands([revised, duplicate]))).toEqual([])
+    expect(rebindNativeTextDrafts([draft], withIslands([island, duplicate]), withIslands([revised]))).toEqual([])
+    expect(rebindNativeTextDrafts([draft], withIslands([island]), withIslands([]))).toEqual([])
+  })
+})
 
 describe('native note workspace', () => {
   it('keeps the other pending fields whether Save or Move is accepted first', () => {
@@ -269,5 +297,62 @@ describe('native note workspace', () => {
     expect(markup.split('&lt;b&gt;Accepted&lt;/b&gt;')).toHaveLength(2)
     expect(markup).not.toContain('Stale output')
     expect(markup).not.toContain('Other page')
+  })
+})
+
+describe('native text replacement', () => {
+  const original = '<ЇAA>'
+  const island = { id: hash, text: original, bounds: [20, 100, 40, 112], profile: 'identityHCidFontType2',
+    operator: 'Tj', maxAdvance: 20 } as const
+
+  it('requires a visible single line of valid Unicode within the native byte limit', () => {
+    expect(nativeReplacementError('ЇA', false)).toBeNull()
+    expect(nativeReplacementError('ЇA', true)).toBe('composing')
+    expect(nativeReplacementError('  ', false)).toBe('required')
+    for (const input of ['A\nЇ', 'A\rЇ', 'A\u2028Ї', 'A\u2029Ї', 'A\u0000', '\ud800']) {
+      expect(nativeReplacementError(input, false)).toBe('invalid')
+    }
+    expect(nativeReplacementError('Ї'.repeat(NATIVE_PDF_LIMITS.noteBytes / 2), false)).toBeNull()
+    expect(nativeReplacementError('Ї'.repeat(NATIVE_PDF_LIMITS.noteBytes / 2 + 1), false)).toBe('limit')
+  })
+
+  it('renders verified island labels and escaped source text in both languages', () => {
+    const initial = documentWith([])
+    const scene = { ...initial.snapshot.scene, textPages: [{ page: 0, refusal: null, islands: [island] }] }
+    for (const locale of ['uk', 'en'] as const) {
+      const markup = renderToStaticMarkup(createElement(PdfNativeEditPanel, {
+        ...dependencies, initialDocument: { ...initial, snapshot: { ...initial.snapshot, scene } }, locale,
+      }))
+      expect(markup).toContain(nativePdfText(locale, 'text.select', { number: 1 }))
+      expect(markup).toContain('&lt;ЇAA&gt;')
+      expect(markup).toContain('aria-pressed="false"')
+      expect(markup).not.toContain(nativePdfText(locale, 'text.apply'))
+    }
+  })
+
+  it('shows a read-only explanation for missing capability and every stable refusal', () => {
+    const initial = documentWith([])
+    for (const [code, reason] of [
+      ['FLOW_PDF_NATIVE_TEXT_FONT', 'reason.font'],
+      ['FLOW_PDF_NATIVE_TEXT_MAPPING', 'reason.mapping'],
+      ['FLOW_PDF_NATIVE_TEXT_LAYOUT', 'reason.layout'],
+      ['FLOW_PDF_NATIVE_TEXT_OWNERSHIP', 'reason.references'],
+      ['FLOW_PDF_NATIVE_TEXT_OVERFLOW', 'reason.overflow'],
+      [null, 'text.unavailable'],
+    ] as const) {
+      for (const locale of ['uk', 'en'] as const) {
+        const scene = code === null ? initial.snapshot.scene : {
+          ...initial.snapshot.scene, textPages: [{ page: 0, refusal: code, islands: [] }],
+        }
+        const markup = renderToStaticMarkup(createElement(PdfNativeEditPanel, {
+          ...dependencies, initialDocument: { ...initial, snapshot: { ...initial.snapshot, scene } }, locale,
+        }))
+        expect(markup).toContain(nativePdfText(locale, reason))
+        const description = markup.match(/<h3[^>]+aria-describedby="([^"]+)"[^>]*>/u)?.[1]
+        expect(description).toBeDefined()
+        expect(markup).toContain(`<p id="${description}" class="native-help native-text-feedback">`)
+        expect(markup).not.toContain(nativePdfText(locale, 'text.apply'))
+      }
+    }
   })
 })
