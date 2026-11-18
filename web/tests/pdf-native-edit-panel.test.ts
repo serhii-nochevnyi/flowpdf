@@ -5,6 +5,9 @@ import {
   NativeNoteDraftRecovery,
   PdfNativeEditPanel,
   nativeDownloadName,
+  nativeObjectBounds,
+  rebindNativeObject,
+  rebindRecoveredObjectDraft,
   nativeMarkerPosition,
   nativeNoteDraftAfter,
   nativeNoteDraftAfterAcceptance,
@@ -15,7 +18,7 @@ import {
   type NativePdfAcceptedDocument,
 } from '../src/pdf/pdf-native-edit-panel.js'
 import { nativePdfMessages, nativePdfText } from '../src/pdf/pdf-native-edit-messages.js'
-import { NATIVE_PDF_LIMITS, type NativePdfAnnotation, type NativePdfTextIsland } from '../src/pdf/pdf-native-edit-protocol.js'
+import { NATIVE_PDF_LIMITS, type NativePdfAnnotation, type NativePdfObjectPage, type NativePdfTextIsland } from '../src/pdf/pdf-native-edit-protocol.js'
 
 const geometry = { bounds: [-10, 20, 190, 120], rotation: 90 } as const
 const hash = Array<number>(32).fill(42)
@@ -352,6 +355,89 @@ describe('native text replacement', () => {
         expect(description).toBeDefined()
         expect(markup).toContain(`<p id="${description}" class="native-help native-text-feedback">`)
         expect(markup).not.toContain(nativePdfText(locale, 'text.apply'))
+      }
+    }
+  })
+})
+
+describe('native object tools', () => {
+  it('converts page-local points and rejects incomplete, excessive, or off-page geometry', () => {
+    const pageBounds = [-10, 20, 190, 120] as const
+    expect(nativeObjectBounds(['1.125', '2', '40', '30'], pageBounds)).toEqual([-8875, 22000, 31125, 52000])
+    expect(nativeObjectBounds(['1,125', '2', '40', '30'], pageBounds)).toEqual([-8875, 22000, 31125, 52000])
+    for (const draft of [
+      ['', '2', '40', '30'], ['0', '0', '0', '30'], ['-1', '2', '40', '30'],
+      ['1.0001', '2', '40', '30'], ['180', '2', '40', '30'], ['1,', '2', '40', '30'],
+    ] as const) expect(nativeObjectBounds(draft, pageBounds)).toBeNull()
+  })
+
+  it('rebinds the exact invocation slot through verified insertions and removals', () => {
+    const first = { id: hash, kind: 'graphic', profile: 'rectangle', bounds: [0, 30000, 24000, 54000],
+      operations: ['replace', 'move', 'remove'] } as const
+    const second = { ...first, id: hash.map(() => 43) }
+    const inserted = { ...first, id: hash.map(() => 44) }
+    const before = documentWith([]).snapshot
+    const withObjects = (objects: readonly typeof first[]) => ({
+      ...before, scene: { ...before.scene, objectPages: [{ page: 0, canAdd: true, refusal: null, objects }] },
+    })
+    expect(rebindNativeObject(withObjects([first]), withObjects([inserted, second]), 0, first,
+      { kind: 'addImage', page: 0, bounds: first.bounds, assetHex: '00' })).toBe(second)
+    expect(rebindNativeObject(withObjects([first, second]), withObjects([inserted]), 0, second,
+      { kind: 'removeObject', target: { page: 0, id: first.id, profile: first.profile } })).toBe(inserted)
+    expect(rebindNativeObject(withObjects([first]), withObjects([]), 0, first,
+      { kind: 'removeObject', target: { page: 0, id: first.id, profile: first.profile } })).toBeUndefined()
+  })
+
+  it('keeps a recovered image draft across an unrelated revision only for a matching invocation', () => {
+    const image = { id: hash, kind: 'image', profile: 'rasterGray8', bounds: [0, 0, 24000, 24000],
+      operations: ['replace', 'move', 'remove'] } as const
+    const revised = { ...image, id: hash.map(() => 43) }
+    const snapshot = documentWith([]).snapshot
+    const withObjects = (objects: NativePdfObjectPage['objects'], canAdd = true) => ({
+      ...snapshot, scene: { ...snapshot.scene, objectPages: [{ page: 0, canAdd, refusal: null, objects }] },
+    })
+    const before = withObjects([image])
+    const after = withObjects([revised])
+    const draft = { profile: 'image', coordinates: ['1', '2', '30', '40'], color: '#334155', stroke: '1',
+      asset: { status: 'ready', name: 'draft.png', hex: '12' } } as const
+    const saved = { pageId: 0, target: { page: 0, id: image.id, profile: image.profile }, draft }
+    const unrelated = { kind: 'add', page: 1, contents: 'Page two note', rect: [0, 0, 24, 24] } as const
+    const rebound = rebindRecoveredObjectDraft(saved, before, after, unrelated)
+    expect(rebound?.target?.id).toBe(revised.id)
+    expect(rebound?.draft).toBe(draft)
+    expect(rebindRecoveredObjectDraft(saved, before, withObjects([]), unrelated)).toBeNull()
+    expect(rebindRecoveredObjectDraft(saved, before, withObjects([{ ...revised, bounds: [1, 0, 24000, 24000] }]), unrelated)).toBeNull()
+    expect(rebindRecoveredObjectDraft(saved, before, after,
+      { kind: 'replaceImage', target: saved.target, assetHex: '12' })).toBeNull()
+
+    const newObject = { ...saved, target: null }
+    expect(rebindRecoveredObjectDraft(newObject, before, after, unrelated)).toBe(newObject)
+    expect(rebindRecoveredObjectDraft(newObject, before, withObjects([revised], false), unrelated)).toBeNull()
+  })
+
+  it('renders only admitted profile controls and associates each refusal with the object region', () => {
+    for (const locale of ['en', 'uk'] as const) {
+      const document = documentWith([])
+      const markup = (refusal: NativePdfObjectPage['refusal']) => renderToStaticMarkup(createElement(PdfNativeEditPanel, {
+        ...dependencies, locale, initialDocument: { ...document, snapshot: { ...document.snapshot,
+          scene: { ...document.snapshot.scene, objectPages: [{ page: 0, objects: [], canAdd: !refusal, refusal }] } } },
+      }))
+      const admitted = markup(null)
+      for (const message of ['object.profile.image', 'object.profile.line', 'object.profile.rectangle',
+        'object.profile.polygon', 'object.geometry.help', 'object.file'] as const) {
+        expect(admitted).toContain(nativePdfText(locale, message))
+      }
+      for (const [code, message] of [
+        ['FLOW_PDF_NATIVE_OBJECT_STATE', 'object.reason.state'],
+        ['FLOW_PDF_NATIVE_OBJECT_GEOMETRY', 'object.reason.geometry'],
+        ['FLOW_PDF_NATIVE_OBJECT_ASSET', 'object.reason.asset'],
+        ['FLOW_PDF_NATIVE_OBJECT_PROFILE', 'object.reason.profile'],
+      ] as const) {
+        const refused = markup(code)
+        const description = refused.match(/class="native-stack native-object-tools"[^>]+aria-describedby="([^"]+)"/u)?.[1]
+        expect(description).toBeDefined()
+        expect(refused).toContain(`<p id="${description}" class="native-help">${nativePdfText(locale, message)}</p>`)
+        expect(refused).not.toContain(nativePdfText(locale, 'object.profile.polygon'))
       }
     }
   })

@@ -233,3 +233,16 @@
   }
   .pdf-native-edit-panel .native-actions > label { width: 100%; }
 }
+
+.pdf-native-edit-panel input[type="color"] {
+  min-width: 44px;
+}
+
+.pdf-native-edit-panel .native-coordinates input {
+  box-sizing: border-box;
+}
+
+.pdf-native-edit-panel .native-object-tools .native-actions button {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
