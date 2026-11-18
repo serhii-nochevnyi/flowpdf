@@ -1017,7 +1017,6 @@ impl Font {
     fn measure(&self, show: &Show, codes: &[u16]) -> TextResult<(String, Metrics)> {
         use NativeTextRefusal::{Layout, Mapping};
 
-        // Use a common denominator for PDF widths and font outline coordinates.
         let upem = i128::from(self.upem);
         let width_scale = i128::from(SCALE * SCALE);
         let denominator = width_scale * upem;
