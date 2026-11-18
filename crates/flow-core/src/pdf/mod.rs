@@ -16,6 +16,7 @@ mod display_list;
 mod font;
 mod forms;
 mod metadata;
+pub mod native;
 mod provenance;
 mod reader;
 mod reconstruction;

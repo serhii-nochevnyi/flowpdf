@@ -316,15 +316,19 @@ pub struct PdfDocumentSummary {
 pub(crate) struct PdfStream {
     pub dict: BTreeMap<String, PdfValue>,
     pub data: Vec<u8>,
+    // @invariant: Preservation edits reuse the original encoded bytes.
+    pub encoded: Vec<u8>,
     pub source_offset: usize,
 }
 
 #[derive(Debug, Clone)]
 pub(crate) enum PdfValue {
     Null,
-    Boolean,
+    Boolean(bool),
     Integer(i64),
     Real(LayoutUnit),
+    // @invariant: The exact decimal token is retained independently of layout rounding.
+    ExactReal(String),
     Name(String),
     String(Vec<u8>),
     Array(Vec<PdfValue>),
@@ -361,6 +365,7 @@ impl PdfValue {
                 .checked_mul(LayoutUnit::UNITS_PER_POINT)
                 .map(LayoutUnit::from_raw),
             Self::Real(value) => Some(*value),
+            Self::ExactReal(token) => parse_decimal(token.as_bytes()).ok(),
             _ => None,
         }
     }
@@ -410,8 +415,11 @@ pub struct PdfReader {
     version: String,
     source_hash: String,
     xref: BTreeMap<u32, PdfXrefEntry>,
+    xref_offset: usize,
     trailer: BTreeMap<String, PdfValue>,
     root: PdfObjectRef,
+    pub(crate) retained_cost: usize,
+    pub(crate) open_work: usize,
     limits: PdfReaderLimits,
 }
 
@@ -498,11 +506,40 @@ impl PdfReader {
         Ok(pages)
     }
 
+    pub(crate) fn into_retained_parts(self) -> (Vec<u8>, BTreeMap<String, PdfValue>) {
+        (self.bytes, self.trailer)
+    }
+
+    pub(crate) fn retained_trailer(&self) -> &BTreeMap<String, PdfValue> {
+        &self.trailer
+    }
+
+    // @contract: Retained syntax preserves exact decimals alongside scene-facing quantization.
+    pub(crate) fn retained_object(
+        &self,
+        reference: PdfObjectRef,
+        retained: usize,
+        decoded: usize,
+        work: usize,
+    ) -> Result<(PdfValue, usize, usize), PdfReadError> {
+        self.read_object(reference, 0, Some((retained, decoded, work)))
+    }
+
     fn object_with_depth(
         &self,
         reference: PdfObjectRef,
         depth: usize,
     ) -> Result<PdfValue, PdfReadError> {
+        self.read_object(reference, depth, None)
+            .map(|result| result.0)
+    }
+
+    fn read_object(
+        &self,
+        reference: PdfObjectRef,
+        depth: usize,
+        retention: Option<(usize, usize, usize)>,
+    ) -> Result<(PdfValue, usize, usize), PdfReadError> {
         if depth > self.limits.max_nesting {
             return Err(PdfReadError::NestingLimit);
         }
@@ -513,7 +550,17 @@ impl PdfReader {
         if entry.generation != reference.generation {
             return Err(PdfReadError::ReferenceInvalid);
         }
+        if retention.is_some() && entry.offset >= self.xref_offset {
+            return Err(PdfReadError::XrefInvalid);
+        }
         let mut cursor = Cursor::new(&self.bytes, entry.offset, self.limits.clone());
+        if let Some((retained, decoded, work)) = retention {
+            cursor.exact = true;
+            cursor.remaining = Some(retained);
+            cursor.limits.max_decoded_stream_bytes =
+                decoded.min(self.limits.max_decoded_stream_bytes);
+            cursor.limits.max_content_tokens = work;
+        }
         let object_number = cursor.parse_u64_token()?.ok_or(PdfReadError::Syntax)?;
         let generation = cursor.parse_u64_token()?.ok_or(PdfReadError::Syntax)?;
         let object_keyword = cursor.token()?.ok_or(PdfReadError::Syntax)?;
@@ -526,12 +573,20 @@ impl PdfReader {
         let mut value = cursor.parse_value(0)?;
         cursor.skip_space();
         if cursor.consume_keyword(b"stream") {
-            let dictionary = value.as_dictionary().cloned().ok_or(PdfReadError::Syntax)?;
+            let dictionary = match value {
+                PdfValue::Dictionary(dict) => dict,
+                _ => return Err(PdfReadError::Syntax),
+            };
+            if !matches!(self.bytes.get(cursor.position()), Some(b'\r' | b'\n')) {
+                return Err(PdfReadError::Syntax);
+            }
             cursor.consume_stream_eol();
-            let length = dictionary
-                .get("Length")
-                .ok_or(PdfReadError::Syntax)
-                .and_then(|length| self.stream_length(length, depth + 1))?;
+            let length_value = dictionary.get("Length").ok_or(PdfReadError::Syntax)?;
+            let length = if retention.is_some() {
+                self.retained_stream_length(length_value, &mut cursor)?
+            } else {
+                self.stream_length(length_value, depth + 1)?
+            };
             if length > self.limits.max_stream_bytes {
                 return Err(PdfReadError::StreamLimit);
             }
@@ -542,20 +597,83 @@ impl PdfReader {
             if end > self.bytes.len() {
                 return Err(PdfReadError::StreamLimit);
             }
+            cursor.charge(length.checked_mul(2).ok_or(PdfReadError::InputSizeLimit)?)?;
             let raw = self.bytes[cursor.position()..end].to_vec();
             cursor.set_position(end);
             cursor.skip_space();
             if !cursor.consume_keyword(b"endstream") {
                 return Err(PdfReadError::Syntax);
             }
-            let data = decode_stream(&dictionary, raw, &self.limits)?;
+            if let Some(remaining) = cursor.remaining {
+                cursor.limits.max_decoded_stream_bytes =
+                    cursor.limits.max_decoded_stream_bytes.min(remaining);
+            }
+            let encoded = raw.clone();
+            let data = decode_stream(&dictionary, raw, &cursor.limits)?;
+            cursor.charge(data.len())?;
             value = PdfValue::Stream(PdfStream {
                 dict: dictionary,
                 data,
+                encoded,
                 source_offset: entry.offset,
             });
         }
-        Ok(value)
+        if !cursor.consume_keyword(b"endobj") {
+            return Err(PdfReadError::Syntax);
+        }
+        if retention.is_some() && cursor.position() > self.xref_offset {
+            return Err(PdfReadError::XrefInvalid);
+        }
+        let retained =
+            retention.map_or(0, |(initial, _, _)| initial - cursor.remaining.unwrap_or(0));
+        Ok((value, retained, cursor.tokens))
+    }
+
+    fn retained_stream_length(
+        &self,
+        value: &PdfValue,
+        owner: &mut Cursor<'_>,
+    ) -> Result<usize, PdfReadError> {
+        let length = if let PdfValue::Reference(reference) = value {
+            let entry = self
+                .xref
+                .get(&reference.object_number)
+                .ok_or(PdfReadError::ObjectMissing)?;
+            if entry.generation != reference.generation || entry.offset >= self.xref_offset {
+                return Err(PdfReadError::ReferenceInvalid);
+            }
+            // @security: Resolve Length as a scalar integer to avoid recursive stream decoding.
+            let mut cursor = Cursor::new(&self.bytes, entry.offset, owner.limits.clone());
+            cursor.exact = true;
+            cursor.remaining = owner.remaining;
+            cursor.limits.max_content_tokens = owner
+                .limits
+                .max_content_tokens
+                .checked_sub(owner.tokens)
+                .ok_or(PdfReadError::TokenLimit)?;
+            if cursor.parse_u64_token()? != Some(u64::from(reference.object_number))
+                || cursor.parse_u64_token()? != Some(u64::from(reference.generation))
+                || !cursor.consume_keyword(b"obj")
+            {
+                return Err(PdfReadError::XrefInvalid);
+            }
+            let number = cursor
+                .parse_value(0)?
+                .as_integer()
+                .ok_or(PdfReadError::Syntax)?;
+            if !cursor.consume_keyword(b"endobj") || cursor.position() > self.xref_offset {
+                return Err(PdfReadError::Syntax);
+            }
+            owner.tokens = owner
+                .tokens
+                .checked_add(cursor.tokens)
+                .ok_or(PdfReadError::TokenLimit)?;
+            owner.remaining = cursor.remaining;
+            number
+        } else {
+            value.as_integer().ok_or(PdfReadError::Syntax)?
+        };
+        usize::try_from(length).map_err(|_| PdfReadError::StreamLimit)
     }
 
     fn stream_length(&self, value: &PdfValue, depth: usize) -> Result<usize, PdfReadError> {
@@ -657,13 +775,37 @@ impl PdfReader {
 /// Opens an owned bounded reader. No indirect object other than the trailer is
 /// parsed until a caller requests a summary or scene page.
 pub fn open_pdf(bytes: &[u8], limits: PdfReaderLimits) -> Result<PdfReader, PdfReadError> {
+    open_pdf_mode(bytes, limits, None)
+}
+
+pub(crate) fn open_pdf_retained(
+    bytes: &[u8],
+    limits: PdfReaderLimits,
+    retained_limit: usize,
+) -> Result<PdfReader, PdfReadError> {
+    open_pdf_mode(bytes, limits, Some(retained_limit))
+}
+
+fn open_pdf_mode(
+    bytes: &[u8],
+    limits: PdfReaderLimits,
+    retained_limit: Option<usize>,
+) -> Result<PdfReader, PdfReadError> {
     limits.validate()?;
     if bytes.len() > limits.max_input_bytes {
         return Err(PdfReadError::InputSizeLimit);
     }
     let version = parse_header(bytes)?;
     let startxref = find_startxref(bytes)?;
-    let (xref, trailer) = parse_xref(bytes, startxref, &limits)?;
+    let retention = retained_limit
+        .map(|limit| {
+            limit
+                .checked_sub(bytes.len())
+                .ok_or(PdfReadError::InputSizeLimit)
+        })
+        .transpose()?;
+    let (xref, trailer, retained_cost, open_work) =
+        parse_xref(bytes, startxref, &limits, retention)?;
     let root = trailer
         .get("Root")
         .and_then(PdfValue::as_reference)
@@ -679,8 +821,11 @@ pub fn open_pdf(bytes: &[u8], limits: PdfReaderLimits) -> Result<PdfReader, PdfR
         version,
         source_hash: blake3::hash(bytes).to_hex().to_string(),
         xref,
+        xref_offset: startxref,
         trailer,
         root,
+        retained_cost,
+        open_work,
         limits,
     })
 }
@@ -690,7 +835,10 @@ fn parse_header(bytes: &[u8]) -> Result<String, PdfReadError> {
         return Err(PdfReadError::HeaderInvalid);
     }
     let version = &bytes[5..8];
-    if version[0] != b'1' || version[1] != b'.' || version[2] > MAX_PDF_VERSION[2] {
+    if version[0] != b'1'
+        || version[1] != b'.'
+        || !(b'0'..=MAX_PDF_VERSION[2]).contains(&version[2])
+    {
         return Err(PdfReadError::VersionUnsupported);
     }
     std::str::from_utf8(version)
@@ -711,13 +859,20 @@ fn find_startxref(bytes: &[u8]) -> Result<usize, PdfReadError> {
     usize::try_from(offset).map_err(|_| PdfReadError::StartxrefInvalid)
 }
 
-type ParsedXref = (BTreeMap<u32, PdfXrefEntry>, BTreeMap<String, PdfValue>);
+type ParsedXref = (
+    BTreeMap<u32, PdfXrefEntry>,
+    BTreeMap<String, PdfValue>,
+    usize,
+    usize,
+);
 
 fn parse_xref(
     bytes: &[u8],
     offset: usize,
     limits: &PdfReaderLimits,
+    retention: Option<usize>,
 ) -> Result<ParsedXref, PdfReadError> {
+    let exact = retention.is_some();
     if offset >= bytes.len() {
         return Err(PdfReadError::XrefInvalid);
     }
@@ -725,6 +880,9 @@ fn parse_xref(
         return Err(PdfReadError::XrefUnsupported);
     }
     let mut cursor = Cursor::new(bytes, offset, limits.clone());
+    cursor.exact = exact;
+    cursor.remaining = retention;
+    let mut seen = BTreeSet::new();
     if cursor.token()?.as_deref() != Some(b"xref".as_slice()) {
         return Err(PdfReadError::XrefUnsupported);
     }
@@ -736,7 +894,9 @@ fn parse_xref(
         }
         let first = parse_u32(&token)?;
         let count = parse_usize(&cursor.token()?.ok_or(PdfReadError::XrefInvalid)?)?;
-        if count > limits.max_objects || first as usize > limits.max_objects {
+        if count > limits.max_objects.saturating_add(1)
+            || (!exact && first as usize > limits.max_objects)
+        {
             return Err(PdfReadError::ObjectLimit);
         }
         for index in 0..count {
@@ -746,9 +906,20 @@ fn parse_xref(
             let object_number = first
                 .checked_add(u32::try_from(index).map_err(|_| PdfReadError::ObjectLimit)?)
                 .ok_or(PdfReadError::ObjectLimit)?;
+            if exact {
+                cursor.charge(128)?;
+            }
+            if !seen.insert(object_number) {
+                return Err(PdfReadError::XrefInvalid);
+            }
+            if seen.len() > limits.max_objects.saturating_add(1) {
+                return Err(PdfReadError::ObjectLimit);
+            }
             if flag == b"n" {
                 if object_number == 0
-                    || usize::try_from(object_number).unwrap_or(usize::MAX) > limits.max_objects
+                    || (!exact
+                        && usize::try_from(object_number).unwrap_or(usize::MAX)
+                            > limits.max_objects)
                 {
                     return Err(PdfReadError::ObjectLimit);
                 }
@@ -764,11 +935,10 @@ fn parse_xref(
             }
         }
     }
-    let trailer = cursor
-        .parse_value(0)?
-        .as_dictionary()
-        .cloned()
-        .ok_or(PdfReadError::XrefInvalid)?;
+    let trailer = match cursor.parse_value(0)? {
+        PdfValue::Dictionary(dict) => dict,
+        _ => return Err(PdfReadError::XrefInvalid),
+    };
     if xref.is_empty() || trailer.contains_key("Encrypt") {
         if trailer.contains_key("Encrypt") {
             return Err(PdfReadError::EncryptionUnsupported);
@@ -776,11 +946,38 @@ fn parse_xref(
         return Err(PdfReadError::XrefInvalid);
     }
     if let Some(size) = trailer.get("Size").and_then(PdfValue::as_integer)
-        && (size < 1 || usize::try_from(size).unwrap_or(usize::MAX) > limits.max_objects + 1)
+        && (size < 1
+            || (!exact
+                && usize::try_from(size).unwrap_or(usize::MAX)
+                    > limits.max_objects.saturating_add(1)))
     {
         return Err(PdfReadError::ObjectLimit);
     }
-    Ok((xref, trailer))
+    if exact {
+        let size = trailer
+            .get("Size")
+            .and_then(PdfValue::as_integer)
+            .ok_or(PdfReadError::XrefInvalid)?;
+        if size < 1 || size > i64::from(u32::MAX) + 1 || seen.iter().any(|n| i64::from(*n) >= size)
+        {
+            return Err(PdfReadError::XrefInvalid);
+        }
+        if !cursor.consume_keyword(b"startxref") || cursor.parse_u64_token()? != Some(offset as u64)
+        {
+            return Err(PdfReadError::StartxrefInvalid);
+        }
+        let tail = &bytes[cursor.position()..];
+        let tail = tail.trim_ascii();
+        if tail != b"%%EOF" {
+            return Err(PdfReadError::XrefInvalid);
+        }
+    }
+    let cost = if exact {
+        retention.unwrap_or(0) - cursor.remaining.unwrap_or(0)
+    } else {
+        0
+    };
+    Ok((xref, trailer, cost, cursor.tokens))
 }
 
 fn refs_from_value(value: &PdfValue) -> Result<Vec<PdfObjectRef>, PdfReadError> {
@@ -835,7 +1032,12 @@ fn decode_stream(
         _ => return Err(PdfReadError::FilterUnsupported),
     };
     match filter {
-        "Identity" => Ok(raw),
+        "Identity" => {
+            if raw.len() > limits.max_decoded_stream_bytes {
+                return Err(PdfReadError::DecodedStreamLimit);
+            }
+            Ok(raw)
+        }
         "DCTDecode" | "DCT" => {
             if raw.len() > limits.max_decoded_stream_bytes {
                 return Err(PdfReadError::DecodedStreamLimit);
@@ -843,8 +1045,17 @@ fn decode_stream(
             Ok(raw)
         }
         "FlateDecode" | "Fl" => {
-            let decoded = miniz_oxide::inflate::decompress_to_vec_zlib(&raw)
-                .map_err(|_| PdfReadError::Syntax)?;
+            let decoded = miniz_oxide::inflate::decompress_to_vec_zlib_with_limit(
+                &raw,
+                limits.max_decoded_stream_bytes,
+            )
+            .map_err(|error| {
+                if error.status == miniz_oxide::inflate::TINFLStatus::HasMoreOutput {
+                    PdfReadError::DecodedStreamLimit
+                } else {
+                    PdfReadError::Syntax
+                }
+            })?;
             if decoded.len() > limits.max_decoded_stream_bytes {
                 return Err(PdfReadError::DecodedStreamLimit);
             }
@@ -862,7 +1073,7 @@ fn decode_ascii_hex(bytes: &[u8], limit: usize) -> Result<Vec<u8>, PdfReadError>
     let mut output = Vec::new();
     let mut high: Option<u8> = None;
     for byte in bytes {
-        if byte.is_ascii_whitespace() {
+        if is_pdf_space(*byte) {
             continue;
         }
         if *byte == b'>' {
@@ -917,6 +1128,28 @@ pub(crate) fn report_active_content(
             report.push(diagnostic);
         }
     }
+}
+
+fn validate_decimal_token(bytes: &[u8]) -> Result<(), PdfReadError> {
+    if bytes.len() > 128 {
+        return Err(PdfReadError::NumericLimit);
+    }
+    let start = usize::from(matches!(bytes.first(), Some(b'+' | b'-')));
+    let mut dots = 0;
+    let mut digits = 0;
+    for byte in &bytes[start..] {
+        if *byte == b'.' {
+            dots += 1;
+        } else if byte.is_ascii_digit() {
+            digits += 1;
+        } else {
+            return Err(PdfReadError::NumericLimit);
+        }
+    }
+    if dots != 1 || digits == 0 {
+        return Err(PdfReadError::NumericLimit);
+    }
+    Ok(())
 }
 
 fn parse_decimal(bytes: &[u8]) -> Result<LayoutUnit, PdfReadError> {
@@ -1016,6 +1249,8 @@ struct Cursor<'a> {
     position: usize,
     limits: PdfReaderLimits,
     tokens: usize,
+    exact: bool,
+    remaining: Option<usize>,
 }
 
 impl<'a> Cursor<'a> {
@@ -1025,7 +1260,18 @@ impl<'a> Cursor<'a> {
             position,
             limits,
             tokens: 0,
+            exact: false,
+            remaining: None,
         }
+    }
+
+    fn charge(&mut self, bytes: usize) -> Result<(), PdfReadError> {
+        if let Some(remaining) = &mut self.remaining {
+            *remaining = remaining
+                .checked_sub(bytes)
+                .ok_or(PdfReadError::InputSizeLimit)?;
+        }
+        Ok(())
     }
 
     fn position(&self) -> usize {
@@ -1041,7 +1287,7 @@ impl<'a> Cursor<'a> {
             while self
                 .bytes
                 .get(self.position)
-                .is_some_and(|byte| byte.is_ascii_whitespace())
+                .is_some_and(|byte| is_pdf_space(*byte))
             {
                 self.position += 1;
             }
@@ -1080,6 +1326,7 @@ impl<'a> Cursor<'a> {
         if self.position == start {
             self.position += 1;
         }
+        self.charge(self.position - start)?;
         Ok(Some(self.bytes[start..self.position].to_vec()))
     }
 
@@ -1126,6 +1373,14 @@ impl<'a> Cursor<'a> {
         if depth > self.limits.max_nesting {
             return Err(PdfReadError::NestingLimit);
         }
+        // @security: Charge retained visits before allocating nested values.
+        if self.exact {
+            self.tokens = self.tokens.checked_add(1).ok_or(PdfReadError::TokenLimit)?;
+            if self.tokens > self.limits.max_content_tokens {
+                return Err(PdfReadError::TokenLimit);
+            }
+        }
+        self.charge(std::mem::size_of::<PdfValue>() * 2)?;
         self.skip_space();
         match self.bytes.get(self.position).copied() {
             Some(b'(') => self.parse_literal_string().map(PdfValue::String),
@@ -1139,8 +1394,8 @@ impl<'a> Cursor<'a> {
                 let token = self.token()?.ok_or(PdfReadError::Syntax)?;
                 match token.as_slice() {
                     b"null" => Ok(PdfValue::Null),
-                    b"true" => Ok(PdfValue::Boolean),
-                    b"false" => Ok(PdfValue::Boolean),
+                    b"true" => Ok(PdfValue::Boolean(true)),
+                    b"false" => Ok(PdfValue::Boolean(false)),
                     _ => {
                         let integer = token
                             .iter()
@@ -1155,7 +1410,16 @@ impl<'a> Cursor<'a> {
                             let parsed = parse_signed_i64(&token)?;
                             PdfValue::Integer(parsed)
                         } else {
-                            PdfValue::Real(parse_decimal(&token)?)
+                            if self.exact {
+                                validate_decimal_token(&token)?;
+                                self.charge(token.len())?;
+                                PdfValue::ExactReal(
+                                    String::from_utf8(token.clone())
+                                        .map_err(|_| PdfReadError::Syntax)?,
+                                )
+                            } else {
+                                PdfValue::Real(parse_decimal(&token)?)
+                            }
                         };
                         if let PdfValue::Integer(object_number) = first {
                             let checkpoint = self.position;
@@ -1238,14 +1502,22 @@ impl<'a> Cursor<'a> {
         while self.position < self.bytes.len() && !is_delimiter(self.bytes[self.position]) {
             self.position += 1;
         }
-        if self.position == start || self.position - start > MAX_PDF_IDENTITY_BYTES {
+        if self.position - start > MAX_PDF_IDENTITY_BYTES {
             return Err(PdfReadError::Syntax);
         }
+        self.charge(
+            (self.position - start)
+                .checked_mul(2)
+                .ok_or(PdfReadError::InputSizeLimit)?,
+        )?;
         let mut output = Vec::with_capacity(self.position - start);
         let bytes = &self.bytes[start..self.position];
         let mut index = 0;
         while index < bytes.len() {
-            if bytes[index] == b'#' && index + 2 < bytes.len() {
+            if bytes[index] == b'#' {
+                if index + 2 >= bytes.len() {
+                    return Err(PdfReadError::Syntax);
+                }
                 let high = hex_nibble(bytes[index + 1]).ok_or(PdfReadError::Syntax)?;
                 let low = hex_nibble(bytes[index + 2]).ok_or(PdfReadError::Syntax)?;
                 output.push((high << 4) | low);
@@ -1255,7 +1527,10 @@ impl<'a> Cursor<'a> {
                 index += 1;
             }
         }
-        String::from_utf8(output).map_err(|_| PdfReadError::Syntax)
+        if output.contains(&0) {
+            return Err(PdfReadError::Syntax);
+        }
+        Ok(output.into_iter().map(char::from).collect())
     }
 
     fn parse_literal_string(&mut self) -> Result<Vec<u8>, PdfReadError> {
@@ -1263,11 +1538,15 @@ impl<'a> Cursor<'a> {
         let mut output = Vec::new();
         let mut nesting = 1_usize;
         while self.position < self.bytes.len() {
+            self.charge(2)?;
             let byte = self.bytes[self.position];
             self.position += 1;
             match byte {
                 b'(' => {
-                    nesting += 1;
+                    nesting = nesting.checked_add(1).ok_or(PdfReadError::NestingLimit)?;
+                    if nesting > self.limits.max_nesting {
+                        return Err(PdfReadError::NestingLimit);
+                    }
                     output.push(byte);
                 }
                 b')' => {
@@ -1306,12 +1585,18 @@ impl<'a> Cursor<'a> {
                                     break;
                                 }
                                 self.position += 1;
-                                value = value * 8 + next - b'0';
+                                value = value.wrapping_mul(8).wrapping_add(next - b'0');
                             }
                             output.push(value);
                         }
                         other => output.push(other),
                     }
+                }
+                b'\r' => {
+                    if self.bytes.get(self.position) == Some(&b'\n') {
+                        self.position += 1;
+                    }
+                    output.push(b'\n');
                 }
                 other => output.push(other),
             }
@@ -1327,9 +1612,10 @@ impl<'a> Cursor<'a> {
         let mut output = Vec::new();
         let mut high: Option<u8> = None;
         while self.position < self.bytes.len() {
+            self.charge(2)?;
             let byte = self.bytes[self.position];
             self.position += 1;
-            if byte.is_ascii_whitespace() {
+            if is_pdf_space(byte) {
                 continue;
             }
             if byte == b'>' {
@@ -1355,8 +1641,12 @@ impl<'a> Cursor<'a> {
     }
 }
 
+fn is_pdf_space(byte: u8) -> bool {
+    matches!(byte, 0 | 9 | 10 | 12 | 13 | 32)
+}
+
 fn is_delimiter(byte: u8) -> bool {
-    byte.is_ascii_whitespace()
+    is_pdf_space(byte)
         || matches!(
             byte,
             b'(' | b')' | b'<' | b'>' | b'[' | b']' | b'{' | b'}' | b'/' | b'%'
