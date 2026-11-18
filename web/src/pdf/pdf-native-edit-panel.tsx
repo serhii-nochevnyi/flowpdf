@@ -6,11 +6,13 @@ import {
   nativePdfText, type NativePdfLocale, type NativePdfMessage,
 } from './pdf-native-edit-messages.js'
 import {
-  NATIVE_PDF_LIMITS, fitsNativeJson, isNativeNoteCommand, isNativePageCommand, nativeBytesHex, nativeHexBytes, sameNativeBytes,
+  NATIVE_PDF_LIMITS, fitsNativeJson, isNativeFieldCommand, isNativeNoteCommand, isNativePageCommand,
+  nativeBytesHex, nativeHexBytes, sameNativeBytes,
   type NativePdfAnnotation, type NativePdfNoteCommand, type NativePdfRect,
   type NativePdfSnapshot, type NativePdfTextCommand, type NativePdfTextIsland,
   type NativePdfTextRefusal, type NativePdfGraphic, type NativePdfObjectCommand, type NativePdfObjectPage,
-  type NativePdfObjectTarget, type NativePdfEditCommand, type NativePdfPageCommand,
+  type NativePdfObjectTarget, type NativePdfSessionCommand, type NativePdfPageCommand,
+  type NativePdfFieldCommand, type NativePdfFieldView,
 } from './pdf-native-edit-protocol.js'
 import {
   confirmedNativeReplacement, NativePdfWorkerError, type NativePdfEditCoordinator,
@@ -22,7 +24,7 @@ type Geometry = NonNullable<Page['geometry']>
 type Note = Extract<NativePdfAnnotation, { kind: 'plainNote' }>
 type Coordinator = Pick<NativePdfEditCoordinator,
   'open' | 'project' | 'reconcile' | 'snapshot' | 'subscribe' | 'dispose'> & {
-  command(command: NativePdfEditCommand): Promise<NativePdfSnapshot>
+  command(command: NativePdfSessionCommand): Promise<NativePdfSnapshot>
 }
 type Message = readonly [NativePdfMessage, Readonly<Record<string, string | number>>?]
 type Size = readonly [number, number]
@@ -76,10 +78,11 @@ interface PendingPageAction {
 }
 
 type PendingContentAction = PendingNoteAction | {
-  readonly command: NativePdfTextCommand | NativePdfObjectCommand
+  readonly command: NativePdfTextCommand | NativePdfObjectCommand | NativePdfFieldCommand
   readonly before: NativePdfSnapshot
   readonly pageId: number
   readonly objectDraft: ObjectDraft | null
+  readonly invoker: HTMLElement | null
 }
 
 type PendingAction = PendingContentAction | PendingPageAction
@@ -145,6 +148,66 @@ export function nativeObjectBounds(values: ObjectCoordinates, page: NativePdfRec
     ? bounds : null
 }
 
+interface FieldDraft {
+  readonly type: 'text' | 'checkbox'
+  readonly name: string
+  readonly value: string
+  readonly checked: boolean
+  readonly page: number
+  readonly coordinates: ObjectCoordinates
+}
+
+interface SavedFieldDraft {
+  readonly field: NativePdfFieldView | null
+  readonly draft: FieldDraft
+  readonly feedback: NativePdfMessage | null
+}
+
+const fieldCoordinateLabels = ['field.x', 'field.y', 'field.width', 'field.height'] as const
+
+export function nativeFieldBounds(values: ObjectCoordinates, page: NativePdfRect): NativePdfRect | null {
+  if (values.some((value) => value === '' || /\D/u.test(value))) return null
+  const [x, y, width, height] = values
+  const left = page[0] + Number(x)
+  const bottom = page[1] + Number(y)
+  const w = Number(width)
+  const h = Number(height)
+  const rect = [left, bottom, left + w, bottom + h] as const
+  return w >= 8 && h >= 8 && rect[2] <= page[2] && rect[3] <= page[3]
+    && rect.every((coordinate) => Number.isInteger(coordinate) && Math.abs(coordinate) <= 1_000_000)
+    ? rect : null
+}
+
+function fieldKey(field: NativePdfFieldView) {
+  const reference = `${field.object.objectNumber}:${field.object.generation}`
+  return field.canEditAppearance ? reference : `${reference}:${field.page}`
+}
+
+function sameFieldObject(left: NativePdfFieldView, right: NativePdfFieldView) {
+  return left.object.objectNumber === right.object.objectNumber && left.object.generation === right.object.generation
+}
+
+export function rebindNativeField(
+  prior: NativePdfFieldView, fields: readonly NativePdfFieldView[], page: number,
+): NativePdfFieldView | undefined {
+  return fields.find((field) => field.page === page && sameFieldObject(prior, field)
+    && field.name === prior.name && field.kind === prior.kind && field.value === prior.value
+    && field.checked === prior.checked && field.canEditAppearance === prior.canEditAppearance
+    && field.refusal === prior.refusal && (prior.rect && field.rect
+      ? sameNativeBytes(prior.rect, field.rect) : prior.rect === field.rect))
+}
+
+function draftFromField(field: NativePdfFieldView, snapshot: NativePdfSnapshot): FieldDraft | null {
+  const page = snapshot.scene.pages[field.page]?.geometry?.bounds
+  if (!field.canEditAppearance || !field.kind || field.name === null || !field.rect || !page) return null
+  const [left, bottom, right, top] = field.rect
+  return {
+    type: field.kind, name: field.name, value: field.value ?? '', checked: field.checked ?? false,
+    page: field.page,
+    coordinates: [String(left - page[0]), String(bottom - page[1]), String(right - left), String(top - bottom)],
+  }
+}
+
 function objectCoordinates([l, b, r, t]: NativePdfRect, page: NativePdfRect): ObjectCoordinates {
   return [String((l - page[0] * 1000) / 1000), String((b - page[1] * 1000) / 1000), String((r - l) / 1000), String((t - b) / 1000)]
 }
@@ -178,7 +241,7 @@ function pageObjects(snapshot: NativePdfSnapshot, pageId: number) {
 
 export function rebindNativeObject(
   before: NativePdfSnapshot, after: NativePdfSnapshot, pageId: number, selected: ObjectView,
-  command: NativePdfEditCommand, destination = pageId,
+  command: NativePdfSessionCommand, destination = pageId,
 ): ObjectView | undefined {
   const previous = pageObjects(before, pageId)
   const next = pageObjects(after, destination)
@@ -210,7 +273,7 @@ function matchesObjectDraftTarget(target: NativePdfObjectTarget | null, object: 
 
 export function rebindRecoveredObjectDraft(
   saved: RecoveredObjectDraft, before: NativePdfSnapshot, after: NativePdfSnapshot,
-  command: NativePdfEditCommand, destination = saved.pageId,
+  command: NativePdfSessionCommand, destination = saved.pageId,
 ): RecoveredObjectDraft | null {
   const { pageId, target } = saved
   if (!target) {
@@ -512,9 +575,18 @@ const objectRefusalReasons = {
   FLOW_PDF_NATIVE_OBJECT_PROFILE: 'object.reason.profile',
 } as const satisfies Record<NonNullable<NativePdfObjectPage['refusal']>, NativePdfMessage>
 
+const fieldRefusalReasons = {
+  FLOW_PDF_NATIVE_FIELD_PROFILE: 'field.reason.profile',
+  FLOW_PDF_NATIVE_FIELD_REFERENCE: 'field.reason.reference',
+  FLOW_PDF_NATIVE_FIELD_APPEARANCE: 'field.reason.appearance',
+  FLOW_PDF_NATIVE_FIELD_GLYPH: 'field.reason.glyph',
+  FLOW_PDF_NATIVE_FIELD_GEOMETRY: 'field.reason.geometry',
+} as const satisfies Record<NonNullable<NativePdfFieldView['refusal']>, NativePdfMessage>
+
 const refusalReasons = new Map<string, NativePdfMessage>([
   ...Object.entries(textRefusalReasons),
   ...Object.entries(objectRefusalReasons),
+  ...Object.entries(fieldRefusalReasons),
   ['FLOW_PDF_NATIVE_IMPORT_REFUSED', 'error.importRefused'],
   ['FLOW_PDF_NATIVE_BINDING_MISMATCH', 'error.stale'],
   ['FLOW_PDF_NATIVE_REVISION_MISMATCH', 'error.stale'],
@@ -554,7 +626,6 @@ function refusal(cause: unknown, pageOperation = false): readonly [string | unde
 
 const unsubscribeIdle = () => undefined
 const idle = () => null
-const familyKeys = ['fields', 'redaction'] as const
 
 export function PdfNativeEditPanel({
   createCoordinator, sourceStore, locale = 'uk', initialDocument, pageText,
@@ -587,15 +658,20 @@ export function PdfNativeEditPanel({
   const [color, setColor] = useState('#334155')
   const [stroke, setStroke] = useState('1')
   const [asset, setAsset] = useState<ObjectAsset | null>(null)
+  const [fieldSelection, setFieldSelection] = useState<NativePdfFieldView | null>(null)
+  const [fieldDraft, setFieldDraft] = useState<FieldDraft | null>(null)
+  const [fieldFeedback, setFieldFeedback] = useState<NativePdfMessage | null>(null)
+  const savedFieldDrafts = useRef(new Map<string, SavedFieldDraft>())
   const [composing, setComposing] = useState(false)
   const composition = useRef(false)
   const [confirm, setConfirm] = useState<({ readonly snapshot: NativePdfSnapshot } &
-    ({ readonly note: number } | { readonly pageCommand: Extract<NativePdfPageCommand, { kind: 'deletePage' }> } | { readonly target: NativePdfObjectTarget; readonly label: string })) | null>(null)
+    ({ readonly note: number } | { readonly pageCommand: Extract<NativePdfPageCommand, { kind: 'deletePage' }> } | { readonly target: NativePdfObjectTarget; readonly label: string }
+      | { readonly field: NativePdfFieldView; readonly label: string })) | null>(null)
   const uncertain = useRef<PendingAction | null>(null)
   const recoveredObject = useRef<RecoveredObjectDraft | null>(null)
   const pageObjectDrafts = useRef(new Map<number, RecoveredObjectDraft>())
   const recoveredDrafts = useRef(new NativeNoteDraftRecovery())
-  const focusAfterRender = useRef<string | HTMLElement | { pageAction: HTMLElement | null } | null>(null)
+  const focusAfterRender = useRef<string | HTMLElement | { pageAction: HTMLElement | null } | { fieldAction: HTMLElement | null } | null>(null)
   const dialog = useRef<HTMLDialogElement>(null)
   const cancelConfirmation = useRef<HTMLButtonElement>(null)
   const removeTrigger = useRef<HTMLButtonElement | null>(null)
@@ -648,6 +724,23 @@ export function PdfNativeEditPanel({
   const objectPageReason = objectPage?.refusal ? objectRefusalReasons[objectPage.refusal]
     : objectPage?.canAdd === false ? 'object.addUnavailable' : null
   const objectForm = !!geometry && (objectPage?.canAdd === true || !!selectedObject)
+  const fields = snapshot?.fields ?? []
+  const selectedField = fields.find((field) => fieldSelection && field.page === fieldSelection.page
+    && sameNativeBytes(field.id, fieldSelection.id))
+  const verifiedFieldDraft = selectedField && snapshot ? draftFromField(selectedField, snapshot) : null
+  const fieldValues = fieldDraft ?? verifiedFieldDraft ?? {
+    type: 'text', name: '', value: '', checked: false, page: pageIndex, coordinates: ['0', '0', '120', '24'],
+  } satisfies FieldDraft
+  const fieldDestination = pages[fieldValues.page]?.geometry?.bounds
+  const fieldBounds = fieldDestination && nativeFieldBounds(fieldValues.coordinates, fieldDestination)
+  const fieldNameValid = fieldValues.name.length > 0 && fieldValues.name.length <= 64
+    && !/[^A-Za-z0-9_-]/u.test(fieldValues.name)
+  const fieldValueValid = fieldValues.type === 'checkbox' || (fitsNativeJson(fieldValues.value, 1024)
+    && !/[\u0000-\u001f\u007f-\u009f\uD800-\uDFFF]/u.test(fieldValues.value))
+  const fieldReason = selectedField?.refusal ? fieldRefusalReasons[selectedField.refusal] : null
+  const readOnlyFields = fields.filter((field) => field.refusal !== null)
+  const fieldControls = canEdit && !composing
+  const fieldDescription = `${id}-field-help ${id}-field-feedback`
   const textPage = snapshot?.scene.textPages?.find((entry) => entry.page === page?.id)
   const islands = verifiedIslands(snapshot, pageId)
   const textDraft = textDrafts.find((entry) => entry.pageId === pageId && entry.selected)
@@ -680,8 +773,12 @@ export function PdfNativeEditPanel({
     }
     if (confirm === null && element?.open) {
       element.close()
-      if (!removeTrigger.current?.matches(':disabled')) removeTrigger.current?.focus()
-      else if (!locked.current) document.getElementById(pageSelectorId)?.focus()
+      const trigger = removeTrigger.current
+      if (trigger?.isConnected && !trigger.matches(':disabled')) trigger.focus()
+      else if (!locked.current) {
+        const selector = trigger?.id === `${id}-field-remove` ? `${id}-field-selector` : pageSelectorId
+        document.getElementById(selector)?.focus()
+      }
     }
   }, [confirm, pageSelectorId])
 
@@ -693,6 +790,12 @@ export function PdfNativeEditPanel({
       const action = target.pageAction
       if (action?.isConnected && !action.matches(':disabled')) action.focus()
       else document.getElementById(pageSelectorId)?.focus()
+      return
+    }
+    if (typeof target === 'object' && 'fieldAction' in target) {
+      const action = target.fieldAction
+      if (action?.isConnected && !action.matches(':disabled')) action.focus()
+      else document.getElementById(`${id}-field-selector`)?.focus()
       return
     }
     const element = typeof target === 'string' ? document.getElementById(target) : target
@@ -760,6 +863,10 @@ export function PdfNativeEditPanel({
       recoveredObject.current = null
       pageObjectDrafts.current.clear()
       recoveredDrafts.current = new NativeNoteDraftRecovery()
+      savedFieldDrafts.current.clear()
+      setFieldSelection(null)
+      setFieldDraft(null)
+      setFieldFeedback(null)
       setAccepted({ filename, snapshot: result })
       setPageId(acceptedPageIndex(result))
       setMovePosition(null)
@@ -952,8 +1059,97 @@ export function PdfNativeEditPanel({
     ])
   }
 
+  function chooseField(field: NativePdfFieldView | null) {
+    const drafts = savedFieldDrafts.current
+    if (fieldDraft) {
+      drafts.set(selectedField ? fieldKey(selectedField) : '', {
+        field: selectedField ?? null, draft: fieldDraft, feedback: fieldFeedback,
+      })
+    }
+    const key = field ? fieldKey(field) : ''
+    const saved = drafts.get(key)
+    drafts.delete(key)
+    setFieldSelection(field)
+    setFieldDraft(saved?.draft ?? null)
+    setFieldFeedback(saved?.feedback ?? null)
+    setComposition(false)
+    clearFeedback()
+  }
+
+  function updateField(update: Partial<FieldDraft>) {
+    setFieldDraft({ ...fieldValues, ...update })
+    setFieldFeedback(null)
+  }
+
+  function submitField(operation: 'add' | 'save' | 'move', invoker: HTMLElement) {
+    if (operation === 'save') {
+      if (selectedField?.canEditAppearance && fieldValueValid) {
+        const field = selectedField.id
+        void act(fieldValues.type === 'text' ? { kind: 'setFieldText', field, value: fieldValues.value }
+          : { kind: 'setFieldChecked', field, checked: fieldValues.checked }, invoker)
+      }
+      return
+    }
+    if (!fieldBounds) return
+    const location = { page: fieldValues.page, rect: fieldBounds }
+    if (operation === 'move') {
+      if (selectedField?.canEditAppearance) void act({ kind: 'moveField', field: selectedField.id, ...location }, invoker)
+    } else if (!selectedField && fieldNameValid && fieldValueValid) {
+      const { name, value, checked, type } = fieldValues
+      void act(type === 'text' ? { kind: 'addTextField', name, value, ...location }
+        : { kind: 'addCheckboxField', name, checked, ...location }, invoker)
+    }
+  }
+
+  function publishFieldSelection(
+    result: NativePdfSnapshot, command?: NativePdfSessionCommand, retained?: ReadonlyMap<number, number>,
+  ) {
+    const nextFields = result.fields ?? []
+    const destination = (index: number) => retained ? retained.get(index) : index
+    const rebind = (field: NativePdfFieldView) => {
+      const index = destination(field.page)
+      return index === undefined ? undefined : rebindNativeField(field, nextFields, index)
+    }
+    for (const [key, saved] of savedFieldDrafts.current) {
+      const field = saved.field && rebind(saved.field)
+      const page = destination(saved.draft.page)
+      if (field === undefined || page === undefined) savedFieldDrafts.current.delete(key)
+      else savedFieldDrafts.current.set(key, { ...saved, field, draft: { ...saved.draft, page } })
+    }
+    if (command && isNativeFieldCommand(command) && ('name' in command
+      || (selectedField && 'field' in command && sameNativeBytes(command.field, selectedField.id)))) {
+      const name = 'name' in command ? command.name : selectedField?.name
+      const next = nextFields.find((field) => field.canEditAppearance && field.name === name)
+      const verified = next && draftFromField(next, result)
+      setFieldSelection(next ?? null)
+      setFieldFeedback(null)
+      let nextDraft: FieldDraft | null = null
+      if (verified && fieldDraft) {
+        if (command.kind === 'moveField') {
+          nextDraft = { ...verified, value: fieldDraft.value, checked: fieldDraft.checked }
+        } else if (command.kind === 'setFieldText' || command.kind === 'setFieldChecked') {
+          nextDraft = { ...verified, page: fieldDraft.page, coordinates: fieldDraft.coordinates }
+        }
+      }
+      setFieldDraft(nextDraft)
+      return
+    }
+    const rebound = selectedField && rebind(selectedField)
+    setFieldSelection(rebound ?? null)
+    if (fieldDraft) {
+      const draftDestination = destination(fieldDraft.page)
+      if ((selectedField && !rebound) || draftDestination === undefined) {
+        setFieldDraft(null)
+        setFieldFeedback(null)
+      } else if (draftDestination !== fieldDraft.page) {
+        setFieldDraft({ ...fieldDraft, page: draftDestination })
+      }
+    }
+  }
+
   function publish(pending: PendingContentAction, result: NativePdfSnapshot): string | null {
     const { command, before } = pending
+    publishFieldSelection(result, command)
     if (recoveredObject.current) {
       recoveredObject.current = rebindRecoveredObjectDraft(recoveredObject.current, before, result, command)
     }
@@ -977,6 +1173,7 @@ export function PdfNativeEditPanel({
       else if (changesSelection) resetObject(rebound)
       else setObjectId(rebound.id)
     }
+    if (isNativeFieldCommand(command)) return null
     if (!('draft' in pending)) {
       if (command.kind !== 'replaceText') {
         if (command.kind === 'addImage' || command.kind === 'addGraphic') {
@@ -1005,6 +1202,7 @@ export function PdfNativeEditPanel({
   function publishPage({ before, pageCommand }: PendingPageAction, result: NativePdfSnapshot, verified = true) {
     const nextPage = acceptedPageIndex(result)
     const retained = verified ? retainedPageIndexes(before, result) : new Map<number, number>()
+    publishFieldSelection(result, pageCommand, retained)
     recoveredDrafts.current.reindex(before, result, retained)
     setTextDrafts((current) => rebindNativeTextDrafts(current, before, result, retained))
     const savedObjects = [...pageObjectDrafts.current.values()]
@@ -1042,7 +1240,7 @@ export function PdfNativeEditPanel({
     if (pageTarget) void act({ ...intent, target: pageTarget }, invoker)
   }
 
-  async function act(command: NativePdfEditCommand, invoker: HTMLElement | null) {
+  async function act(command: NativePdfSessionCommand, invoker: HTMLElement | null) {
     if (locked.current || composition.current || !coordinator || !canEdit || !snapshot) return
     const pageOperation = isNativePageCommand(command)
     if (pageOperation) {
@@ -1051,6 +1249,12 @@ export function PdfNativeEditPanel({
         || (command.kind === 'reorderPage' && (command.position === pageIndex
           || command.position < 0 || command.position > (pageState?.maxPosition ?? -1)))
         || (geometry === null && command.kind !== 'reorderPage' && command.kind !== 'deletePage')) return
+    } else if (isNativeFieldCommand(command)) {
+      if ('field' in command && (!selectedField?.canEditAppearance
+        || !sameNativeBytes(selectedField.id, command.field))) {
+        setError(['error.stale'])
+        return
+      }
     } else if (command.kind === 'replaceText') {
       if (!selectedIsland || !sameNativeBytes(selectedIsland.id, command.island)
         || nativeReplacementError(command.text, false) !== null) return
@@ -1071,9 +1275,10 @@ export function PdfNativeEditPanel({
       ? { pageCommand: command, before: snapshot, invoker }
       : isNativeNoteCommand(command)
       ? { command, before: snapshot, pageId, draft }
-      : { command, before: snapshot, pageId, objectDraft: command.kind === 'replaceText' || command.kind === 'removeObject'
+      : { command, before: snapshot, pageId, invoker, objectDraft: command.kind === 'replaceText' || command.kind === 'removeObject' || isNativeFieldCommand(command)
         ? null : { profile: objectProfile, coordinates, color, stroke, asset } }
     clearFeedback()
+    if (isNativeFieldCommand(command)) setFieldFeedback(null)
     clearNavigation()
     setBusy('mutating')
     try {
@@ -1084,7 +1289,9 @@ export function PdfNativeEditPanel({
         if (pageActionOwnsFocus(invoker)) restorePageActionFocus(pending)
       } else {
         const fallback = publish(pending, result)
-        focusAfterRender.current = fallback ?? (document.activeElement === document.body ? invoker : null)
+        if (isNativeFieldCommand(command)) {
+          if (pageActionOwnsFocus(invoker)) focusAfterRender.current = { fieldAction: invoker }
+        } else focusAfterRender.current = fallback ?? (document.activeElement === document.body ? invoker : null)
       }
     } catch (cause) {
       if (!mounted.current) return
@@ -1095,6 +1302,9 @@ export function PdfNativeEditPanel({
           if (needsReadback) focusAfterRender.current = reconcileId
           else restorePageActionFocus(pending)
         }
+      } else if (isNativeFieldCommand(command)) {
+        if (pageActionOwnsFocus(invoker)) focusAfterRender.current = needsReadback ? reconcileId : { fieldAction: invoker }
+        setFieldFeedback(refusal(cause)[1])
       } else if (document.activeElement === document.body) focusAfterRender.current = invoker
       setFailure(cause, false, pageOperation)
       if (command.kind === 'replaceText' && coordinator.snapshot().phase === 'ready') {
@@ -1134,10 +1344,13 @@ export function PdfNativeEditPanel({
           result.status === 'accepted' || (result.status === 'unseen' && pageTarget?.stableId === pending.pageCommand.target.stableId))
         return
       }
-      let focusTarget = `${id}-${'draft' in pending ? 'notes' : pending.command.kind === 'replaceText' ? 'text-islands' : 'object-selector'}`
+      let focusTarget = `${id}-${'draft' in pending ? 'notes' : isNativeFieldCommand(pending.command) ? 'field-selector' : pending.command.kind === 'replaceText' ? 'text-islands' : 'object-selector'}`
       if (result.status === 'unseen') {
         setAccepted((current) => current && { ...current, snapshot: result.snapshot })
-        if (!('draft' in pending) && pending.command.kind !== 'replaceText') {
+        if (isNativeFieldCommand(pending.command)) {
+          publishFieldSelection(result.snapshot)
+          setStatus([fieldDraft ? 'status.unseen' : 'status.unseenNoDraft'])
+        } else if (!('draft' in pending) && pending.command.kind !== 'replaceText') {
           const pageIndex = result.snapshot.scene.pages.findIndex((item) => item.id === pending.pageId)
           if (!pending.objectDraft || pageIndex < 0) setStatus(['status.unseenNoDraft'])
           else {
@@ -1196,13 +1409,19 @@ export function PdfNativeEditPanel({
         setAccepted((current) => current && { ...current, snapshot: result.snapshot })
         recoveredDrafts.current.prune(result.snapshot)
         setDraft(null)
+        savedFieldDrafts.current.clear()
+        setFieldSelection(null)
+        setFieldDraft(null)
+        setFieldFeedback(null)
         setTextDrafts([])
         recoveredObject.current = null
         pageObjectDrafts.current.clear()
         resetObject()
         setError(['error.stale'])
       }
-      if (document.activeElement === invoker) focusAfterRender.current = focusTarget
+      if (!('draft' in pending) && isNativeFieldCommand(pending.command)) {
+        if (pageActionOwnsFocus(invoker)) focusAfterRender.current = { fieldAction: pending.invoker }
+      } else if (document.activeElement === invoker) focusAfterRender.current = focusTarget
     } catch (cause) {
       if (!mounted.current) return
       setFailure(cause, false)
@@ -1267,6 +1486,11 @@ export function PdfNativeEditPanel({
     y: geometry.bounds[3] - geometry.bounds[1] - geometrySize[1],
   })
   const deletingPage = confirm !== null && 'pageCommand' in confirm
+  const fieldLabel = (field: NativePdfFieldView) => t('field.onPage', {
+    name: field.name ?? t('field.widget', { object: field.object.objectNumber, generation: field.object.generation }),
+    page: field.page + 1,
+  })
+  const removingField = confirm !== null && 'field' in confirm
   const removingObject = confirm !== null && 'target' in confirm
   const unavailable = invalidated ? t('error.session') : needsReconcile ? t('error.reconcile')
     : busy !== null ? t('capability.busy') : null
@@ -1328,7 +1552,7 @@ export function PdfNativeEditPanel({
       <p role="alert" aria-atomic="true">{failure}</p>
       {busy === 'opening' && accepted && <p>{t('status.previousView')}</p>}
       {accepted && <p>{t('admission.ready')}</p>}
-      <p>{t('capability.later', { families: familyKeys.map((key) => t(`family.${key}`)).join(', ') })}</p>
+      <p>{t('capability.later', { families: t('family.redaction') })}</p>
       {accepted === undefined && <div className="native-stack">
         <h3>{t('empty.heading')}</h3><p>{t('empty.body')}</p>
       </div>}
@@ -1595,6 +1819,121 @@ export function PdfNativeEditPanel({
               </div>
             </fieldset>}
           </section>
+          <section className="native-stack native-field-tools" aria-labelledby={`${id}-fields`}>
+            <h3 id={`${id}-fields`}>{t('field.title')}</h3>
+            <label>{t('field.select')}
+              <select id={`${id}-field-selector`} value={selectedField ? fieldKey(selectedField) : ''}
+                disabled={busy !== null || composing || needsReconcile} aria-describedby={`${id}-field-state`}
+                onChange={(event) => {
+                  const key = event.currentTarget.value
+                  chooseField(fields.find((field) => fieldKey(field) === key) ?? null)
+                }}>
+                <option value="">{t('field.new')}</option>
+                {fields.map((field) => <option key={fieldKey(field)} value={fieldKey(field)}>
+                  {fieldLabel(field)}
+                </option>)}
+              </select>
+            </label>
+            <div id={`${id}-field-state`} className="native-stack">
+              {selectedField && <p dir="auto">{fieldLabel(selectedField)}</p>}
+              {fieldReason && <p>{t('field.readOnly', { reason: t(fieldReason) })}</p>}
+              {!selectedField && readOnlyFields.length > 0 && <ul className="native-field-read-only">
+                {readOnlyFields.map((field) => field.refusal && <li key={fieldKey(field)}>
+                  {fieldLabel(field)} — {t('field.readOnly', { reason: t(fieldRefusalReasons[field.refusal]) })}
+                </li>)}
+              </ul>}
+              {verifiedFieldDraft && <p dir="auto">{t('field.accepted', {
+                value: verifiedFieldDraft.type === 'checkbox'
+                  ? t(verifiedFieldDraft.checked ? 'field.checked' : 'field.unchecked')
+                  : verifiedFieldDraft.value || t('field.empty'),
+              })}</p>}
+              {verifiedFieldDraft && <p>{t('field.verifiedGeometry', {
+                x: verifiedFieldDraft.coordinates[0], y: verifiedFieldDraft.coordinates[1],
+                width: verifiedFieldDraft.coordinates[2], height: verifiedFieldDraft.coordinates[3],
+              })}</p>}
+              {verifiedFieldDraft && <p>{t('field.owned')}</p>}
+            </div>
+            {(!selectedField || verifiedFieldDraft) && <fieldset className="native-stack" disabled={!canEdit}>
+              <legend>{t(selectedField ? (fieldValues.type === 'text' ? 'field.text' : 'field.checkbox') : 'field.new')}</legend>
+              {!selectedField && <label>{t('field.type')}
+                <select value={fieldValues.type} disabled={composing}
+                  onChange={(event) => updateField({ type: event.currentTarget.value === 'checkbox' ? 'checkbox' : 'text' })}>
+                  <option value="text">{t('field.text')}</option>
+                  <option value="checkbox">{t('field.checkbox')}</option>
+                </select>
+              </label>}
+              <label>{t('field.name')}
+                <input className="native-text-line" readOnly={!!selectedField} value={fieldValues.name}
+                  aria-invalid={!selectedField && fieldValues.name.length > 0 && !fieldNameValid}
+                  aria-describedby={selectedField ? undefined : `${id}-field-name-help`}
+                  onCompositionStart={() => setComposition(true)} onCompositionEnd={() => setComposition(false)}
+                  onChange={(event) => updateField({ name: event.currentTarget.value })} />
+              </label>
+              {!selectedField && <p id={`${id}-field-name-help`} className="native-help">{t('field.nameHelp')}</p>}
+              {fieldValues.type === 'text' ? <>
+                <label>{t('field.value')}
+                  <input className="native-text-line" dir="auto" value={fieldValues.value}
+                    aria-invalid={!fieldValueValid || fieldFeedback === 'field.reason.glyph'}
+                    aria-describedby={fieldDescription} onCompositionStart={() => setComposition(true)}
+                    onCompositionEnd={() => setComposition(false)}
+                    onChange={(event) => updateField({ value: event.currentTarget.value })} />
+                </label>
+                <p id={`${id}-field-help`} className="native-help">{t('field.help')}</p>
+              </> : <label className="native-field-checkbox">
+                <input type="checkbox" checked={fieldValues.checked}
+                  aria-describedby={`${id}-field-feedback`}
+                  onChange={(event) => updateField({ checked: event.currentTarget.checked })} />
+                {t('field.checked')}
+              </label>}
+              <label>{t('field.page')}
+                <select value={fieldValues.page} aria-describedby={`${id}-field-geometry`}
+                  onChange={(event) => updateField({ page: Number(event.currentTarget.value) })}>
+                  {pages.map((entry, index) => <option key={entry.id} value={index} disabled={!entry.geometry}>
+                    {t('navigation.position', { page: index + 1, total: pages.length })}
+                  </option>)}
+                </select>
+              </label>
+              <div className="native-coordinates">
+                {fieldCoordinateLabels.map((label, index) => <label key={label}>{t(label)}
+                  <input type="number" min={index < 2 ? 0 : 8} step={1} value={fieldValues.coordinates[index]}
+                    aria-invalid={!fieldBounds} aria-describedby={`${id}-field-geometry`}
+                    onChange={(event) => {
+                      const coordinates: [string, string, string, string] = [...fieldValues.coordinates]
+                      coordinates[index] = event.currentTarget.value
+                      updateField({ coordinates })
+                    }} />
+                </label>)}
+              </div>
+              <p id={`${id}-field-geometry`} className="native-help">{t('field.reason.geometry')}</p>
+              <p id={`${id}-field-feedback`} aria-live="polite">{fieldFeedback ? t(fieldFeedback)
+                : !fieldValueValid ? t('field.valueHelp') : ''}</p>
+              <div className="native-actions">
+                {!selectedField ? <button type="button" className="native-primary"
+                  disabled={!fieldControls || !fieldNameValid || !fieldValueValid || !fieldBounds}
+                  aria-describedby={`${id}-field-name-help ${id}-field-geometry ${id}-field-feedback`}
+                  onClick={(event) => submitField('add', event.currentTarget)}>{t('field.add')}</button> : <>
+                  <button type="button" className="native-primary" disabled={!fieldControls || !fieldValueValid}
+                    aria-describedby={`${id}-field-feedback`}
+                    onClick={(event) => submitField('save', event.currentTarget)}>{t('field.save')}</button>
+                  <button type="button" disabled={!fieldControls || !fieldBounds}
+                    aria-describedby={`${id}-field-geometry ${id}-field-feedback`}
+                    onClick={(event) => submitField('move', event.currentTarget)}>{t('field.move')}</button>
+                  <button type="button" id={`${id}-field-remove`} disabled={!fieldControls}
+                    onClick={(event) => {
+                      if (!snapshot || locked.current || composition.current) return
+                      removeTrigger.current = event.currentTarget
+                      setConfirm({ snapshot, field: selectedField, label: fieldLabel(selectedField) })
+                    }}>{t('field.remove')}</button>
+                </>}
+                {fieldDraft && <button type="button" disabled={!fieldControls} onClick={() => {
+                  setFieldDraft(null)
+                  setFieldFeedback(null)
+                  clearFeedback()
+                  focusAfterRender.current = { fieldAction: null }
+                }}>{t('field.cancel')}</button>}
+              </div>
+            </fieldset>}
+          </section>
           <h3 id={`${id}-notes`} tabIndex={-1}>{t('notes.title')}</h3>
           <p>{t('notes.count', { count: notes.length })}</p>
           {notes.length === 0 && <p>{t(page.canAddNote && geometry && !invalidated && !needsReconcile
@@ -1669,13 +2008,13 @@ export function PdfNativeEditPanel({
       <dialog ref={dialog} onCancel={(event) => { event.preventDefault(); setConfirm(null) }}
         aria-labelledby={`${id}-remove-title`} aria-describedby={`${id}-remove-body ${id}-remove-target`}>
         <div className="native-stack">
-          <h3 id={`${id}-remove-title`}>{t(deletingPage ? 'page.confirm' : removingObject ? 'object.remove' : 'note.remove.heading')}</h3>
-          <p id={`${id}-remove-body`}>{t(deletingPage ? 'page.deleteBody' : removingObject ? 'object.remove.body' : 'note.remove.body')}</p>
+          <h3 id={`${id}-remove-title`}>{t(deletingPage ? 'page.confirm' : removingObject ? 'object.remove' : removingField ? 'field.remove' : 'note.remove.heading')}</h3>
+          <p id={`${id}-remove-body`}>{t(deletingPage ? 'page.deleteBody' : removingObject ? 'object.remove.body' : removingField ? 'field.removeBody' : 'note.remove.body')}</p>
           <p id={`${id}-remove-target`}>{confirm && ('pageCommand' in confirm
             ? t('navigation.position', { page: confirm.pageCommand.target.page + 1, total: confirm.snapshot.scene.pages.length })
-            : 'target' in confirm ? confirm.label : t('note.confirmTarget', { number: confirm.note, page: pageIndex + 1 }))}</p>
+            : 'label' in confirm ? confirm.label : t('note.confirmTarget', { number: confirm.note, page: pageIndex + 1 }))}</p>
           <div className="native-actions">
-            <button type="button" ref={cancelConfirmation} onClick={() => setConfirm(null)}>{t(deletingPage ? 'page.keep' : 'note.remove.cancel')}</button>
+            <button type="button" ref={cancelConfirmation} onClick={() => setConfirm(null)}>{t(deletingPage ? 'page.keep' : removingField ? 'field.keep' : 'note.remove.cancel')}</button>
             <button type="button" className="native-destructive" onClick={() => {
               if (confirm === null) return
               setConfirm(null)
@@ -1689,6 +2028,14 @@ export function PdfNativeEditPanel({
                   return
                 }
                 void act(confirm.pageCommand, removeTrigger.current)
+                return
+              }
+              if ('field' in confirm) {
+                if (!selectedField?.canEditAppearance || !sameNativeBytes(selectedField.id, confirm.field.id)) {
+                  setError(['error.stale'])
+                  return
+                }
+                void act({ kind: 'removeField', field: confirm.field.id }, removeTrigger.current)
                 return
               }
               if ('target' in confirm) {
@@ -1705,7 +2052,7 @@ export function PdfNativeEditPanel({
                 return
               }
               void act({ kind: 'remove', note: confirm.note }, removeTrigger.current)
-            }}>{t(deletingPage ? 'page.delete' : removingObject ? 'object.remove' : 'note.remove')}</button>
+            }}>{t(deletingPage ? 'page.delete' : removingObject ? 'object.remove' : removingField ? 'field.remove' : 'note.remove')}</button>
           </div>
         </div>
       </dialog>

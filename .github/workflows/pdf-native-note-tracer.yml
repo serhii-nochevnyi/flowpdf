@@ -64,6 +64,8 @@ jobs:
         run: PLAYWRIGHT_BROWSERS_PATH=./work/playwright npm run test:browser -- web/tests/pdf-native-objects.browser.test.ts --no-cache --configLoader runner --browser.screenshotFailures=false
       - name: Run bilingual Chromium page management tracer
         run: PLAYWRIGHT_BROWSERS_PATH=./work/playwright npm run test:browser -- web/tests/pdf-native-pages.browser.test.ts --no-cache --configLoader runner --browser.screenshotFailures=false
+      - name: Run bilingual Chromium field editing tracer
+        run: PLAYWRIGHT_BROWSERS_PATH=./work/playwright npm run test:browser -- web/tests/pdf-native-forms.browser.test.ts --no-cache --configLoader runner --browser.screenshotFailures=false
       - name: Bundle the production editor
         run: npm run build:vite
       - name: Run built-editor Chromium smoke
