@@ -36,6 +36,7 @@ enum Role {
     Tree,
     Page,
     Content,
+    PageContents,
     Resources,
     FontResources,
     XResources,
@@ -139,11 +140,15 @@ impl Document {
         let mut decoded = MAX_DECODED;
         while let Some((id, role)) = queue.pop() {
             spend(&mut work, 1)?;
-            if let Some((seen, _)) = document.objects.get(&id) {
+            if let Some((seen, previous)) = document.objects.get(&id) {
                 if *seen != role
                     && !matches!(
                         (*seen, role),
                         (Role::Page, Role::Tree) | (Role::Tree, Role::Page)
+                    )
+                    && !matches!(
+                        (*seen, role, previous),
+                        (Role::Content, Role::PageContents, PdfValue::Stream(_))
                     )
                 {
                     return Err(Structure);
@@ -160,6 +165,7 @@ impl Document {
             }
             let role = match (role, value.as_dictionary().and_then(|d| name(d, "Type"))) {
                 (Role::Tree, Some("Page")) => Role::Page,
+                (Role::PageContents, _) if matches!(value, PdfValue::Stream(_)) => Role::Content,
                 _ => role,
             };
             inspect(&value, role, side, &mut queue)?;
@@ -319,7 +325,7 @@ impl Document {
             Some(PdfValue::Array(values)) => {
                 values.iter().map(reference).collect::<VerifyResult<_>>()?
             }
-            None => Vec::new(),
+            None | Some(PdfValue::Null) => Vec::new(),
             _ => return Err(Structure),
         };
         for &content in &contents {
@@ -475,7 +481,8 @@ fn inspect(
                 .iter()
                 .try_for_each(|v| enqueue(v, Annotation));
         }
-        Content if value.as_array().is_some() => {
+        PageContents if matches!(value, PdfValue::Null) => return Ok(()),
+        PageContents if value.as_array().is_some() => {
             return value
                 .as_array()
                 .ok_or(Structure)?
@@ -710,7 +717,8 @@ fn inspect(
             }
             if let Some(value) = dict.get("Contents") {
                 match value {
-                    PdfValue::Reference(_) => enqueue(value, Content)?,
+                    PdfValue::Null => {}
+                    PdfValue::Reference(_) => enqueue(value, PageContents)?,
                     PdfValue::Array(values) => {
                         for item in values {
                             enqueue(item, Content)?;
