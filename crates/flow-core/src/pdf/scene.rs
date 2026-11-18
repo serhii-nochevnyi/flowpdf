@@ -15,6 +15,105 @@ use super::reader::{
     PdfReadReport, PdfReader, PdfReaderLimits, PdfStream, PdfValue, report_active_content,
 };
 
+use super::native::{NativeNoteId, NativePageGeometry, NativePageId};
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct NativePdfNote {
+    pub id: NativeNoteId,
+    pub object: PdfObjectRef,
+    pub contents: String,
+    pub rect: [i64; 4],
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum NativeReadOnlyAnnotation {
+    Text,
+    Appearance,
+    Link,
+    Widget,
+    Other,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum NativePdfAnnotation {
+    PlainNote(NativePdfNote),
+    ReadOnly {
+        object: Option<PdfObjectRef>,
+        profile: NativeReadOnlyAnnotation,
+        rect: Option<[LayoutUnit; 4]>,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct NativePdfNotePage {
+    pub id: NativePageId,
+    pub object: PdfObjectRef,
+    pub geometry: Option<NativePageGeometry>,
+    pub can_add_note: bool,
+    pub annotations: Vec<NativePdfAnnotation>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct NativePdfNoteScene {
+    pub output_hash: [u8; 32],
+    pub scene_hash: [u8; 32],
+    pub pages: Vec<NativePdfNotePage>,
+}
+
+impl NativePdfNoteScene {
+    pub(super) fn new(
+        output_hash: [u8; 32],
+        pages: Vec<NativePdfNotePage>,
+    ) -> Result<Self, super::native::NativeSessionError> {
+        struct HashWriter(blake3::Hasher);
+        impl std::io::Write for HashWriter {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.update(bytes);
+                Ok(bytes.len())
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let mut writer = HashWriter(blake3::Hasher::new());
+        writer.0.update(b"flowpdf:accepted-note-scene:v2");
+        writer.0.update(&output_hash);
+        for page in &pages {
+            serde_json::to_writer(
+                &mut writer,
+                &(page.object, page.geometry, page.can_add_note),
+            )
+            .map_err(|_| super::native::NativeSessionError::Postcondition)?;
+            for annotation in &page.annotations {
+                match annotation {
+                    NativePdfAnnotation::PlainNote(note) => serde_json::to_writer(
+                        &mut writer,
+                        &(note.object, note.rect, &note.contents),
+                    ),
+                    NativePdfAnnotation::ReadOnly {
+                        object,
+                        profile,
+                        rect,
+                    } => serde_json::to_writer(&mut writer, &(object, profile, rect)),
+                }
+                .map_err(|_| super::native::NativeSessionError::Postcondition)?;
+            }
+        }
+        Ok(Self {
+            output_hash,
+            scene_hash: *writer.0.finalize().as_bytes(),
+            pages,
+        })
+    }
+}
+
 pub const PDF_SCENE_SCHEMA_VERSION: u32 = 1;
 
 /// Page window requested from a reader. The reader remains lazy outside this

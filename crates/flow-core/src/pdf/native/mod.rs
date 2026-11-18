@@ -1,9 +1,20 @@
 // @contract: Bounded graph-level editing of admitted classic-xref PDFs.
 // @security: Errors exclude document data and authored text.
+#[cfg_attr(not(test), allow(dead_code))]
 mod graph;
+mod notes;
+mod session;
 mod writer;
 
-pub use graph::{NativeEditError, NativeEditLimits, NativePdfGraph, PlainTextNote};
+pub use graph::{NativeEditError, NativeEditLimits};
+pub use notes::{NativeNoteCommand, NativeNoteId, NativePageGeometry, NativePageId};
+pub use session::{
+    NATIVE_MAX_NOTE_BYTES, NATIVE_REQUEST_HISTORY, NativeBinding, NativeEditReceipt,
+    NativePdfSession, NativeRequestLookup, NativeSessionError, NativeSnapshot,
+};
+
+#[cfg(test)]
+use graph::{NativePdfGraph, PlainTextNote};
 
 #[cfg(test)]
 mod tests {
@@ -68,7 +79,7 @@ mod tests {
         assert!(output.windows(payload.len()).any(|w| w == payload));
         assert!(
             output
-                .windows(28)
+                .windows(b"+0.1234567890123456789012345".len())
                 .any(|w| w == b"+0.1234567890123456789012345")
         );
         let mut reopened = NativePdfGraph::open(&output, NativeEditLimits::default()).unwrap();

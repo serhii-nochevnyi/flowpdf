@@ -39,6 +39,11 @@ pub use metadata::{
     PdfMetadataError, PdfMetadataOptions, PdfOutlineEntry, PdfSupportReport, PdfSupportedFeature,
     PdfUnsupportedFeature,
 };
+pub use native::{
+    NATIVE_MAX_NOTE_BYTES, NATIVE_REQUEST_HISTORY, NativeBinding, NativeEditError,
+    NativeEditLimits, NativeEditReceipt, NativeNoteCommand, NativeNoteId, NativePageGeometry,
+    NativePageId, NativePdfSession, NativeRequestLookup, NativeSessionError, NativeSnapshot,
+};
 pub use provenance::{
     MAX_PDF_MANIFEST_BYTES, MAX_PDF_SOURCE_PAYLOAD_BYTES, MAX_PDF_SOURCE_STREAM_BYTES,
     PDF_PROVENANCE_SCHEMA_VERSION, PdfExportManifest, PdfFontManifestIdentity, PdfManifestOptions,
@@ -61,10 +66,11 @@ pub use recovery::{
     PdfRecoveredSource, PdfRecoveryError, PdfRecoveryExpectation, recover_owned_source,
 };
 pub use scene::{
-    PDF_SCENE_SCHEMA_VERSION, PdfAnnotationElement, PdfAnnotationKind, PdfClipElement,
-    PdfFormElement, PdfGlyph, PdfImageElement, PdfLinkElement, PdfPathCommand, PdfPathElement,
-    PdfScene, PdfSceneElement, PdfScenePage, PdfSceneRequest, PdfSourceProvenance, PdfTextElement,
-    PdfTextMapping, read_pdf_scene,
+    NativePdfAnnotation, NativePdfNote, NativePdfNotePage, NativePdfNoteScene,
+    NativeReadOnlyAnnotation, PDF_SCENE_SCHEMA_VERSION, PdfAnnotationElement, PdfAnnotationKind,
+    PdfClipElement, PdfFormElement, PdfGlyph, PdfImageElement, PdfLinkElement, PdfPathCommand,
+    PdfPathElement, PdfScene, PdfSceneElement, PdfScenePage, PdfSceneRequest, PdfSourceProvenance,
+    PdfTextElement, PdfTextMapping, read_pdf_scene,
 };
 
 /// Version of the owned PDF export envelope.
