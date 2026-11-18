@@ -6,6 +6,8 @@ import {
   PdfNativeEditPanel,
   nativeDownloadName,
   nativeObjectBounds,
+  nativeFieldBounds,
+  rebindNativeField,
   rebindNativeObject,
   rebindRecoveredObjectDraft,
   nativeMarkerPosition,
@@ -18,7 +20,7 @@ import {
   type NativePdfAcceptedDocument,
 } from '../src/pdf/pdf-native-edit-panel.js'
 import { nativePdfMessages, nativePdfText } from '../src/pdf/pdf-native-edit-messages.js'
-import { NATIVE_PDF_LIMITS, type NativePdfAnnotation, type NativePdfObjectPage, type NativePdfTextIsland } from '../src/pdf/pdf-native-edit-protocol.js'
+import { NATIVE_PDF_LIMITS, type NativePdfAnnotation, type NativePdfFieldView, type NativePdfObjectPage, type NativePdfTextIsland } from '../src/pdf/pdf-native-edit-protocol.js'
 
 const geometry = { bounds: [-10, 20, 190, 120], rotation: 90 } as const
 const hash = Array<number>(32).fill(42)
@@ -510,4 +512,67 @@ it('renders the Rust-selected stable page after its position changes', () => {
   expect(markup).toContain('Page 2 of 2')
   expect(markup).toContain('data-native-note-id="2"')
   expect(markup).not.toContain(nativePdfText('en', 'page.final'))
+})
+
+describe('native field drafts', () => {
+  const field: NativePdfFieldView = {
+    id: hash, object: ref, page: 0, kind: 'text', name: 'recipient',
+    value: 'Ї', checked: null, rect: [0, 30, 140, 54], canEditAppearance: true, refusal: null,
+  }
+
+  it('checks whole-point geometry against the selected page crop', () => {
+    expect(nativeFieldBounds(['10', '10', '140', '24'], geometry.bounds)).toEqual(field.rect)
+    expect(nativeFieldBounds(['', '10', '140', '24'], geometry.bounds)).toBeNull()
+    expect(nativeFieldBounds(['10', '10', '7', '24'], geometry.bounds)).toBeNull()
+    expect(nativeFieldBounds(['10.5', '10', '140', '24'], geometry.bounds)).toBeNull()
+    expect(nativeFieldBounds(['10', '10', '200', '24'], geometry.bounds)).toBeNull()
+  })
+
+  it('rebinds only the same verified field across a page operation', () => {
+    const next = { ...field, id: hash.map(() => 43), page: 1 }
+    expect(rebindNativeField(field, [next], 1)).toBe(next)
+    expect(rebindNativeField(field, [next, { ...next, id: hash }], 1)).toBeUndefined()
+    expect(rebindNativeField(field, [next], 0)).toBeUndefined()
+    expect(rebindNativeField(field, [{ ...next, object: { ...ref, objectNumber: 2 } }], 1)).toBeUndefined()
+    expect(rebindNativeField(field, [{ ...next, value: 'Different' }], 1)).toBeUndefined()
+    expect(rebindNativeField(field, [{ ...next, canEditAppearance: false }], 1)).toBeUndefined()
+  })
+
+  it('rebinds a renumbered field only with unique verified identity on the retained page', () => {
+    const next = { ...field, id: hash.map(() => 43), object: { ...ref, objectNumber: 2 }, page: 1 }
+    const other = { ...next, object: { ...ref, objectNumber: 3 }, value: 'Different' }
+    expect(rebindNativeField(field, [next, { ...other, page: 2 }], 1, [field])).toBe(next)
+    expect(rebindNativeField(field, [next, other], 1, [field])).toBeUndefined()
+    expect(rebindNativeField(field, [{ ...next, object: ref }, other], 1, [field])).toBeUndefined()
+    expect(rebindNativeField(field, [next], 1, [field, { ...other, page: 0 }])).toBeUndefined()
+    expect(rebindNativeField(field, [other], 1, [field])).toBeUndefined()
+    expect(rebindNativeField(field, [next], 0, [field])).toBeUndefined()
+  })
+
+  it('rebinds a survivor after removing a sibling and rejects changed accepted state', () => {
+    const sibling = { ...field, name: 'sender' }
+    const before = { ...field, id: hash.map(() => 2), object: { ...ref, objectNumber: 2 } }
+    const after = { ...field, id: hash.map(() => 3) }
+    expect(rebindNativeField(before, [after], 0, [sibling, before])).toBe(after)
+    expect(rebindNativeField(before, [{ ...after, value: 'Different' }], 0, [sibling, before])).toBeUndefined()
+    expect(rebindNativeField(before, [{ ...after, canEditAppearance: false }], 0, [sibling, before])).toBeUndefined()
+  })
+
+  it('names unsupported widgets and their refusal without rendering edit controls for them', () => {
+    const initialDocument = documentWith([])
+    const widget: NativePdfFieldView = {
+      ...field, kind: null, name: null, value: null, canEditAppearance: false,
+      refusal: 'FLOW_PDF_NATIVE_FIELD_APPEARANCE',
+    }
+    for (const locale of ['uk', 'en'] as const) {
+      const html = renderToStaticMarkup(createElement(PdfNativeEditPanel, {
+        ...dependencies, locale, initialDocument: { ...initialDocument, snapshot: {
+          ...initialDocument.snapshot, fields: [widget],
+        } },
+      }))
+      expect(html).toContain(nativePdfText(locale, 'field.widget', { object: 1, generation: 0 }))
+      expect(html).toContain(nativePdfText(locale, 'field.reason.appearance'))
+      expect(html).not.toContain(nativePdfText(locale, 'field.save'))
+    }
+  })
 })

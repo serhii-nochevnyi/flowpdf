@@ -259,3 +259,28 @@
 .pdf-native-edit-panel .native-page-tools legend {
   font-weight: 600;
 }
+
+.pdf-native-edit-panel .native-field-tools :is(input, select) {
+  box-sizing: border-box;
+}
+
+.pdf-native-edit-panel .native-field-tools .native-actions button {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.pdf-native-edit-panel label.native-field-checkbox {
+  grid-template-columns: 44px minmax(0, 1fr);
+  align-items: center;
+}
+
+.pdf-native-edit-panel .native-field-checkbox input {
+  width: 24px;
+  min-height: 24px;
+  margin: 10px;
+}
+
+.pdf-native-edit-panel .native-field-read-only {
+  margin: 0;
+  padding-inline-start: 24px;
+}
