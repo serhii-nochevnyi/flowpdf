@@ -126,6 +126,30 @@ describe('native PDF edit coordinator', () => {
     expect(lane.coordinator.snapshot().phase).toBe('ready')
   })
 
+  it.each([
+    'FLOW_PDF_NATIVE_BUDGET_EXHAUSTED',
+    'FLOW_PDF_NATIVE_POSTCONDITION_FAILED',
+  ])('continues FIFO after a verified mutation refusal (%s)', async (code) => {
+    const lane = fakePort()
+    const initial = await opened(lane)
+    const first = lane.coordinator.command(note('first'))
+    const rejected = expect(first).rejects.toMatchObject({ code })
+    const second = lane.coordinator.command(note('second'))
+    const edit = await lane.take()
+    lane.deliver(edit, { ...addReply(edit.request, initial), status: 'failed', snapshot: null, code })
+    await rejected
+
+    const next = await lane.take()
+    expect(lane.coordinator.snapshot().accepted).toBe(initial)
+    expect(lane.coordinator.outputBytes()).toEqual(original().bytes)
+    expect(next.request.requestId).toBeGreaterThan(edit.request.requestId)
+    expect(next.request).toMatchObject({ binding: initial.binding, outputHash: initial.outputHash })
+    lane.deliver(next, addReply(next.request, initial))
+    expect((await second).binding.revision).toBe(1)
+    expect(lane.verify).toHaveBeenCalledTimes(3)
+    lane.coordinator.dispose()
+  })
+
   it('orders commands, owns input and output copies, and ignores projection cancellation and duplicate replies', async () => {
     const lane = fakePort()
     const input = original()
