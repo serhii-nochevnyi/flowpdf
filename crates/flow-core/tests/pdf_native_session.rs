@@ -271,6 +271,33 @@ fn evicted_requests_can_only_reconcile() {
 }
 
 #[test]
+fn a_skipped_request_id_cannot_mutate_after_a_higher_id_is_accepted() {
+    let bytes = graph::fixture("", "");
+    let mut session = NativePdfSession::open(&bytes, NativeEditLimits::default()).unwrap();
+    let initial = session.snapshot().binding;
+    let command = NativeNoteCommand::Add {
+        page: session.snapshot().scene.pages[0].id,
+        rect: [15, 25, 30, 40],
+        contents: "One".into(),
+    };
+    let accepted = session.apply(initial, 3, &command).unwrap();
+    let before = session.output_bytes().to_vec();
+
+    assert_eq!(
+        session.lookup(accepted.binding, 2),
+        Ok(NativeRequestLookup::ReconciliationRequired)
+    );
+    assert_eq!(
+        session.apply(accepted.binding, 2, &command),
+        Err(NativeSessionError::ReconciliationRequired)
+    );
+    assert_eq!(session.snapshot().binding, accepted.binding);
+    assert_eq!(session.snapshot().consumed_request, 3);
+    assert_eq!(session.output_bytes(), before);
+    assert_eq!(session.origin_bytes(), bytes);
+}
+
+#[test]
 fn imported_notes_keep_identity_across_renumbering_and_aliases_remain_read_only() {
     let bytes = graph::fixture("", "/Annots 33 0 R");
     let mut session = NativePdfSession::open(&bytes, NativeEditLimits::default()).unwrap();

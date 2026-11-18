@@ -517,6 +517,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn accepted_scene_shares_the_graph_admission_work_budget() {
+        let encoded = miniz_oxide::deflate::compress_to_vec_zlib(b"q Q", 6);
+        let bytes = super::super::tests::fixture("", &encoded);
+        let defaults = NativeEditLimits::default();
+        let graph = NativePdfGraph::open(&bytes, defaults).unwrap();
+        let limits = NativeEditLimits {
+            max_work: defaults.max_work - graph.remaining_work() + 10,
+            ..defaults
+        };
+        assert!(NativePdfGraph::open(&bytes, limits).is_ok());
+        assert!(matches!(
+            NativePdfSession::open(&bytes, limits),
+            Err(NativeSessionError::Budget)
+        ));
+    }
+
+    #[test]
     fn serialization_and_reopen_failures_leave_accepted_state_untouched() {
         let encoded = miniz_oxide::deflate::compress_to_vec_zlib(b"q Q", 6);
         let bytes = super::super::tests::fixture("", &encoded);

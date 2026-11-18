@@ -280,7 +280,7 @@ pub(super) fn project(
     ids: &BTreeMap<PdfObjectRef, NativeNoteId>,
     remaining: &mut usize,
 ) -> Result<Vec<NativePdfNotePage>, NativeSessionError> {
-    let mut work = graph.limits.max_work;
+    let mut work = graph.remaining_work();
     let mut scratch = *remaining;
     let mut refs = Vec::new();
     for value in graph.trailer.values() {
@@ -316,7 +316,8 @@ pub(super) fn project(
         let mut annotations = Vec::new();
         let values = page_annots(graph, page)?;
         for value in values {
-            spend(&mut work, graph.limits.max_nesting + 1)?;
+            // Both the annotation and its read-only rectangle may be indirect.
+            spend(&mut work, (graph.limits.max_nesting + 1) * 2)?;
             spend(remaining, 256)?;
             let dict = resolve(graph, value)
                 .and_then(PdfValue::as_dictionary)
