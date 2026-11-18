@@ -519,3 +519,43 @@ fn redaction_refuses_a_shared_form_with_conflicting_placements() {
     );
     assert!(evidence.checks_passed(), "{evidence:?}");
 }
+
+#[test]
+fn session_redacts_embedded_font_text_and_publishes_only_the_verified_hash() {
+    use flow_core::pdf::native::{NativeEditLimits, NativePdfSession, NativeRedactionStage};
+
+    let source =
+        text_pdf("BT /F 10 Tf 1 0 0 1 10 10 Tm (AB) Tj ET BT /F 10 Tf 60 60 Td (BA) Tj ET");
+    let mut session =
+        NativePdfSession::open_scoped(&source, NativeEditLimits::default(), [3; 16]).unwrap();
+    let base = session.snapshot().binding;
+    let order = session.snapshot().page_state.order.clone();
+    let mark = mark(order[0], [11_000, 11_000, 13_000, 13_000]);
+    session.add_redaction_mark(base, mark).unwrap();
+    let NativeRedactionStage::Pending(candidate) = session.stage_redaction(base, 1).unwrap() else {
+        panic!("expected pending status");
+    };
+    assert!(session.verify_redaction(base, 1).unwrap().checks_passed());
+    let receipt = session.publish_redaction(base, 1).unwrap();
+    let bytes = session.redacted_output_bytes().unwrap();
+    assert_eq!(receipt.output_hash, candidate.candidate_hash);
+    assert_eq!(blake3::hash(bytes).as_bytes(), &candidate.candidate_hash);
+    assert!(verify(&source, bytes, &order, &[mark]).checks_passed());
+
+    let different = text_pdf("BT /F 10 Tf 60 60 Td (AB) Tj ET");
+    let context = NativeRedactionContext {
+        binding: base,
+        accepted_hash: base.origin_hash,
+        request_id: 1,
+        page_order: &order,
+    };
+    let policy = NativeRedactionPolicy {
+        binding: base,
+        candidate_hash: candidate.candidate_hash,
+        request_id: 1,
+        marks: &[mark],
+    };
+    let evidence = session.accepted_redaction_evidence().unwrap();
+    assert!(evidence.eligible_for(bytes, context, policy));
+    assert!(!evidence.eligible_for(&different, context, policy));
+}

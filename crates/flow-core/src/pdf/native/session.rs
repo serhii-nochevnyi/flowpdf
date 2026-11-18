@@ -6,13 +6,20 @@ use thiserror::Error;
 
 use super::super::reader::{PdfObjectRef, PdfValue};
 use super::super::scene::{NativePdfAnnotation, NativePdfNoteScene};
+use super::candidate::{
+    Candidate, NativeRedactionCandidateStatus, NativeRedactionStage, evidence_reserve,
+};
 use super::forms::{self, NativeFieldCommand, NativeFieldRefusal, NativeFieldView};
 use super::graph::{NativeEditError, NativeEditLimits, NativePdfGraph, collect_refs, spend};
 use super::notes::{self, ExpectedNote, NativeNoteCommand, NativeNoteId};
 
 use super::objects::{self, NativeObjectCommand, NativeObjectPage, NativeObjectRefusal};
 use super::pages::{self, NativePageCommand, NativePageState};
+use super::redaction;
 use super::text::{self, NativeTextCommand, NativeTextPage, NativeTextRefusal};
+use super::verifier::{
+    NativeRedactionContext, NativeRedactionMark, VersionedNativeRedactionEvidence,
+};
 
 pub const NATIVE_REQUEST_HISTORY: usize = 128;
 pub const NATIVE_MAX_NOTE_BYTES: usize = 16 * 1024;
@@ -20,7 +27,7 @@ const REQUEST_RECORD_BYTES: usize = 512;
 const SESSION_BYTES: usize = 1024;
 const FIRST_PAGE_OBJECT_ID: u64 = 1 << 52;
 const PAGE_OBJECT_ID_LIMIT: u64 = 1 << 53;
-const OBJECT_ID_BYTES: usize = 128;
+pub(super) const OBJECT_ID_BYTES: usize = 128;
 
 static NEXT_SESSION: AtomicU64 = AtomicU64::new(1);
 
@@ -99,6 +106,12 @@ pub enum NativeSessionError {
     Budget,
     #[error("native PDF rewrite postcondition failed")]
     Postcondition,
+    #[error("native PDF redaction mark is invalid")]
+    InvalidRedactionMark,
+    #[error("native PDF redaction candidate is unavailable")]
+    RedactionCandidateUnavailable,
+    #[error("native PDF redaction candidate lacks complete verification")]
+    RedactionUnverified,
 }
 
 impl From<NativeEditError> for NativeSessionError {
@@ -145,6 +158,11 @@ impl NativeSessionError {
             Self::InvalidNote => "FLOW_PDF_NATIVE_NOTE_INVALID",
             Self::Budget => "FLOW_PDF_NATIVE_BUDGET_EXHAUSTED",
             Self::Postcondition => "FLOW_PDF_NATIVE_POSTCONDITION_FAILED",
+            Self::InvalidRedactionMark => "FLOW_PDF_NATIVE_REDACTION_MARK_INVALID",
+            Self::RedactionCandidateUnavailable => {
+                "FLOW_PDF_NATIVE_REDACTION_CANDIDATE_UNAVAILABLE"
+            }
+            Self::RedactionUnverified => "FLOW_PDF_NATIVE_REDACTION_UNVERIFIED",
         }
     }
 }
@@ -167,7 +185,7 @@ enum Expected<'a> {
 }
 
 struct RequestRecord {
-    digest: [u8; 32],
+    digest: Option<[u8; 32]>,
     base_revision: u64,
     receipt: NativeEditReceipt,
 }
@@ -180,6 +198,11 @@ pub struct NativePdfSession {
     records: VecDeque<RequestRecord>,
     remaining_retained: usize,
     next_page_object_id: u64,
+    redaction_marks: Vec<NativeRedactionMark>,
+    redaction_marks_binding: Option<NativeBinding>,
+    last_redaction_request: u64,
+    candidate: Option<Candidate>,
+    accepted_redaction_evidence: Option<VersionedNativeRedactionEvidence>,
     #[cfg(test)]
     fail_at: Option<FailurePoint>,
 }
@@ -230,6 +253,11 @@ impl NativePdfSession {
             records: VecDeque::new(),
             remaining_retained,
             next_page_object_id: FIRST_PAGE_OBJECT_ID,
+            redaction_marks: Vec::new(),
+            redaction_marks_binding: None,
+            last_redaction_request: 0,
+            candidate: None,
+            accepted_redaction_evidence: None,
             #[cfg(test)]
             fail_at: None,
         })
@@ -247,6 +275,399 @@ impl NativePdfSession {
 
     pub fn output_bytes(&self) -> &[u8] {
         self.graph.original_bytes()
+    }
+
+    pub fn redaction_mark_geometry(
+        &self,
+        page_id: u64,
+    ) -> Result<super::NativeRedactionGeometry, NativeSessionError> {
+        let index = self
+            .snapshot
+            .page_state
+            .order
+            .iter()
+            .position(|&id| id == page_id)
+            .ok_or(NativeSessionError::InvalidRedactionMark)?;
+        Ok(redaction::geometry(&self.graph, index)?)
+    }
+
+    pub fn redaction_marks(&self) -> &[NativeRedactionMark] {
+        &self.redaction_marks
+    }
+
+    pub fn redaction_marks_binding(&self) -> Option<NativeBinding> {
+        self.redaction_marks_binding
+    }
+
+    fn check_current_binding(&self, binding: NativeBinding) -> Result<(), NativeSessionError> {
+        self.check_identity(binding, 1)?;
+        if binding != self.snapshot.binding {
+            return Err(NativeSessionError::RevisionMismatch);
+        }
+        Ok(())
+    }
+
+    pub fn add_redaction_mark(
+        &mut self,
+        binding: NativeBinding,
+        mark: NativeRedactionMark,
+    ) -> Result<(), NativeSessionError> {
+        self.check_current_binding(binding)?;
+        if self
+            .redaction_marks_binding
+            .is_some_and(|base| base != binding)
+        {
+            return Err(NativeSessionError::RevisionMismatch);
+        }
+        if self.redaction_mark_geometry(mark.page_id)? != mark.geometry
+            || !redaction::valid_rect(mark.rect)
+            || !redaction::contains(mark.geometry.crop_box, mark.rect)
+        {
+            return Err(NativeSessionError::InvalidRedactionMark);
+        }
+        if self.redaction_marks.contains(&mark) {
+            return Ok(());
+        }
+        if self.redaction_marks.len() == redaction::MAX_MARKS {
+            return Err(NativeSessionError::Budget);
+        }
+        let mut remaining = self.remaining_retained;
+        spend(
+            &mut remaining,
+            self.candidate.as_ref().map_or(0, Candidate::retained),
+        )?;
+        spend(
+            &mut remaining,
+            (self
+                .redaction_marks
+                .capacity()
+                .max(self.redaction_marks.len() + 1))
+                * std::mem::size_of::<NativeRedactionMark>(),
+        )?;
+        self.redaction_marks
+            .try_reserve_exact(1)
+            .map_err(|_| NativeSessionError::Budget)?;
+        self.candidate = None;
+        self.redaction_marks.push(mark);
+        self.redaction_marks_binding = Some(binding);
+        Ok(())
+    }
+
+    pub fn remove_redaction_mark(
+        &mut self,
+        binding: NativeBinding,
+        mark: NativeRedactionMark,
+    ) -> Result<(), NativeSessionError> {
+        self.check_current_binding(binding)?;
+        let index = self
+            .redaction_marks
+            .iter()
+            .position(|value| *value == mark)
+            .ok_or(NativeSessionError::InvalidRedactionMark)?;
+        self.candidate = None;
+        self.redaction_marks.remove(index);
+        if self.redaction_marks.is_empty() {
+            self.reset_marks();
+        }
+        Ok(())
+    }
+
+    pub fn clear_redaction_marks(
+        &mut self,
+        binding: NativeBinding,
+    ) -> Result<(), NativeSessionError> {
+        self.check_current_binding(binding)?;
+        self.candidate = None;
+        self.reset_marks();
+        Ok(())
+    }
+
+    fn reset_marks(&mut self) {
+        self.redaction_marks = Vec::new();
+        self.redaction_marks_binding = None;
+    }
+
+    fn mark_bytes(&self) -> usize {
+        self.redaction_marks.capacity() * std::mem::size_of::<NativeRedactionMark>()
+    }
+
+    pub fn redaction_candidate_status(&self) -> Option<NativeRedactionCandidateStatus<'_>> {
+        self.candidate.as_ref().map(Candidate::status)
+    }
+
+    pub fn accepted_redaction_evidence(&self) -> Option<&VersionedNativeRedactionEvidence> {
+        self.accepted_redaction_evidence.as_ref()
+    }
+
+    pub fn redacted_output_bytes(&self) -> Option<&[u8]> {
+        self.accepted_redaction_evidence
+            .as_ref()
+            .map(|_| self.output_bytes())
+    }
+
+    fn redaction_context(&self, request_id: u64) -> NativeRedactionContext<'_> {
+        NativeRedactionContext {
+            binding: self.snapshot.binding,
+            request_id,
+            accepted_hash: self.snapshot.output_hash,
+            page_order: &self.snapshot.page_state.order,
+        }
+    }
+
+    fn redaction_receipt(
+        &self,
+        binding: NativeBinding,
+        request_id: u64,
+    ) -> Result<Option<NativeEditReceipt>, NativeSessionError> {
+        self.check_identity(binding, request_id)?;
+        if request_id <= self.snapshot.consumed_request {
+            let record = self
+                .records
+                .iter()
+                .find(|record| record.receipt.request_id == request_id)
+                .ok_or(NativeSessionError::ReconciliationRequired)?;
+            if record.base_revision != binding.revision {
+                return Err(NativeSessionError::RevisionMismatch);
+            }
+            if record.digest.is_some() {
+                return Err(NativeSessionError::RequestConflict);
+            }
+            return Ok(Some(record.receipt));
+        }
+        self.check_current_binding(binding)?;
+        Ok(None)
+    }
+
+    fn check_candidate(
+        &self,
+        binding: NativeBinding,
+        request_id: u64,
+    ) -> Result<(), NativeSessionError> {
+        self.check_identity(binding, request_id)?;
+        self.check_current_binding(binding)?;
+        let status = self
+            .redaction_candidate_status()
+            .ok_or(NativeSessionError::RedactionCandidateUnavailable)?;
+        if status.identity.request_id != request_id || status.identity.binding != binding {
+            return Err(NativeSessionError::RequestConflict);
+        }
+        Ok(())
+    }
+
+    pub fn stage_redaction(
+        &mut self,
+        binding: NativeBinding,
+        request_id: u64,
+    ) -> Result<NativeRedactionStage, NativeSessionError> {
+        if let Some(receipt) = self.redaction_receipt(binding, request_id)? {
+            return Ok(NativeRedactionStage::Accepted(receipt));
+        }
+        if let Some(status) = self.redaction_candidate_status() {
+            self.check_candidate(binding, request_id)?;
+            return Ok(NativeRedactionStage::Pending(status.identity));
+        }
+        if request_id <= self.last_redaction_request {
+            return Err(NativeSessionError::ReconciliationRequired);
+        }
+        if self.redaction_marks_binding != Some(binding) {
+            return Err(NativeSessionError::InvalidRedactionMark);
+        }
+        self.last_redaction_request = request_id;
+        let max_input = super::verify_structure::MAX_INPUT;
+        let pages = self.snapshot.page_state.order.len();
+        if pages > redaction::MAX_PAGES
+            || self.origin_bytes().len().max(self.output_bytes().len()) > max_input
+        {
+            return Err(NativeSessionError::Budget);
+        }
+        let mut remaining = self.remaining_retained;
+        spend(
+            &mut remaining,
+            self.mark_bytes() + evidence_reserve(pages) + pages * 128,
+        )?;
+        spend(&mut remaining, self.ids.len() * OBJECT_ID_BYTES)?;
+        let mut limits = self.snapshot.limits;
+        if binding.revision != 0 {
+            limits.max_source_bytes = limits.max_output_bytes;
+        }
+        let output_budget = limits.max_output_bytes.min(max_input).min(remaining / 5);
+        if output_budget == 0 {
+            return Err(NativeSessionError::Budget);
+        }
+        limits.max_output_bytes = output_budget;
+        limits.max_retained_bytes = remaining - output_budget;
+        let mut staged = NativePdfGraph::open(self.output_bytes(), limits)?;
+        redaction::scrub(
+            &mut staged,
+            &self.snapshot.page_state.order,
+            &self.redaction_marks,
+        )?;
+        staged.limits.max_source_bytes = output_budget;
+        let bytes = staged.rewrite()?;
+
+        let mut reopen_limits = staged.limits;
+        reopen_limits.max_retained_bytes = staged.remaining_retained();
+        reopen_limits.max_total_decoded_bytes = staged.remaining_decoded();
+        if reopen_limits.max_retained_bytes == 0 || reopen_limits.max_total_decoded_bytes == 0 {
+            return Err(NativeSessionError::Budget);
+        }
+        let reopened = NativePdfGraph::open(&bytes, reopen_limits)?;
+        let ids = preserve_and_remap(&staged, &reopened, &self.ids)?;
+        let candidate = Candidate::new(
+            bytes,
+            ids,
+            self.redaction_context(request_id),
+            &self.redaction_marks,
+        );
+        let mut remaining = self.remaining_retained;
+        spend(&mut remaining, self.mark_bytes() + candidate.retained())?;
+        let result = NativeRedactionStage::Pending(candidate.status().identity);
+        self.candidate = Some(candidate);
+        Ok(result)
+    }
+
+    pub fn verify_redaction(
+        &mut self,
+        binding: NativeBinding,
+        request_id: u64,
+    ) -> Result<&VersionedNativeRedactionEvidence, NativeSessionError> {
+        self.check_candidate(binding, request_id)?;
+        let accepted = self.graph.original_bytes();
+        let origin = self.origin.as_deref().unwrap_or(accepted);
+        let mut remaining = self.remaining_retained;
+        spend(&mut remaining, self.mark_bytes())?;
+        let context = NativeRedactionContext {
+            binding: self.snapshot.binding,
+            request_id,
+            accepted_hash: self.snapshot.output_hash,
+            page_order: &self.snapshot.page_state.order,
+        };
+        let candidate = self
+            .candidate
+            .as_mut()
+            .ok_or(NativeSessionError::RedactionCandidateUnavailable)?;
+        spend(
+            &mut remaining,
+            candidate.retained() + candidate.verification_input_bytes() + accepted.len(),
+        )?;
+        Ok(candidate.verify(origin, accepted, context, &self.redaction_marks))
+    }
+
+    pub fn cancel_redaction(
+        &mut self,
+        binding: NativeBinding,
+        request_id: u64,
+    ) -> Result<(), NativeSessionError> {
+        self.check_candidate(binding, request_id)?;
+        self.candidate = None;
+        Ok(())
+    }
+
+    pub fn publish_redaction(
+        &mut self,
+        binding: NativeBinding,
+        request_id: u64,
+    ) -> Result<NativeEditReceipt, NativeSessionError> {
+        if let Some(receipt) = self.redaction_receipt(binding, request_id)? {
+            return Ok(receipt);
+        }
+        self.check_candidate(binding, request_id)?;
+        let context = self.redaction_context(request_id);
+        let candidate = self
+            .candidate
+            .as_ref()
+            .ok_or(NativeSessionError::RedactionCandidateUnavailable)?;
+        let bytes = candidate
+            .verified_bytes(context, &self.redaction_marks)
+            .ok_or(NativeSessionError::RedactionUnverified)?;
+        let output_hash = candidate.status().identity.candidate_hash;
+        let evidence_bytes = evidence_reserve(candidate.status().affected_pages.len());
+        let revision = binding
+            .revision
+            .checked_add(1)
+            .filter(|&revision| revision < FIRST_PAGE_OBJECT_ID - (1 << 48))
+            .ok_or(NativeSessionError::Budget)?;
+        let next_binding = NativeBinding {
+            revision,
+            ..binding
+        };
+        let mut remaining = self.remaining_retained;
+        spend(&mut remaining, self.mark_bytes() + candidate.retained())?;
+        let mut limits = self.snapshot.limits;
+        limits.max_source_bytes = limits.max_output_bytes;
+        limits.max_retained_bytes = remaining;
+        let mut reopened = NativePdfGraph::open(bytes, limits)?;
+        let record_count = (self.records.len() + 1).min(NATIVE_REQUEST_HISTORY);
+        let (scene, mut scene_remaining) = accepted_scene(
+            &reopened,
+            candidate.ids(),
+            output_hash,
+            next_binding,
+            self.origin_bytes().len(),
+            record_count,
+        )?;
+        spend(&mut scene_remaining, evidence_bytes)?;
+        let fields = forms::project(&reopened, &scene.pages, next_binding, &mut scene_remaining)?;
+        let state = page_state(
+            &reopened,
+            candidate.ids(),
+            self.snapshot.page_state.selected,
+        );
+        if !state.valid_for_count(scene.pages.len())
+            || state.order != self.snapshot.page_state.order
+        {
+            return Err(NativeSessionError::Postcondition);
+        }
+        let receipt = NativeEditReceipt {
+            binding: next_binding,
+            request_id,
+            note: NativeNoteId(0),
+            text_island: None,
+            object: None,
+            selected_page: None,
+            output_hash,
+            scene_hash: scene.scene_hash,
+        };
+        self.records
+            .try_reserve_exact(usize::from(self.records.len() < NATIVE_REQUEST_HISTORY))
+            .map_err(|_| NativeSessionError::Budget)?;
+
+        let context = NativeRedactionContext {
+            binding: self.snapshot.binding,
+            request_id,
+            accepted_hash: self.snapshot.output_hash,
+            page_order: &self.snapshot.page_state.order,
+        };
+        let verified = self
+            .candidate
+            .take()
+            .and_then(|candidate| candidate.into_verified(context, &self.redaction_marks))
+            .ok_or(NativeSessionError::RedactionUnverified)?;
+        reopened.source = verified.bytes;
+        let previous = std::mem::replace(&mut self.graph, reopened);
+        if self.origin.is_none() {
+            self.origin = Some(previous.source);
+        }
+        self.ids = verified.ids;
+        self.snapshot.binding = next_binding;
+        self.snapshot.consumed_request = request_id;
+        self.snapshot.output_hash = output_hash;
+        self.snapshot.scene = scene;
+        self.snapshot.page_state = state;
+        self.snapshot.fields = fields;
+        self.accepted_redaction_evidence = Some(verified.evidence);
+        self.remaining_retained =
+            self.snapshot.limits.max_retained_bytes - limits.max_retained_bytes + scene_remaining;
+        self.reset_marks();
+        if self.records.len() == NATIVE_REQUEST_HISTORY {
+            self.records.pop_front();
+        }
+        self.records.push_back(RequestRecord {
+            digest: None,
+            base_revision: binding.revision,
+            receipt,
+        });
+        Ok(receipt)
     }
 
     fn check_identity(
@@ -283,7 +704,8 @@ impl NativePdfSession {
             }
             return Ok(NativeRequestLookup::Accepted(record.receipt));
         }
-        if request_id <= self.snapshot.consumed_request {
+        if request_id <= self.snapshot.consumed_request || request_id <= self.last_redaction_request
+        {
             return Ok(NativeRequestLookup::ReconciliationRequired);
         }
         if binding.revision != self.snapshot.binding.revision {
@@ -414,13 +836,16 @@ impl NativePdfSession {
             if binding.revision != record.base_revision {
                 return Err(NativeSessionError::RevisionMismatch);
             }
-            if command_digest(command) != Ok(record.digest) {
+            if command_digest(command).map(Some) != Ok(record.digest) {
                 return Err(NativeSessionError::RequestConflict);
             }
             return Ok(record.receipt);
         }
         if binding.revision != self.snapshot.binding.revision {
             return Err(NativeSessionError::RevisionMismatch);
+        }
+        if request_id <= self.last_redaction_request {
+            return Err(NativeSessionError::ReconciliationRequired);
         }
         if let Command::Page(command) = command {
             let target = command.target();
@@ -472,6 +897,10 @@ impl NativePdfSession {
             _ => 0,
         };
         let mut remaining = self.remaining_retained;
+        spend(
+            &mut remaining,
+            self.mark_bytes() + self.candidate.as_ref().map_or(0, Candidate::retained),
+        )?;
         spend(
             &mut remaining,
             4096 + content_cost + annotation_cost + (self.ids.len() + 1) * OBJECT_ID_BYTES,
@@ -702,11 +1131,13 @@ impl NativePdfSession {
         self.snapshot.output_hash = output_hash;
         self.snapshot.scene = scene;
         self.snapshot.fields = fields;
+        self.candidate = None;
+        self.accepted_redaction_evidence = None;
         if self.records.len() == NATIVE_REQUEST_HISTORY {
             self.records.pop_front();
         }
         self.records.push_back(RequestRecord {
-            digest,
+            digest: Some(digest),
             base_revision: binding.revision,
             receipt,
         });
