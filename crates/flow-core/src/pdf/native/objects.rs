@@ -137,7 +137,7 @@ pub struct NativeGraphic {
     pub stroke_width: i64,
 }
 
-// @contract: Bounds and points use thousandths of a PDF point in unrotated page space. Affine translations use PDF points.
+// @contract: Unrotated bounds and points use millipoints. Affine translations use PDF points.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(
     tag = "kind",
