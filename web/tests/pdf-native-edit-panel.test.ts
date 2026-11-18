@@ -17,10 +17,11 @@ import {
   nativeNoteTextError,
   nativeReplacementError,
   rebindNativeTextDrafts,
+  verifiedRedactionCandidate,
   type NativePdfAcceptedDocument,
 } from '../src/pdf/pdf-native-edit-panel.js'
 import { nativePdfMessages, nativePdfText } from '../src/pdf/pdf-native-edit-messages.js'
-import { NATIVE_PDF_LIMITS, type NativePdfAnnotation, type NativePdfFieldView, type NativePdfObjectPage, type NativePdfTextIsland } from '../src/pdf/pdf-native-edit-protocol.js'
+import { NATIVE_PDF_LIMITS, type NativePdfAnnotation, type NativePdfFieldView, type NativePdfObjectPage, type NativePdfRedactionResult, type NativePdfSnapshot, type NativePdfTextIsland } from '../src/pdf/pdf-native-edit-protocol.js'
 
 const geometry = { bounds: [-10, 20, 190, 120], rotation: 90 } as const
 const hash = Array<number>(32).fill(42)
@@ -42,6 +43,58 @@ const dependencies = {
   createCoordinator: () => { throw Error('SSR must not create a worker') },
   sourceStore: { put: async () => { throw Error('unexpected write') }, get: async () => null },
 }
+
+describe('exact redacted output', () => {
+  const before = documentWith([]).snapshot
+  const outputHash = Array<number>(32).fill(43)
+  const pageState = { order: [10, 20], selected: 10, canDelete: true, maxPosition: 1 }
+  const previous = { ...before, pageState }
+  const next = {
+    ...previous, binding: { ...before.binding, revision: 3 }, consumedRequest: 5,
+    outputHash, scene: { ...before.scene, outputHash },
+  }
+  const check = { status: 'passed', coveredPages: 2 } as const
+  const result = {
+    action: 'publish', acceptedHash: before.outputHash, published: true, markCount: 0,
+    candidate: { hash: outputHash, affectedPages: [10, 20], validatorVersion: 1, validatorProfile: 'classic-xref-owned-144dpi-v1' },
+    verification: { status: 'passed', structure: check, text: check, raster: check },
+  } as const satisfies NativePdfRedactionResult
+
+  it('requires a publishing receipt tied to the exact accepted revision and every marked page', () => {
+    const accept = (reply: NativePdfRedactionResult | null, snapshot: NativePdfSnapshot = next, affected = [10, 20]) =>
+      verifiedRedactionCandidate(previous, snapshot, reply, affected)
+    expect(accept(result)).toBe(result.candidate)
+    expect(accept({ ...result, action: 'readPublished' })).toBe(result.candidate)
+    expect(accept(null)).toBeNull()
+    expect(accept({ ...result, action: 'status' })).toBeNull()
+    expect(accept({ ...result, published: false })).toBeNull()
+    expect(accept({ ...result, markCount: 1 })).toBeNull()
+    expect(accept({ ...result, acceptedHash: outputHash })).toBeNull()
+    expect(accept({ ...result, candidate: { ...result.candidate, hash } })).toBeNull()
+    expect(accept({ ...result, candidate: { ...result.candidate, validatorVersion: 2 as 1 } })).toBeNull()
+    expect(accept({ ...result, candidate: { ...result.candidate, affectedPages: [10] } })).toBeNull()
+    expect(accept({ ...result, verification: { ...result.verification, raster: { ...check, coveredPages: 1 } } })).toBeNull()
+    for (const status of ['pending', 'failed', 'unavailable', 'inconclusive'] as const) {
+      expect(accept({ ...result, verification: { ...result.verification, status } })).toBeNull()
+    }
+    expect(accept(result, { ...next, binding: { ...next.binding, revision: 4 } })).toBeNull()
+    expect(accept(result, { ...next, binding: { ...next.binding, sessionId: 2 } })).toBeNull()
+    expect(accept(result, { ...next, consumedRequest: before.consumedRequest })).toBeNull()
+    expect(accept(result, { ...next, scene: before.scene })).toBeNull()
+    expect(accept(result, next, [10])).toBeNull()
+  })
+
+  for (const locale of ['en', 'uk'] as const) {
+    it(`keeps redaction unavailable without a live scrub capability in ${locale}`, () => {
+      const markup = renderToStaticMarkup(createElement(PdfNativeEditPanel, {
+        ...dependencies, locale, initialDocument: documentWith([]),
+      }))
+      expect(markup).toContain(nativePdfText(locale, 'redaction.unavailable'))
+      expect(markup).not.toContain(nativePdfText(locale, 'redaction.download'))
+      expect(markup).not.toContain(nativePdfText(locale, 'redaction.success'))
+    })
+  }
+})
 
 describe('text draft readback', () => {
   it('rebinds unique matches on the original page and discards ambiguous or missing targets', () => {

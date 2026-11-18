@@ -21,6 +21,7 @@
 .pdf-native-edit-panel :is(h2, h3) { font-weight: 600; line-height: 1.2; }
 .pdf-native-edit-panel p { color: var(--text-secondary); }
 .pdf-native-edit-panel [role="status"] { min-height: 1.5em; color: var(--status-success); }
+.pdf-native-edit-panel [data-native-redaction-status="neutral"] { color: var(--text-secondary); }
 .pdf-native-edit-panel [role="alert"] { color: var(--status-error); }
 .pdf-native-edit-panel [role="alert"]:empty { margin-top: -8px; }
 
@@ -177,6 +178,17 @@
 
 .pdf-native-edit-panel .native-marker[data-selected="true"] { z-index: 1; }
 .pdf-native-edit-panel .native-marker[data-selected="true"] > span { background: var(--accent); }
+
+.pdf-native-edit-panel .native-redaction-mark {
+  position: absolute;
+  box-sizing: border-box;
+  border: 2px dashed var(--status-error);
+  pointer-events: none;
+}
+
+.pdf-native-edit-panel .native-evidence { display: grid; gap: 8px; margin: 0; }
+.pdf-native-edit-panel .native-evidence > div { display: flex; flex-wrap: wrap; gap: 8px; }
+.pdf-native-edit-panel .native-evidence dd { margin: 0; font-weight: 600; }
 
 @media (forced-colors: active) {
   .pdf-native-edit-panel .native-marker[data-selected="true"] > span {
