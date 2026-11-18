@@ -24,6 +24,19 @@ const bind = (record, path) => {
   assert.ok(sha256(bytes(path)) === record.sha256, path + " digest mismatch");
 };
 
+function verifyEmbeddedFont(pdf, font, id) {
+  const streamHeader = Buffer.from(
+    `/Length ${font.length} /Length1 ${font.length} >>\nstream\n`,
+  );
+  const headerOffset = pdf.indexOf(streamHeader);
+  assert.ok(headerOffset >= 0, id + " font stream missing");
+  const start = headerOffset + streamHeader.length;
+  const end = start + font.length;
+  assert.ok(pdf.subarray(start, end).equals(font), id + " embedded font mismatch");
+  const streamEnd = Buffer.from("\nendstream\nendobj\n");
+  assert.ok(pdf.subarray(end, end + streamEnd.length).equals(streamEnd), id + " font stream boundary");
+}
+
 const matrix = {
   "notes-preservation": {
     profile: "classic-xref-preservation",
@@ -55,6 +68,7 @@ test("corpus has closed provenance, exact source and expected hashes, and unique
     "12e55f73bf39d88d7f2e37e094ad30b8f6752b3d25391ac23978b1e5e35ca66b");
 
   same(manifest.fixtures.map(({ id }) => id), Object.keys(matrix));
+  const font = bytes(manifest.font.binary.path);
   for (const fixture of manifest.fixtures) {
     const { id, provenance, profile, admission, source, expected } = fixture;
     keys(fixture, ["id", "provenance", "profile", "admission", "source", "expected"], id);
@@ -64,6 +78,7 @@ test("corpus has closed provenance, exact source and expected hashes, and unique
     assert.equal(profile, matrix[id].profile, id);
     assert.equal(admission, matrix[id].admission, id);
     bind(source, corpus + id + ".pdf");
+    verifyEmbeddedFont(bytes(source.path), font, id);
     if (id === "notes-preservation") {
       bind(expected, corpus + id + ".expected.json");
     } else {
