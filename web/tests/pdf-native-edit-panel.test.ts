@@ -549,6 +549,15 @@ describe('native field drafts', () => {
     expect(rebindNativeField(field, [next], 0, [field])).toBeUndefined()
   })
 
+  it('rebinds a survivor after removing a sibling and rejects changed accepted state', () => {
+    const sibling = { ...field, name: 'sender' }
+    const before = { ...field, id: hash.map(() => 2), object: { ...ref, objectNumber: 2 } }
+    const after = { ...field, id: hash.map(() => 3) }
+    expect(rebindNativeField(before, [after], 0, [sibling, before])).toBe(after)
+    expect(rebindNativeField(before, [{ ...after, value: 'Different' }], 0, [sibling, before])).toBeUndefined()
+    expect(rebindNativeField(before, [{ ...after, canEditAppearance: false }], 0, [sibling, before])).toBeUndefined()
+  })
+
   it('names unsupported widgets and their refusal without rendering edit controls for them', () => {
     const initialDocument = documentWith([])
     const widget: NativePdfFieldView = {
