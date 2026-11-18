@@ -1,3 +1,5 @@
+import { resolve } from 'node:path'
+
 import react from '@vitejs/plugin-react'
 import { defineConfig } from 'vite'
 
@@ -24,5 +26,11 @@ export default defineConfig({
   build: {
     outDir: '../dist/web',
     emptyOutDir: false,
+    rolldownOptions: {
+      input: {
+        inspector: resolve(import.meta.dirname, 'web/index.html'),
+        editor: resolve(import.meta.dirname, 'web/editor.html'),
+      },
+    },
   },
 })

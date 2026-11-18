@@ -108,26 +108,30 @@ export function createDefaultWorkerRuntime(
   fontCatalog: RuntimeFontCatalog,
   workerConstructor?: WorkerConstructor,
 ): DefaultWorkerRuntime {
-  const WorkerClass = workerConstructor ?? Worker
-  const layoutWorker = new WorkerClass(
-    new URL('./layout-worker-entry.ts', import.meta.url),
-    { type: 'module' },
+  const layoutWorker = (
+    workerConstructor === undefined
+      ? new Worker(new URL('./layout-worker-entry.ts', import.meta.url), { type: 'module' })
+      : new workerConstructor(new URL('./layout-worker-entry.ts', import.meta.url), { type: 'module' })
   ) as unknown as LayoutWorkerPort
-  const pdfWorker = new WorkerClass(
-    new URL('../pdf/pdf-worker-entry.ts', import.meta.url),
-    { type: 'module' },
+  const pdfWorker = (
+    workerConstructor === undefined
+      ? new Worker(new URL('../pdf/pdf-worker-entry.ts', import.meta.url), { type: 'module' })
+      : new workerConstructor(new URL('../pdf/pdf-worker-entry.ts', import.meta.url), { type: 'module' })
   ) as unknown as PdfWorkerPort
-  const pdfReaderWorker = new WorkerClass(
-    new URL('../pdf/pdf-reader-worker-entry.ts', import.meta.url),
-    { type: 'module' },
+  const pdfReaderWorker = (
+    workerConstructor === undefined
+      ? new Worker(new URL('../pdf/pdf-reader-worker-entry.ts', import.meta.url), { type: 'module' })
+      : new workerConstructor(new URL('../pdf/pdf-reader-worker-entry.ts', import.meta.url), { type: 'module' })
   ) as unknown as PdfReaderWorkerPort
-  const pdfReconstructionReaderWorker = new WorkerClass(
-    new URL('../pdf/pdf-reader-worker-entry.ts', import.meta.url),
-    { type: 'module' },
+  const pdfReconstructionReaderWorker = (
+    workerConstructor === undefined
+      ? new Worker(new URL('../pdf/pdf-reader-worker-entry.ts', import.meta.url), { type: 'module' })
+      : new workerConstructor(new URL('../pdf/pdf-reader-worker-entry.ts', import.meta.url), { type: 'module' })
   ) as unknown as PdfReaderWorkerPort
-  const pdfReconstructionWorker = new WorkerClass(
-    new URL('../pdf/pdf-reconstruction-worker-entry.ts', import.meta.url),
-    { type: 'module' },
+  const pdfReconstructionWorker = (
+    workerConstructor === undefined
+      ? new Worker(new URL('../pdf/pdf-reconstruction-worker-entry.ts', import.meta.url), { type: 'module' })
+      : new workerConstructor(new URL('../pdf/pdf-reconstruction-worker-entry.ts', import.meta.url), { type: 'module' })
   ) as unknown as PdfReconstructionWorkerPort
   const layoutScheduler = createWorkerLayoutScheduler(layoutWorker)
   const pdfExportScheduler = createWorkerPdfExportScheduler(pdfWorker)

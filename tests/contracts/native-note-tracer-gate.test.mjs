@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { buildArgv, browserArgv, requirePassedCi, runTracer } from '../../scripts/check-native-note-tracer.mjs'
+import { buildArgv, browserArgv, bundleArgv, builtBrowserArgv, requirePassedCi, runTracer } from '../../scripts/check-native-note-tracer.mjs'
 
 const sha = 'a'.repeat(40)
 const repo = 'serhii-nochevnyi/flowpdf'
@@ -101,10 +101,10 @@ function runner({ fail, npm = '11.9.0' } = {}) {
   }
 }
 
-test('builds before the exact Chromium command with a pinned cache', () => {
+test('runs source and built Chromium checks with a pinned cache', () => {
   const mock = runner()
   assert.deepEqual(runTracer(mock.command, {}, '24.10.0'), { sha })
-  assert.deepEqual(mock.calls.slice(-3, -1), [buildArgv, browserArgv])
+  assert.deepEqual(mock.calls.slice(-5, -1), [buildArgv, browserArgv, bundleArgv, builtBrowserArgv])
 })
 
 test('fails closed on missing tools, checkout mismatch, and build or browser failure', () => {
@@ -121,4 +121,15 @@ test('fails closed on missing tools, checkout mismatch, and build or browser fai
   const browser = runner({ fail: browserArgv })
   assert.throws(() => runTracer(browser.command, {}, '24.10.0'), { message: 'NATIVE_NOTE_TRACER_BROWSER_FAILED' })
   assert.deepEqual(browser.calls.at(-1), browserArgv)
+})
+
+test('fails closed when the production bundle or its Chromium smoke fails', () => {
+  for (const [argv, reason] of [
+    [bundleArgv, 'NATIVE_NOTE_TRACER_BUNDLE_FAILED'],
+    [builtBrowserArgv, 'NATIVE_NOTE_TRACER_BUILT_BROWSER_FAILED'],
+  ]) {
+    const mock = runner({ fail: argv })
+    assert.throws(() => runTracer(mock.command, {}, '24.10.0'), { message: reason })
+    assert.deepEqual(mock.calls.at(-1), argv)
+  }
 })

@@ -101,6 +101,8 @@ export function requirePassedCi(ref, command = execute) {
 }
 
 export const buildArgv = ['npm', 'run', 'build:web']
+export const bundleArgv = ['npm', 'run', 'build:vite']
+export const builtBrowserArgv = ['node', 'scripts/check-native-note-built.mjs']
 export const browserArgv = ['npx', '--no-install', 'vitest', 'run', '--project', 'browser',
   'web/tests/pdf-native-edit.browser.test.ts']
 
@@ -149,6 +151,8 @@ export function runTracer(command = execute, env = process.env, nodeVersion = pr
   }
   call(command, buildArgv, 'NATIVE_NOTE_TRACER_BUILD_FAILED', { ...options, timeout: 20 * 60_000 })
   call(command, browserArgv, 'NATIVE_NOTE_TRACER_BROWSER_FAILED', { ...options, timeout: 5 * 60_000 })
+  call(command, bundleArgv, 'NATIVE_NOTE_TRACER_BUNDLE_FAILED', { ...options, timeout: 5 * 60_000 })
+  call(command, builtBrowserArgv, 'NATIVE_NOTE_TRACER_BUILT_BROWSER_FAILED', { ...options, timeout: 5 * 60_000 })
   requireEvidence(resolveRef(command, 'HEAD') === sha, 'NATIVE_NOTE_TRACER_CHECKOUT_MISMATCH')
   if (env.GITHUB_ACTIONS === 'true') {
     call(command, ['git', 'diff', '--quiet', 'HEAD', '--'], 'NATIVE_NOTE_TRACER_CHECKOUT_MISMATCH')
@@ -167,7 +171,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
         attempt: process.env.GITHUB_RUN_ATTEMPT,
         job: jobName,
       } : {}
-      console.log(JSON.stringify({ ...identity, sha, build: 'passed', browser: 'passed' }))
+      console.log(JSON.stringify({ ...identity, sha, build: 'passed', browser: 'passed', builtBrowser: 'passed' }))
     } else if (args.length === 3 && args[0] === '--require-passed-ci' && args[1] === '--ref') {
       console.log(JSON.stringify(requirePassedCi(args[2])))
     } else {

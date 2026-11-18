@@ -1,7 +1,7 @@
 import { loadBundledFontCatalog } from './runtime/font-catalog.js'
 import { createDefaultWorkerRuntime } from './layout/layout-runtime.js'
 import { mountEditorApp, type EditorLocale } from './editor/editor-app.js'
-import { loadWasm } from './editor/editor-controller.js'
+import init, * as wasm from '../generated/flow_wasm.js'
 
 const locale: EditorLocale = document.documentElement.lang.toLowerCase().startsWith('en')
   ? 'en'
@@ -22,7 +22,7 @@ async function start(): Promise<void> {
   const lifecycle = new AbortController()
   let runtime: ReturnType<typeof createDefaultWorkerRuntime> | undefined
   try {
-    const wasm = await loadWasm()
+    await init()
     if (
       wasm.font_catalog_identity === undefined ||
       wasm.hyphenation_data_identity === undefined
