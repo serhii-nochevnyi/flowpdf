@@ -176,6 +176,11 @@ for (const locale of ['uk', 'en'] as const) {
       await activate(island(1).element())
       await expect.element(original).toHaveValue('ЇAA')
       await expect.element(original).toHaveAttribute('readonly')
+      const boundsId = original.element().getAttribute('aria-describedby')
+      const [right, top] = locale === 'uk' ? ['49,404', '150,896'] : ['49.404', '150.896']
+      expect(document.getElementById(boundsId ?? '')?.textContent).toBe(
+        t('text.bounds', { left: '30', bottom: '140', right, top }),
+      )
       expect(document.activeElement).toBe(replacement.element())
       await expect.element(apply).toBeDisabled()
 
