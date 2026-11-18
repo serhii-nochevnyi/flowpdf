@@ -177,7 +177,7 @@ function readScene(bytes: Uint8Array) {
   return (JSON.parse(json) as { result: PdfReaderResultDto }).result.scene
 }
 
-async function exactOutputHash(bytes: Uint8Array) {
+async function reopenOutput(bytes: Uint8Array) {
   const originStoreHash = (await hashPdfSourceBytes(bytes)).slice('sha256:v1:'.length)
   const request = { protocolVersion: 1, requestId: 1, originStoreHash, epoch: [...crypto.getRandomValues(new Uint8Array(16))] }
   const json = native_pdf_open(JSON.stringify({ ...request, operation: 'open', bytesHex: nativeBytesHex(bytes) }))
@@ -188,7 +188,7 @@ async function exactOutputHash(bytes: Uint8Array) {
   native_pdf_close(JSON.stringify({
     protocolVersion: 1, requestId: 2, operation: 'close', originStoreHash, binding: reply.binding,
   }))
-  return nativeBytesHex(Uint8Array.from(reply.snapshot.outputHash))
+  return reply.snapshot
 }
 
 const ordinaryNote = 'Ordinary prior note'
@@ -258,13 +258,14 @@ for (const locale of ['en', 'uk'] as const) {
         await activate(add.element())
         await expect.poll(() => marksOnPage().length).toBe(count)
       }
-      const openConfirmation = async (kind: 'clear' | 'apply', pages: string) => {
+      const openConfirmation = async (kind: 'clear' | 'apply', pages: string, count = 2) => {
         const trigger = redactionButton(kind === 'clear' ? 'redaction.clear' : 'redaction.apply')
+        await expect.element(trigger).toBeEnabled()
         await activate(trigger.element())
         const dialog = panel.getByRole('dialog', { name: t(kind === 'clear' ? 'redaction.clear.heading' : 'redaction.confirm.heading'), exact: true })
         await expect.element(dialog).toBeVisible()
         await expect.element(dialog.getByText(t(kind === 'clear' ? 'redaction.clear.body' : 'redaction.confirm.body'), { exact: true })).toBeVisible()
-        await expect.element(dialog.getByText(t('redaction.markSummary', { count: 2, pages }), { exact: true })).toBeVisible()
+        await expect.element(dialog.getByText(t('redaction.markSummary', { count, pages }), { exact: true })).toBeVisible()
         expect(document.activeElement).toBe(dialog.getByRole('button', { name: t('redaction.keep'), exact: true }).element())
         return dialog.getByRole('button', { name: t(kind === 'clear' ? 'redaction.clear' : 'redaction.apply'), exact: true })
       }
@@ -312,6 +313,8 @@ for (const locale of ['en', 'uk'] as const) {
       expect(marksOnPage()).toHaveLength(2)
       await activate((await openConfirmation('clear', '1')).element())
       await expect.poll(() => marksOnPage().length).toBe(0)
+      await expect.element(status).toHaveTextContent(t('redaction.empty'))
+      await expect.element(status).toHaveAttribute('data-native-redaction-status', 'neutral')
       expect(acceptedScope()).toBe(ordinary)
 
       await fillMark(20, 20, 59, 80)
@@ -328,6 +331,7 @@ for (const locale of ['en', 'uk'] as const) {
       await pageSelect.selectOptions(nextOption)
       await expect.element(pageSelect).toHaveValue(nextOption.value)
       await expect.element(panel.getByText(t('navigation.position', { page: 2, total: 2 }), { exact: true }).first()).toBeVisible()
+      await expect.element(status).toHaveAttribute('data-native-redaction-status', 'neutral')
       await fillMark(20, 20, 20, 20)
       await addMark(1)
       const firstOption = select.options[0]!
@@ -350,6 +354,8 @@ for (const locale of ['en', 'uk'] as const) {
         expect(put).toHaveBeenCalledExactlyOnceWith(ordinary.originStoreHash, source)
         expect(editor.snapshot().accepted).toBe(semantic)
         expect(acceptedScope()).toBe(ordinary)
+        const exposed = lane.coordinator.outputBytes()
+        expect(exposed === null || nativeBytesHex(exposed) === ordinary.outputHex).toBe(true)
         expect(marksOnPage()).toHaveLength(1)
         await expect.element(panel.getByText(privateNote, { exact: true })).toBeVisible()
         await expect.element(notes).toHaveValue(retainedDraft)
@@ -357,8 +363,7 @@ for (const locale of ['en', 'uk'] as const) {
         expect(status.element().textContent).not.toContain(t('redaction.success'))
       }
       async function assertCheck(key: 'internal' | 'structure' | 'text' | 'raster', value: NativePdfMessage) {
-        const definition = check(key).element().nextElementSibling
-        expect(definition?.textContent).toBe(t(value))
+        await expect.poll(() => check(key).query()?.nextElementSibling?.textContent).toBe(t(value))
       }
 
       lane.control.hold = 'verify'
@@ -369,7 +374,9 @@ for (const locale of ['en', 'uk'] as const) {
       await assertCheck('internal', 'evidence.passed')
       for (const key of ['structure', 'text', 'raster'] as const) await assertCheck(key, 'evidence.pending')
       await assertQuarantine(cancelling)
-      await activate(redactionButton('redaction.cancel').element())
+      const cancel = redactionButton('redaction.cancel')
+      await expect.element(cancel).toHaveFocus()
+      await userEvent.keyboard('{Enter}')
       lane.control.resume!()
       await expect.element(alert).toHaveTextContent(t('redaction.cancelled'))
       expect(lane.control.requests).toContain('cancel')
@@ -415,8 +422,10 @@ for (const locale of ['en', 'uk'] as const) {
         await activate(button('session.reconcile').element())
       }
       await expect.element(status).toHaveTextContent(t('redaction.success'))
+      expect(status.element().hasAttribute('data-native-redaction-status')).toBe(false)
       if (locale === 'uk') expect(lane.control.requests).toContain('readPublished')
       const accepted = lane.control.statuses.findLast((result) => result.published && result.action !== 'status')
+      expect(accepted?.action).toBe(locale === 'uk' ? 'readPublished' : 'publish')
       const affectedPages = ordinary.pageState.order
       expect(accepted?.candidate?.affectedPages).toEqual(affectedPages)
       expect(accepted?.verification).toEqual({
@@ -433,10 +442,15 @@ for (const locale of ['en', 'uk'] as const) {
       const result = await getDownload('redaction.download')
       expect(result.name).toBe('contract-redacted.pdf')
       expect(nativeBytesHex(result.bytes)).toBe(lane.control.output())
-      const hash = await exactOutputHash(result.bytes)
+      const reopened = await reopenOutput(result.bytes)
+      const hash = nativeBytesHex(Uint8Array.from(reopened.outputHash))
       expect(hash).toBe(nativeBytesHex(Uint8Array.from(accepted!.candidate!.hash)))
       expect(button('redaction.download').element().getAttribute('data-output-hash')).toBe(hash)
+      expect(button('redaction.download').element().getAttribute('data-validator-version')).toBe('1')
       await expect.element(panel.getByText(t('redaction.outputIdentity', { revision: 2, hash }), { exact: true })).toBeVisible()
+      expect(reopened.scene.pages.flatMap((page) => page.annotations.flatMap((entry) =>
+        entry.kind === 'plainNote' ? [entry.contents] : [],
+      ))).toEqual([publicNote, ordinaryNote])
       const scene = readScene(result.bytes)
       const first = scene.pages[0]!.elements
       expect(first.flatMap((entry) => entry.kind === 'text' ? [entry.value.text] : [])).toEqual(['AA'])
@@ -459,11 +473,7 @@ for (const locale of ['en', 'uk'] as const) {
       await putOriginal(await redactionFixture(true))
       await fillMark(20, 20, 59, 80)
       await addMark(1)
-      const apply = async () => {
-        await activate(redactionButton('redaction.apply').element())
-        const dialog = panel.getByRole('dialog', { name: t('redaction.confirm.heading'), exact: true })
-        await activate(dialog.getByRole('button', { name: t('redaction.apply'), exact: true }).element())
-      }
+      const apply = async () => activate((await openConfirmation('apply', '1', 1)).element())
       const refused = checkpoint()
       await apply()
       await expect.element(alert).toHaveTextContent(t('redaction.unsupported'))

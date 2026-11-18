@@ -1004,7 +1004,10 @@ export function PdfNativeEditPanel({
     locked.current = true
     clearFeedback()
     setStatus(null)
-    if (applying) setRedactionRefusal(null)
+    if (applying) {
+      setRedactionRefusal(null)
+      focusAfterRender.current = `${id}-redaction-cancel`
+    }
     setBusy(applying ? 'redacting' : 'marking')
     try {
       const result = applying ? await coordinator.applyRedaction(attempt.controller.signal) : await coordinator.markRedaction(action)
@@ -1828,7 +1831,7 @@ export function PdfNativeEditPanel({
                 : t('output.revision', { revision })}</p>}
       </header>
       <p role="status" aria-live="polite" aria-atomic="true"
-        data-native-redaction-status={busy === 'redacting' || busy === 'marking' || activeRedaction || status?.[0] === 'redaction.marked' ? 'neutral' : undefined}>{announcement}</p>
+        data-native-redaction-status={preRedactionOutput || busy === 'marking' || status?.[0] === 'redaction.empty' ? 'neutral' : undefined}>{announcement}</p>
       <p role="alert" aria-atomic="true">{failure}</p>
       {busy === 'opening' && accepted && <p>{t('status.previousView')}</p>}
       {accepted && <p>{t('admission.ready')}</p>}
