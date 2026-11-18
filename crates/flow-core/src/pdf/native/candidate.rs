@@ -1,0 +1,294 @@
+use std::collections::BTreeMap;
+use std::mem::size_of;
+
+use serde::Serialize;
+
+use super::super::reader::PdfObjectRef;
+use super::session::OBJECT_ID_BYTES;
+use super::{
+    NATIVE_REDACTION_VALIDATOR_PROFILE, NATIVE_REDACTION_VALIDATOR_VERSION, NativeBinding,
+    NativeEditReceipt, NativeNoteId, NativeRedactionContext, NativeRedactionMark,
+    NativeRedactionPageEvidence, NativeRedactionPolicy, NativeVerificationStatus,
+    VersionedNativeRedactionEvidence, verify_native_redaction,
+};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NativeRedactionCandidateIdentity {
+    pub binding: NativeBinding,
+    pub request_id: u64,
+    pub accepted_hash: [u8; 32],
+    pub candidate_hash: [u8; 32],
+    pub validator_version: u32,
+    pub validator_profile: &'static str,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NativeRedactionStage {
+    Pending(NativeRedactionCandidateIdentity),
+    Accepted(NativeEditReceipt),
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NativeRedactionCandidateStatus<'a> {
+    pub identity: NativeRedactionCandidateIdentity,
+    pub affected_pages: &'a [NativeRedactionPageEvidence],
+    pub evidence: Option<&'a VersionedNativeRedactionEvidence>,
+}
+
+impl NativeRedactionCandidateStatus<'_> {
+    pub fn status(self) -> NativeVerificationStatus {
+        use NativeVerificationStatus::*;
+        let Some(evidence) = self.evidence else {
+            return Pending;
+        };
+        if evidence.checks_passed() {
+            return if evidence.identity().is_some_and(|identity| {
+                identity.binding() == self.identity.binding
+                    && identity.request_id() == self.identity.request_id
+                    && identity.accepted_hash() == self.identity.accepted_hash
+                    && identity.candidate_hash() == self.identity.candidate_hash
+                    && identity.validator_version() == self.identity.validator_version
+                    && identity.validator_profile() == self.identity.validator_profile
+                    && identity.affected_pages() == self.affected_pages
+            }) {
+                Passed
+            } else {
+                Failed
+            };
+        }
+        let lanes = [
+            evidence.structure().status(),
+            evidence.text().status(),
+            evidence.raster().status(),
+        ];
+        if evidence.identity_failure().is_some() || lanes.contains(&Failed) {
+            Failed
+        } else if lanes.contains(&Unavailable) {
+            Unavailable
+        } else {
+            Inconclusive
+        }
+    }
+}
+
+pub(super) struct Candidate {
+    identity: NativeRedactionCandidateIdentity,
+    affected: Vec<NativeRedactionPageEvidence>,
+    bytes: Vec<u8>,
+    ids: BTreeMap<PdfObjectRef, NativeNoteId>,
+    evidence: Option<VersionedNativeRedactionEvidence>,
+}
+
+impl Candidate {
+    // @invariant: Construct only after the scrubbed closure and exact rewrite agree.
+    pub(super) fn new(
+        bytes: Vec<u8>,
+        ids: BTreeMap<PdfObjectRef, NativeNoteId>,
+        context: NativeRedactionContext<'_>,
+        marks: &[NativeRedactionMark],
+    ) -> Self {
+        Self {
+            identity: NativeRedactionCandidateIdentity {
+                binding: context.binding,
+                request_id: context.request_id,
+                accepted_hash: context.accepted_hash,
+                candidate_hash: *blake3::hash(&bytes).as_bytes(),
+                validator_version: NATIVE_REDACTION_VALIDATOR_VERSION,
+                validator_profile: NATIVE_REDACTION_VALIDATOR_PROFILE,
+            },
+            affected: context
+                .page_order
+                .iter()
+                .filter_map(|&id| {
+                    marks.iter().find(|mark| mark.page_id == id).map(|mark| {
+                        NativeRedactionPageEvidence {
+                            page_id: id,
+                            geometry: mark.geometry,
+                        }
+                    })
+                })
+                .collect(),
+            bytes,
+            ids,
+            evidence: None,
+        }
+    }
+
+    pub(super) fn status(&self) -> NativeRedactionCandidateStatus<'_> {
+        NativeRedactionCandidateStatus {
+            identity: self.identity,
+            affected_pages: &self.affected,
+            evidence: self.evidence.as_ref(),
+        }
+    }
+
+    pub(super) fn retained(&self) -> usize {
+        self.bytes.capacity()
+            + self.ids.len() * OBJECT_ID_BYTES
+            + self.affected.capacity() * size_of::<NativeRedactionPageEvidence>()
+            + evidence_reserve(self.affected.len())
+    }
+
+    pub(super) fn verification_input_bytes(&self) -> usize {
+        self.bytes.len()
+    }
+
+    fn policy<'a>(&self, marks: &'a [NativeRedactionMark]) -> NativeRedactionPolicy<'a> {
+        NativeRedactionPolicy {
+            binding: self.identity.binding,
+            request_id: self.identity.request_id,
+            candidate_hash: self.identity.candidate_hash,
+            marks,
+        }
+    }
+
+    pub(super) fn verify(
+        &mut self,
+        origin: &[u8],
+        accepted: &[u8],
+        context: NativeRedactionContext<'_>,
+        marks: &[NativeRedactionMark],
+    ) -> &VersionedNativeRedactionEvidence {
+        let policy = self.policy(marks);
+        self.evidence.get_or_insert_with(|| {
+            verify_native_redaction(origin, accepted, &self.bytes, context, policy)
+        })
+    }
+
+    // @security: Only the internally acquired verdict can authorize access to quarantined bytes.
+    pub(super) fn verified_bytes(
+        &self,
+        context: NativeRedactionContext<'_>,
+        marks: &[NativeRedactionMark],
+    ) -> Option<&[u8]> {
+        let evidence = self.evidence.as_ref()?;
+        if self.status().status() != NativeVerificationStatus::Passed
+            || !evidence.eligible_for(&self.bytes, context, self.policy(marks))
+        {
+            return None;
+        }
+        Some(&self.bytes)
+    }
+
+    pub(super) fn into_verified(
+        self,
+        context: NativeRedactionContext<'_>,
+        marks: &[NativeRedactionMark],
+    ) -> Option<PublishedCandidate> {
+        self.verified_bytes(context, marks)?;
+        Some(PublishedCandidate {
+            bytes: self.bytes,
+            ids: self.ids,
+            evidence: self.evidence?,
+        })
+    }
+
+    pub(super) fn ids(&self) -> &BTreeMap<PdfObjectRef, NativeNoteId> {
+        &self.ids
+    }
+}
+
+pub(super) struct PublishedCandidate {
+    pub bytes: Vec<u8>,
+    pub ids: BTreeMap<PdfObjectRef, NativeNoteId>,
+    pub evidence: VersionedNativeRedactionEvidence,
+}
+
+pub(super) fn evidence_reserve(pages: usize) -> usize {
+    1024 + 8 * pages * size_of::<NativeRedactionPageEvidence>()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::{NativeRedactionGeometry, tests::redaction_fixture};
+    use super::*;
+
+    #[test]
+    fn quarantine_requires_matching_verdict_identity_coverage_and_bytes() {
+        let source = redaction_fixture("10 10 10 10 re f 40 40 10 10 re f");
+        let exact = redaction_fixture("40 40 10 10 re f");
+        let other = redaction_fixture("55 55 10 10 re f");
+        let context = NativeRedactionContext {
+            binding: NativeBinding {
+                epoch: [5; 16],
+                session_id: 1,
+                revision: 0,
+                origin_hash: *blake3::hash(&source).as_bytes(),
+            },
+            request_id: 2,
+            accepted_hash: *blake3::hash(&source).as_bytes(),
+            page_order: &[3],
+        };
+        let marks = [NativeRedactionMark {
+            page_id: 3,
+            geometry: NativeRedactionGeometry {
+                media_box: [0, 0, 100_000, 100_000],
+                crop_box: [0, 0, 100_000, 100_000],
+                rotation: 0,
+            },
+            rect: [12_000, 12_000, 13_000, 13_000],
+        }];
+        let mut candidate = Candidate::new(exact.clone(), BTreeMap::new(), context, &marks);
+        assert_eq!(
+            candidate.status().status(),
+            NativeVerificationStatus::Pending
+        );
+        assert!(candidate.verified_bytes(context, &marks).is_none());
+
+        let mut mismatch = Candidate::new(other.clone(), BTreeMap::new(), context, &marks);
+        assert!(
+            !mismatch
+                .verify(&source, &source, context, &marks)
+                .checks_passed()
+        );
+        assert_eq!(mismatch.status().status(), NativeVerificationStatus::Failed);
+        assert!(mismatch.into_verified(context, &marks).is_none());
+
+        assert!(
+            candidate
+                .verify(&source, &source, context, &marks)
+                .checks_passed()
+        );
+        assert_eq!(
+            candidate.status().status(),
+            NativeVerificationStatus::Passed
+        );
+        assert_eq!(
+            candidate.verified_bytes(context, &marks),
+            Some(exact.as_slice())
+        );
+        let identity = candidate.identity;
+        candidate.identity.validator_version += 1;
+        assert_eq!(
+            candidate.status().status(),
+            NativeVerificationStatus::Failed
+        );
+        assert!(candidate.verified_bytes(context, &marks).is_none());
+        candidate.identity = identity;
+        candidate.identity.validator_profile = "different-profile";
+        assert!(candidate.verified_bytes(context, &marks).is_none());
+        candidate.identity = identity;
+        candidate.identity.candidate_hash = *blake3::hash(&other).as_bytes();
+        assert!(candidate.verified_bytes(context, &marks).is_none());
+        candidate.identity = identity;
+        let coverage = std::mem::take(&mut candidate.affected);
+        assert!(candidate.verified_bytes(context, &marks).is_none());
+        candidate.affected = coverage;
+        assert!(
+            candidate
+                .verified_bytes(
+                    NativeRedactionContext {
+                        request_id: 3,
+                        ..context
+                    },
+                    &marks
+                )
+                .is_none()
+        );
+        assert!(candidate.verified_bytes(context, &[]).is_none());
+        candidate.bytes = other;
+        assert!(candidate.into_verified(context, &marks).is_none());
+    }
+}

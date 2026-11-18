@@ -1,16 +1,57 @@
 // @contract: Bounded graph-level editing of admitted classic-xref PDFs.
 // @security: Errors exclude document data and authored text.
+mod candidate;
 mod forms;
 #[cfg_attr(not(test), allow(dead_code))]
 mod graph;
 mod notes;
 mod objects;
 mod pages;
+mod redaction;
 mod session;
 mod text {
     include!("text.rs");
 
     pub(super) struct FieldFont(Font);
+
+    pub(super) struct RedactionText<'a>(Recognition<'a>);
+
+    impl<'a> RedactionText<'a> {
+        pub(super) fn new(graph: &'a NativePdfGraph) -> Self {
+            Self(Recognition::new(graph))
+        }
+
+        pub(super) fn measure(
+            &mut self,
+            resources: Option<&Dict>,
+            block: &[u8],
+            work: &mut usize,
+        ) -> Result<Option<(String, Bounds)>, super::NativeEditError> {
+            use super::NativeEditError::Unsupported;
+            let mut shows = shows(block).map_err(|_| Unsupported)?;
+            let Some(show) = shows.pop() else {
+                return Ok(None);
+            };
+            if !shows.is_empty() || show.codes.len() > 8192 || show.size > 10_000 * SCALE {
+                return Err(Unsupported);
+            }
+            super::graph::spend(work, show.codes.len() * 4 + 1)?;
+            self.0.work = *work;
+            let font = self
+                .0
+                .font(resources.ok_or(Unsupported)?, &show.font)
+                .map_err(|_| Unsupported)?;
+            let codes = font.decode(&show.codes).map_err(|_| Unsupported)?;
+            let (_, metrics) = font.measure(&show, &codes).map_err(|_| Unsupported)?;
+            let bounds = metrics.wire_bounds().map_err(|_| Unsupported)?;
+            *work = self.0.work;
+            Ok(Some((show.font, bounds)))
+        }
+    }
+
+    pub(super) fn redaction_number(raw: &[u8]) -> Option<i64> {
+        milli(raw)
+    }
 
     impl FieldFont {
         pub(super) fn admit(graph: &NativePdfGraph, dict: &Dict) -> Option<Self> {
@@ -71,6 +112,9 @@ mod verify_structure;
 mod verify_text;
 mod writer;
 
+pub use candidate::{
+    NativeRedactionCandidateIdentity, NativeRedactionCandidateStatus, NativeRedactionStage,
+};
 pub use forms::{
     NATIVE_MAX_FIELD_NAME_BYTES, NATIVE_MAX_FIELD_TEXT_BYTES, NativeFieldCommand, NativeFieldKind,
     NativeFieldRefusal, NativeFieldView,
@@ -108,6 +152,30 @@ use graph::{NativePdfGraph, PlainTextNote};
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    pub(super) fn redaction_fixture(paint: &str) -> Vec<u8> {
+        let objects = [
+            "<< /Type /Catalog /Pages 2 0 R >>".to_owned(),
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_owned(),
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] /Contents 4 0 R >>".to_owned(),
+            format!("<< /Length {} >>\nstream\n{paint}\nendstream", paint.len()),
+        ];
+        let mut pdf = b"%PDF-1.7\n%\xE2\xE3\xCF\xD3\n".to_vec();
+        let mut offsets = Vec::new();
+        for (index, object) in objects.into_iter().enumerate() {
+            offsets.push(pdf.len());
+            pdf.extend_from_slice(format!("{} 0 obj\n{object}\nendobj\n", index + 1).as_bytes());
+        }
+        let xref = pdf.len();
+        pdf.extend_from_slice(b"xref\n0 5\n0000000000 65535 f \n");
+        for offset in offsets {
+            pdf.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+        }
+        pdf.extend_from_slice(
+            format!("trailer\n<< /Size 5 /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n").as_bytes(),
+        );
+        pdf
+    }
 
     pub(super) fn fixture(extra: &str, stream: &[u8]) -> Vec<u8> {
         let mut bytes = b"%PDF-1.7\n".to_vec();
