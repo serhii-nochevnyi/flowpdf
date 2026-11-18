@@ -6,11 +6,11 @@ import {
   nativePdfText, type NativePdfLocale, type NativePdfMessage,
 } from './pdf-native-edit-messages.js'
 import {
-  NATIVE_PDF_LIMITS, fitsNativeJson, isNativeNoteCommand, nativeBytesHex, nativeHexBytes, sameNativeBytes,
+  NATIVE_PDF_LIMITS, fitsNativeJson, isNativeNoteCommand, isNativePageCommand, nativeBytesHex, nativeHexBytes, sameNativeBytes,
   type NativePdfAnnotation, type NativePdfNoteCommand, type NativePdfRect,
-  type NativePdfCommand, type NativePdfSnapshot, type NativePdfTextCommand, type NativePdfTextIsland,
+  type NativePdfSnapshot, type NativePdfTextCommand, type NativePdfTextIsland,
   type NativePdfTextRefusal, type NativePdfGraphic, type NativePdfObjectCommand, type NativePdfObjectPage,
-  type NativePdfObjectTarget,
+  type NativePdfObjectTarget, type NativePdfEditCommand, type NativePdfPageCommand,
 } from './pdf-native-edit-protocol.js'
 import {
   confirmedNativeReplacement, NativePdfWorkerError, type NativePdfEditCoordinator,
@@ -21,8 +21,8 @@ type Page = NativePdfSnapshot['scene']['pages'][number]
 type Geometry = NonNullable<Page['geometry']>
 type Note = Extract<NativePdfAnnotation, { kind: 'plainNote' }>
 type Coordinator = Pick<NativePdfEditCoordinator,
-  'open' | 'reconcile' | 'snapshot' | 'subscribe' | 'dispose'> & {
-  command(command: NativePdfCommand): Promise<NativePdfSnapshot>
+  'open' | 'project' | 'reconcile' | 'snapshot' | 'subscribe' | 'dispose'> & {
+  command(command: NativePdfEditCommand): Promise<NativePdfSnapshot>
 }
 type Message = readonly [NativePdfMessage, Readonly<Record<string, string | number>>?]
 type Size = readonly [number, number]
@@ -61,19 +61,48 @@ interface PendingNoteAction {
   readonly draft: Draft | null
 }
 
+type TextIslandFingerprint = Pick<NativePdfTextIsland, 'text' | 'profile' | 'operator' | 'bounds' | 'maxAdvance'>
+
 interface TextDraft {
   readonly pageId: number
   readonly selected: boolean
   readonly refusal: NativePdfMessage | null
   readonly island: readonly number[]
   readonly replacement: string
+  readonly suspended?: { readonly stableId: number; readonly fingerprint: TextIslandFingerprint }
 }
 
-type PendingAction = PendingNoteAction | {
+interface PendingPageAction {
+  readonly pageCommand: NativePdfPageCommand
+  readonly before: NativePdfSnapshot
+  readonly invoker: HTMLElement | null
+}
+
+type PendingContentAction = PendingNoteAction | {
   readonly command: NativePdfTextCommand | NativePdfObjectCommand
   readonly before: NativePdfSnapshot
   readonly pageId: number
   readonly objectDraft: ObjectDraft | null
+}
+
+type PendingAction = PendingContentAction | PendingPageAction
+type PageIntent = NativePdfPageCommand extends infer Command
+  ? Command extends NativePdfPageCommand ? Omit<Command, 'target'> : never
+  : never
+
+function acceptedPageIndex(snapshot: NativePdfSnapshot | undefined) {
+  const state = snapshot?.pageState
+  return state && state.selected !== null ? state.order.indexOf(state.selected) : 0
+}
+
+function retainedPageIndexes(before: NativePdfSnapshot, after: NativePdfSnapshot) {
+  const positions = new Map(after.pageState?.order.map((stableId, index) => [stableId, index]))
+  const retained = new Map<number, number>()
+  before.pageState?.order.forEach((stableId, index) => {
+    const next = positions.get(stableId)
+    if (next !== undefined) retained.set(index, next)
+  })
+  return retained
 }
 
 interface ObjectDraft {
@@ -151,10 +180,11 @@ function pageObjects(snapshot: NativePdfSnapshot, pageId: number) {
 }
 
 export function rebindNativeObject(
-  before: NativePdfSnapshot, after: NativePdfSnapshot, pageId: number, selected: ObjectView, command: NativePdfCommand,
+  before: NativePdfSnapshot, after: NativePdfSnapshot, pageId: number, selected: ObjectView,
+  command: NativePdfEditCommand, destination = pageId,
 ): ObjectView | undefined {
   const previous = pageObjects(before, pageId)
-  const next = pageObjects(after, pageId)
+  const next = pageObjects(after, destination)
   let index = previous.findIndex((entry) => sameNativeBytes(entry.id, selected.id))
   if (index < 0) return undefined
   let expectedCount = previous.length
@@ -170,7 +200,7 @@ export function rebindNativeObject(
   }
   const candidate = next[index]
   if (next.length !== expectedCount || !candidate || candidate.kind !== selected.kind) return undefined
-  const changesSelection = 'target' in command && command.target.page === pageId
+  const changesSelection = 'target' in command && 'id' in command.target && command.target.page === pageId
     && sameNativeBytes(command.target.id, selected.id)
   return changesSelection || (candidate.profile === selected.profile && sameNativeBytes(candidate.bounds, selected.bounds))
     ? candidate : undefined
@@ -182,14 +212,19 @@ function matchesObjectDraftTarget(target: NativePdfObjectTarget | null, object: 
 }
 
 export function rebindRecoveredObjectDraft(
-  saved: RecoveredObjectDraft, before: NativePdfSnapshot, after: NativePdfSnapshot, command: NativePdfCommand,
+  saved: RecoveredObjectDraft, before: NativePdfSnapshot, after: NativePdfSnapshot,
+  command: NativePdfEditCommand, destination = saved.pageId,
 ): RecoveredObjectDraft | null {
   const { pageId, target } = saved
-  if (!target) return after.scene.objectPages?.some((page) => page.page === pageId && page.canAdd) ? saved : null
-  if ('target' in command && command.target.page === pageId && sameNativeBytes(command.target.id, target.id)) return null
+  if (!target) {
+    if (!after.scene.objectPages?.some((page) => page.page === destination && page.canAdd)) return null
+    return destination === pageId ? saved : { ...saved, pageId: destination }
+  }
+  if ('target' in command && 'id' in command.target
+    && command.target.page === pageId && sameNativeBytes(command.target.id, target.id)) return null
   const previous = pageObjects(before, pageId).find((object) => matchesObjectDraftTarget(target, object))
-  const rebound = previous && rebindNativeObject(before, after, pageId, previous, command)
-  return rebound ? { ...saved, target: { ...target, id: rebound.id } } : null
+  const rebound = previous && rebindNativeObject(before, after, pageId, previous, command, destination)
+  return rebound ? { ...saved, pageId: destination, target: { ...target, page: destination, id: rebound.id } } : null
 }
 
 function imageHeader(bytes: Uint8Array): Size | null {
@@ -244,20 +279,39 @@ function verifiedIslands(snapshot: NativePdfSnapshot | undefined, pageId: number
   return page?.refusal === null ? page.islands : []
 }
 
-function sameTextIsland(left: NativePdfTextIsland, right: NativePdfTextIsland) {
+function sameTextIsland(left: TextIslandFingerprint, right: TextIslandFingerprint) {
   return left.text === right.text && left.profile === right.profile && left.operator === right.operator
     && left.maxAdvance === right.maxAdvance && left.bounds.every((value, index) => value === right.bounds[index])
 }
 
 export function rebindNativeTextDrafts(
   drafts: readonly TextDraft[], before: NativePdfSnapshot, after: NativePdfSnapshot,
+  retained?: ReadonlyMap<number, number>,
 ): TextDraft[] {
   return drafts.flatMap((draft) => {
-    const previous = verifiedIslands(before, draft.pageId)
-    const original = previous.find(({ id }) => sameNativeBytes(id, draft.island))
-    if (!original || previous.filter((island) => sameTextIsland(original, island)).length !== 1) return []
-    const matches = verifiedIslands(after, draft.pageId).filter((island) => sameTextIsland(original, island))
-    return matches.length === 1 ? [{ ...draft, island: matches[0]!.id }] : []
+    const pageId = retained ? retained.get(draft.pageId) : draft.pageId
+    if (pageId === undefined) return []
+    const { suspended, ...active } = draft
+    const stableId = before.pageState?.order[draft.pageId]
+    const samePage = stableId !== undefined && after.pageState?.order[pageId] === stableId
+    if (stableId !== undefined && !samePage) return []
+    let fingerprint: TextIslandFingerprint
+    if (suspended) {
+      if (!samePage || stableId !== suspended.stableId) return []
+      fingerprint = suspended.fingerprint
+    } else {
+      const previous = verifiedIslands(before, draft.pageId)
+      const original = previous.find(({ id }) => sameNativeBytes(id, draft.island))
+      if (!original || previous.filter((island) => sameTextIsland(original, island)).length !== 1) return []
+      const { text, profile, operator, bounds, maxAdvance } = original
+      fingerprint = { text, profile, operator, bounds, maxAdvance }
+    }
+    const textPage = after.scene.textPages?.find((entry) => entry.page === pageId)
+    if (samePage && textPage?.refusal === 'FLOW_PDF_NATIVE_TEXT_OWNERSHIP') {
+      return [{ ...active, pageId, suspended: { stableId, fingerprint } }]
+    }
+    const matches = verifiedIslands(after, pageId).filter((island) => sameTextIsland(fingerprint, island))
+    return matches.length === 1 ? [{ ...active, pageId, island: matches[0]!.id }] : []
   })
 }
 
@@ -380,6 +434,12 @@ export class NativeNoteDraftRecovery {
     if (drafts?.has(draft.note)) drafts.set(draft.note, draft)
   }
 
+  remember(pageId: number, draft: Draft) {
+    const entries = this.pages.get(pageId)
+    entries?.delete(draft.note)
+    this.pages.set(pageId, new Map([[draft.note, draft], ...(entries ?? [])]))
+  }
+
   discard(pageId: number, note: Draft['note']) {
     const drafts = this.pages.get(pageId)
     drafts?.delete(note)
@@ -426,6 +486,29 @@ export class NativeNoteDraftRecovery {
     }
   }
 
+  reindex(before: NativePdfSnapshot, after: NativePdfSnapshot, retained: ReadonlyMap<number, number>) {
+    const drafts = [...this.pages]
+    this.pages.clear()
+    for (const [index, entries] of drafts) {
+      const next = retained.get(index)
+      if (next === undefined) continue
+      const original = before.scene.pages[index]
+      const current = after.scene.pages[next]
+      if (!original?.geometry || !current?.geometry
+        || !sameNativeBytes(original.geometry.bounds, current.geometry.bounds)) continue
+      const oldNotes = notesOf(original)
+      const currentNotes = notesOf(current)
+      for (const [noteId, draft] of entries) {
+        const priorNote = oldNotes.find((note) => note.id === noteId)
+        const nextNote = currentNotes.find((note) => note.id === noteId)
+        if (noteId === null ? current.canAddNote
+          : priorNote && nextNote && priorNote.contents === nextNote.contents && sameNativeBytes(priorNote.rect, nextNote.rect)) {
+          this.save(next, draft)
+        }
+      }
+    }
+  }
+
   private save(pageId: number, draft: Draft) {
     const drafts = this.pages.get(pageId) ?? new Map<Draft['note'], Draft>()
     drafts.set(draft.note, draft)
@@ -456,6 +539,7 @@ const refusalReasons = new Map<string, NativePdfMessage>([
   ['FLOW_PDF_NATIVE_REVISION_MISMATCH', 'error.stale'],
   ['FLOW_PDF_NATIVE_TARGET_UNAVAILABLE', 'error.stale'],
   ['FLOW_PDF_NATIVE_REQUEST_CONFLICT', 'error.stale'],
+  ['FLOW_PDF_NATIVE_FINAL_PAGE', 'page.final'],
   ['FLOW_PDF_NATIVE_NOTE_INVALID', 'error.retry'],
   ['FLOW_PDF_NATIVE_GRAPH_MALFORMED', 'reason.structure'],
   ['FLOW_PDF_NATIVE_UNSUPPORTED', 'reason.structure'],
@@ -478,9 +562,10 @@ const refusalReasons = new Map<string, NativePdfMessage>([
   ['FLOW_PDF_SOURCE_STORE_ABORTED', 'error.retry'],
 ])
 
-function refusal(cause: unknown): readonly [string | undefined, NativePdfMessage] {
+function refusal(cause: unknown, pageOperation = false): readonly [string | undefined, NativePdfMessage] {
   if (cause instanceof NativePdfWorkerError || cause instanceof PdfSourceStoreError) {
-    const message = refusalReasons.get(cause.code)
+    const message = pageOperation && cause.code === 'FLOW_PDF_NATIVE_UNSUPPORTED' ? 'page.unsupported'
+      : refusalReasons.get(cause.code)
     if (message !== undefined) return [cause.code, message]
   }
   return [undefined, 'error.retry']
@@ -488,7 +573,7 @@ function refusal(cause: unknown): readonly [string | undefined, NativePdfMessage
 
 const unsubscribeIdle = () => undefined
 const idle = () => null
-const familyKeys = ['pages', 'fields', 'redaction'] as const
+const familyKeys = ['fields', 'redaction'] as const
 
 export function PdfNativeEditPanel({
   createCoordinator, sourceStore, locale = 'uk', initialDocument, pageText,
@@ -503,11 +588,15 @@ export function PdfNativeEditPanel({
   const candidateRef = useRef<Coordinator | null>(null)
   const mounted = useRef(false)
   const locked = useRef(false)
+  const navigationRequest = useRef<AbortController | null>(null)
+  const [navigation, setNavigation] = useState<{ readonly page: number; readonly position: number; readonly failed: boolean } | null>(null)
   const [busy, setBusy] = useState<'opening' | 'mutating' | 'reconciling' | null>(null)
   const [status, setStatus] = useState<Message | null>(null)
   const [error, setError] = useState<Message | null>(null)
   const [operationError, setOperationError] = useState<{ code: string | undefined; reason: NativePdfMessage; file: boolean } | null>(null)
-  const [pageId, setPageId] = useState(0)
+  const [pageId, setPageId] = useState(() => acceptedPageIndex(initialDocument?.snapshot))
+  const [blankSide, setBlankSide] = useState<'before' | 'after'>('after')
+  const [movePosition, setMovePosition] = useState<number | null>(null)
   const [zoom, setZoom] = useState(0)
   const [draft, setDraft] = useState<Draft | null>(null)
   const [textDrafts, setTextDrafts] = useState<readonly TextDraft[]>([])
@@ -517,15 +606,15 @@ export function PdfNativeEditPanel({
   const [color, setColor] = useState('#334155')
   const [stroke, setStroke] = useState('1')
   const [asset, setAsset] = useState<ObjectAsset | null>(null)
-  const assetGeneration = useRef(0)
   const [composing, setComposing] = useState(false)
   const composition = useRef(false)
   const [confirm, setConfirm] = useState<({ readonly snapshot: NativePdfSnapshot } &
-    ({ readonly note: number } | { readonly target: NativePdfObjectTarget; readonly label: string })) | null>(null)
+    ({ readonly note: number } | { readonly pageCommand: Extract<NativePdfPageCommand, { kind: 'deletePage' }> } | { readonly target: NativePdfObjectTarget; readonly label: string })) | null>(null)
   const uncertain = useRef<PendingAction | null>(null)
   const recoveredObject = useRef<RecoveredObjectDraft | null>(null)
+  const pageObjectDrafts = useRef(new Map<number, RecoveredObjectDraft>())
   const recoveredDrafts = useRef(new NativeNoteDraftRecovery())
-  const focusAfterRender = useRef<string | HTMLElement | null>(null)
+  const focusAfterRender = useRef<string | HTMLElement | { pageAction: HTMLElement | null } | null>(null)
   const dialog = useRef<HTMLDialogElement>(null)
   const cancelConfirmation = useRef<HTMLButtonElement>(null)
   const removeTrigger = useRef<HTMLButtonElement | null>(null)
@@ -534,6 +623,7 @@ export function PdfNativeEditPanel({
     mounted.current = true
     return () => {
       mounted.current = false
+      navigationRequest.current?.abort()
       candidateRef.current?.dispose()
       coordinatorRef.current?.dispose()
       candidateRef.current = null
@@ -554,6 +644,14 @@ export function PdfNativeEditPanel({
   const notes = notesOf(page)
   const selected = notes.find((note) => note.id === draft?.note)
   const canEdit = busy === null && service?.phase === 'ready' && snapshot === service.accepted
+  const pageState = snapshot?.pageState
+  const stableId = pageState?.order[pageIndex]
+  const pageTarget = stableId === undefined ? null : { page: pageId, stableId }
+  const canManagePages = canEdit && !composing && pageTarget !== null
+  const targetPosition = movePosition ?? pageIndex
+  const navigationBlocked = busy !== null || navigation?.failed === false
+  const pageSelectorId = `${id}-page-selector`
+  const reconcileId = `${id}-reconcile`
   const objectPage = snapshot?.scene.objectPages?.find((entry) => entry.page === pageId)
   const selectedObject = objectPage?.objects.find((entry) => objectId && sameNativeBytes(entry.id, objectId))
   const objectTarget = selectedObject && { page: pageId, id: selectedObject.id, profile: selectedObject.profile }
@@ -571,7 +669,7 @@ export function PdfNativeEditPanel({
   const objectForm = !!geometry && (objectPage?.canAdd === true || !!selectedObject)
   const textPage = snapshot?.scene.textPages?.find((entry) => entry.page === page?.id)
   const islands = verifiedIslands(snapshot, pageId)
-  const textDraft = textDrafts.find((entry) => entry.pageId === pageId && entry.selected)
+  const textDraft = textDrafts.find((entry) => entry.pageId === pageId && entry.selected && !entry.suspended)
   const textRefusal = textDraft?.refusal
   const selectedIsland = islands.find((island) => textDraft && sameNativeBytes(textDraft.island, island.id))
   const replacementError = textDraft ? nativeReplacementError(textDraft.replacement, composing) : null
@@ -601,14 +699,21 @@ export function PdfNativeEditPanel({
     }
     if (confirm === null && element?.open) {
       element.close()
-      removeTrigger.current?.focus()
+      if (!removeTrigger.current?.matches(':disabled')) removeTrigger.current?.focus()
+      else if (!locked.current) document.getElementById(pageSelectorId)?.focus()
     }
-  }, [confirm])
+  }, [confirm, pageSelectorId])
 
   useLayoutEffect(() => {
     const target = focusAfterRender.current
     if (target === null) return
     focusAfterRender.current = null
+    if (typeof target === 'object' && 'pageAction' in target) {
+      const action = target.pageAction
+      if (action?.isConnected && !action.matches(':disabled')) action.focus()
+      else document.getElementById(pageSelectorId)?.focus()
+      return
+    }
     const element = typeof target === 'string' ? document.getElementById(target) : target
     if (element?.isConnected && !element.matches(':disabled')) element.focus()
     else if (typeof target === 'string' && target.startsWith(`${id}-object-`)) {
@@ -627,11 +732,17 @@ export function PdfNativeEditPanel({
     setOperationError(null)
   }
 
-  function setFailure(cause: unknown, file: boolean) {
+  function setFailure(cause: unknown, file: boolean, pageOperation = false) {
     // Keep only bounded, known codes across renders, never an arbitrary Error.
-    const [code, reason] = refusal(cause)
+    const [code, reason] = refusal(cause, pageOperation)
     setOperationError({ code, reason, file })
     setStatus(null)
+  }
+
+  function clearNavigation() {
+    navigationRequest.current?.abort()
+    navigationRequest.current = null
+    setNavigation(null)
   }
 
   async function open(filename: string, read: () => Promise<Uint8Array>, originalHash?: string) {
@@ -639,6 +750,7 @@ export function PdfNativeEditPanel({
     locked.current = true
     clearFeedback()
     setStatus(null)
+    clearNavigation()
     setBusy('opening')
     let candidate: Coordinator | null = null
     try {
@@ -665,9 +777,12 @@ export function PdfNativeEditPanel({
       previous?.dispose()
       uncertain.current = null
       recoveredObject.current = null
+      pageObjectDrafts.current.clear()
       recoveredDrafts.current = new NativeNoteDraftRecovery()
       setAccepted({ filename, snapshot: result })
-      setPageId(result.scene.pages[0]?.id ?? 0)
+      setPageId(acceptedPageIndex(result))
+      setMovePosition(null)
+      setBlankSide('after')
       setZoom(0)
       setDraft(null)
       setTextDrafts([])
@@ -684,40 +799,89 @@ export function PdfNativeEditPanel({
     }
   }
 
-  function choosePage(destination: Page | undefined) {
-    if (locked.current || destination === undefined || destination.id === pageId) return
+  async function choosePage(destination: Page | undefined, invoker: HTMLElement) {
+    if (locked.current || navigationRequest.current || navigationBlocked || destination === undefined || destination.id === pageId) return
+    rememberPageDrafts()
+    const position = pages.indexOf(destination) + 1
+    if (coordinator && service?.phase === 'ready' && snapshot === service.accepted) {
+      const request = new AbortController()
+      navigationRequest.current = request
+      setNavigation({ page: destination.id, position, failed: false })
+      let projected: Page | undefined
+      try {
+        const scene = await coordinator.project(request.signal)
+        projected = scene?.pages.find((item) => item.id === destination.id)
+      } catch {
+        projected = undefined
+      }
+      if (!mounted.current || request.signal.aborted || navigationRequest.current !== request) return
+      navigationRequest.current = null
+      if (!projected) {
+        setNavigation({ page: destination.id, position, failed: true })
+        if (document.activeElement === document.body) focusAfterRender.current = `${id}-page-retry`
+        return
+      }
+      if (document.activeElement === document.body || document.activeElement === invoker) {
+        focusAfterRender.current = pageSelectorId
+      }
+    }
+    setNavigation(null)
     const recovered = recoveredDrafts.current.get(destination.id)
     setPageId(destination.id)
+    setMovePosition(null)
     const restoredObject = snapshot ? restoreObject(destination.id, snapshot) : false
     if (!restoredObject) resetObject()
     setDraft(recovered)
     setComposition(false)
-    setStatus([restoredObject ? 'status.unseen' : recovered ? 'status.draftRestored' : 'navigation.position', {
-      page: pages.indexOf(destination) + 1,
+    setStatus([restoredObject === 'unseen' ? 'status.objectDraftRestored'
+      : restoredObject || recovered ? 'status.draftRestored' : 'navigation.position', {
+      page: position,
       total: pages.length,
     }])
   }
 
-  function restoreObject(destination: number, current: NativePdfSnapshot, selection?: ObjectView | null): boolean {
-    const saved = recoveredObject.current
-    if (!saved || saved.pageId !== destination) return false
-    if (selection !== undefined && !matchesObjectDraftTarget(saved.target, selection ?? undefined)) return false
-    recoveredObject.current = null
+  function rememberPageDrafts(keepNoteSelection = false) {
+    if (draft && geometry) {
+      const original = selected ? draftFrom(selected, geometry) : { contents: '', x: '0', y: '0' }
+      if (keepNoteSelection || draft.contents !== original.contents || draft.x !== original.x || draft.y !== original.y) {
+        recoveredDrafts.current.remember(pageId, draft)
+      }
+    }
+    const profile = selectedObject?.kind === 'graphic' ? selectedObject.profile : 'image'
+    const initialCoordinates = selectedObject && geometry ? objectCoordinates(selectedObject.bounds, geometry.bounds) : ['', '', '', '']
+    const edited = objectForm && (asset || objectProfile !== profile || color !== '#334155' || stroke !== '1'
+      || coordinates.some((value, index) => value !== initialCoordinates[index]))
+    if (edited) pageObjectDrafts.current.set(pageId, {
+      pageId, target: objectTarget ?? null, draft: { profile: objectProfile, coordinates, color, stroke, asset },
+    })
+    else pageObjectDrafts.current.delete(pageId)
+  }
+
+  function restoreObject(destination: number, current: NativePdfSnapshot, selection?: ObjectView | null, preferDraft = false) {
+    const pageDraft = pageObjectDrafts.current.get(destination)
+    const recovered = recoveredObject.current
+    const candidates = preferDraft ? [pageDraft, recovered] : [recovered, pageDraft]
+    const saved = candidates.find((entry) => entry?.pageId === destination
+      && (selection === undefined || matchesObjectDraftTarget(entry.target, selection ?? undefined)))
+    if (!saved) return false
     const page = current.scene.objectPages?.find((entry) => entry.page === destination)
     const match = saved.target && page?.objects.find((entry) => matchesObjectDraftTarget(saved.target, entry))
+    if (pageDraft === saved) pageObjectDrafts.current.delete(destination)
+    if (saved === recovered) recoveredObject.current = null
     if (saved.target ? !match : !page?.canAdd) return false
-    assetGeneration.current++
+    if (saved === recovered && pageDraft && matchesObjectDraftTarget(pageDraft.target, match ?? undefined)) {
+      pageObjectDrafts.current.delete(destination)
+    }
     setObjectId(match?.id ?? null)
     setObjectProfile(saved.draft.profile)
     setCoordinates(saved.draft.coordinates)
     setColor(saved.draft.color)
     setStroke(saved.draft.stroke)
     setAsset(saved.draft.asset)
-    return true
+    return saved === recovered ? 'unseen' : 'draft'
   }
 
   function resetObject(target?: ObjectView) {
-    assetGeneration.current++
     setAsset(null)
     setObjectId(target?.id ?? null)
     setObjectProfile(target?.profile === 'line' || target?.profile === 'polygon' || target?.profile === 'rectangle'
@@ -728,11 +892,15 @@ export function PdfNativeEditPanel({
   }
 
   async function chooseImage(file: File) {
-    const generation = ++assetGeneration.current
+    const pending = { name: file.name, status: 'loading' } as const
     clearFeedback()
-    setAsset({ name: file.name, status: 'loading' })
+    setAsset(pending)
     const result = await readObjectAsset(file)
-    if (mounted.current && generation === assetGeneration.current) setAsset(result)
+    if (!mounted.current) return
+    setAsset((current) => current === pending ? result : current)
+    for (const [index, saved] of pageObjectDrafts.current) {
+      if (saved.draft.asset === pending) pageObjectDrafts.current.set(index, { ...saved, draft: { ...saved.draft, asset: result } })
+    }
   }
 
   function submitObject(operation: 'add' | 'replace' | 'move', invoker: HTMLElement) {
@@ -756,14 +924,14 @@ export function PdfNativeEditPanel({
   }
 
   function chooseNote(note: Note) {
-    if (geometry === null || locked.current) return
+    if (geometry === null || locked.current || navigationRequest.current) return
     setComposition(false)
     setDraft(recoveredDrafts.current.get(pageId, note.id) ?? draftFrom(note, geometry))
     focusAfterRender.current = `${id}-contents`
   }
 
   function startNote() {
-    if (!canAdd || locked.current) return
+    if (!canAdd || locked.current || navigationRequest.current) return
     setComposition(false)
     setDraft(recoveredDrafts.current.get(pageId, null) ?? { note: null, contents: '', x: '0', y: '0' })
     focusAfterRender.current = `${id}-contents`
@@ -790,7 +958,7 @@ export function PdfNativeEditPanel({
   }
 
   function updateDraft(next: Draft) {
-    if (locked.current) return
+    if (locked.current || navigationRequest.current) return
     recoveredDrafts.current.update(pageId, next)
     setDraft(next)
   }
@@ -803,10 +971,15 @@ export function PdfNativeEditPanel({
     ])
   }
 
-  function publish(pending: PendingAction, result: NativePdfSnapshot): string | null {
+  function publish(pending: PendingContentAction, result: NativePdfSnapshot): string | null {
     const { command, before } = pending
     if (recoveredObject.current) {
       recoveredObject.current = rebindRecoveredObjectDraft(recoveredObject.current, before, result, command)
+    }
+    for (const [index, saved] of pageObjectDrafts.current) {
+      const rebound = rebindRecoveredObjectDraft(saved, before, result, command)
+      if (rebound) pageObjectDrafts.current.set(index, rebound)
+      else pageObjectDrafts.current.delete(index)
     }
     setAccepted((current) => current && { ...current, snapshot: result })
     const { kind } = command
@@ -848,9 +1021,57 @@ export function PdfNativeEditPanel({
     return kind === 'add' || kind === 'remove' ? `${id}-add` : null
   }
 
-  async function act(command: NativePdfCommand, invoker: HTMLElement | null) {
+  function publishPage({ before, pageCommand }: PendingPageAction, result: NativePdfSnapshot, verified = true) {
+    const nextPage = acceptedPageIndex(result)
+    const retained = verified ? retainedPageIndexes(before, result) : new Map<number, number>()
+    recoveredDrafts.current.reindex(before, result, retained)
+    setTextDrafts((current) => rebindNativeTextDrafts(current, before, result, retained))
+    const savedObjects = [...pageObjectDrafts.current.values()]
+    pageObjectDrafts.current.clear()
+    for (const saved of savedObjects) {
+      const destination = retained.get(saved.pageId)
+      if (destination === undefined) continue
+      const rebound = rebindRecoveredObjectDraft(saved, before, result, pageCommand, destination)
+      if (rebound) pageObjectDrafts.current.set(destination, rebound)
+    }
+    const recovered = recoveredObject.current
+    const destination = recovered && retained.get(recovered.pageId)
+    recoveredObject.current = recovered && destination != null
+      ? rebindRecoveredObjectDraft(recovered, before, result, pageCommand, destination) : null
+    setAccepted((current) => current && { ...current, snapshot: result })
+    setPageId(nextPage)
+    setMovePosition(null)
+    setDraft(recoveredDrafts.current.get(nextPage))
+    if (!restoreObject(nextPage, result, undefined, true)) resetObject()
+    setStatus(['page.accepted', { page: nextPage + 1, total: result.scene.pages.length, revision: result.binding.revision }])
+  }
+
+  function pageActionOwnsFocus(invoker: HTMLElement | null) {
+    const active = document.activeElement
+    return active === document.body || active === invoker || dialog.current?.contains(active)
+  }
+
+  function restorePageActionFocus(pending: PendingPageAction, applicable = true) {
+    focusAfterRender.current = {
+      pageAction: applicable && pending.pageCommand.kind !== 'deletePage' ? pending.invoker : null,
+    }
+  }
+
+  function managePage(intent: PageIntent, invoker: HTMLElement) {
+    if (pageTarget) void act({ ...intent, target: pageTarget }, invoker)
+  }
+
+  async function act(command: NativePdfEditCommand, invoker: HTMLElement | null) {
     if (locked.current || composition.current || !coordinator || !canEdit || !snapshot) return
-    if (command.kind === 'replaceText') {
+    const pageOperation = isNativePageCommand(command)
+    if (!pageOperation && navigationRequest.current) return
+    if (pageOperation) {
+      if (!canManagePages || command.target.page !== pageTarget?.page || command.target.stableId !== pageTarget.stableId
+        || (command.kind === 'deletePage' && !pageState?.canDelete)
+        || (command.kind === 'reorderPage' && (command.position === pageIndex
+          || command.position < 0 || command.position > (pageState?.maxPosition ?? -1)))
+        || (geometry === null && command.kind !== 'reorderPage' && command.kind !== 'deletePage')) return
+    } else if (command.kind === 'replaceText') {
       if (!selectedIsland || !sameNativeBytes(selectedIsland.id, command.island)
         || nativeReplacementError(command.text, false) !== null) return
     } else if (!isNativeNoteCommand(command)) {
@@ -865,24 +1086,37 @@ export function PdfNativeEditPanel({
       return
     }
     locked.current = true
-    const pending: PendingAction = isNativeNoteCommand(command)
+    if (pageOperation) rememberPageDrafts(command.kind === 'rotatePage' || command.kind === 'reorderPage')
+    const pending: PendingAction = pageOperation
+      ? { pageCommand: command, before: snapshot, invoker }
+      : isNativeNoteCommand(command)
       ? { command, before: snapshot, pageId, draft }
       : { command, before: snapshot, pageId, objectDraft: command.kind === 'replaceText' || command.kind === 'removeObject'
         ? null : { profile: objectProfile, coordinates, color, stroke, asset } }
     clearFeedback()
+    clearNavigation()
     setBusy('mutating')
     try {
       const result = await coordinator.command(command)
       if (!mounted.current) return
-      const fallback = publish(pending, result)
-      focusAfterRender.current = fallback ?? (document.activeElement === document.body ? invoker : null)
+      if ('pageCommand' in pending) {
+        publishPage(pending, result)
+        if (pageActionOwnsFocus(invoker)) restorePageActionFocus(pending)
+      } else {
+        const fallback = publish(pending, result)
+        focusAfterRender.current = fallback ?? (document.activeElement === document.body ? invoker : null)
+      }
     } catch (cause) {
       if (!mounted.current) return
-      if (coordinator.snapshot().phase === 'reconciliationRequired') {
-        uncertain.current = pending
-      }
-      if (document.activeElement === document.body) focusAfterRender.current = invoker
-      setFailure(cause, false)
+      const needsReadback = coordinator.snapshot().phase === 'reconciliationRequired'
+      if (needsReadback) uncertain.current = pending
+      if ('pageCommand' in pending) {
+        if (pageActionOwnsFocus(invoker)) {
+          if (needsReadback) focusAfterRender.current = reconcileId
+          else restorePageActionFocus(pending)
+        }
+      } else if (document.activeElement === document.body) focusAfterRender.current = invoker
+      setFailure(cause, false, pageOperation)
       if (command.kind === 'replaceText' && coordinator.snapshot().phase === 'ready') {
         updateTextDraft({ pageId, island: command.island, replacement: command.text, selected: true, refusal: refusal(cause)[1] })
         focusAfterRender.current = `${id}-replacement`
@@ -896,6 +1130,8 @@ export function PdfNativeEditPanel({
   async function reconcile(invoker: HTMLElement) {
     const pending = uncertain.current
     if (!coordinator || !pending || locked.current) return
+    if ('pageCommand' in pending) rememberPageDrafts(pending.pageCommand.target.page === pageId
+      && (pending.pageCommand.kind === 'rotatePage' || pending.pageCommand.kind === 'reorderPage'))
     locked.current = true
     clearFeedback()
     setBusy('reconciling')
@@ -903,6 +1139,21 @@ export function PdfNativeEditPanel({
       const result = await coordinator.reconcile()
       if (!mounted.current) return
       uncertain.current = null
+      if ('pageCommand' in pending) {
+        if (result.status === 'unseen') {
+          setAccepted((current) => current && { ...current, snapshot: result.snapshot })
+          setStatus(['status.unseenNoDraft'])
+        } else {
+          publishPage(pending, result.snapshot, result.status === 'accepted')
+          if (result.status === 'evicted') {
+            setStatus(null)
+            setError(['error.stale'])
+          }
+        }
+        if (pageActionOwnsFocus(invoker)) restorePageActionFocus(pending,
+          result.status === 'accepted' || (result.status === 'unseen' && pageTarget?.stableId === pending.pageCommand.target.stableId))
+        return
+      }
       let focusTarget = `${id}-${'draft' in pending ? 'notes' : pending.command.kind === 'replaceText' ? 'text-islands' : 'object-selector'}`
       if (result.status === 'unseen') {
         setAccepted((current) => current && { ...current, snapshot: result.snapshot })
@@ -967,6 +1218,7 @@ export function PdfNativeEditPanel({
         setDraft(null)
         setTextDrafts([])
         recoveredObject.current = null
+        pageObjectDrafts.current.clear()
         resetObject()
         setError(['error.stale'])
       }
@@ -1028,11 +1280,14 @@ export function PdfNativeEditPanel({
   const announcement = busy === 'opening' ? t('status.opening')
     : busy === 'mutating' ? t('status.pending')
       : busy === 'reconciling' ? t('status.reconciling')
-        : status === null ? '' : t(...status)
+        : navigation ? t(navigation.failed ? 'navigation.error' : 'navigation.pending', { page: navigation.position })
+          : status === null ? '' : t(...status)
   const bounds = geometry && t('geometry.bounds', {
     x: geometry.bounds[2] - geometry.bounds[0] - geometrySize[0],
     y: geometry.bounds[3] - geometry.bounds[1] - geometrySize[1],
   })
+  const deletingPage = confirm !== null && 'pageCommand' in confirm
+  const removingObject = confirm !== null && 'target' in confirm
   const unavailable = invalidated ? t('error.session') : needsReconcile ? t('error.reconcile')
     : busy !== null ? t('capability.busy') : null
 
@@ -1079,7 +1334,7 @@ export function PdfNativeEditPanel({
             }, origin)
           }}>{t('session.reopen')}</button>}
           {(needsReconcile || service?.phase === 'reconciling' || busy === 'reconciling')
-            && <button type="button" aria-disabled={busy !== null} onClick={(event) => void reconcile(event.currentTarget)}>
+            && <button type="button" id={reconcileId} aria-disabled={busy !== null} onClick={(event) => void reconcile(event.currentTarget)}>
               {t('session.reconcile')}</button>}
         </div>
         <p className="native-help" id={`${id}-file-limit`}>{t('limit.file', { limit: pdfLimit })}</p>
@@ -1099,25 +1354,70 @@ export function PdfNativeEditPanel({
       </div>}
       <div className="native-workspace">
         <div className="native-stack">
-          <div className="native-actions" role="group" aria-label={t('navigation.label')}>
-            <button type="button" disabled={pageIndex <= 0 || busy !== null}
-              onClick={() => choosePage(pages[pageIndex - 1])}>{t('navigation.previous')}</button>
-            <button type="button" disabled={pageIndex < 0 || pageIndex >= pages.length - 1 || busy !== null}
-              onClick={() => choosePage(pages[pageIndex + 1])}>{t('navigation.next')}</button>
+          <div className="native-actions native-page-navigation" role="group" aria-label={t('navigation.label')}>
+            <button type="button" disabled={pageIndex <= 0 || navigationBlocked}
+              onClick={(event) => void choosePage(pages[pageIndex - 1], event.currentTarget)}>{t('navigation.previous')}</button>
+            <button type="button" disabled={pageIndex < 0 || pageIndex >= pages.length - 1 || navigationBlocked}
+              onClick={(event) => void choosePage(pages[pageIndex + 1], event.currentTarget)}>{t('navigation.next')}</button>
             <label>{t('navigation.select')}
-              <select disabled={pages.length === 0 || busy !== null} value={page?.id ?? ''}
-                onChange={(event) => choosePage(pages.find((item) => item.id === Number(event.target.value)))}>
+              <select id={pageSelectorId} disabled={pages.length === 0 || navigationBlocked} value={page?.id ?? ''}
+                onChange={(event) => void choosePage(pages.find((entry) => entry.id === Number(event.target.value)), event.currentTarget)}>
                 {pages.map((item, index) => <option key={item.id} value={item.id}>{index + 1}</option>)}
               </select>
             </label>
             <label>{t('navigation.zoom')}
-              <select disabled={geometry === null} value={zoom} onChange={(event) => setZoom(Number(event.target.value))}>
+              <select disabled={geometry === null || navigationBlocked} value={zoom} onChange={(event) => setZoom(Number(event.target.value))}>
                 <option value={0}>{t('navigation.fit')}</option>
                 {[50, 100, 150, 200].map((percent) => <option key={percent} value={percent}>{percent}%</option>)}
               </select>
             </label>
-            <button type="button" disabled={geometry === null} onClick={() => setZoom(0)}>{t('navigation.fit')}</button>
+            <button type="button" disabled={geometry === null || navigationBlocked} onClick={() => setZoom(0)}>{t('navigation.fit')}</button>
+            {navigation?.failed && <button type="button" id={`${id}-page-retry`} disabled={navigationBlocked}
+              onClick={(event) => void choosePage(pages.find((entry) => entry.id === navigation.page), event.currentTarget)}>{t('navigation.retry')}</button>}
           </div>
+          {pageState && page && <fieldset className="native-stack native-page-tools" disabled={!canManagePages}>
+            <legend>{t('page.title')}</legend>
+            <div className="native-actions">
+              <label>{t('page.placement')}
+                <select value={blankSide} onChange={(event) => setBlankSide(event.target.value === 'before' ? 'before' : 'after')}>
+                  <option value="before">{t('page.before')}</option>
+                  <option value="after">{t('page.after')}</option>
+                </select>
+              </label>
+              <button type="button" disabled={!geometry} aria-describedby={!geometry ? `${id}-page-geometry` : undefined}
+                onClick={(event) => managePage({ kind: 'insertBlankPage', side: blankSide }, event.currentTarget)}>{t('page.insert')}</button>
+            </div>
+            <div className="native-actions">
+              <label>{t('page.position')}
+                <select value={targetPosition} disabled={pageState.maxPosition === 0}
+                  onChange={(event) => setMovePosition(Number(event.target.value))}>
+                  {pages.map((_, index) => <option key={index} value={index}>{index + 1}</option>)}
+                </select>
+              </label>
+              <button type="button" disabled={targetPosition === pageIndex}
+                onClick={(event) => managePage({ kind: 'reorderPage', position: targetPosition }, event.currentTarget)}>{t('page.reorder')}</button>
+              <button type="button" disabled={pageIndex === 0}
+                onClick={(event) => managePage({ kind: 'reorderPage', position: pageIndex - 1 }, event.currentTarget)}>{t('page.earlier')}</button>
+              <button type="button" disabled={pageIndex >= pageState.maxPosition}
+                onClick={(event) => managePage({ kind: 'reorderPage', position: pageIndex + 1 }, event.currentTarget)}>{t('page.later')}</button>
+            </div>
+            <div className="native-actions">
+              <button type="button" disabled={!geometry} aria-describedby={!geometry ? `${id}-page-geometry` : undefined}
+                onClick={(event) => managePage({ kind: 'rotatePage', degrees: -90 }, event.currentTarget)}>{t('page.left')}</button>
+              <button type="button" disabled={!geometry} aria-describedby={!geometry ? `${id}-page-geometry` : undefined}
+                onClick={(event) => managePage({ kind: 'rotatePage', degrees: 90 }, event.currentTarget)}>{t('page.right')}</button>
+              <button type="button" disabled={!geometry} aria-describedby={!geometry ? `${id}-page-geometry` : undefined}
+                onClick={(event) => managePage({ kind: 'duplicatePage' }, event.currentTarget)}>{t('page.duplicate')}</button>
+              <button type="button" className="native-destructive" disabled={!pageState.canDelete}
+                aria-describedby={!pageState.canDelete ? `${id}-final-page` : undefined} onClick={(event) => {
+                  if (!snapshot || !pageTarget || !pageState.canDelete || !canManagePages) return
+                  removeTrigger.current = event.currentTarget
+                  setConfirm({ snapshot, pageCommand: { kind: 'deletePage', target: pageTarget } })
+                }}>{t('page.delete')}</button>
+            </div>
+            {!pageState.canDelete && <p id={`${id}-final-page`} className="native-help">{t('page.final')}</p>}
+            {!geometry && <p id={`${id}-page-geometry`} className="native-help">{t('page.geometry')}</p>}
+          </fieldset>}
           {page && <div className="native-stack">
             <p>{position}</p>
             <div className="native-viewport" role="region" aria-label={t('viewport.label')} tabIndex={0}>
@@ -1138,12 +1438,13 @@ export function PdfNativeEditPanel({
             {objectPageReason && <p id={`${id}-object-page-reason`} className="native-help">{t(objectPageReason)}</p>}
             {(objectPage.canAdd || objectPage.objects.length > 0) && <label>{t('object.title')}
               <select id={`${id}-object-selector`} value={selectedObject ? objectKey(selectedObject) : ''}
-                disabled={busy !== null}
+                disabled={navigationBlocked}
                 onChange={(event) => {
-                  if (locked.current) return
+                  if (locked.current || navigationRequest.current) return
                   const object = objectPage.objects.find((entry) => objectKey(entry) === event.target.value)
-                  if (snapshot && restoreObject(pageId, snapshot, object ?? null)) setStatus(['status.unseen'])
-                  else resetObject(object)
+                  const restored = snapshot && restoreObject(pageId, snapshot, object ?? null)
+                  if (restored === 'unseen') setStatus(['status.unseen'])
+                  if (!restored) resetObject(object)
                   clearFeedback()
                 }}>
                 <option value="" disabled={!objectPage.canAdd}>{t(objectPage.canAdd ? 'object.new' : 'object.unavailable')}</option>
@@ -1152,14 +1453,13 @@ export function PdfNativeEditPanel({
                 </option>)}
               </select>
             </label>}
-            {objectForm && <fieldset className="native-stack" disabled={!canEdit}>
+            {objectForm && <fieldset className="native-stack" disabled={!canEdit || navigationBlocked}>
               <legend>{t('object.geometry')}</legend>
               <label>{t('object.profile.label')}
                 <select value={objectProfile} disabled={selectedObject?.kind === 'image'} onChange={(event) => {
                   const next = objectProfiles.find((profile) => profile === event.target.value)
                   if (next) {
                     setObjectProfile(next)
-                    assetGeneration.current++
                     setAsset(null)
                     clearFeedback()
                   }
@@ -1239,6 +1539,8 @@ export function PdfNativeEditPanel({
                   if (saved?.pageId === pageId && matchesObjectDraftTarget(saved.target, selectedObject)) {
                     recoveredObject.current = null
                   }
+                  const pageDraft = pageObjectDrafts.current.get(pageId)
+                  if (pageDraft && matchesObjectDraftTarget(pageDraft.target, selectedObject)) pageObjectDrafts.current.delete(pageId)
                   resetObject(selectedObject)
                   clearFeedback()
                 }}>{t('object.cancel')}</button>
@@ -1257,9 +1559,9 @@ export function PdfNativeEditPanel({
                 return <li key={key}>
                   <button type="button" id={`${id}-island-button-${key}`} aria-labelledby={`${id}-island-${key}`}
                     aria-describedby={`${id}-island-preview-${key}`}
-                    aria-pressed={island === selectedIsland} disabled={busy !== null}
+                    aria-pressed={island === selectedIsland} disabled={navigationBlocked}
                     onClick={() => {
-                      if (locked.current) return
+                      if (locked.current || navigationRequest.current) return
                       setComposition(false)
                       if (island !== selectedIsland) {
                         const saved = textDrafts.find((entry) => entry.pageId === pageId
@@ -1279,7 +1581,7 @@ export function PdfNativeEditPanel({
                 </li>
               })}
             </ul>}
-            {selectedIsland && textDraft && <fieldset className="native-stack" disabled={busy !== null}>
+            {selectedIsland && textDraft && <fieldset className="native-stack" disabled={navigationBlocked}>
               <label htmlFor={`${id}-original-text`}>{t('text.original')}</label>
               <input id={`${id}-original-text`} className="native-text-line" type="text" readOnly
                 dir="auto" lang="" value={selectedIsland.text} aria-describedby={`${id}-island-bounds`} />
@@ -1294,7 +1596,7 @@ export function PdfNativeEditPanel({
                 aria-invalid={(replacementError !== null && !composing && textDraft.replacement !== '') || !!textRefusal}
                 onCompositionStart={() => setComposition(true)} onCompositionEnd={() => setComposition(false)}
                 onChange={(event) => {
-                  if (locked.current) return
+                  if (locked.current || navigationRequest.current) return
                   updateTextDraft({ ...textDraft, replacement: event.target.value, refusal: null })
                 }} />
               <p className="native-help" id={`${id}-text-help`}>{t('text.help')}</p>
@@ -1321,7 +1623,7 @@ export function PdfNativeEditPanel({
             {page.annotations.map((item, index) => item.kind === 'plainNote' ? (
               <li key={item.id}>
                 <button type="button" id={`${id}-note-${item.id}`} data-native-note-id={item.id}
-                  aria-pressed={selected?.id === item.id} disabled={busy !== null || geometry === null}
+                  aria-pressed={selected?.id === item.id} disabled={navigationBlocked || geometry === null}
                   onClick={() => chooseNote(item)}>
                   {t('note.open', { number: item.id })}
                   {selected?.id === item.id && <span>{t('object.selected')}</span>}
@@ -1333,11 +1635,11 @@ export function PdfNativeEditPanel({
             </li>)}
           </ul>}
           {draft?.note !== null && <div>
-            <button type="button" className={selected ? undefined : 'native-primary'} id={`${id}-add`} disabled={!canAdd}
+            <button type="button" className={selected ? undefined : 'native-primary'} id={`${id}-add`} disabled={!canAdd || navigationBlocked}
               aria-describedby={canAdd ? undefined : `${id}-unavailable`} onClick={startNote}>{t('note.add')}</button>
           </div>}
           {!canAdd && <p className="native-help" id={`${id}-unavailable`}>{t('capability.unavailable', { reason: unavailable ?? t('note.unavailable') })}</p>}
-          {draft && <fieldset className="native-stack" disabled={busy !== null}>
+          {draft && <fieldset className="native-stack" disabled={navigationBlocked}>
             <label htmlFor={`${id}-contents`}>{t('note.contents')}</label>
             <textarea id={`${id}-contents`} value={draft.contents} dir="auto" lang="" readOnly={!canEdit}
               aria-describedby={`${id}-note-limit ${id}-note-count ${id}-note-error`}
@@ -1387,16 +1689,26 @@ export function PdfNativeEditPanel({
       <dialog ref={dialog} onCancel={(event) => { event.preventDefault(); setConfirm(null) }}
         aria-labelledby={`${id}-remove-title`} aria-describedby={`${id}-remove-body ${id}-remove-target`}>
         <div className="native-stack">
-          <h3 id={`${id}-remove-title`}>{t(confirm && 'target' in confirm ? 'object.remove' : 'note.remove.heading')}</h3>
-          <p id={`${id}-remove-body`}>{t(confirm && 'target' in confirm ? 'object.remove.body' : 'note.remove.body')}</p>
-          <p id={`${id}-remove-target`}>{confirm && ('target' in confirm ? confirm.label : t('note.confirmTarget', { number: confirm.note, page: pageIndex + 1 }))}</p>
+          <h3 id={`${id}-remove-title`}>{t(deletingPage ? 'page.confirm' : removingObject ? 'object.remove' : 'note.remove.heading')}</h3>
+          <p id={`${id}-remove-body`}>{t(deletingPage ? 'page.deleteBody' : removingObject ? 'object.remove.body' : 'note.remove.body')}</p>
+          <p id={`${id}-remove-target`}>{confirm && ('pageCommand' in confirm
+            ? t('navigation.position', { page: confirm.pageCommand.target.page + 1, total: confirm.snapshot.scene.pages.length })
+            : 'target' in confirm ? confirm.label : t('note.confirmTarget', { number: confirm.note, page: pageIndex + 1 }))}</p>
           <div className="native-actions">
-            <button type="button" ref={cancelConfirmation} onClick={() => setConfirm(null)}>{t('note.remove.cancel')}</button>
+            <button type="button" ref={cancelConfirmation} onClick={() => setConfirm(null)}>{t(deletingPage ? 'page.keep' : 'note.remove.cancel')}</button>
             <button type="button" className="native-destructive" onClick={() => {
               if (confirm === null) return
               setConfirm(null)
               if (confirm.snapshot !== snapshot || !canEdit) {
                 setError(['error.stale'])
+                return
+              }
+              if ('pageCommand' in confirm) {
+                if (pageTarget?.stableId !== confirm.pageCommand.target.stableId || !pageState?.canDelete) {
+                  setError(['error.stale'])
+                  return
+                }
+                void act(confirm.pageCommand, removeTrigger.current)
                 return
               }
               if ('target' in confirm) {
@@ -1413,7 +1725,7 @@ export function PdfNativeEditPanel({
                 return
               }
               void act({ kind: 'remove', note: confirm.note }, removeTrigger.current)
-            }}>{t(confirm && 'target' in confirm ? 'object.remove' : 'note.remove')}</button>
+            }}>{t(deletingPage ? 'page.delete' : removingObject ? 'object.remove' : 'note.remove')}</button>
           </div>
         </div>
       </dialog>

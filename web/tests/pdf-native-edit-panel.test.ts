@@ -64,6 +64,9 @@ describe('text draft readback', () => {
     expect(rebindNativeTextDrafts([draft], withIslands([island]), withIslands([revised, duplicate]))).toEqual([])
     expect(rebindNativeTextDrafts([draft], withIslands([island, duplicate]), withIslands([revised]))).toEqual([])
     expect(rebindNativeTextDrafts([draft], withIslands([island]), withIslands([]))).toEqual([])
+    expect(rebindNativeTextDrafts([draft], withIslands([island]), withIslands([]), new Map([[0, 1]])))
+      .toEqual([{ ...draft, pageId: 1, island: duplicate.id }])
+    expect(rebindNativeTextDrafts([draft], withIslands([island]), withIslands([revised]), new Map())).toEqual([])
   })
 })
 
@@ -209,6 +212,23 @@ describe('native note workspace', () => {
     }, documentWith([added]).snapshot)
     expect(recovery.get(0, null)).toBeNull()
     expect(recovery.get(1, null)).toBe(other)
+  })
+
+  it('carries a note draft to its retained page only when the note readback still matches', () => {
+    const retainedNote = note(2)
+    const before = documentWith([retainedNote]).snapshot
+    const original = before.scene.pages[0]!
+    const moved = { ...original, id: 1, geometry: { ...geometry, rotation: 180 } }
+    const recovered = new NativeNoteDraftRecovery()
+    const draft = { note: 2, contents: 'Unsubmitted', x: '40', y: '50' }
+    recovered.remember(0, draft)
+    const after = { ...before, scene: { ...before.scene, pages: [original, moved] } }
+    recovered.reindex(before, after, new Map([[0, 1]]))
+    expect(recovered.get(0)).toBeNull()
+    expect(recovered.get(1)).toBe(draft)
+    const changed = { ...moved, annotations: [{ ...retainedNote, contents: 'Changed' }] }
+    recovered.reindex(after, { ...after, scene: { ...after.scene, pages: [original, changed] } }, new Map([[1, 1]]))
+    expect(recovered.get(1)).toBeNull()
   })
 
   it('blocks blank, composing, malformed and over-limit UTF-8 drafts', () => {
@@ -413,6 +433,14 @@ describe('native object tools', () => {
     const newObject = { ...saved, target: null }
     expect(rebindRecoveredObjectDraft(newObject, before, after, unrelated)).toBe(newObject)
     expect(rebindRecoveredObjectDraft(newObject, before, withObjects([revised], false), unrelated)).toBeNull()
+
+    const pageMove = { kind: 'reorderPage', target: { page: 0, stableId: 8 }, position: 1 } as const
+    const moved = { ...after, scene: { ...after.scene, objectPages: [
+      { page: 0, canAdd: true, refusal: null, objects: [image] },
+      { page: 1, canAdd: true, refusal: null, objects: [revised] },
+    ] } }
+    expect(rebindRecoveredObjectDraft(saved, before, moved, pageMove, 1))
+      .toEqual({ ...saved, pageId: 1, target: { ...saved.target, page: 1, id: revised.id } })
   })
 
   it('renders only admitted profile controls and associates each refusal with the object region', () => {
@@ -441,4 +469,45 @@ describe('native object tools', () => {
       }
     }
   })
+})
+
+describe('native page management', () => {
+  for (const locale of ['en', 'uk'] as const) {
+    it(`shows accepted page bounds and explains final-page deletion in ${locale}`, () => {
+      const initial = documentWith([])
+      const markup = renderToStaticMarkup(createElement(PdfNativeEditPanel, {
+        ...dependencies, locale, initialDocument: {
+          ...initial,
+          snapshot: { ...initial.snapshot, pageState: { order: [42], selected: 42, canDelete: false, maxPosition: 0 } },
+        },
+      }))
+      expect(markup).toMatch(/aria-describedby="([^"]+-final-page)"[^>]*>/)
+      const reasonId = markup.match(/aria-describedby="([^"]+-final-page)"/)?.[1]
+      expect(markup).toContain(`id="${reasonId}"`)
+      expect(markup).toContain(nativePdfText(locale, 'page.final'))
+      expect(markup).toContain(nativePdfText(locale, 'navigation.position', { page: 1, total: 1 }))
+      expect(markup).toContain(nativePdfText(locale, 'page.position'))
+      for (const action of ['navigation.previous', 'navigation.next', 'page.reorder', 'page.earlier', 'page.later', 'page.delete'] as const) {
+        const label = nativePdfText(locale, action)
+        expect(markup.match(/<button[^>]* disabled=""[^>]*>[^<]*<\/button>/gu))
+          .toEqual(expect.arrayContaining([expect.stringContaining(`>${label}</button>`)]))
+      }
+    })
+  }
+})
+
+it('renders the Rust-selected stable page after its position changes', () => {
+  const initial = documentWith([])
+  const first = initial.snapshot.scene.pages[0]!
+  const snapshot = {
+    ...initial.snapshot,
+    pageState: { order: [86, 42], selected: 42, canDelete: true, maxPosition: 1 },
+    scene: { ...initial.snapshot.scene, pages: [first, { ...first, id: 1, annotations: [note(2)] }] },
+  }
+  const markup = renderToStaticMarkup(createElement(PdfNativeEditPanel, {
+    ...dependencies, locale: 'en', initialDocument: { ...initial, snapshot },
+  }))
+  expect(markup).toContain('Page 2 of 2')
+  expect(markup).toContain('data-native-note-id="2"')
+  expect(markup).not.toContain(nativePdfText('en', 'page.final'))
 })
