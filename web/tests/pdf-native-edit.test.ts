@@ -110,6 +110,22 @@ async function opened(lane: ReturnType<typeof fakePort>) {
 describe('native PDF edit coordinator', () => {
   afterEach(() => { vi.useRealTimers() })
 
+  it('returns to idle after a verified reader refusal and allows another open', async () => {
+    const lane = fakePort()
+    const opening = lane.coordinator.open(original())
+    const rejected = expect(opening).rejects.toMatchObject({ code: 'FLOW_PDF_NATIVE_IMPORT_REFUSED' })
+    const dispatch = await lane.take()
+    lane.deliver(dispatch, {
+      ...openReply(dispatch.request),
+      status: 'failed', binding: null, snapshot: null, code: 'FLOW_PDF_NATIVE_IMPORT_REFUSED',
+    })
+    await rejected
+    expect(lane.verify).toHaveBeenCalledTimes(1)
+    expect(lane.coordinator.snapshot()).toMatchObject({ phase: 'idle', accepted: null, reopenOriginal: false })
+    await opened(lane)
+    expect(lane.coordinator.snapshot().phase).toBe('ready')
+  })
+
   it('orders commands, owns input and output copies, and ignores projection cancellation and duplicate replies', async () => {
     const lane = fakePort()
     const input = original()

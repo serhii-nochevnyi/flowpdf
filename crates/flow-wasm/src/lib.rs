@@ -3,8 +3,9 @@
 #![forbid(unsafe_code)]
 
 use flow_core::pdf::{
-    NATIVE_MAX_NOTE_BYTES, NATIVE_REQUEST_HISTORY, NativeBinding, NativeEditLimits,
-    NativeNoteCommand, NativePdfNoteScene, NativePdfSession, NativeRequestLookup, PdfObjectRef,
+    NATIVE_MAX_NOTE_BYTES, NATIVE_REQUEST_HISTORY, NativeBinding, NativeEditError, NativeEditLimits,
+    NativeNoteCommand, NativePdfNoteScene, NativePdfSession, NativeRequestLookup,
+    NativeSessionError, PdfObjectRef,
 };
 use flow_core::{
     ApiResponse, ApplyCommandRequest, AssetStageRequest, AssetStageResponse, AuditedRecoverRequest,
@@ -24,6 +25,7 @@ use flow_core::{
     verify_pdf_document_candidate, verify_pdf_reconstruction_result,
 };
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::{cell::RefCell, collections::VecDeque, io::Write};
 use wasm_bindgen::prelude::*;
 
@@ -1315,6 +1317,7 @@ const NATIVE_PDF_SESSIONS: usize = 2;
 const NATIVE_PDF_RETAINED: usize = 8 * 1024 * 1024;
 const MAX_WIRE_ID: u64 = (1 << 53) - 1;
 const MAX_NATIVE_REVISION: u64 = MAX_WIRE_ID - (1 << 48);
+const NATIVE_IMPORT_REFUSED: &str = "FLOW_PDF_NATIVE_IMPORT_REFUSED";
 const NATIVE_DECODE: &str = "FLOW_PDF_NATIVE_REQUEST_DECODE";
 const NATIVE_BINDING: &str = "FLOW_PDF_NATIVE_BINDING_MISMATCH";
 const NATIVE_REVISION: &str = "FLOW_PDF_NATIVE_REVISION_MISMATCH";
@@ -1677,6 +1680,9 @@ impl NativeRegistry {
                 return Err(NATIVE_BUDGET);
             }
             let bytes = native_decode_pdf(&bytes_hex).map_err(|()| NATIVE_DECODE)?;
+            if encode_hex(&Sha256::digest(&bytes)) != origin_store_hash {
+                return Err(NATIVE_BINDING);
+            }
             let limits = NativeEditLimits {
                 max_source_bytes: NATIVE_PDF_BYTES,
                 max_output_bytes: NATIVE_PDF_BYTES,
@@ -1684,8 +1690,12 @@ impl NativeRegistry {
                     - (NATIVE_REQUEST_HISTORY * size_of::<(u64, [u8; 32])>() + 1024),
                 ..NativeEditLimits::default()
             };
-            let session = NativePdfSession::open_scoped(&bytes, limits, epoch)
-                .map_err(|error| error.code())?;
+            let session = NativePdfSession::open_scoped(&bytes, limits, epoch).map_err(
+                |error| match error {
+                    NativeSessionError::Graph(NativeEditError::Reader(_)) => NATIVE_IMPORT_REFUSED,
+                    error => error.code(),
+                },
+            )?;
             if !native_binding_valid(session.snapshot().binding) {
                 return Err(NATIVE_BUDGET);
             }
@@ -2043,6 +2053,10 @@ pub fn verify_native_pdf_response(response_json: String) -> bool {
         (_, NativeStatus::Failed) => {
             response.snapshot.is_none()
                 && response.code.as_ref().is_some_and(|code| {
+                    if code == NATIVE_IMPORT_REFUSED {
+                        return response.operation == NativeOperation::Open
+                            && response.request_id > 0;
+                    }
                     matches!(
                         code.as_str(),
                         NATIVE_DECODE
