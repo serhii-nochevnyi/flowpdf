@@ -7,6 +7,7 @@ import {
   nativeDownloadName,
   nativeObjectBounds,
   rebindNativeObject,
+  rebindRecoveredObjectDraft,
   nativeMarkerPosition,
   nativeNoteDraftAfter,
   nativeNoteDraftAfterAcceptance,
@@ -385,6 +386,33 @@ describe('native object tools', () => {
       { kind: 'removeObject', target: { page: 0, id: first.id, profile: first.profile } })).toBe(inserted)
     expect(rebindNativeObject(withObjects([first]), withObjects([]), 0, first,
       { kind: 'removeObject', target: { page: 0, id: first.id, profile: first.profile } })).toBeUndefined()
+  })
+
+  it('keeps a recovered image draft across an unrelated revision only for a matching invocation', () => {
+    const image = { id: hash, kind: 'image', profile: 'rasterGray8', bounds: [0, 0, 24000, 24000],
+      operations: ['replace', 'move', 'remove'] } as const
+    const revised = { ...image, id: hash.map(() => 43) }
+    const snapshot = documentWith([]).snapshot
+    const withObjects = (objects: NativePdfObjectPage['objects'], canAdd = true) => ({
+      ...snapshot, scene: { ...snapshot.scene, objectPages: [{ page: 0, canAdd, refusal: null, objects }] },
+    })
+    const before = withObjects([image])
+    const after = withObjects([revised])
+    const draft = { profile: 'image', coordinates: ['1', '2', '30', '40'], color: '#334155', stroke: '1',
+      asset: { status: 'ready', name: 'draft.png', hex: '12' } } as const
+    const saved = { pageId: 0, target: { page: 0, id: image.id, profile: image.profile }, draft }
+    const unrelated = { kind: 'add', page: 1, contents: 'Page two note', rect: [0, 0, 24, 24] } as const
+    const rebound = rebindRecoveredObjectDraft(saved, before, after, unrelated)
+    expect(rebound?.target?.id).toBe(revised.id)
+    expect(rebound?.draft).toBe(draft)
+    expect(rebindRecoveredObjectDraft(saved, before, withObjects([]), unrelated)).toBeNull()
+    expect(rebindRecoveredObjectDraft(saved, before, withObjects([{ ...revised, bounds: [1, 0, 24000, 24000] }]), unrelated)).toBeNull()
+    expect(rebindRecoveredObjectDraft(saved, before, after,
+      { kind: 'replaceImage', target: saved.target, assetHex: '12' })).toBeNull()
+
+    const newObject = { ...saved, target: null }
+    expect(rebindRecoveredObjectDraft(newObject, before, after, unrelated)).toBe(newObject)
+    expect(rebindRecoveredObjectDraft(newObject, before, withObjects([revised], false), unrelated)).toBeNull()
   })
 
   it('renders only admitted profile controls and associates each refusal with the object region', () => {

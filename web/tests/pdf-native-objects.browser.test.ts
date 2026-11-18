@@ -64,11 +64,16 @@ for (const locale of ['uk', 'en'] as const) {
       downloads.push(fetch(this.href).then(async (response) => new Uint8Array(await response.arrayBuffer())))
     })
     let staleId: readonly number[] | undefined
+    let dropReplacement = false
     const postMessage = Worker.prototype.postMessage
     const worker = vi.spyOn(Worker.prototype, 'postMessage').mockImplementation(
       function (this: Worker, ...args: Parameters<Worker['postMessage']>) {
         const envelope = args[0] as Partial<NativePdfWorkerRequest> | undefined
         const request = envelope?.request
+        if (dropReplacement && request?.operation === 'command' && request.command.kind === 'replaceImage') {
+          dropReplacement = false
+          return
+        }
         if (staleId && request?.operation === 'command' && 'target' in request.command) {
           args[0] = { ...envelope, request: { ...request,
             command: { ...request.command, target: { ...request.command.target, id: staleId } },
@@ -137,7 +142,10 @@ for (const locale of ['uk', 'en'] as const) {
         }
       }
 
-      async function accepted(action: NativePdfMessage, expected: ReturnType<typeof signatures>, selectedIndex?: number) {
+      async function accepted(
+        action: NativePdfMessage, expected: ReturnType<typeof signatures>, selectedIndex?: number,
+        expectedFocus?: typeof selector | ReturnType<typeof button>,
+      ) {
         const prior = outputHash()
         const watched = downloads.length
         if (action === 'object.remove') {
@@ -145,6 +153,8 @@ for (const locale of ['uk', 'en'] as const) {
           await activate(dialog.getByRole('button', { name: t('object.remove') }).element())
         } else await activate(button(action).element())
         await expect.poll(outputHash).not.toBe(prior)
+        if (action === 'object.move') await expect.element(button(action)).toHaveFocus()
+        if (expectedFocus) await expect.element(expectedFocus).toHaveFocus()
         expect(downloads).toHaveLength(watched)
         const bytes = await download('download.edited')
         const snapshot = await inspect(bytes)
@@ -160,6 +170,7 @@ for (const locale of ['uk', 'en'] as const) {
         if (selectedIndex !== undefined) {
           expect((selector.element() as HTMLSelectElement).selectedIndex).toBe(selectedIndex + 1)
         }
+        return snapshot
       }
 
       await open(objectPdf('30 1 0 40 100 120'), 'skew.pdf')
@@ -211,13 +222,51 @@ for (const locale of ['uk', 'en'] as const) {
       chooseFile(asset(), new File([grayPng], 'gray.png', { type: 'image/png' }))
       await expect.element(objects.getByText(t('object.file.ready'), { exact: false })).toBeVisible()
       const addedImage = image([10000, 20000, 40000, 60000])
-      await accepted('object.add', [addedImage, baseImage, baseGraphic], 0)
+      await accepted('object.add', [addedImage, baseImage, baseGraphic], 0, selector)
 
       await selector.selectOptions((selector.element() as HTMLSelectElement).options[2]!.value)
       const originalTarget = (selector.element() as HTMLSelectElement).value
+      const draftX = locale === 'uk' ? '101,25' : '101.25'
+      await geometry([draftX, '121', '31', '41'])
       chooseFile(asset(), new File([grayPng], 'replacement.png', { type: 'image/png' }))
       await expect.element(objects.getByText(t('object.file.ready'), { exact: false })).toBeVisible()
-      await accepted('object.replace', [addedImage, image([...baseImage.bounds]), baseGraphic], 1)
+      dropReplacement = true
+      const beforeUnseen = outputHash()
+      await activate(button('object.replace').element())
+      const reconcile = button('session.reconcile')
+      await expect.element(reconcile, { timeout: 35_000 }).toBeEnabled()
+      expect(dropReplacement).toBe(false)
+      const beforeReconcile = commandCount()
+      await activate(button('navigation.next').element())
+      await activate(reconcile.element())
+      await expect.element(panel.getByRole('status')).toHaveTextContent(t('status.unseenPage', { page: 1 }))
+      expect(outputHash()).toBe(beforeUnseen)
+      expect(commandCount()).toBe(beforeReconcile)
+
+      await activate(button('note.add').element())
+      await panel.getByRole('textbox', { name: t('note.contents') }).fill('Page two note')
+      await activate(button('note.add').element())
+      await expect.poll(outputHash).not.toBe(beforeUnseen)
+      await expect.element(panel.getByRole('button', { name: /Page two note/u })).toBeVisible()
+      expect(commandCount()).toBe(beforeReconcile + 1)
+      expect(objects.getByText('replacement.png', { exact: true }).query()).toBeNull()
+
+      await activate(button('navigation.previous').element())
+      await expect.element(panel.getByRole('status')).toHaveTextContent(t('status.unseen'))
+      const recoveredTarget = (selector.element() as HTMLSelectElement).value
+      expect(recoveredTarget).not.toBe(originalTarget)
+      expect((selector.element() as HTMLSelectElement).selectedIndex).toBe(2)
+      await expect.element(objects.getByText('replacement.png', { exact: true })).toBeVisible()
+      await expect.element(objects.getByRole('textbox', { name: t('object.x') })).toHaveValue(draftX)
+      await expect.element(objects.getByRole('textbox', { name: t('object.y') })).toHaveValue('121')
+      await expect.element(objects.getByRole('textbox', { name: t('object.width') })).toHaveValue('31')
+      await expect.element(objects.getByRole('textbox', { name: t('object.height') })).toHaveValue('41')
+      await expect.element(button('object.replace')).toBeEnabled()
+      expect(commandCount()).toBe(beforeReconcile + 1)
+      const replaced = await accepted('object.replace', [addedImage, image([...baseImage.bounds]), baseGraphic], 1, selector)
+      expect(replaced.scene.pages[1]?.annotations).toContainEqual(expect.objectContaining({
+        kind: 'plainNote', contents: 'Page two note',
+      }))
 
       const beforeInvalidAsset = await download('download.edited')
       const beforeInvalidAssetHash = outputHash()
@@ -233,8 +282,8 @@ for (const locale of ['uk', 'en'] as const) {
       await accepted('object.move', [addedImage, image([105125, 125000, 135125, 165000]), baseGraphic], 1)
       const beforeRefusal = await download('download.edited')
       const beforeRefusalHash = outputHash()
-      expect((selector.element() as HTMLSelectElement).value).not.toBe(originalTarget)
-      staleId = Array.from(nativeHexBytes(originalTarget))
+      expect((selector.element() as HTMLSelectElement).value).not.toBe(recoveredTarget)
+      staleId = Array.from(nativeHexBytes(recoveredTarget))
       await geometry(['110', '125', '30', '40'])
       await activate(button('object.move').element())
       await expect.element(panel.getByRole('alert')).toHaveTextContent(t('error.stale'))
@@ -256,7 +305,7 @@ for (const locale of ['uk', 'en'] as const) {
         expect(outputHash()).toBe(beforeCancel)
         expect(commandCount()).toBe(commandsBeforeCancel)
         await activate(trigger)
-        await accepted('object.remove', expected)
+        await accepted('object.remove', expected, undefined, selector)
       }
 
       await remove([addedImage, baseGraphic])
@@ -277,10 +326,10 @@ for (const locale of ['uk', 'en'] as const) {
       await accepted('object.add', [line, addedImage, baseGraphic], 0)
       await profile.selectOptions('rectangle')
       const rectangle = graphic('rectangle', line.bounds)
-      await accepted('object.replace', [rectangle, addedImage, baseGraphic], 0)
+      await accepted('object.replace', [rectangle, addedImage, baseGraphic], 0, button('object.replace'))
       await profile.selectOptions('polygon')
       const polygon = graphic('polygon', rectangle.bounds)
-      await accepted('object.replace', [polygon, addedImage, baseGraphic], 0)
+      await accepted('object.replace', [polygon, addedImage, baseGraphic], 0, button('object.replace'))
       await geometry(['75', '22', '20', '30'])
       await accepted('object.move', [graphic('polygon', [75000, 22000, 95000, 52000]), addedImage, baseGraphic], 0)
       await remove([addedImage, baseGraphic])
