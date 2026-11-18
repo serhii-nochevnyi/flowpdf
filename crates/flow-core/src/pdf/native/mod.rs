@@ -1,0 +1,146 @@
+// @contract: Bounded graph-level editing of admitted classic-xref PDFs.
+// @security: Errors exclude document data and authored text.
+mod graph;
+mod writer;
+
+pub use graph::{NativeEditError, NativeEditLimits, NativePdfGraph, PlainTextNote};
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    pub(super) fn fixture(extra: &str, stream: &[u8]) -> Vec<u8> {
+        let mut bytes = b"%PDF-1.7\n".to_vec();
+        let mut objects = vec![
+            b"<< /Type /Catalog /Pages 2 0 R /Custom 5 7 R >>".to_vec(),
+            b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R >>".to_vec(),
+            format!("<< /Length 6 0 R /Filter /FlateDecode >>\nstream\n").into_bytes(),
+            format!(
+                "<< /T true /F false /Decimal +0.1234567890123456789012345 /A#23B /N#FF {extra} >>"
+            )
+            .into_bytes(),
+            stream.len().to_string().into_bytes(),
+            b"(unreachable decoy)".to_vec(),
+        ];
+        objects[3].extend_from_slice(stream);
+        objects[3].extend_from_slice(b"\nendstream");
+        let mut offsets = vec![0];
+        for (i, object) in objects.iter().enumerate() {
+            offsets.push(bytes.len());
+            bytes.extend_from_slice(
+                format!("{} {} obj\n", i + 1, if i == 4 { 7 } else { 0 }).as_bytes(),
+            );
+            bytes.extend_from_slice(object);
+            bytes.extend_from_slice(b"\nendobj\n");
+        }
+        let xref = bytes.len();
+        bytes.extend_from_slice(b"xref\n0 8\n0000000000 65535 f \n");
+        for (i, offset) in offsets.iter().enumerate().skip(1) {
+            bytes.extend_from_slice(
+                format!("{offset:010} {:05} n \n", if i == 5 { 7 } else { 0 }).as_bytes(),
+            );
+        }
+        bytes.extend_from_slice(
+            format!(
+                "trailer\n<< /Size 8 /Root 1 0 R /ID [<0123> <4567>] >>\nstartxref\n{xref}\n%%EOF\n"
+            )
+            .as_bytes(),
+        );
+        bytes
+    }
+
+    #[test]
+    fn imported_note_rewrite_and_repeat_preserve_values_and_source() {
+        let payload = miniz_oxide::deflate::compress_to_vec_zlib(b"q\nQ\n", 6);
+        let original = fixture("", &payload);
+        let snapshot = original.clone();
+        let mut graph = NativePdfGraph::open(&original, NativeEditLimits::default()).unwrap();
+        let note = PlainTextNote {
+            page_index: 0,
+            contents: "Note (one) Україна".into(),
+            rect: [10, 20, 30, 40],
+        };
+        graph.add_note(note.clone()).unwrap();
+        let output = graph.rewrite().unwrap();
+        assert_eq!(original, snapshot);
+        assert!(!output.windows(17).any(|w| w == b"unreachable decoy"));
+        assert!(output.windows(payload.len()).any(|w| w == payload));
+        assert!(
+            output
+                .windows(28)
+                .any(|w| w == b"+0.1234567890123456789012345")
+        );
+        let mut reopened = NativePdfGraph::open(&output, NativeEditLimits::default()).unwrap();
+        assert_eq!(reopened.notes(0).unwrap(), vec![note.clone()]);
+        let second = PlainTextNote {
+            contents: "Second".into(),
+            rect: [1, 2, 3, 4],
+            ..note.clone()
+        };
+        reopened.add_note(second.clone()).unwrap();
+        let twice = reopened.rewrite().unwrap();
+        let twice = NativePdfGraph::open(&twice, NativeEditLimits::default()).unwrap();
+        assert_eq!(twice.notes(0).unwrap(), vec![note, second]);
+        assert_eq!(output, graph.rewrite().unwrap());
+    }
+
+    #[test]
+    fn hostile_closure_and_budgets_refuse() {
+        let payload = miniz_oxide::deflate::compress_to_vec_zlib(b"q Q", 6);
+        for extra in [
+            "/Broken 8 0 R",
+            "/Broken 5 0 R",
+            "/OpenAction (secret)",
+            "/Type /Sig",
+            "/Type /ObjStm",
+        ] {
+            assert!(
+                NativePdfGraph::open(&fixture(extra, &payload), NativeEditLimits::default())
+                    .is_err()
+            );
+        }
+        let bytes = fixture("", &payload);
+        for limits in [
+            NativeEditLimits {
+                max_source_bytes: 10,
+                ..Default::default()
+            },
+            NativeEditLimits {
+                max_objects: 2,
+                ..Default::default()
+            },
+            NativeEditLimits {
+                max_retained_bytes: 10,
+                ..Default::default()
+            },
+            NativeEditLimits {
+                max_decoded_stream_bytes: 2,
+                ..Default::default()
+            },
+            NativeEditLimits {
+                max_total_decoded_bytes: 2,
+                ..Default::default()
+            },
+            NativeEditLimits {
+                max_work: 2,
+                ..Default::default()
+            },
+            NativeEditLimits {
+                max_nesting: 1,
+                ..Default::default()
+            },
+        ] {
+            assert!(NativePdfGraph::open(&bytes, limits).is_err());
+        }
+        let graph = NativePdfGraph::open(
+            &bytes,
+            NativeEditLimits {
+                max_output_bytes: 20,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(graph.rewrite().is_err());
+    }
+}
