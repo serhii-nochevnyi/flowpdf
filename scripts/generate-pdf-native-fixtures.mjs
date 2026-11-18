@@ -22,7 +22,6 @@ function stream(dictionary, bytes) {
   ]);
 }
 
-// Object numbers are contiguous. Generations are explicit in both references and xref entries.
 function classicPdf(objects, trailer) {
   if (objects.length === 0 || objects.length > 64) throw new Error("Fixture object limit");
   const chunks = [Buffer.from("%PDF-1.7\n%\xe2\xe3\xcf\xd3\n", "latin1")];
@@ -70,7 +69,6 @@ end
 end
 `;
 
-// Objects 5–9 are shared across the two authored sources.
 const resources = [
   [4, "<< /Font << /F1 6 0 R >> >>"],
   [0, "<< /Type /Font /Subtype /TrueType /BaseFont /NotoSans-Regular /FirstChar 65 /LastChar 66 " +
@@ -104,7 +102,6 @@ const notes = classicPdf([
   [0, "[]"],
 ], "/Root 1 2 R /Info 13 5 R /ID [<7A2B29194DE84059865FC3E05D770AB1> <7A2B29194DE84059865FC3E05D770AB1>]");
 
-// An explicit local destination opens this ordinary PDF at its only page.
 const refused = classicPdf([
   [2, "<< /Type /Catalog /Pages 2 0 R /OpenAction [3 3 R /Fit] >>"],
   [0, `<< /Type /Pages /Count 1 /Kids [3 3 R] ${mediaBox} >>`],
