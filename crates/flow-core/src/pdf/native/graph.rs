@@ -114,6 +114,27 @@ pub(super) fn spend(remaining: &mut usize, amount: usize) -> Result<(), NativeEd
     Ok(())
 }
 
+fn decode_pdf_doc_encoding(bytes: &[u8]) -> Result<String, NativeEditError> {
+    const ACCENTS: [char; 8] = ['˘', 'ˇ', 'ˆ', '˙', '˝', '˛', '˚', '˜'];
+    const SPECIAL: [char; 31] = [
+        '•', '†', '‡', '…', '—', '–', 'ƒ', '⁄', '‹', '›', '−', '‰', '„', '“', '”', '‘', '’', '‚',
+        '™', 'ﬁ', 'ﬂ', 'Ł', 'Œ', 'Š', 'Ÿ', 'Ž', 'ı', 'ł', 'œ', 'š', 'ž',
+    ];
+    let mut contents = String::new();
+    let max_utf8_bytes = bytes.len().checked_mul(3).ok_or(NativeEditError::Budget)?;
+    contents
+        .try_reserve_exact(max_utf8_bytes)
+        .map_err(|_| NativeEditError::Budget)?;
+    contents.extend(bytes.iter().map(|&byte| match byte {
+        0x18..=0x1f => ACCENTS[usize::from(byte - 0x18)],
+        0x80..=0x9e => SPECIAL[usize::from(byte - 0x80)],
+        0xa0 => '€',
+        0x7f | 0x9f | 0xad => char::REPLACEMENT_CHARACTER,
+        _ => char::from(byte),
+    }));
+    Ok(contents)
+}
+
 impl NativePdfGraph {
     pub fn open(bytes: &[u8], limits: NativeEditLimits) -> Result<Self, NativeEditError> {
         limits.validate()?;
@@ -420,7 +441,7 @@ impl NativePdfGraph {
                     .collect();
                 String::from_utf16(&units).map_err(|_| NativeEditError::Malformed)?
             } else {
-                String::from_utf8(bytes.to_vec()).map_err(|_| NativeEditError::Unsupported)?
+                decode_pdf_doc_encoding(bytes)?
             };
             result.push(PlainTextNote {
                 page_index,
@@ -904,6 +925,55 @@ mod tests {
                 _ => false,
             });
         }
+    }
+
+    #[test]
+    fn imported_pdfdocencoded_note_survives_alongside_added_note() {
+        let payload = miniz_oxide::deflate::compress_to_vec_zlib(b"q Q", 6);
+        let bytes = super::super::tests::fixture("", &payload);
+        let original = PlainTextNote {
+            page_index: 0,
+            contents: "Café — €".into(),
+            rect: [10, 20, 30, 40],
+        };
+        let added = PlainTextNote {
+            page_index: 0,
+            contents: "Друга примітка".into(),
+            rect: [1, 2, 3, 4],
+        };
+        let encoded = b"Caf\xe9 \x84 \xa0";
+
+        let mut graph = NativePdfGraph::open(&bytes, NativeEditLimits::default()).unwrap();
+        graph.add_note(original.clone()).unwrap();
+        let annotation = graph
+            .objects
+            .values_mut()
+            .find_map(|value| match value {
+                PdfValue::Dictionary(dict) => dict
+                    .get_mut("Contents")
+                    .filter(|value| matches!(value, PdfValue::String(_))),
+                _ => None,
+            })
+            .unwrap();
+        *annotation = PdfValue::String(encoded.to_vec());
+        let imported = graph.rewrite().unwrap();
+
+        let mut graph = NativePdfGraph::open(&imported, NativeEditLimits::default()).unwrap();
+        assert_eq!(graph.notes(0).unwrap(), vec![original.clone()]);
+        graph.add_note(added.clone()).unwrap();
+        let output = graph.rewrite().unwrap();
+        let reopened = NativePdfGraph::open(&output, NativeEditLimits::default()).unwrap();
+        assert_eq!(reopened.notes(0).unwrap(), vec![original, added]);
+        assert_eq!(graph.original_bytes(), imported);
+
+        let page = reopened.objects[&reopened.pages[0]]
+            .as_dictionary()
+            .unwrap();
+        let annots = page["Annots"].as_array().unwrap();
+        let annotation = reopened.objects[&annots[0].as_reference().unwrap()]
+            .as_dictionary()
+            .unwrap();
+        assert_eq!(annotation["Contents"].as_bytes(), Some(encoded.as_slice()));
     }
 
     #[test]
