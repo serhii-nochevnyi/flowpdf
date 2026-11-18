@@ -65,6 +65,7 @@ pub struct NativePdfNoteScene {
     pub pages: Vec<NativePdfNotePage>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub text_pages: Vec<NativeTextPage>,
+    pub object_pages: Vec<super::native::NativeObjectPage>,
 }
 
 impl NativePdfNoteScene {
@@ -72,6 +73,7 @@ impl NativePdfNoteScene {
         output_hash: [u8; 32],
         pages: Vec<NativePdfNotePage>,
         text_pages: Vec<NativeTextPage>,
+        object_pages: Vec<super::native::NativeObjectPage>,
     ) -> Result<Self, super::native::NativeSessionError> {
         struct HashWriter(blake3::Hasher);
         impl std::io::Write for HashWriter {
@@ -114,11 +116,15 @@ impl NativePdfNoteScene {
             serde_json::to_writer(&mut writer, &text_pages)
                 .map_err(|_| super::native::NativeSessionError::Postcondition)?;
         }
+        writer.0.update(b"flowpdf:native-object-pages:v1");
+        serde_json::to_writer(&mut writer, &object_pages)
+            .map_err(|_| super::native::NativeSessionError::Postcondition)?;
         Ok(Self {
             output_hash,
             scene_hash: *writer.0.finalize().as_bytes(),
             pages,
             text_pages,
+            object_pages,
         })
     }
 }

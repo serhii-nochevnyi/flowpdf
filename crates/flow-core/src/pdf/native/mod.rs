@@ -3,12 +3,19 @@
 #[cfg_attr(not(test), allow(dead_code))]
 mod graph;
 mod notes;
+mod objects;
 mod session;
 mod text;
 mod writer;
 
 pub use graph::{NativeEditError, NativeEditLimits};
 pub use notes::{NativeNoteCommand, NativeNoteId, NativePageGeometry, NativePageId};
+pub use objects::{
+    NATIVE_MAX_GRAPHIC_POINTS, NATIVE_MAX_IMAGE_BYTES, NATIVE_MAX_IMAGE_DIMENSION,
+    NATIVE_MAX_IMAGE_PIXELS, NATIVE_MAX_STROKE_WIDTH, NativeGraphic, NativeGraphicShape,
+    NativeObjectCommand, NativeObjectKind, NativeObjectOperation, NativeObjectPage,
+    NativeObjectProfile, NativeObjectRefusal, NativeObjectTarget, NativeObjectView,
+};
 pub use session::{
     NATIVE_MAX_NOTE_BYTES, NATIVE_REQUEST_HISTORY, NativeBinding, NativeEditReceipt,
     NativePdfSession, NativeRequestLookup, NativeSessionError, NativeSnapshot,

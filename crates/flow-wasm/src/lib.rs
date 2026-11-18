@@ -2,7 +2,11 @@
 
 #![forbid(unsafe_code)]
 
-use flow_core::pdf::native::{NativeTextCommand, NativeTextPage, NativeTextRefusal};
+use flow_core::pdf::native::{
+    NATIVE_MAX_GRAPHIC_POINTS, NATIVE_MAX_IMAGE_BYTES, NATIVE_MAX_IMAGE_DIMENSION,
+    NATIVE_MAX_IMAGE_PIXELS, NATIVE_MAX_STROKE_WIDTH, NativeObjectCommand, NativeObjectPage,
+    NativeObjectRefusal, NativeTextCommand, NativeTextPage, NativeTextRefusal,
+};
 use flow_core::pdf::{
     NATIVE_MAX_NOTE_BYTES, NATIVE_REQUEST_HISTORY, NativeBinding, NativeEditError,
     NativeEditLimits, NativeNoteCommand, NativePdfNoteScene, NativePdfSession, NativeRequestLookup,
@@ -1389,6 +1393,7 @@ enum NativeRequest {
 enum NativeWireCommand {
     Note(NativeNoteCommand),
     Text(NativeTextCommand),
+    Object(NativeObjectCommand),
 }
 
 impl NativeRequest {
@@ -1460,12 +1465,25 @@ struct NativeWireLimits {
     request_history: usize,
     sessions: usize,
     retained_bytes: usize,
+    image_bytes: usize,
+    image_pixels: u64,
+    image_dimension: u32,
+    graphic_points: usize,
+    graphic_stroke_width: i64,
+    image_formats: [NativeImageFormat; 2],
 }
 
 #[derive(Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 enum NativeCountUnit {
     Utf8Bytes,
+}
+
+#[derive(Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+enum NativeImageFormat {
+    Png,
+    Jpeg,
 }
 
 fn native_wire_limits() -> NativeWireLimits {
@@ -1480,6 +1498,12 @@ fn native_wire_limits() -> NativeWireLimits {
         request_history: NATIVE_REQUEST_HISTORY,
         sessions: NATIVE_PDF_SESSIONS,
         retained_bytes: NATIVE_PDF_SESSIONS * NATIVE_PDF_RETAINED,
+        image_bytes: NATIVE_MAX_IMAGE_BYTES,
+        image_pixels: NATIVE_MAX_IMAGE_PIXELS,
+        image_dimension: NATIVE_MAX_IMAGE_DIMENSION,
+        graphic_points: NATIVE_MAX_GRAPHIC_POINTS,
+        graphic_stroke_width: NATIVE_MAX_STROKE_WIDTH,
+        image_formats: [NativeImageFormat::Png, NativeImageFormat::Jpeg],
     }
 }
 
@@ -1525,6 +1549,7 @@ struct NativeVerifiedScene {
     pages: Vec<NativeVerifiedPage>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     text_pages: Vec<NativeTextPage>,
+    object_pages: Vec<NativeObjectPage>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -1855,6 +1880,9 @@ impl NativeRegistryEntry {
             NativeWireCommand::Text(command) => {
                 self.session.apply_text(binding, request_id, command)
             }
+            NativeWireCommand::Object(command) => {
+                self.session.apply_object(binding, request_id, command)
+            }
         }
         .map_err(|error| native_session_error_code(error, NATIVE_POSTCONDITION))?;
         if receipt.binding.revision < previous_revision {
@@ -2013,6 +2041,8 @@ impl NativeVerifiedScene {
             writer.0.update(b"flowpdf:native-text-pages:v1");
             serde_json::to_writer(&mut writer, &self.text_pages).ok()?;
         }
+        writer.0.update(b"flowpdf:native-object-pages:v1");
+        serde_json::to_writer(&mut writer, &self.object_pages).ok()?;
         (writer.0.finalize().as_bytes() == &self.scene_hash).then_some(())
     }
 }
@@ -2058,11 +2088,12 @@ fn verify_native_snapshot(response: &NativeResponse<NativeVerifiedScene>) -> Opt
         return None;
     }
     snapshot.scene.verify()?;
-    NativePdfSession::verify_text_projection(
+    NativePdfSession::verify_edit_projection(
         &bytes,
         native_edit_limits(),
         snapshot.binding,
         &snapshot.scene.text_pages,
+        &snapshot.scene.object_pages,
     )
     .ok()?
     .then_some(())
@@ -2101,6 +2132,18 @@ pub fn verify_native_pdf_response(response_json: String) -> bool {
                 && response.code.as_ref().is_some_and(|code| {
                     if code == NATIVE_IMPORT_REFUSED {
                         return response.operation == NativeOperation::Open
+                            && response.request_id > 0;
+                    }
+                    if [
+                        NativeObjectRefusal::State,
+                        NativeObjectRefusal::Geometry,
+                        NativeObjectRefusal::Asset,
+                        NativeObjectRefusal::Profile,
+                    ]
+                    .iter()
+                    .any(|reason| reason.code() == code)
+                    {
+                        return response.operation == NativeOperation::Command
                             && response.request_id > 0;
                     }
                     if [
@@ -2185,7 +2228,9 @@ mod native_wire_tests {
                 let code = native_session_error_code(error, reader_refusal);
                 assert_eq!(code, expected);
                 response.code = Some(code.to_owned());
-                assert!(verify_native_pdf_response(serialize_native_response(response)));
+                assert!(verify_native_pdf_response(serialize_native_response(
+                    response
+                )));
             }
         }
     }
