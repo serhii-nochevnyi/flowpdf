@@ -169,6 +169,13 @@
 .pdf-native-edit-panel .native-marker[data-selected="true"] { z-index: 1; }
 .pdf-native-edit-panel .native-marker[data-selected="true"] > span { background: var(--accent); }
 
+@media (forced-colors: active) {
+  .pdf-native-edit-panel .native-marker[data-selected="true"] > span {
+    outline: 2px dashed CanvasText;
+    outline-offset: 2px;
+  }
+}
+
 .pdf-native-edit-panel .native-note-list {
   display: grid;
   gap: 8px;
