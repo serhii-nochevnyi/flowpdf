@@ -1040,6 +1040,20 @@ fn graphic_source(graphic: &NativeGraphic) -> Result<(String, NativeObjectProfil
     Ok((source, profile, local_bounds))
 }
 
+fn check_png_color_chunks(mut chunks: &[u8]) -> Result<()> {
+    while let Some(header) = chunks.get(..8) {
+        let size = u32::from_be_bytes(header[..4].try_into().map_err(|_| Asset)?) as usize;
+        let end = size.checked_add(12).ok_or(Asset)?;
+        let rest = chunks.get(end..).ok_or(Asset)?;
+        match &header[4..8] {
+            b"iCCP" | b"cICP" | b"sRGB" | b"gAMA" | b"cHRM" => return Err(Asset.into()),
+            b"IEND" if size == 0 && rest.is_empty() => return Ok(()),
+            _ => chunks = rest,
+        }
+    }
+    Err(Asset.into())
+}
+
 fn image_source(hex: &str, graph: &NativePdfGraph, remaining: &mut usize) -> Result<PdfStream> {
     fn nibble(b: u8) -> Result<u8> {
         match b {
@@ -1094,6 +1108,9 @@ fn image_source(hex: &str, graph: &NativePdfGraph, remaining: &mut usize) -> Res
         pixels * jpeg.map_or(1, |(_, _, color)| u64::from(color.bytes_per_pixel()));
     if minimum_samples > decoded_limit as u64 {
         return Err(NativeSessionError::Budget);
+    }
+    if format == ImageFormat::Png {
+        check_png_color_chunks(&bytes[8..])?;
     }
     let mut limits = Limits::default();
     limits.max_image_width = Some(width);
