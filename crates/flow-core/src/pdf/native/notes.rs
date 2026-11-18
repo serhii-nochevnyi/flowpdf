@@ -316,7 +316,6 @@ pub(super) fn project(
         let mut annotations = Vec::new();
         let values = page_annots(graph, page)?;
         for value in values {
-            // Both the annotation and its read-only rectangle may be indirect.
             spend(&mut work, (graph.limits.max_nesting + 1) * 2)?;
             spend(remaining, 256)?;
             let dict = resolve(graph, value)
