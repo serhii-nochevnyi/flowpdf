@@ -534,6 +534,37 @@ mod tests {
     }
 
     #[test]
+    fn accepted_scene_charges_note_decoding_to_the_work_budget() {
+        let encoded = miniz_oxide::deflate::compress_to_vec_zlib(b"q Q", 6);
+        let bytes = super::super::tests::fixture("", &encoded);
+        let defaults = NativeEditLimits::default();
+        let mut session = NativePdfSession::open(&bytes, defaults).unwrap();
+        session
+            .apply(
+                session.snapshot().binding,
+                1,
+                &NativeNoteCommand::Add {
+                    page: NativePageId(0),
+                    rect: [1, 2, 3, 4],
+                    contents: "Ї".repeat(1024),
+                },
+            )
+            .unwrap();
+
+        let output = session.output_bytes();
+        let graph = NativePdfGraph::open(output, defaults).unwrap();
+        let limits = NativeEditLimits {
+            max_work: defaults.max_work - graph.remaining_work() + 1024,
+            ..defaults
+        };
+        assert!(NativePdfGraph::open(output, limits).is_ok());
+        assert!(matches!(
+            NativePdfSession::open(output, limits),
+            Err(NativeSessionError::Budget)
+        ));
+    }
+
+    #[test]
     fn serialization_and_reopen_failures_leave_accepted_state_untouched() {
         let encoded = miniz_oxide::deflate::compress_to_vec_zlib(b"q Q", 6);
         let bytes = super::super::tests::fixture("", &encoded);

@@ -245,7 +245,7 @@ fn plain_note(
     dict: &BTreeMap<String, PdfValue>,
     page: PdfObjectRef,
     geometry: NativePageGeometry,
-) -> Option<([i64; 4], String)> {
+) -> Option<([i64; 4], &[u8])> {
     if dict
         .keys()
         .any(|key| !matches!(key.as_str(), "Type" | "Subtype" | "Contents" | "Rect" | "P"))
@@ -271,8 +271,7 @@ fn plain_note(
         return None;
     }
     let bytes = dict.get("Contents")?.as_bytes()?;
-    let contents = decode_contents(bytes)?;
-    Some((rect, contents))
+    (bytes.len() <= NATIVE_MAX_NOTE_BYTES * 2 + 2).then_some((rect, bytes))
 }
 
 pub(super) fn project(
@@ -333,45 +332,48 @@ pub(super) fn project(
                     .get(&object)
                     .and_then(PdfValue::as_dictionary)
                     .is_some()
-                && let Some((rect, contents)) = plain_note(dict, page, geometry)
+                && let Some((rect, bytes)) = plain_note(dict, page, geometry)
             {
-                spend(remaining, contents.capacity())?;
-                annotations.push(NativePdfAnnotation::PlainNote(NativePdfNote {
-                    id: *id,
-                    object,
-                    rect,
-                    contents,
-                }));
-            } else {
-                let profile = if dict.contains_key("AP") {
-                    NativeReadOnlyAnnotation::Appearance
-                } else {
-                    match subtype {
-                        Some("Text") => NativeReadOnlyAnnotation::Text,
-                        Some("Link") => NativeReadOnlyAnnotation::Link,
-                        Some("Widget") => NativeReadOnlyAnnotation::Widget,
-                        _ => NativeReadOnlyAnnotation::Other,
-                    }
-                };
-                let rect = dict
-                    .get("Rect")
-                    .and_then(|value| resolve(graph, value))
-                    .and_then(PdfValue::as_array)
-                    .and_then(|values| {
-                        let [l, b, r, t] = values else { return None };
-                        Some([
-                            l.as_number()?,
-                            b.as_number()?,
-                            r.as_number()?,
-                            t.as_number()?,
-                        ])
-                    });
-                annotations.push(NativePdfAnnotation::ReadOnly {
-                    object,
-                    profile,
-                    rect,
-                });
+                spend(&mut work, bytes.len())?;
+                if let Some(contents) = decode_contents(bytes) {
+                    spend(remaining, contents.capacity())?;
+                    annotations.push(NativePdfAnnotation::PlainNote(NativePdfNote {
+                        id: *id,
+                        object,
+                        rect,
+                        contents,
+                    }));
+                    continue;
+                }
             }
+            let profile = if dict.contains_key("AP") {
+                NativeReadOnlyAnnotation::Appearance
+            } else {
+                match subtype {
+                    Some("Text") => NativeReadOnlyAnnotation::Text,
+                    Some("Link") => NativeReadOnlyAnnotation::Link,
+                    Some("Widget") => NativeReadOnlyAnnotation::Widget,
+                    _ => NativeReadOnlyAnnotation::Other,
+                }
+            };
+            let rect = dict
+                .get("Rect")
+                .and_then(|value| resolve(graph, value))
+                .and_then(PdfValue::as_array)
+                .and_then(|values| {
+                    let [l, b, r, t] = values else { return None };
+                    Some([
+                        l.as_number()?,
+                        b.as_number()?,
+                        r.as_number()?,
+                        t.as_number()?,
+                    ])
+                });
+            annotations.push(NativePdfAnnotation::ReadOnly {
+                object,
+                profile,
+                rect,
+            });
         }
         pages.push(NativePdfNotePage {
             id: NativePageId(index as u32),
@@ -385,9 +387,6 @@ pub(super) fn project(
 }
 
 fn decode_contents(bytes: &[u8]) -> Option<String> {
-    if bytes.len() > NATIVE_MAX_NOTE_BYTES * 2 + 2 {
-        return None;
-    }
     let contents = if let Some(bytes) = bytes.strip_prefix(&[0xfe, 0xff]) {
         if bytes.len() % 2 != 0 {
             return None;
