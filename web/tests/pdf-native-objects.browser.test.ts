@@ -64,11 +64,16 @@ for (const locale of ['uk', 'en'] as const) {
       downloads.push(fetch(this.href).then(async (response) => new Uint8Array(await response.arrayBuffer())))
     })
     let staleId: readonly number[] | undefined
+    let dropReplacement = false
     const postMessage = Worker.prototype.postMessage
     const worker = vi.spyOn(Worker.prototype, 'postMessage').mockImplementation(
       function (this: Worker, ...args: Parameters<Worker['postMessage']>) {
         const envelope = args[0] as Partial<NativePdfWorkerRequest> | undefined
         const request = envelope?.request
+        if (dropReplacement && request?.operation === 'command' && request.command.kind === 'replaceImage') {
+          dropReplacement = false
+          return
+        }
         if (staleId && request?.operation === 'command' && 'target' in request.command) {
           args[0] = { ...envelope, request: { ...request,
             command: { ...request.command, target: { ...request.command.target, id: staleId } },
@@ -145,6 +150,7 @@ for (const locale of ['uk', 'en'] as const) {
           await activate(dialog.getByRole('button', { name: t('object.remove') }).element())
         } else await activate(button(action).element())
         await expect.poll(outputHash).not.toBe(prior)
+        if (action === 'object.move') await expect.element(button(action)).toHaveFocus()
         expect(downloads).toHaveLength(watched)
         const bytes = await download('download.edited')
         const snapshot = await inspect(bytes)
@@ -217,6 +223,23 @@ for (const locale of ['uk', 'en'] as const) {
       const originalTarget = (selector.element() as HTMLSelectElement).value
       chooseFile(asset(), new File([grayPng], 'replacement.png', { type: 'image/png' }))
       await expect.element(objects.getByText(t('object.file.ready'), { exact: false })).toBeVisible()
+      dropReplacement = true
+      const beforeUnseen = outputHash()
+      await activate(button('object.replace').element())
+      const reconcile = button('session.reconcile')
+      await expect.element(reconcile, { timeout: 35_000 }).toBeEnabled()
+      expect(dropReplacement).toBe(false)
+      const beforeReconcile = commandCount()
+      await activate(button('navigation.next').element())
+      await activate(reconcile.element())
+      await expect.element(panel.getByRole('status')).toHaveTextContent(t('status.unseenPage', { page: 1 }))
+      expect(outputHash()).toBe(beforeUnseen)
+      await activate(button('navigation.previous').element())
+      await expect.element(panel.getByRole('status')).toHaveTextContent(t('status.unseen'))
+      await expect.element(selector).toHaveValue(originalTarget)
+      await expect.element(objects.getByText('replacement.png', { exact: true })).toBeVisible()
+      await expect.element(button('object.replace')).toBeEnabled()
+      expect(commandCount()).toBe(beforeReconcile)
       await accepted('object.replace', [addedImage, image([...baseImage.bounds]), baseGraphic], 1)
 
       const beforeInvalidAsset = await download('download.edited')
