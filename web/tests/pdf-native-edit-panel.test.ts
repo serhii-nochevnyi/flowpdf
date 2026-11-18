@@ -70,6 +70,7 @@ describe('native note workspace', () => {
     expect(markup).toContain('PDF ще не відкрито')
     expect(markup).toContain('aria-live="polite"')
     expect(markup).toContain('role="alert" aria-atomic="true"')
+    expect(markup).toContain('class="native-file native-primary"')
     expect(markup).not.toContain('<main')
   })
 
@@ -81,9 +82,14 @@ describe('native note workspace', () => {
           ...dependencies, locale, initialDocument: documentWith(annotations),
         }))
         expect(markup).toContain(nativePdfText(locale, 'notes.count', { count }))
+        expect(markup.includes(nativePdfText(locale, 'notes.empty'))).toBe(count === 0)
         expect(markup).toContain(nativePdfText(locale, 'download.original'))
         expect(markup).toContain(nativePdfText(locale, 'download.edited'))
         expect(markup).toContain('&lt;unsafe&gt;.pdf')
+        expect(markup).toContain('class="native-file"')
+        expect(markup).toContain(`data-origin-hash="${'a'.repeat(64)}"`)
+        expect(markup).toContain(`data-output-hash="${'2a'.repeat(32)}"`)
+        expect(markup).toContain('class="native-destructive"')
         expect(markup).not.toContain('<script>')
         expect(markup.split('&lt;script&gt;')).toHaveLength(count + 1)
         expect(markup.match(/data-native-note-id=/g) ?? []).toHaveLength(count)

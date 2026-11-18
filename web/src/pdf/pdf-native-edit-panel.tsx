@@ -1,7 +1,4 @@
-import {
-  useCallback, useEffect, useId, useLayoutEffect, useRef, useState, useSyncExternalStore,
-  type KeyboardEvent,
-} from 'react'
+import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react'
 import {
   hashPdfSourceBytes, PdfSourceStoreError, type PdfSourceStore,
 } from '../../persistence/pdf-source-store.js'
@@ -273,7 +270,7 @@ export function PdfNativeEditPanel({
       const bytes = await read()
       if (!mounted.current) return
       if (bytes.byteLength > NATIVE_PDF_LIMITS.pdfBytes) {
-        setError(['error.limit', { limit: `${NATIVE_PDF_LIMITS.pdfBytes} B` }])
+        setError(['error.limit', { limit: pdfLimit }])
         return
       }
       const hash = (await hashPdfSourceBytes(bytes)).slice('sha256:v1:'.length)
@@ -331,7 +328,7 @@ export function PdfNativeEditPanel({
   }
 
   function cancelDraft() {
-    if (locked.current) return
+    if (locked.current || composition.current) return
     setComposition(false)
     clearFeedback()
     if (selected && geometry) {
@@ -456,10 +453,6 @@ export function PdfNativeEditPanel({
     }
   }
 
-  function keepKeysLocal(event: KeyboardEvent<HTMLElement>) {
-    if (event.ctrlKey || event.metaKey || event.nativeEvent.isComposing) event.stopPropagation()
-  }
-
   let failure = error === null ? '' : t(...error)
   if (operationError) {
     const { code, reason } = operationError
@@ -483,12 +476,12 @@ export function PdfNativeEditPanel({
 
   return (
     <section className="pdf-native-edit-panel" data-pdf-native-edit="" aria-labelledby={`${id}-title`}
-      onKeyDown={keepKeysLocal} lang={locale}>
+      onKeyDown={(event) => event.stopPropagation()} lang={locale}>
       <header className="native-stack">
         <h2 id={`${id}-title`}>{t('title')}</h2>
         <p>{t('description')}</p>
         <div className="native-actions">
-          <label className="native-file">
+          <label className={accepted ? 'native-file' : 'native-file native-primary'}>
             {t('open')}
             <input type="file" accept="application/pdf,.pdf" disabled={busy !== null || needsReconcile}
               aria-describedby={`${id}-file-limit`} onChange={(event) => {
@@ -526,9 +519,9 @@ export function PdfNativeEditPanel({
           {needsReconcile && <button type="button" disabled={busy !== null} onClick={() => void reconcile()}>
             {t('session.reconcile')}</button>}
         </div>
-        <p id={`${id}-file-limit`}>{t('limit.file', { limit: pdfLimit })}</p>
+        <p className="native-help" id={`${id}-file-limit`}>{t('limit.file', { limit: pdfLimit })}</p>
         {accepted && <p data-native-filename="" dir="auto"><bdi>{accepted.filename}</bdi></p>}
-        <p id={`${id}-edited`}>{revision === 0 ? t('download.unavailable')
+        <p className="native-help" id={`${id}-edited`}>{revision === 0 ? t('download.unavailable')
           : invalidated || needsReconcile ? t('output.last', { revision })
             : operationError && !operationError.file ? t('output.previous', { revision })
               : t('output.revision', { revision })}</p>
@@ -578,7 +571,8 @@ export function PdfNativeEditPanel({
           </div>
           <p>{extracted ? t(extracted.text.length ? 'projection.partial' : 'projection.empty') : t('projection.unavailable')}</p>
           <p>{t('notes.count', { count: notes.length })}</p>
-          {notes.length === 0 && <p>{t(canAdd ? 'notes.empty' : 'note.emptyReadOnly')}</p>}
+          {notes.length === 0 && <p>{t(page.canAddNote && geometry && !invalidated && !needsReconcile
+            ? 'notes.empty' : 'note.emptyReadOnly')}</p>}
           {page.annotations.length > 0 && <ul className="native-note-list" aria-labelledby={`${id}-notes`}>
             {page.annotations.map((item, index) => item.kind === 'plainNote' ? (
               <li key={item.id}>
@@ -595,10 +589,10 @@ export function PdfNativeEditPanel({
             </li>)}
           </ul>}
           {draft?.note !== null && <div>
-            <button type="button" id={`${id}-add`} disabled={!canAdd}
+            <button type="button" className={selected ? undefined : 'native-primary'} id={`${id}-add`} disabled={!canAdd}
               aria-describedby={canAdd ? undefined : `${id}-unavailable`} onClick={startNote}>{t('note.add')}</button>
           </div>}
-          {!canAdd && <p id={`${id}-unavailable`}>{t('capability.unavailable', { reason: unavailable })}</p>}
+          {!canAdd && <p className="native-help" id={`${id}-unavailable`}>{t('capability.unavailable', { reason: unavailable })}</p>}
           {draft && <fieldset className="native-stack" disabled={busy !== null}>
             <label htmlFor={`${id}-contents`}>{t('note.contents')}</label>
             <textarea id={`${id}-contents`} value={draft.contents} dir="auto" lang="" readOnly={!canEdit}
@@ -606,9 +600,9 @@ export function PdfNativeEditPanel({
               aria-invalid={noteError !== null && !composing}
               onCompositionStart={() => setComposition(true)} onCompositionEnd={() => setComposition(false)}
               onChange={(event) => setDraft({ ...draft, contents: event.target.value })} />
-            <p id={`${id}-note-limit`}>{t('note.limit', { limit: noteLimit })}</p>
-            <p id={`${id}-note-count`}>{t('limit.count', { count: textBytes, limit: NATIVE_PDF_LIMITS.noteBytes })}</p>
-            <p id={`${id}-note-error`}>{noteError === 'limit' ? t('note.tooLong', { limit: noteLimit })
+            <p className="native-help" id={`${id}-note-limit`}>{t('note.limit', { limit: noteLimit })}</p>
+            <p className="native-help" id={`${id}-note-count`}>{t('limit.count', { count: textBytes, limit: NATIVE_PDF_LIMITS.noteBytes })}</p>
+            <p className="native-help" id={`${id}-note-error`}>{noteError === 'limit' ? t('note.tooLong', { limit: noteLimit })
               : noteError && t(`note.${noteError}`)}</p>
             <div className="native-coordinates">
               {(['x', 'y'] as const).map((axis) => <label key={axis}>
@@ -623,20 +617,20 @@ export function PdfNativeEditPanel({
                   onChange={(event) => setDraft({ ...draft, [axis]: event.target.value })} />
               </label>)}
             </div>
-            <p id={`${id}-coordinates`}>{t('geometry.help')}</p>
-            <p id={`${id}-bounds`}>{bounds && (rect ? bounds : t('error.invalidGeometry', { bounds }))}</p>
+            <p className="native-help" id={`${id}-coordinates`}>{t('geometry.help')}</p>
+            <p className="native-help" id={`${id}-bounds`}>{bounds && (rect ? bounds : t('error.invalidGeometry', { bounds }))}</p>
             <div className="native-actions">
               {draft.note === null
-                ? <button type="button" id={`${id}-submit-add`} disabled={!canAdd || composing}
+                ? <button type="button" className="native-primary" id={`${id}-submit-add`} disabled={!canAdd || composing}
                     onClick={(event) => submitDraft('add', event.currentTarget)}>{t('note.add')}</button>
                 : <>
-                    <button type="button" id={`${id}-save`} disabled={!canEdit || composing}
+                    <button type="button" className="native-primary" id={`${id}-save`} disabled={!canEdit || composing}
                       onClick={(event) => submitDraft('edit', event.currentTarget)}>{t('note.save')}</button>
                     <button type="button" disabled={!canAdd || composing}
                       aria-describedby={canAdd ? undefined : `${id}-unavailable`}
                       onClick={(event) => submitDraft('move', event.currentTarget)}>{t('note.move')}</button>
                   </>}
-              <button type="button" onClick={cancelDraft}>{t('note.cancel')}</button>
+              <button type="button" disabled={composing} onClick={cancelDraft}>{t('note.cancel')}</button>
               {selected && <button type="button" disabled={!canEdit || composing} onClick={(event) => {
                 if (!snapshot || locked.current || composition.current) return
                 removeTrigger.current = event.currentTarget
@@ -654,7 +648,7 @@ export function PdfNativeEditPanel({
           <p id={`${id}-remove-target`}>{confirm && t('note.confirmTarget', { number: confirm.note, page: pageIndex + 1 })}</p>
           <div className="native-actions">
             <button type="button" ref={cancelConfirmation} onClick={() => setConfirm(null)}>{t('note.remove.cancel')}</button>
-            <button type="button" onClick={() => {
+            <button type="button" className="native-destructive" onClick={() => {
               if (confirm === null) return
               setConfirm(null)
               if (confirm.snapshot !== snapshot || selected?.id !== confirm.note || !canEdit) {
