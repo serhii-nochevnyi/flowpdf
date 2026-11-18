@@ -4,6 +4,7 @@
 mod graph;
 mod notes;
 mod objects;
+mod pages;
 mod session;
 mod text;
 mod writer;
@@ -16,6 +17,7 @@ pub use objects::{
     NativeObjectCommand, NativeObjectKind, NativeObjectOperation, NativeObjectPage,
     NativeObjectProfile, NativeObjectRefusal, NativeObjectTarget, NativeObjectView,
 };
+pub use pages::{NativePageCommand, NativePageSide, NativePageState, NativePageTarget};
 pub use session::{
     NATIVE_MAX_NOTE_BYTES, NATIVE_REQUEST_HISTORY, NativeBinding, NativeEditReceipt,
     NativePdfSession, NativeRequestLookup, NativeSessionError, NativeSnapshot,

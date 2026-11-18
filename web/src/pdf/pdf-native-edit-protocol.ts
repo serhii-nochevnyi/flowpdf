@@ -56,7 +56,27 @@ export type NativePdfObjectCommand =
   | { readonly kind: 'moveObject'; readonly target: NativePdfObjectTarget; readonly transform: readonly [number, number, number, number, number, number] }
   | { readonly kind: 'removeObject'; readonly target: NativePdfObjectTarget }
 
+export interface NativePdfPageTarget {
+  readonly page: number
+  readonly stableId: number
+}
+
+export type NativePdfPageCommand =
+  | { readonly kind: 'insertBlankPage'; readonly target: NativePdfPageTarget; readonly side: 'before' | 'after' }
+  | { readonly kind: 'reorderPage'; readonly target: NativePdfPageTarget; readonly position: number }
+  | { readonly kind: 'rotatePage'; readonly target: NativePdfPageTarget; readonly degrees: -90 | 90 }
+  | { readonly kind: 'duplicatePage'; readonly target: NativePdfPageTarget }
+  | { readonly kind: 'deletePage'; readonly target: NativePdfPageTarget }
+
+export interface NativePdfPageState {
+  readonly order: readonly number[]
+  readonly selected: number | null
+  readonly canDelete: boolean
+  readonly maxPosition: number
+}
+
 export type NativePdfCommand = NativePdfNoteCommand | NativePdfTextCommand | NativePdfObjectCommand
+export type NativePdfEditCommand = NativePdfCommand | NativePdfPageCommand
 
 const objectRefusals = [
   'FLOW_PDF_NATIVE_OBJECT_STATE',
@@ -138,8 +158,13 @@ export interface NativePdfSnapshot {
   readonly originStoreHash: string
   readonly outputHash: readonly number[]
   readonly consumedRequest: number
+  readonly pageState?: NativePdfPageState
   readonly scene: NativePdfNoteScene
   readonly outputHex: string
+}
+
+export interface NativePdfVerifiedSnapshot extends NativePdfSnapshot {
+  readonly pageState: NativePdfPageState
 }
 
 interface RequestIdentity {
@@ -154,7 +179,7 @@ interface BoundRequest extends RequestIdentity {
 
 export type NativePdfRequest =
   | (RequestIdentity & { readonly operation: 'open'; readonly epoch: readonly number[]; readonly bytesHex: string })
-  | (BoundRequest & { readonly operation: 'command'; readonly outputHash: readonly number[]; readonly command: NativePdfCommand })
+  | (BoundRequest & { readonly operation: 'command'; readonly outputHash: readonly number[]; readonly command: NativePdfEditCommand })
   | (BoundRequest & { readonly operation: 'snapshot' })
   | (BoundRequest & { readonly operation: 'close' })
 
@@ -172,9 +197,9 @@ type BoundResponse = ResponseIdentity & {
 }
 
 export type NativePdfResponse =
-  | (BoundResponse & { readonly operation: 'open'; readonly status: 'opened'; readonly snapshot: NativePdfSnapshot })
-  | (BoundResponse & { readonly operation: 'command'; readonly status: 'applied'; readonly snapshot: NativePdfSnapshot })
-  | (BoundResponse & { readonly operation: 'snapshot'; readonly status: 'accepted' | 'unseen' | 'evicted'; readonly snapshot: NativePdfSnapshot })
+  | (BoundResponse & { readonly operation: 'open'; readonly status: 'opened'; readonly snapshot: NativePdfVerifiedSnapshot })
+  | (BoundResponse & { readonly operation: 'command'; readonly status: 'applied'; readonly snapshot: NativePdfVerifiedSnapshot })
+  | (BoundResponse & { readonly operation: 'snapshot'; readonly status: 'accepted' | 'unseen' | 'evicted'; readonly snapshot: NativePdfVerifiedSnapshot })
   | (BoundResponse & { readonly operation: 'close'; readonly status: 'closed'; readonly snapshot: null })
   | (ResponseIdentity & {
     readonly operation: NativePdfRequest['operation']
@@ -227,6 +252,7 @@ const rustErrorCodes = new Set([
   'FLOW_PDF_NATIVE_REQUEST_INVALID',
   'FLOW_PDF_NATIVE_REQUEST_CONFLICT',
   'FLOW_PDF_NATIVE_TARGET_UNAVAILABLE',
+  'FLOW_PDF_NATIVE_FINAL_PAGE',
   'FLOW_PDF_NATIVE_POSTCONDITION_FAILED',
 ])
 
@@ -375,11 +401,31 @@ function objectCommand(value: unknown): boolean {
   }
 }
 
-function isNativeCommand(value: unknown): value is NativePdfCommand {
+export function isNativePageCommand(value: unknown): value is NativePdfPageCommand {
+  if (typeof value !== 'object' || value === null) return false
+  const command = value as Record<string, unknown>
+  if (!shape(command.target, 'page', 'stableId')
+    || !integer(command.target.page, 0, 4095) || !isNativeRequestId(command.target.stableId)) return false
+  switch (command.kind) {
+    case 'insertBlankPage':
+      return shape(command, 'kind', 'target', 'side') && (command.side === 'before' || command.side === 'after')
+    case 'reorderPage':
+      return shape(command, 'kind', 'target', 'position') && integer(command.position, 0, 4095)
+    case 'rotatePage':
+      return shape(command, 'kind', 'target', 'degrees') && (command.degrees === -90 || command.degrees === 90)
+    case 'duplicatePage':
+    case 'deletePage':
+      return shape(command, 'kind', 'target')
+    default:
+      return false
+  }
+}
+
+function isNativeCommand(value: unknown): value is NativePdfEditCommand {
   return isNativeNoteCommand(value)
     || (shape(value, 'kind', 'island', 'text') && value.kind === 'replaceText'
       && hash(value.island) && contents(value.text))
-    || objectCommand(value)
+    || objectCommand(value) || isNativePageCommand(value)
 }
 
 export function isNativeWorkerRequest(value: unknown): value is NativePdfWorkerRequest {
@@ -509,10 +555,19 @@ export function sameNativeSession(left: NativePdfBinding, right: NativePdfBindin
     && sameNativeBytes(left.originHash, right.originHash)
 }
 
-function snapshot(value: unknown): value is NativePdfSnapshot {
-  return shape(value, 'binding', 'originStoreHash', 'outputHash', 'consumedRequest', 'scene', 'outputHex')
+function pageState(value: unknown, count: number): boolean {
+  return count > 0 && shape(value, 'order', 'selected', 'canDelete', 'maxPosition')
+    && Array.isArray(value.order) && value.order.length === count
+    && value.order.every(isNativeRequestId) && new Set(value.order).size === count
+    && (value.selected === null || (isNativeRequestId(value.selected) && value.order.includes(value.selected)))
+    && value.canDelete === (count > 1) && value.maxPosition === count - 1
+}
+
+function snapshot(value: unknown): value is NativePdfVerifiedSnapshot {
+  return shape(value, 'binding', 'originStoreHash', 'outputHash', 'consumedRequest', 'scene', 'outputHex', 'pageState')
     && binding(value.binding) && isNativeStoreHash(value.originStoreHash) && hash(value.outputHash)
     && integer(value.consumedRequest, value.binding.revision) && scene(value.scene) && bytesHex(value.outputHex)
+    && pageState(value.pageState, value.scene.pages.length)
     && sameNativeBytes(value.outputHash, value.scene.outputHash)
     && (value.binding.revision === 0) === (value.consumedRequest === 0)
     && (value.binding.revision !== 0 || sameNativeBytes(value.binding.originHash, value.outputHash))

@@ -1,0 +1,306 @@
+use flow_core::pdf::native::{NativeEditLimits, NativePageCommand, NativePdfSession};
+
+fn fixture() -> Vec<u8> {
+    build_pdf(&[
+        (0, "<< /Type /Catalog /Pages 2 0 R >>"),
+        (
+            0,
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 300 500] /Rotate 90 >>",
+        ),
+        (0, "<< /Type /Pages /Parent 2 0 R /Kids [4 0 R] /Count 1 >>"),
+        (0, "<< /Type /Page /Parent 3 0 R >>"),
+    ])
+}
+
+fn build_pdf(objects: &[(u16, &str)]) -> Vec<u8> {
+    let mut pdf = b"%PDF-1.7\n".to_vec();
+    let mut offsets = vec![];
+    for (index, (generation, object)) in objects.iter().enumerate() {
+        offsets.push(pdf.len());
+        pdf.extend(format!("{} {generation} obj\n{object}\nendobj\n", index + 1).bytes());
+    }
+    let xref = pdf.len();
+    let size = objects.len() + 1;
+    pdf.extend(format!("xref\n0 {size}\n0000000000 65535 f \n").bytes());
+    for (offset, (generation, _)) in offsets.into_iter().zip(objects) {
+        pdf.extend(format!("{offset:010} {generation:05} n \n").bytes());
+    }
+    pdf.extend(
+        format!("trailer\n<< /Root 1 0 R /Size {size} >>\nstartxref\n{xref}\n%%EOF\n").bytes(),
+    );
+    pdf
+}
+
+#[test]
+fn page_operations_keep_identity_through_rewrite() {
+    let mut session =
+        NativePdfSession::open_scoped(&fixture(), NativeEditLimits::default(), [1; 16]).unwrap();
+    for (step, command) in [
+        r#"{"kind":"insertBlankPage","target":{"page":0,"stableId":262144},"side":"after"}"#,
+        r#"{"kind":"rotatePage","target":{"page":0,"stableId":262144},"degrees":90}"#,
+        r#"{"kind":"reorderPage","target":{"page":0,"stableId":262144},"position":1}"#,
+        r#"{"kind":"duplicatePage","target":{"page":1,"stableId":262144}}"#,
+        r#"{"kind":"deletePage","target":{"page":1,"stableId":262144}}"#,
+    ]
+    .iter()
+    .enumerate()
+    {
+        let command: NativePageCommand = serde_json::from_str(command).unwrap();
+        session
+            .apply_page(session.snapshot().binding, step as u64 + 1, &command)
+            .unwrap();
+    }
+    assert_eq!(session.snapshot().page_state.order.len(), 2);
+    assert_eq!(
+        session.snapshot().page_state.selected,
+        Some(session.snapshot().page_state.order[1])
+    );
+    assert_eq!(
+        session.snapshot().scene.pages[1]
+            .geometry
+            .unwrap()
+            .rotation(),
+        180
+    );
+}
+
+fn command(
+    kind: &str,
+    page: usize,
+    snapshot: &flow_core::pdf::native::NativeSnapshot,
+) -> NativePageCommand {
+    serde_json::from_value(serde_json::json!({
+        "kind": kind, "target": {"page":page,"stableId":snapshot.page_state.order[page]},
+    }))
+    .unwrap()
+}
+
+fn dependency_fixture(catalog_entry: &str) -> Vec<u8> {
+    build_pdf(&[
+        (
+            0,
+            &format!(
+                "<< /Type /Catalog /Pages 2 0 R /AcroForm 9 0 R /Outlines 12 0 R {catalog_entry} >>"
+            ),
+        ),
+        (
+            0,
+            "<< /Type /Pages /Kids [3 0 R 5 0 R] /Count 2 /MediaBox [0 0 300 500] >>",
+        ),
+        (
+            0,
+            "<< /Type /Pages /Parent 2 0 R /Kids [4 7 R] /Count 1 /Rotate 90 /Resources 14 0 R >>",
+        ),
+        (
+            7,
+            "<< /Type /Page /Parent 3 0 R /Contents 11 0 R /Annots [7 0 R 8 0 R] >>",
+        ),
+        (
+            0,
+            "<< /Type /Pages /Parent 2 0 R /Kids [6 0 R] /Count 1 /Rotate 180 /Resources <<>> >>",
+        ),
+        (
+            0,
+            "<< /Type /Page /Parent 5 0 R /Contents 11 0 R /Annots [10 0 R] >>",
+        ),
+        (
+            0,
+            "<< /Type /Annot /Subtype /Text /P 4 7 R /Rect [10 20 40 60] /Contents (original) >>",
+        ),
+        (
+            0,
+            "<< /Type /Annot /Subtype /Widget /P 4 7 R /Rect [40 60 80 90] /FT /Btn /T (check) /V /Off /AS /Off >>",
+        ),
+        (0, "<< /Fields [8 0 R] >>"),
+        (
+            0,
+            "<< /Type /Annot /Subtype /Link /P 6 0 R /Rect [20 30 50 60] /Dest [4 7 R /Fit] >>",
+        ),
+        (0, "<< /Length 4 >>\nstream\nq Q\n\nendstream"),
+        (
+            0,
+            "<< /Type /Outlines /First 13 0 R /Last 13 0 R /Count 1 >>",
+        ),
+        (0, "<< /Title (origin) /Parent 12 0 R /Dest [4 7 R /Fit] >>"),
+        (0, "<< /ProcSet [/PDF ] >>"),
+    ])
+}
+
+#[test]
+fn independent_note_and_checkbox_clone_survive_cross_parent_reorder_and_navigation_cleanup() {
+    use flow_core::pdf::NativePdfAnnotation;
+    use flow_core::pdf::native::NativeNoteCommand;
+    let mut session = NativePdfSession::open_scoped(
+        &dependency_fixture(""),
+        NativeEditLimits::default(),
+        [2; 16],
+    )
+    .unwrap();
+    assert_eq!(session.snapshot().page_state.order[0], (4 << 16) + 7);
+    let duplicate = command("duplicatePage", 0, session.snapshot());
+    session
+        .apply_page(session.snapshot().binding, 1, &duplicate)
+        .unwrap();
+    let page = |session: &NativePdfSession, index: usize| {
+        let NativePdfAnnotation::PlainNote(note) =
+            &session.snapshot().scene.pages[index].annotations[0]
+        else {
+            panic!("expected an editable note");
+        };
+        (note.id, note.contents.clone())
+    };
+    let (source_note, _) = page(&session, 0);
+    let (new_note, _) = page(&session, 1);
+    assert_ne!(source_note, new_note);
+    session
+        .apply(
+            session.snapshot().binding,
+            2,
+            &NativeNoteCommand::Edit {
+                note: new_note,
+                contents: "copy".into(),
+            },
+        )
+        .unwrap();
+    assert_eq!(page(&session, 0).1, "original");
+    assert_eq!(page(&session, 1).1, "copy");
+    let rotate = session.snapshot().scene.pages[1].geometry.unwrap();
+    assert_eq!(
+        rotate.to_rotated_crop([10, 20, 40, 60]),
+        Some([20, 260, 60, 290])
+    );
+    let reorder: NativePageCommand = serde_json::from_value(serde_json::json!({
+        "kind":"reorderPage", "target":{"page":1,"stableId":session.snapshot().page_state.order[1]}, "position":2
+    })).unwrap();
+    session
+        .apply_page(session.snapshot().binding, 3, &reorder)
+        .unwrap();
+    assert_eq!(
+        session.snapshot().scene.pages[1]
+            .geometry
+            .unwrap()
+            .rotation(),
+        180
+    );
+    assert_eq!(session.snapshot().scene.pages[2].geometry, Some(rotate));
+    let delete = command("deletePage", 0, session.snapshot());
+    session
+        .apply_page(session.snapshot().binding, 4, &delete)
+        .unwrap();
+    assert!(session.snapshot().scene.pages[0].annotations.is_empty());
+    assert_eq!(page(&session, 1).1, "copy");
+    assert_eq!(session.snapshot().scene.pages[1].annotations.len(), 2);
+    let output = String::from_utf8_lossy(session.output_bytes());
+    assert_eq!(output.matches("/Subtype /Widget").count(), 1);
+    assert_eq!(output.matches("/ProcSet [/PDF ]").count(), 1);
+    assert_eq!(output.matches("/Length 4").count(), 1);
+    assert!(!output.contains("/Title"));
+}
+
+#[test]
+fn final_page_and_external_dependencies_refuse_without_changing_output() {
+    for (bytes, code) in [
+        (fixture(), "FLOW_PDF_NATIVE_FINAL_PAGE"),
+        (
+            dependency_fixture("/Dests << /Permanent [4 7 R /Fit] >>"),
+            "FLOW_PDF_NATIVE_UNSUPPORTED",
+        ),
+    ] {
+        let mut session =
+            NativePdfSession::open_scoped(&bytes, NativeEditLimits::default(), [3; 16]).unwrap();
+        let prior = session.snapshot().clone();
+        let delete = command("deletePage", 0, &prior);
+        assert_eq!(
+            session
+                .apply_page(prior.binding, 1, &delete)
+                .unwrap_err()
+                .code(),
+            code
+        );
+        assert_eq!(session.output_bytes(), bytes);
+        assert_eq!(session.snapshot().binding, prior.binding);
+        assert_eq!(session.snapshot().page_state, prior.page_state);
+    }
+}
+
+#[test]
+fn malformed_page_counts_and_parents_refuse_on_open() {
+    for (count, parent) in [(2, 2), (1, 1)] {
+        let file = build_pdf(&[
+            (0, "<< /Type /Catalog /Pages 2 0 R >>"),
+            (
+                0,
+                &format!("<< /Type /Pages /Kids [3 0 R] /Count {count} /MediaBox [0 0 100 100] >>"),
+            ),
+            (0, &format!("<< /Type /Page /Parent {parent} 0 R >>")),
+        ]);
+        assert!(
+            NativePdfSession::open_scoped(&file, NativeEditLimits::default(), [4; 16]).is_err()
+        );
+    }
+}
+
+#[test]
+fn object_budget_overflow_refuses_blank_insertion() {
+    let file = fixture();
+    let limits = NativeEditLimits {
+        max_objects: 4,
+        ..NativeEditLimits::default()
+    };
+    let mut session = NativePdfSession::open_scoped(&file, limits, [5; 16]).unwrap();
+    let binding = session.snapshot().binding;
+    let insert = serde_json::from_str(
+        r#"{"kind":"insertBlankPage","target":{"page":0,"stableId":262144},"side":"after"}"#,
+    )
+    .unwrap();
+    assert_eq!(
+        session.apply_page(binding, 1, &insert).unwrap_err().code(),
+        "FLOW_PDF_NATIVE_BUDGET_EXHAUSTED"
+    );
+    assert_eq!(session.output_bytes(), file);
+    assert_eq!(session.snapshot().binding, binding);
+}
+
+#[test]
+fn split_text_widget_and_direct_form_clone_as_independent_owners() {
+    let file = build_pdf(&[
+        (
+            0,
+            "<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields 6 0 R >> >>",
+        ),
+        (
+            0,
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 100 100] /CropBox [10 10 90 90] >>",
+        ),
+        (0, "<< /Type /Page /Parent 2 0 R /Annots [4 0 R] >>"),
+        (
+            0,
+            "<< /Type /Annot /Subtype /Widget /P 3 0 R /Parent 5 0 R /Rect [20 20 40 40] >>",
+        ),
+        (0, "<< /FT /Tx /T (customer) /V (data) /Kids [4 0 R] >>"),
+        (0, "[5 0 R]"),
+    ]);
+    let mut session =
+        NativePdfSession::open_scoped(&file, NativeEditLimits::default(), [6; 16]).unwrap();
+    let duplicate = command("duplicatePage", 0, session.snapshot());
+    session
+        .apply_page(session.snapshot().binding, 1, &duplicate)
+        .unwrap();
+    assert_eq!(
+        session.snapshot().scene.pages[1].geometry.unwrap().bounds(),
+        [10, 10, 90, 90]
+    );
+    let output = String::from_utf8_lossy(session.output_bytes());
+    assert_eq!(output.matches("/Subtype /Widget").count(), 2);
+    assert_eq!(output.matches("/FT /Tx").count(), 2);
+    assert_eq!(output.matches("/T <637573746F6D6572>").count(), 1);
+
+    let delete = command("deletePage", 0, session.snapshot());
+    session
+        .apply_page(session.snapshot().binding, 2, &delete)
+        .unwrap();
+    let output = String::from_utf8_lossy(session.output_bytes());
+    assert_eq!(output.matches("/Subtype /Widget").count(), 1);
+    assert_eq!(output.matches("/FT /Tx").count(), 1);
+    assert!(!output.contains("/T <637573746F6D6572>"));
+}
