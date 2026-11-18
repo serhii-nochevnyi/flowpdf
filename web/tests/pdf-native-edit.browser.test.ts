@@ -116,7 +116,9 @@ for (const locale of ['uk', 'en'] satisfies NativePdfLocale[]) {
     const initialWidth = locale === 'uk' ? 320 : 1280
     await page.viewport(initialWidth, 900)
     const root = document.createElement('div')
-    document.body.append(root)
+    const shortcutBoundary = document.createElement('div')
+    shortcutBoundary.append(root)
+    document.body.append(shortcutBoundary)
     const lifecycle = new AbortController()
     const store = new PdfSourceStore(`flowpdf-native-tracer-${crypto.randomUUID()}`)
     const nativePdf = createNativePdfRuntime(undefined, store)
@@ -166,7 +168,7 @@ for (const locale of ['uk', 'en'] satisfies NativePdfLocale[]) {
       const filename = `contract-${'довгий'.repeat(26)}.pdf`
       const firstText = `Узгодити пункт договору ${'Додаток'.repeat(30)}`
       let semanticShortcut = false
-      root.addEventListener('keydown', (event) => {
+      shortcutBoundary.addEventListener('keydown', (event) => {
         if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'z') semanticShortcut = true
       })
 
@@ -353,7 +355,7 @@ for (const locale of ['uk', 'en'] satisfies NativePdfLocale[]) {
       nativePdf.dispose()
       post.mockRestore()
       click.mockRestore()
-      root.remove()
+      shortcutBoundary.remove()
     }
   }, 60_000)
 }

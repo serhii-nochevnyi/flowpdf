@@ -10,6 +10,7 @@ permissions:
 jobs:
   native_pdf_note_tracer:
     name: native-pdf-note-tracer
+    if: github.repository == 'serhii-nochevnyi/flowpdf' && (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: [self-hosted, flowpdf-phase9]
     timeout-minutes: 30
     env:
