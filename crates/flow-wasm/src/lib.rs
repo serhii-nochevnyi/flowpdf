@@ -1568,7 +1568,14 @@ struct NativeRegistryEntry {
 #[derive(Default)]
 struct NativeRegistry {
     sessions: Vec<NativeRegistryEntry>,
-    closed: VecDeque<(NativeBinding, String, u64)>,
+    closed: VecDeque<NativeClosedSession>,
+}
+
+struct NativeClosedSession {
+    binding: NativeBinding,
+    origin_store_hash: String,
+    request_id: u64,
+    consumed_request: u64,
 }
 
 thread_local! {
@@ -1699,29 +1706,39 @@ impl NativeRegistry {
                 && entry.origin_store_hash == store_hash
         });
         if matches!(request, NativeRequest::Close { .. }) {
-            let consumed_request = if let Some(index) = index {
+            if let Some(index) = index {
                 let current = self.sessions[index].session.snapshot();
                 if current.binding != binding {
                     return Err(NATIVE_REVISION);
                 }
-                current.consumed_request
-            } else {
-                self.closed
-                    .iter()
-                    .find(|(closed, hash, _)| *closed == binding && hash == store_hash)
-                    .map(|(_, _, consumed_request)| *consumed_request)
-                    .ok_or(NATIVE_BINDING)?
-            };
-            if request_id <= consumed_request {
-                return Err("FLOW_PDF_NATIVE_REQUEST_INVALID");
-            }
-            if let Some(index) = index {
+                let consumed_request = current.consumed_request;
+                if request_id <= consumed_request {
+                    return Err("FLOW_PDF_NATIVE_REQUEST_INVALID");
+                }
                 let entry = self.sessions.swap_remove(index);
                 if self.closed.len() == NATIVE_PDF_SESSIONS {
                     self.closed.pop_front();
                 }
-                self.closed
-                    .push_back((binding, entry.origin_store_hash, consumed_request));
+                self.closed.push_back(NativeClosedSession {
+                    binding,
+                    origin_store_hash: entry.origin_store_hash,
+                    request_id,
+                    consumed_request,
+                });
+            } else {
+                let closed = self
+                    .closed
+                    .iter()
+                    .find(|closed| {
+                        closed.binding == binding && closed.origin_store_hash == store_hash
+                    })
+                    .ok_or(NATIVE_BINDING)?;
+                if request_id <= closed.consumed_request {
+                    return Err("FLOW_PDF_NATIVE_REQUEST_INVALID");
+                }
+                if request_id != closed.request_id {
+                    return Err(NATIVE_BINDING);
+                }
             }
             response.status = NativeStatus::Closed;
             return Ok(());
@@ -1747,7 +1764,8 @@ impl NativeRegistry {
                     NativeRequestLookup::Accepted(_) => NativeStatus::Accepted,
                     NativeRequestLookup::Unseen => NativeStatus::Unseen,
                     NativeRequestLookup::ReconciliationRequired
-                        if binding.revision < current.binding.revision =>
+                        if current.binding.revision.saturating_sub(binding.revision)
+                            > NATIVE_REQUEST_HISTORY as u64 =>
                     {
                         NativeStatus::Evicted
                     }
@@ -1958,6 +1976,7 @@ fn verify_native_snapshot(response: &NativeResponse<NativeVerifiedScene>) -> Opt
         || !native_same_session(snapshot.binding, binding)
         || Some(&snapshot.origin_store_hash) != response.origin_store_hash.as_ref()
         || snapshot.consumed_request > MAX_WIRE_ID
+        || snapshot.binding.revision > snapshot.consumed_request
         || snapshot.output_hash != snapshot.scene.output_hash
         || (snapshot.binding.revision == 0) != (snapshot.consumed_request == 0)
         || (snapshot.binding.revision == 0 && snapshot.binding.origin_hash != snapshot.output_hash)
@@ -1974,9 +1993,12 @@ fn verify_native_snapshot(response: &NativeResponse<NativeVerifiedScene>) -> Opt
             revision == base + 1 && consumed == request
         }
         (NativeOperation::Snapshot, NativeStatus::Accepted) => {
-            revision > base && consumed >= request
+            (revision == base + 1 && consumed == request)
+                || (revision > base + 1 && consumed > request)
         }
-        (NativeOperation::Snapshot, NativeStatus::Evicted) => revision > base && consumed > request,
+        (NativeOperation::Snapshot, NativeStatus::Evicted) => {
+            revision.saturating_sub(base) > NATIVE_REQUEST_HISTORY as u64 && consumed > request
+        }
         (NativeOperation::Snapshot, NativeStatus::Unseen) => revision == base && consumed < request,
         _ => false,
     };

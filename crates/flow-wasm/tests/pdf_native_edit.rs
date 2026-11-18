@@ -158,6 +158,10 @@ fn serialized_note_lifecycle_and_fail_closed_wire() {
     assert_eq!(call(native_pdf_close, close.clone())["status"], "closed");
     assert_eq!(call(native_pdf_close, close)["status"], "closed");
     assert_eq!(
+        call(native_pdf_close, bound("close", 7, &latest))["status"],
+        "failed"
+    );
+    assert_eq!(
         call(native_pdf_close, bound("close", 5, &latest))["status"],
         "failed"
     );
@@ -165,6 +169,19 @@ fn serialized_note_lifecycle_and_fail_closed_wire() {
         call(native_pdf_snapshot, bound("snapshot", 7, &latest))["status"],
         "failed"
     );
+}
+
+#[test]
+fn a_skipped_request_is_not_reported_as_evicted_inside_the_history_window() {
+    let (_, initial) = open();
+    let mut later = bound("command", 3, &initial);
+    later["outputHash"] = initial["outputHash"].clone();
+    later["command"] = json!({"kind":"add","page":0,"rect":[1,2,3,4],"contents":"later"});
+    let applied = call(native_pdf_command, later);
+    assert_eq!(applied["status"], "applied");
+    let reply = call(native_pdf_snapshot, bound("snapshot", 2, &initial));
+    assert_eq!(reply["status"], "failed");
+    assert!(reply["snapshot"].is_null());
 }
 
 #[test]

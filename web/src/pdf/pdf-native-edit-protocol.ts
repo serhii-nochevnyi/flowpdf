@@ -305,7 +305,7 @@ export function sameNativeSession(left: NativePdfBinding, right: NativePdfBindin
 function snapshot(value: unknown): value is NativePdfSnapshot {
   return shape(value, 'binding', 'originStoreHash', 'outputHash', 'consumedRequest', 'scene', 'outputHex')
     && binding(value.binding) && isNativeStoreHash(value.originStoreHash) && hash(value.outputHash)
-    && integer(value.consumedRequest, 0) && scene(value.scene) && bytesHex(value.outputHex)
+    && integer(value.consumedRequest, value.binding.revision) && scene(value.scene) && bytesHex(value.outputHex)
     && sameNativeBytes(value.outputHash, value.scene.outputHash)
     && (value.binding.revision === 0) === (value.consumedRequest === 0)
     && (value.binding.revision !== 0 || sameNativeBytes(value.binding.originHash, value.outputHash))
@@ -339,8 +339,11 @@ function isNativeResponse(value: unknown): value is NativePdfResponse {
     case 'open': return value.status === 'opened' && base === 0 && current === 0
     case 'command': return value.status === 'applied' && current === base + 1 && consumed === value.requestId
     case 'snapshot':
-      if (value.status === 'accepted') return current > base && consumed >= value.requestId
-      if (value.status === 'evicted') return current > base && consumed > value.requestId
+      if (value.status === 'accepted') {
+        return (current === base + 1 && consumed === value.requestId)
+          || (current > base + 1 && consumed > value.requestId)
+      }
+      if (value.status === 'evicted') return current - base > NATIVE_PDF_LIMITS.requestHistory && consumed > value.requestId
       return value.status === 'unseen' && current === base && consumed < value.requestId
   }
 }

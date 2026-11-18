@@ -212,6 +212,31 @@ describe('native PDF edit coordinator', () => {
     lane.coordinator.dispose()
   })
 
+  it('rejects an eviction claim inside the retained request history window', async () => {
+    vi.useFakeTimers()
+    const lane = fakePort(20)
+    const initial = await opened(lane)
+    const edit = lane.coordinator.command(note('possibly accepted'))
+    const lost = expect(edit).rejects.toMatchObject({ code: 'FLOW_PDF_NATIVE_REPLY_LOST' })
+    const sent = await lane.take()
+    await vi.advanceTimersByTimeAsync(20)
+    await lost
+
+    const reconciling = lane.coordinator.reconcile()
+    const refused = expect(reconciling).rejects.toMatchObject({ code: 'FLOW_PDF_NATIVE_RESPONSE_INVALID' })
+    const lookup = await lane.take()
+    const reply = addReply(sent.request, initial)
+    const current = {
+      ...reply.snapshot,
+      binding: { ...initial.binding, revision: 2 },
+      consumedRequest: sent.request.requestId + 1,
+    }
+    lane.deliver(lookup, { ...reply, operation: 'snapshot', status: 'evicted', snapshot: current })
+    await refused
+    expect(lane.coordinator.snapshot()).toMatchObject({ phase: 'reconciliationRequired', accepted: initial })
+    lane.coordinator.dispose()
+  })
+
   it('drops queued commands when the worker dies during a mutation', async () => {
     const lane = fakePort()
     const initial = await opened(lane)
