@@ -108,12 +108,14 @@ for (const locale of ['en', 'uk'] as const) {
         revision = 0
       }
 
-      async function choose(key: NativePdfMessage, direction: 'Home' | 'End', value: string) {
+      async function choose(key: NativePdfMessage, value: string) {
         const control = select(key).element()
         if (!(control instanceof HTMLSelectElement)) throw Error('Missing native select')
         control.focus()
         expect(document.activeElement).toBe(control)
-        await userEvent.keyboard(`{${direction}}`)
+        const option = Array.from(control.options).find((entry) => entry.value === value)
+        if (!option) throw Error('Missing native select option')
+        await select(key).selectOptions(option)
         await expect.element(select(key)).toHaveValue(value)
       }
 
@@ -176,10 +178,10 @@ for (const locale of ['en', 'uk'] as const) {
       await activate(button('navigation.previous').element())
       await expect.element(selector).toHaveValue('0')
 
-      await choose('navigation.zoom', 'End', '200')
+      await choose('navigation.zoom', '200')
       await activate(button('navigation.fit').element())
       await expect.element(select('navigation.zoom')).toHaveValue('0')
-      await choose('page.placement', 'Home', 'before')
+      await choose('page.placement', 'before')
       failProjection = true
       await activate(button('navigation.next').element())
       await expect.poll(() => held.resume).toBeTypeOf('function')
@@ -213,7 +215,7 @@ for (const locale of ['en', 'uk'] as const) {
       await expect.element(panel.getByRole('spinbutton', { name: t('geometry.y'), exact: true })).toHaveValue(36)
       await expect.element(panel.getByText(t('geometry.help'), { exact: true })).toBeVisible()
 
-      await choose('page.position', 'End', '2')
+      await choose('page.position', '2')
       await change('page.reorder', 3, 3)
       expect((await readBack()).map(({ annotations }) => annotations.length)).toEqual([0, 0, 1])
       await change('page.earlier', 2, 3)
@@ -256,7 +258,7 @@ for (const locale of ['en', 'uk'] as const) {
       await open(pagePdf(1), 'final.pdf')
       await expect.element(button('page.delete')).toBeDisabled()
       await expect.element(button('page.delete')).toHaveAccessibleDescription(t('page.final'))
-      await choose('page.placement', 'End', 'after')
+      await choose('page.placement', 'after')
       await change('page.insert', 2, 2)
       expect((await readBack()).map(({ annotations }) => annotations.length)).toEqual([1, 0])
 
@@ -286,7 +288,7 @@ for (const locale of ['en', 'uk'] as const) {
       expect(pageSelect.options).toHaveLength(40)
       expect(pageSelect.getBoundingClientRect().height).toBeGreaterThanOrEqual(44)
       expect(pageSelect.getBoundingClientRect().height).toBeLessThanOrEqual(320)
-      await choose('navigation.select', 'End', '39')
+      await choose('navigation.select', '39')
       await expect.element(button('navigation.next')).toBeDisabled()
       expect(panel.element().scrollWidth).toBeLessThanOrEqual(panel.element().clientWidth + 1)
     } finally {
