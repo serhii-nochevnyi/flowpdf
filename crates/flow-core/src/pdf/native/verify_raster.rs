@@ -413,7 +413,6 @@ impl<'a> Interpreter<'a> {
                     path = Path {
                         points: vec![[x, y], [x + w, y], [x + w, y + h], [x, y + h]],
                         closed: true,
-                        rectangle: true,
                     };
                 }
                 "h" if args.is_empty() && !path.closed && !path.points.is_empty() => {
@@ -540,10 +539,8 @@ impl Paint<'_> {
         let PaintKind::Vector(vector) = &self.kind else {
             return Ok(true);
         };
-        if vector
-            .fill_path
-            .as_ref()
-            .is_some_and(|fill| intersects(mark, fill.bounds))
+        if let (Some((_, evenodd)), Some(fill)) = (vector.fill, &vector.fill_path)
+            && fill.fill_intersects_rect(mark, evenodd, work)?
         {
             return Ok(true);
         }
@@ -607,7 +604,6 @@ struct TextPaint {
 struct Path {
     points: Vec<Point>,
     closed: bool,
-    rectangle: bool,
 }
 
 struct Vector {
@@ -647,24 +643,6 @@ impl Vector {
         {
             return Err(UnsupportedProfile);
         }
-        let mut bounds = bounds_of(&points).ok_or(UnsupportedProfile)?;
-        if stroke.is_some() {
-            let pad = if !path.rectangle && points.len() > 2 {
-                10 * state.width
-            } else {
-                (state.width + 1) / 2
-            };
-            bounds = [
-                bounds[0] - pad,
-                bounds[1] - pad,
-                bounds[2] + pad,
-                bounds[3] + pad,
-            ];
-        }
-        if !valid_rect(bounds) {
-            return Err(UnsupportedProfile);
-        }
-        let bounds = state.matrix.bounds(bounds)?;
         spend(memory, points.len() * std::mem::size_of::<Point>())?;
         let fill_path = if fill.is_some() {
             Some(Stencil::single(&points, state.matrix, memory)?)
@@ -676,6 +654,13 @@ impl Vector {
         } else {
             Vec::new()
         };
+        let bounds = fill_path
+            .iter()
+            .chain(&stroke_paths)
+            .map(|stencil| stencil.bounds)
+            .reduce(|[l, b, r, t], [x, y, u, v]| [l.min(x), b.min(y), r.max(u), t.max(v)])
+            .filter(|&bounds| valid_rect(bounds))
+            .ok_or(UnsupportedProfile)?;
         Ok((
             Self {
                 vertices: points,
@@ -821,7 +806,12 @@ impl Stencil {
             .iter()
             .map(|&p| transformed(matrix, p))
             .collect::<VerifyResult<Vec<_>>>()?;
-        Self::new(vec![points])
+        let mut stencil = Self::new(vec![points])?;
+        let bounds = bounds_of(path).ok_or(UnsupportedProfile)?;
+        if valid_rect(bounds) {
+            stencil.bounds = matrix.bounds(bounds)?;
+        }
+        Ok(stencil)
     }
 
     fn new(contours: Vec<Vec<Point>>) -> VerifyResult<Self> {
@@ -868,31 +858,103 @@ impl Stencil {
             })
     }
 
-    fn hits(&self, p: Point, evenodd: bool) -> bool {
-        if !inside(self.bounds, p) {
-            return false;
+    fn fill_intersects_rect(
+        &self,
+        rect @ [left, bottom, right, top]: Rect,
+        evenodd: bool,
+        work: &mut usize,
+    ) -> VerifyResult<bool> {
+        if !intersects(self.bounds, rect) {
+            return Ok(false);
         }
-        let mut winding = 0_i32;
-        for contour in &self.contours {
-            for (&a, &b) in contour
-                .iter()
-                .zip(contour.iter().cycle().skip(1))
-                .take(contour.len())
-            {
-                if a[1] <= p[1] && p[1] < b[1] && cross(sub(b, a), sub(p, a)) > 0 {
-                    winding += 1;
+        spend(work, self.edges * 6 + 1)?;
+        if self.hits_scaled([left + right, bottom + top], 2, evenodd) {
+            return Ok(true);
+        }
+        let segments = self.segments();
+        let mut grouped = vec![false; self.edges];
+        for (index, (start, end)) in segments.clone().enumerate() {
+            if grouped[index] || !crosses_interior(start, end, rect) {
+                continue;
+            }
+            spend(work, self.edges * 32 + 1)?;
+            // @invariant: Coincident edges are fill boundaries only where their net winding changes coverage.
+            let axis = usize::from(start[0] == end[0]);
+            let direction = sub(end, start);
+            let mut events = Vec::new();
+            for (index, (a, b)) in segments.clone().enumerate() {
+                if a != b
+                    && cross(direction, sub(a, start)) == 0
+                    && cross(direction, sub(b, start)) == 0
+                {
+                    grouped[index] = true;
+                    let change = if a[axis] < b[axis] { 1 } else { -1 };
+                    events.extend([(a, change), (b, -change)]);
                 }
-                if b[1] <= p[1] && p[1] < a[1] && cross(sub(b, a), sub(p, a)) < 0 {
-                    winding -= 1;
+            }
+            events.sort_unstable_by_key(|(point, _)| point[axis]);
+            let mut winding_change = 0;
+            for pair in events.windows(2) {
+                let (start, change) = pair[0];
+                let (end, _) = pair[1];
+                winding_change += change;
+                if is_filled(winding_change, evenodd) && crosses_interior(start, end, rect) {
+                    return Ok(true);
                 }
             }
         }
-        if evenodd {
-            winding % 2 != 0
-        } else {
-            winding != 0
-        }
+        Ok(false)
     }
+
+    fn segments(&self) -> impl Iterator<Item = (Point, Point)> + Clone + '_ {
+        self.contours.iter().flat_map(|contour| {
+            contour
+                .iter()
+                .copied()
+                .zip(contour.iter().copied().cycle().skip(1))
+        })
+    }
+
+    fn hits(&self, p: Point, evenodd: bool) -> bool {
+        inside(self.bounds, p) && self.hits_scaled(p, 1, evenodd)
+    }
+
+    fn hits_scaled(&self, p: Point, scale: i64, evenodd: bool) -> bool {
+        let mut winding = 0_i32;
+        for (a, b) in self.segments() {
+            let a = a.map(|v| v * scale);
+            let b = b.map(|v| v * scale);
+            if a[1] <= p[1] && p[1] < b[1] && cross(sub(b, a), sub(p, a)) > 0 {
+                winding += 1;
+            }
+            if b[1] <= p[1] && p[1] < a[1] && cross(sub(b, a), sub(p, a)) < 0 {
+                winding -= 1;
+            }
+        }
+        is_filled(winding, evenodd)
+    }
+}
+
+fn is_filled(winding: i32, evenodd: bool) -> bool {
+    if evenodd {
+        winding % 2 != 0
+    } else {
+        winding != 0
+    }
+}
+
+fn crosses_interior(a: Point, b: Point, [left, bottom, right, top]: Rect) -> bool {
+    if a[0].max(b[0]) <= left
+        || a[0].min(b[0]) >= right
+        || a[1].max(b[1]) <= bottom
+        || a[1].min(b[1]) >= top
+    {
+        return false;
+    }
+    let direction = sub(b, a);
+    let sides = [[left, bottom], [right, bottom], [right, top], [left, top]]
+        .map(|corner| cross(direction, sub(corner, a)));
+    sides.iter().any(|&side| side < 0) && sides.iter().any(|&side| side > 0)
 }
 
 fn transformed(matrix: Matrix, p: Point) -> VerifyResult<Point> {
@@ -1408,7 +1470,6 @@ mod tests {
                     [1_000, 3_000],
                 ],
                 closed: true,
-                rectangle: true,
             },
             "f",
             Graphics::default(),
@@ -1463,5 +1524,27 @@ mod tests {
         assert_eq!(image_interval(0, 10, 20, -20, 2), Some((1, 2)));
         assert_eq!(image_interval(10, 11, 0, 20, 2), Some((1, 2)));
         assert_eq!(image_interval(20, 21, 0, 20, 2), None);
+    }
+
+    #[test]
+    fn fill_overlap_respects_coincident_edges_and_work_limits() {
+        let rectangle = [[0, 0], [2_000, 0], [2_000, 2_000], [0, 2_000]];
+        let outline = rectangle.repeat(2);
+        let fill =
+            Stencil::single(&outline, Matrix::IDENTITY, &mut MAX_DRAW_BYTES.clone()).unwrap();
+        let crossing = [-1_000, 500, 100, 1_500];
+        assert!(
+            fill.fill_intersects_rect(crossing, false, &mut 1_000)
+                .unwrap()
+        );
+        assert!(
+            !fill
+                .fill_intersects_rect(crossing, true, &mut 1_000)
+                .unwrap()
+        );
+        assert_eq!(
+            fill.fill_intersects_rect(crossing, true, &mut 0),
+            Err(Budget)
+        );
     }
 }

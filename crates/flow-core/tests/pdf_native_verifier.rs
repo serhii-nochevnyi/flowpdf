@@ -175,6 +175,68 @@ fn nearby_stroke_is_preserved_when_its_ink_misses_the_mark() {
 }
 
 #[test]
+fn near_crop_edge_stroke_is_admitted_only_when_its_paint_fits() {
+    let geometry = NativeRedactionGeometry {
+        crop_box: [5_000, 5_000, 95_000, 95_000],
+        ..GEOMETRY
+    };
+    let marks = [NativeRedactionMark {
+        page_id: 91,
+        geometry,
+        rect: [9_000, 9_000, 12_000, 12_000],
+    }];
+    let cropped = "/CropBox [5 5 95 95]";
+    let stroke = |x, endpoint| format!("q 0 1 -1 0 {x} 0 cm 2 w 10 6 m 26 6 l 26 {endpoint} l S Q");
+    let retained = stroke(98, 25);
+    let accepted = pdf(&[(&format!("{SECRET}{retained}"), cropped)], vec![], "");
+    let candidate = pdf(&[(&retained, cropped)], vec![], "");
+    let evidence = verify(&accepted, &candidate, &[91], &marks);
+    assert!(evidence.checks_passed(), "{evidence:?}");
+
+    let changed = pdf(&[(&stroke(98, 24), cropped)], vec![], "");
+    let clipped = pdf(&[(&stroke(101, 25), cropped)], vec![], "");
+    for (candidate, failure) in [
+        (changed, NativeVerificationFailure::RasterMismatch),
+        (clipped, NativeVerificationFailure::UnsupportedProfile),
+    ] {
+        let evidence = verify(&accepted, &candidate, &[91], &marks);
+        assert_eq!(evidence.raster().failure(), Some(failure));
+    }
+}
+
+#[test]
+fn transformed_fill_is_preserved_when_only_its_bounds_meet_the_mark() {
+    let square = "1 0 0 rg 42 46 4 4 re f ";
+    let empty_corner = [mark(91, [41_000, 45_000, 44_000, 48_000])];
+    let crossing = [mark(91, [46_000, 38_000, 50_000, 42_000])];
+    for op in ["f", "f*"] {
+        let triangle =
+            |endpoint| format!("q 0 1 -1 0 90 0 cm 0 g 30 30 m 50 30 l 30 {endpoint} l {op} Q");
+        let retained = triangle(50);
+        let accepted = pdf(&[(&format!("{square}{retained}"), "")], vec![], "");
+        let candidate = pdf(&[(&retained, "")], vec![], "");
+        let evidence = verify(&accepted, &candidate, &[91], &empty_corner);
+        assert!(evidence.checks_passed(), "{evidence:?}");
+
+        let changed = pdf(&[(&triangle(49), "")], vec![], "");
+        let evidence = verify(&accepted, &changed, &[91], &empty_corner);
+        assert_eq!(
+            evidence.raster().failure(),
+            Some(NativeVerificationFailure::RasterMismatch)
+        );
+
+        let expected = pdf(&[(square, "")], vec![], "");
+        let evidence = verify(&accepted, &expected, &[91], &crossing);
+        assert!(evidence.checks_passed(), "{evidence:?}");
+        let evidence = verify(&accepted, &accepted, &[91], &crossing);
+        assert_eq!(
+            evidence.raster().failure(),
+            Some(NativeVerificationFailure::RasterMismatch)
+        );
+    }
+}
+
+#[test]
 fn blank_page_accepts_direct_and_indirect_null_contents() {
     let document = |paint: &str, contents: &str, extra: Option<Vec<u8>>| {
         let mut objects = vec![
