@@ -2326,6 +2326,7 @@ impl NativeRegistryEntry {
                 self.session
                     .cancel_redaction(binding, request_id)
                     .map_err(map_error)?;
+                result.candidate = Some(candidate.clone());
             }
             _ => return Err(NATIVE_DECODE),
         }
@@ -2700,6 +2701,16 @@ fn verify_native_redaction_response(response: &NativeResponse<NativeVerifiedScen
     {
         return None;
     }
+    if redaction.action == Cancel {
+        let candidate = redaction.candidate.as_ref()?;
+        return (response.status == NativeStatus::Redaction
+            && response.snapshot.is_none()
+            && !redaction.published
+            && redaction.verification.is_none()
+            && candidate.valid()
+            && candidate.affected_pages.len() <= redaction.mark_count)
+            .then_some(());
+    }
     let verdict = match (&redaction.candidate, &redaction.verification) {
         (Some(candidate), Some(verification))
             if candidate.valid()
@@ -2738,7 +2749,7 @@ fn verify_native_redaction_response(response: &NativeResponse<NativeVerifiedScen
         return None;
     }
     let valid = match redaction.action {
-        AddMark | RemoveMark | ClearMarks | Cancel => {
+        AddMark | RemoveMark | ClearMarks => {
             !redaction.published
                 && verdict.is_none()
                 && (redaction.action != ClearMarks || redaction.mark_count == 0)
@@ -2746,7 +2757,7 @@ fn verify_native_redaction_response(response: &NativeResponse<NativeVerifiedScen
         Stage => !redaction.published && verdict == Some(Pending),
         Verify => !redaction.published && verdict.is_some_and(|status| status != Pending),
         Status => true,
-        Publish | ReadPublished => false,
+        Publish | ReadPublished | Cancel => false,
     };
     valid.then_some(())
 }

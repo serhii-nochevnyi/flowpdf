@@ -266,6 +266,49 @@ fn redaction_wire_releases_only_the_verified_exact_output() {
 }
 
 #[test]
+fn cancelling_a_verified_redaction_keeps_the_base_and_prevents_publication() {
+    let source = redaction_pdf(100);
+    let opened = call(native_pdf_open, open_request(source.as_bytes()));
+    let base = &opened["snapshot"];
+    let page = &base["pageState"]["order"][0];
+    let start = |id, action| call(native_pdf_redaction, redaction_request(id, base, action));
+    let added = start(
+        2,
+        json!({"kind":"addMark","pageId":page,"rect":[12000,12000,13000,13000]}),
+    );
+    assert_eq!(added["redaction"]["markCount"], 1);
+    status_only(&added);
+    let staged = start(3, json!({"kind":"stage"}));
+    status_only(&staged);
+    let candidate = &staged["redaction"]["candidate"];
+    let verified = start(3, json!({"kind":"verify","candidate":candidate}));
+    assert_eq!(verified["redaction"]["verification"]["status"], "passed");
+    status_only(&verified);
+
+    let cancelled = start(3, json!({"kind":"cancel","candidate":candidate}));
+    status_only(&cancelled);
+    assert_eq!(cancelled["redaction"]["markCount"], 1);
+    assert_eq!(&cancelled["redaction"]["candidate"], candidate);
+    assert!(cancelled["redaction"]["verification"].is_null());
+    for kind in ["verify", "publish", "readPublished"] {
+        let reply = start(3, json!({"kind":kind,"candidate":candidate}));
+        assert_eq!(reply["status"], "failed");
+        status_only(&reply);
+    }
+    let stale_stage = start(3, json!({"kind":"stage"}));
+    assert_eq!(stale_stage["status"], "failed");
+    status_only(&stale_stage);
+    assert_eq!(
+        call(native_pdf_snapshot, bound("snapshot", 4, base))["snapshot"],
+        *base
+    );
+    let next = start(4, json!({"kind":"stage"}));
+    status_only(&next);
+    assert_eq!(next["redaction"]["markCount"], 1);
+    assert_eq!(next["redaction"]["verification"]["status"], "pending");
+}
+
+#[test]
 fn redaction_wire_retains_marks_when_only_some_checks_pass() {
     let source = redaction_pdf(3_000);
     let opened = call(native_pdf_open, open_request(source.as_bytes()));

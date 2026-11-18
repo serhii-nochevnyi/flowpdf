@@ -766,6 +766,10 @@ function redactionVerification(value: unknown, pages: number): value is NativePd
 function redactionResult(value: unknown, snapshotStatus: unknown): value is NativePdfRedactionResult {
   if (!shape(value, 'action', 'acceptedHash', 'markCount', 'candidate', 'verification', 'published')
     || !hash(value.acceptedHash) || !integer(value.markCount, 0, 1024) || typeof value.published !== 'boolean') return false
+  if (value.action === 'cancel') {
+    return snapshotStatus === 'redaction' && !value.published && value.verification === null
+      && redactionCandidate(value.candidate) && value.candidate.affectedPages.length <= value.markCount
+  }
   let status: NativePdfVerificationStatus | null = null
   if (redactionCandidate(value.candidate)) {
     const count = value.candidate.affectedPages.length
@@ -777,8 +781,7 @@ function redactionResult(value: unknown, snapshotStatus: unknown): value is Nati
   if (snapshotStatus === 'published') return (value.action === 'publish' || value.action === 'readPublished') && value.published
   switch (value.action) {
     case 'addMark':
-    case 'removeMark':
-    case 'cancel': return !value.published && status === null
+    case 'removeMark': return !value.published && status === null
     case 'clearMarks': return !value.published && status === null && value.markCount === 0
     case 'stage': return !value.published && status === 'pending'
     case 'verify': return !value.published && status !== null && status !== 'pending'
@@ -876,7 +879,7 @@ export function matchesNativeResponse(request: NativePdfRequest, response: Nativ
     || !sameNativeBytes(request.acceptedHash, response.redaction.acceptedHash)) return false
   const actual = response.redaction.candidate
   const action = request.action
-  if (action.kind === 'cancel' || !('candidate' in action)) return true
+  if (!('candidate' in action)) return true
   const expected = action.candidate
   if (actual === null) return action.kind === 'status' && !response.redaction.published
   if (expected === null) return action.kind === 'status' && !response.redaction.published

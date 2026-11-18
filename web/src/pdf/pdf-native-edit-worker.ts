@@ -78,6 +78,7 @@ function verifyReply(request: NativePdfRequest, json: string, verify: RustVerifi
 
 export function installNativePdfWorker(scope: NativePdfWorkerScope, startup: Promise<NativePdfWasmBoundary>): void {
   const ready = startup.then((wasm) => wasm, () => null)
+  let failed = false
   scope.onmessage = ({ data }) => {
     const dispatchId = nativeDispatchId(data)
     if (dispatchId === null) return
@@ -87,8 +88,8 @@ export function installNativePdfWorker(scope: NativePdfWorkerScope, startup: Pro
     }
     const request = freezeNativeDto(structuredClone(data.request))
     void ready.then((wasm) => {
-      if (wasm === null) {
-        scope.postMessage({ dispatchId, type: 'failed', code: STARTUP })
+      if (failed || wasm === null) {
+        scope.postMessage({ dispatchId, type: 'failed', code: failed ? WORKER_FAILED : STARTUP })
         return
       }
       let response: NativePdfWorkerResponse
@@ -100,8 +101,12 @@ export function installNativePdfWorker(scope: NativePdfWorkerScope, startup: Pro
         verifyReply(request, json, (value) => wasm.verify_native_pdf_response(value))
         response = { dispatchId, type: 'response', json }
       } catch (error: unknown) {
-        const code = error instanceof NativePdfWorkerError && error.code === REQUEST_INVALID
-          ? REQUEST_INVALID : RESPONSE_INVALID
+        if (!(error instanceof NativePdfWorkerError)) {
+          failed = true
+          scope.postMessage({ dispatchId, type: 'failed', code: WORKER_FAILED })
+          return
+        }
+        const code = error.code === REQUEST_INVALID ? REQUEST_INVALID : RESPONSE_INVALID
         response = { dispatchId, type: 'failed', code }
       }
       scope.postMessage(response)

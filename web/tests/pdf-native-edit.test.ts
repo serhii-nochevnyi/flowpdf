@@ -691,13 +691,15 @@ function redactionReply(
   status: NativePdfRedactionVerification['status'] = 'pending',
 ): Extract<NativePdfResponse, { status: 'redaction' }> {
   if (request.operation !== 'redaction') throw new Error('expected redaction')
+  const action = request.action
+  if (action.kind === 'cancel') candidate ??= action.candidate
   const check = { status, coveredPages: status === 'passed' ? 1 : 0 }
+  const verification = candidate === null || action.kind === 'cancel' ? null : { status, structure: check, text: check, raster: check }
   return {
     ...boundRedactionReply(request), status: 'redaction', snapshot: null,
     redaction: {
-      action: request.action.kind, acceptedHash: request.acceptedHash, markCount: 1,
-      candidate, verification: candidate === null ? null : { status, structure: check, text: check, raster: check },
-      published: false,
+      action: action.kind, acceptedHash: request.acceptedHash, markCount: 1,
+      candidate, verification, published: false,
     },
   }
 }
@@ -727,6 +729,37 @@ function redactionAction(dispatch: NativePdfWorkerRequest): NativePdfRedactionAc
 
 describe('native redaction quarantine', () => {
   afterEach(() => { vi.useRealTimers() })
+
+  it.each(['operation', 'response verifier'] as const)('stops processing after a WASM %s throws during verification', async (failure) => {
+    const posted: NativePdfWorkerResponse[] = []
+    const scope: NativePdfWorkerScope = { onmessage: null, postMessage: (message) => { posted.push(message) } }
+    const run = vi.fn((json: string) => {
+      const request = JSON.parse(json) as NativePdfRequest
+      if (request.operation !== 'redaction' || request.action.kind !== 'verify') throw new Error('unexpected operation')
+      if (failure === 'operation') throw new WebAssembly.RuntimeError('private verification context')
+      return JSON.stringify(redactionReply(request, redactionCandidate, 'unavailable'))
+    })
+    const verify = vi.fn((_json: string) => { throw new WebAssembly.RuntimeError('private verification context') })
+    installNativePdfWorker(scope, Promise.resolve({
+      native_pdf_open: run, native_pdf_command: run, native_pdf_snapshot: run,
+      native_pdf_close: run, native_pdf_redaction: run, verify_native_pdf_response: verify,
+    }))
+    const base = openReply({ protocolVersion: 1, operation: 'open', requestId: 1,
+      epoch: Array<number>(16).fill(1), originStoreHash: storeHash, bytesHex: '010203',
+    }).snapshot
+    const request = {
+      protocolVersion: 1, operation: 'redaction', requestId: 2,
+      binding: base.binding, originStoreHash: base.originStoreHash, acceptedHash: base.outputHash,
+    }
+    for (const [index, kind] of (['verify', 'status', 'cancel'] as const).entries()) {
+      scope.onmessage?.({ data: { dispatchId: index + 1, request: { ...request, action: { kind, candidate: redactionCandidate } } } })
+    }
+    await vi.waitFor(() => expect(posted).toEqual([1, 2, 3].map((dispatchId) => ({
+      dispatchId, type: 'failed', code: 'FLOW_PDF_NATIVE_WORKER_FAILED',
+    }))), { interval: 1 })
+    expect(run).toHaveBeenCalledOnce()
+    expect(verify).toHaveBeenCalledTimes(failure === 'operation' ? 0 : 1)
+  })
 
   it('posts only closed status bodies or stable errors for unpublished operations', async () => {
     const posted: NativePdfWorkerResponse[] = []
@@ -912,6 +945,25 @@ describe('native redaction quarantine', () => {
     lane.deliver(cancel, redactionReply(cancel.request))
     await cancelled
     expect(lane.coordinator.snapshot()).toMatchObject({ phase: 'ready', accepted: initial, redaction: { markCount: 1 } })
+    expect(lane.sent).toEqual([])
+    lane.coordinator.dispose()
+  })
+
+  it('keeps downloads locked when cancellation acknowledges a different candidate', async () => {
+    const lane = fakePort()
+    const initial = await redactionMarked(lane)
+    const applying = lane.coordinator.applyRedaction()
+    const refused = expect(applying).rejects.toMatchObject({ code: 'FLOW_PDF_NATIVE_RESPONSE_INVALID' })
+    const stage = await lane.take()
+    lane.deliver(stage, redactionReply(stage.request, redactionCandidate))
+    const verify = await lane.take()
+    lane.deliver(verify, redactionReply(verify.request, redactionCandidate, 'inconclusive'))
+    const cancel = await lane.take()
+    expect(redactionAction(cancel)).toEqual({ kind: 'cancel', candidate: redactionCandidate })
+    lane.deliver(cancel, redactionReply(cancel.request, { ...redactionCandidate, hash: hash(71) }))
+    await refused
+    expect(lane.coordinator.snapshot()).toMatchObject({ phase: 'reconciliationRequired', accepted: initial })
+    expect(lane.coordinator.outputBytes()).toBeNull()
     expect(lane.sent).toEqual([])
     lane.coordinator.dispose()
   })
