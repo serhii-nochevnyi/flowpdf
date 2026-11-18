@@ -193,11 +193,12 @@ function sameFieldObject(left: NativePdfFieldView, right: NativePdfFieldView) {
 export function rebindNativeField(
   prior: NativePdfFieldView, fields: readonly NativePdfFieldView[], page: number,
 ): NativePdfFieldView | undefined {
-  return fields.find((field) => field.page === page && sameFieldObject(prior, field)
+  const matches = fields.filter((field) => field.page === page && sameFieldObject(prior, field)
     && field.name === prior.name && field.kind === prior.kind && field.value === prior.value
     && field.checked === prior.checked && field.canEditAppearance === prior.canEditAppearance
     && field.refusal === prior.refusal && (prior.rect && field.rect
       ? sameNativeBytes(prior.rect, field.rect) : prior.rect === field.rect))
+  return matches.length === 1 ? matches[0] : undefined
 }
 
 function draftFromField(field: NativePdfFieldView, snapshot: NativePdfSnapshot): FieldDraft | null {
@@ -758,7 +759,7 @@ export function PdfNativeEditPanel({
     && !/[\u0000-\u001f\u007f-\u009f\uD800-\uDFFF]/u.test(fieldValues.value))
   const fieldReason = selectedField?.refusal ? fieldRefusalReasons[selectedField.refusal] : null
   const readOnlyFields = fields.filter((field) => field.refusal !== null)
-  const fieldControls = canEdit && !composing
+  const fieldControls = canEdit && !navigationBlocked && !composing
   const fieldDescription = `${id}-field-help ${id}-field-feedback`
   const textPage = snapshot?.scene.textPages?.find((entry) => entry.page === page?.id)
   const islands = verifiedIslands(snapshot, pageId)
@@ -1129,11 +1130,14 @@ export function PdfNativeEditPanel({
       const index = destination(field.page)
       return index === undefined ? undefined : rebindNativeField(field, nextFields, index)
     }
-    for (const [key, saved] of savedFieldDrafts.current) {
+    const drafts = [...savedFieldDrafts.current.values()]
+    savedFieldDrafts.current.clear()
+    for (const saved of drafts) {
       const field = saved.field && rebind(saved.field)
       const page = destination(saved.draft.page)
-      if (field === undefined || page === undefined) savedFieldDrafts.current.delete(key)
-      else savedFieldDrafts.current.set(key, { ...saved, field, draft: { ...saved.draft, page } })
+      if (field !== undefined && page !== undefined) {
+        savedFieldDrafts.current.set(field ? fieldKey(field) : '', { ...saved, field, draft: { ...saved.draft, page } })
+      }
     }
     if (command && isNativeFieldCommand(command) && ('name' in command
       || (selectedField && 'field' in command && sameNativeBytes(command.field, selectedField.id)))) {
@@ -1351,6 +1355,7 @@ export function PdfNativeEditPanel({
       uncertain.current = null
       if ('pageCommand' in pending) {
         if (result.status === 'unseen') {
+          publishFieldSelection(result.snapshot, undefined, retainedPageIndexes(pending.before, result.snapshot))
           setAccepted((current) => current && { ...current, snapshot: result.snapshot })
           setStatus(['status.unseenNoDraft'])
         } else {
@@ -1367,8 +1372,8 @@ export function PdfNativeEditPanel({
       let focusTarget = `${id}-${'draft' in pending ? 'notes' : isNativeFieldCommand(pending.command) ? 'field-selector' : pending.command.kind === 'replaceText' ? 'text-islands' : 'object-selector'}`
       if (result.status === 'unseen') {
         setAccepted((current) => current && { ...current, snapshot: result.snapshot })
+        publishFieldSelection(result.snapshot)
         if (isNativeFieldCommand(pending.command)) {
-          publishFieldSelection(result.snapshot)
           setStatus([fieldDraft ? 'status.unseen' : 'status.unseenNoDraft'])
         } else if (!('draft' in pending) && pending.command.kind !== 'replaceText') {
           const pageIndex = result.snapshot.scene.pages.findIndex((item) => item.id === pending.pageId)
@@ -1843,7 +1848,7 @@ export function PdfNativeEditPanel({
             <h3 id={`${id}-fields`}>{t('field.title')}</h3>
             <label>{t('field.select')}
               <select id={`${id}-field-selector`} value={selectedField ? fieldKey(selectedField) : ''}
-                disabled={busy !== null || composing || needsReconcile} aria-describedby={`${id}-field-state`}
+                disabled={navigationBlocked || composing || needsReconcile} aria-describedby={`${id}-field-state`}
                 onChange={(event) => {
                   const key = event.currentTarget.value
                   chooseField(fields.find((field) => fieldKey(field) === key) ?? null)
@@ -1873,7 +1878,7 @@ export function PdfNativeEditPanel({
               })}</p>}
               {verifiedFieldDraft && <p>{t('field.owned')}</p>}
             </div>
-            {(!selectedField || verifiedFieldDraft) && <fieldset className="native-stack" disabled={!canEdit}>
+            {(!selectedField || verifiedFieldDraft) && <fieldset className="native-stack" disabled={!canEdit || navigationBlocked}>
               <legend>{t(selectedField ? (fieldValues.type === 'text' ? 'field.text' : 'field.checkbox') : 'field.new')}</legend>
               {!selectedField && <label>{t('field.type')}
                 <select value={fieldValues.type} disabled={composing}

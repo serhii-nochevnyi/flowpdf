@@ -531,6 +531,7 @@ describe('native field drafts', () => {
   it('rebinds only the same verified field across a page operation', () => {
     const next = { ...field, id: hash.map(() => 43), page: 1 }
     expect(rebindNativeField(field, [next], 1)).toBe(next)
+    expect(rebindNativeField(field, [next, { ...next, id: hash }], 1)).toBeUndefined()
     expect(rebindNativeField(field, [next], 0)).toBeUndefined()
     expect(rebindNativeField(field, [{ ...next, object: { ...ref, objectNumber: 2 } }], 1)).toBeUndefined()
     expect(rebindNativeField(field, [{ ...next, value: 'Different' }], 1)).toBeUndefined()
