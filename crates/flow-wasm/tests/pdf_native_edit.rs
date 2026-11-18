@@ -3,14 +3,16 @@ use flow_wasm::{
     verify_native_pdf_response,
 };
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 
-fn pdf_hex() -> String {
+fn pdf(width: u32) -> String {
     let mut pdf = "%PDF-1.7\n".to_owned();
     let mut offsets = vec![];
+    let page = format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {width} 792] >>");
     for (index, value) in [
         "<< /Type /Catalog /Pages 2 0 R >>",
         "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
-        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>",
+        &page,
     ]
     .into_iter()
     .enumerate()
@@ -26,7 +28,7 @@ fn pdf_hex() -> String {
     pdf.push_str(&format!(
         "trailer\n<< /Size 4 /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n"
     ));
-    pdf.bytes().map(|byte| format!("{byte:02x}")).collect()
+    pdf
 }
 
 fn call(export: fn(String) -> String, request: Value) -> Value {
@@ -35,11 +37,48 @@ fn call(export: fn(String) -> String, request: Value) -> Value {
     serde_json::from_str(&response).unwrap()
 }
 
-fn open() -> (Value, Value) {
-    let request = json!({
+fn open_request(bytes: &[u8]) -> Value {
+    let bytes_hex: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
+    json!({
         "protocolVersion": 1, "operation": "open", "requestId": 1,
-        "epoch": vec![1; 16], "originStoreHash": "ab".repeat(32), "bytesHex": pdf_hex(),
-    });
+        "epoch": vec![1; 16], "originStoreHash": format!("{:x}", Sha256::digest(bytes)),
+        "bytesHex": bytes_hex,
+    })
+}
+
+#[test]
+fn open_verifies_source_bytes_and_returns_verifiable_reader_refusals() {
+    let original = pdf(612);
+    let replacement = pdf(600);
+    let replacement_request = open_request(replacement.as_bytes());
+    let mut stale = replacement_request.clone();
+    stale["originStoreHash"] = open_request(original.as_bytes())["originStoreHash"].clone();
+
+    for (request, code) in [
+        (stale, "FLOW_PDF_NATIVE_BINDING_MISMATCH"),
+        (open_request(b"ordinary text"), "FLOW_PDF_NATIVE_IMPORT_REFUSED"),
+    ] {
+        let response = call(native_pdf_open, request.clone());
+        assert_eq!(response["status"], "failed");
+        assert_eq!(response["code"], code);
+        assert_eq!(response["requestId"], request["requestId"]);
+        assert_eq!(response["originStoreHash"], request["originStoreHash"]);
+        assert!(response["binding"].is_null());
+        assert!(response["snapshot"].is_null());
+    }
+
+    let response = call(native_pdf_open, replacement_request.clone());
+    assert_eq!(response["status"], "opened", "{response}");
+    assert_eq!(response["originStoreHash"], replacement_request["originStoreHash"]);
+    assert_eq!(
+        response["binding"]["originHash"],
+        json!(blake3::hash(replacement.as_bytes()).as_bytes())
+    );
+    assert_eq!(call(native_pdf_open, open_request(original.as_bytes()))["status"], "opened");
+}
+
+fn open() -> (Value, Value) {
+    let request = open_request(pdf(612).as_bytes());
     let response = call(native_pdf_open, request.clone());
     assert_eq!(response["status"], "opened", "{response}");
     (request, response["snapshot"].clone())

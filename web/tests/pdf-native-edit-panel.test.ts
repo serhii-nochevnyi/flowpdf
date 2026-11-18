@@ -5,6 +5,7 @@ import {
   PdfNativeEditPanel,
   nativeDownloadName,
   nativeMarkerPosition,
+  nativeNoteDraftAfter,
   nativeNoteRect,
   nativeNoteTextError,
   type NativePdfAcceptedDocument,
@@ -15,7 +16,7 @@ import { NATIVE_PDF_LIMITS, type NativePdfAnnotation } from '../src/pdf/pdf-nati
 const geometry = { bounds: [-10, 20, 190, 120], rotation: 90 } as const
 const hash = Array<number>(32).fill(42)
 const ref = { objectNumber: 1, generation: 0 }
-const note = (id: number): NativePdfAnnotation => ({
+const note = (id: number): Extract<NativePdfAnnotation, { kind: 'plainNote' }> => ({
   kind: 'plainNote', id, object: { ...ref, objectNumber: id },
   contents: '<script>Привіт & hello</script>', rect: [0, 30, 24, 54],
 })
@@ -34,6 +35,20 @@ const dependencies = {
 }
 
 describe('native note workspace', () => {
+  it('keeps the other pending fields whether Save or Move is accepted first', () => {
+    const original = note(2)
+    const pending = { note: 2, contents: 'Edited', x: '20', y: '30' }
+    const edited = { ...original, contents: pending.contents }
+    const moved = { ...original, rect: [10, 50, 34, 74] as const }
+    const afterSave = nativeNoteDraftAfter('edit', pending, edited, geometry)
+    const afterMove = nativeNoteDraftAfter('move', pending, moved, geometry)
+    expect(afterSave).toEqual(pending)
+    expect(afterMove).toEqual(pending)
+    const final = { ...edited, rect: moved.rect }
+    expect(nativeNoteDraftAfter('move', afterSave, final, geometry)).toEqual(pending)
+    expect(nativeNoteDraftAfter('edit', afterMove, final, geometry)).toEqual(pending)
+  })
+
   it('blocks blank, composing, malformed and over-limit UTF-8 drafts', () => {
     expect(nativeNoteTextError('   ', false)).toBe('required')
     expect(nativeNoteTextError('Привіт', true)).toBe('composing')

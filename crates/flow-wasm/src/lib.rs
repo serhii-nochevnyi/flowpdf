@@ -3,8 +3,9 @@
 #![forbid(unsafe_code)]
 
 use flow_core::pdf::{
-    NATIVE_MAX_NOTE_BYTES, NATIVE_REQUEST_HISTORY, NativeBinding, NativeEditLimits,
-    NativeNoteCommand, NativePdfNoteScene, NativePdfSession, NativeRequestLookup, PdfObjectRef,
+    NATIVE_MAX_NOTE_BYTES, NATIVE_REQUEST_HISTORY, NativeBinding, NativeEditError, NativeEditLimits,
+    NativeNoteCommand, NativePdfNoteScene, NativePdfSession, NativeRequestLookup,
+    NativeSessionError, PdfObjectRef,
 };
 use flow_core::{
     ApiResponse, ApplyCommandRequest, AssetStageRequest, AssetStageResponse, AuditedRecoverRequest,
@@ -14,7 +15,7 @@ use flow_core::{
     MigrateDocumentRequest, MigrateDocumentResult, OperationResult, PdfDocumentCandidate,
     PdfDocumentSummary, PdfExportManifest, PdfExportOptions, PdfExportRequest,
     PdfFontManifestIdentity, PdfFormPlan, PdfInternalLink, PdfMetadataOptions, PdfOcrCandidate,
-    PdfOutlineEntry, PdfPagePlan, PdfReaderLimits, PdfReconstructionRequest,
+    PdfOutlineEntry, PdfPagePlan, PdfReadError, PdfReaderLimits, PdfReconstructionRequest,
     PdfReconstructionResult, PdfRecoveryExpectation, PdfReproducibilityInputs, PdfReviewDecision,
     PdfScene, PdfSceneRequest, PlanPersistenceCommitRequest, PlanStandaloneAuditRequest,
     RecoverRequest, RecoverResult, UkrainianHyphenation, VOICE_PROTOCOL_VERSION,
@@ -24,6 +25,7 @@ use flow_core::{
     verify_pdf_document_candidate, verify_pdf_reconstruction_result,
 };
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::{cell::RefCell, collections::VecDeque, io::Write};
 use wasm_bindgen::prelude::*;
 
@@ -1315,11 +1317,13 @@ const NATIVE_PDF_SESSIONS: usize = 2;
 const NATIVE_PDF_RETAINED: usize = 8 * 1024 * 1024;
 const MAX_WIRE_ID: u64 = (1 << 53) - 1;
 const MAX_NATIVE_REVISION: u64 = MAX_WIRE_ID - (1 << 48);
+const NATIVE_IMPORT_REFUSED: &str = "FLOW_PDF_NATIVE_IMPORT_REFUSED";
 const NATIVE_DECODE: &str = "FLOW_PDF_NATIVE_REQUEST_DECODE";
 const NATIVE_BINDING: &str = "FLOW_PDF_NATIVE_BINDING_MISMATCH";
 const NATIVE_REVISION: &str = "FLOW_PDF_NATIVE_REVISION_MISMATCH";
 const NATIVE_RECONCILE: &str = "FLOW_PDF_NATIVE_RECONCILIATION_REQUIRED";
 const NATIVE_BUDGET: &str = "FLOW_PDF_NATIVE_BUDGET_EXHAUSTED";
+const NATIVE_POSTCONDITION: &str = "FLOW_PDF_NATIVE_POSTCONDITION_FAILED";
 
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1659,6 +1663,24 @@ fn native_result_hash(response: &impl Serialize) -> Result<String, serde_json::E
     Ok(writer.0.finalize().to_hex().to_string())
 }
 
+fn native_session_error_code(error: NativeSessionError, reader_refusal: &'static str) -> &'static str {
+    match error {
+        NativeSessionError::Graph(NativeEditError::Reader(
+            PdfReadError::InputSizeLimit
+            | PdfReadError::ObjectLimit
+            | PdfReadError::NestingLimit
+            | PdfReadError::TokenLimit
+            | PdfReadError::StreamLimit
+            | PdfReadError::DecodedStreamLimit
+            | PdfReadError::PageCountLimit
+            | PdfReadError::NumericLimit
+            | PdfReadError::ImageLimit,
+        )) => NATIVE_BUDGET,
+        NativeSessionError::Graph(NativeEditError::Reader(_)) => reader_refusal,
+        error => error.code(),
+    }
+}
+
 impl NativeRegistry {
     fn execute<'a>(
         &'a mut self,
@@ -1677,6 +1699,9 @@ impl NativeRegistry {
                 return Err(NATIVE_BUDGET);
             }
             let bytes = native_decode_pdf(&bytes_hex).map_err(|()| NATIVE_DECODE)?;
+            if encode_hex(&Sha256::digest(&bytes)) != origin_store_hash {
+                return Err(NATIVE_BINDING);
+            }
             let limits = NativeEditLimits {
                 max_source_bytes: NATIVE_PDF_BYTES,
                 max_output_bytes: NATIVE_PDF_BYTES,
@@ -1685,7 +1710,7 @@ impl NativeRegistry {
                 ..NativeEditLimits::default()
             };
             let session = NativePdfSession::open_scoped(&bytes, limits, epoch)
-                .map_err(|error| error.code())?;
+                .map_err(|error| native_session_error_code(error, NATIVE_IMPORT_REFUSED))?;
             if !native_binding_valid(session.snapshot().binding) {
                 return Err(NATIVE_BUDGET);
             }
@@ -1812,7 +1837,7 @@ impl NativeRegistryEntry {
         let receipt = self
             .session
             .apply(binding, request_id, command)
-            .map_err(|error| error.code())?;
+            .map_err(|error| native_session_error_code(error, NATIVE_POSTCONDITION))?;
         if receipt.binding.revision < previous_revision {
             return Err(NATIVE_RECONCILE);
         }
@@ -2043,6 +2068,10 @@ pub fn verify_native_pdf_response(response_json: String) -> bool {
         (_, NativeStatus::Failed) => {
             response.snapshot.is_none()
                 && response.code.as_ref().is_some_and(|code| {
+                    if code == NATIVE_IMPORT_REFUSED {
+                        return response.operation == NativeOperation::Open
+                            && response.request_id > 0;
+                    }
                     matches!(
                         code.as_str(),
                         NATIVE_DECODE
@@ -2057,7 +2086,7 @@ pub fn verify_native_pdf_response(response_json: String) -> bool {
                             | "FLOW_PDF_NATIVE_REQUEST_INVALID"
                             | "FLOW_PDF_NATIVE_REQUEST_CONFLICT"
                             | "FLOW_PDF_NATIVE_TARGET_UNAVAILABLE"
-                            | "FLOW_PDF_NATIVE_POSTCONDITION_FAILED"
+                            | NATIVE_POSTCONDITION
                     )
                 })
                 && if response.request_id == 0 {
@@ -2081,4 +2110,39 @@ pub fn verify_native_pdf_response(response_json: String) -> bool {
         }
     };
     valid && native_result_hash(&response).is_ok_and(|actual| actual == supplied)
+}
+
+#[cfg(test)]
+mod native_wire_tests {
+    use super::*;
+
+    #[test]
+    fn nested_reader_failures_use_verifiable_native_codes() {
+        let binding = NativeBinding {
+            epoch: [1; 16],
+            session_id: 1,
+            origin_hash: [2; 32],
+            revision: 0,
+        };
+        for (operation, reader_refusal) in [
+            (NativeOperation::Open, NATIVE_IMPORT_REFUSED),
+            (NativeOperation::Command, NATIVE_POSTCONDITION),
+        ] {
+            for (reader_error, expected) in [
+                (PdfReadError::DecodedStreamLimit, NATIVE_BUDGET),
+                (PdfReadError::TokenLimit, NATIVE_BUDGET),
+                (PdfReadError::Syntax, reader_refusal),
+            ] {
+                let mut response = native_response::<NativeVerifiedScene>(operation);
+                response.request_id = 2;
+                response.binding = (operation == NativeOperation::Command).then_some(binding);
+                response.origin_store_hash = Some("ab".repeat(32));
+                let error = NativeEditError::Reader(reader_error).into();
+                let code = native_session_error_code(error, reader_refusal);
+                assert_eq!(code, expected);
+                response.code = Some(code.to_owned());
+                assert!(verify_native_pdf_response(serialize_native_response(response)));
+            }
+        }
+    }
 }
