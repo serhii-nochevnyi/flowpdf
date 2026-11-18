@@ -17,7 +17,7 @@ import {
   type NativePdfAcceptedDocument,
 } from '../src/pdf/pdf-native-edit-panel.js'
 import { nativePdfMessages, nativePdfText } from '../src/pdf/pdf-native-edit-messages.js'
-import { NATIVE_PDF_LIMITS, type NativePdfAnnotation, type NativePdfTextIsland } from '../src/pdf/pdf-native-edit-protocol.js'
+import { NATIVE_PDF_LIMITS, type NativePdfAnnotation, type NativePdfObjectPage, type NativePdfTextIsland } from '../src/pdf/pdf-native-edit-protocol.js'
 
 const geometry = { bounds: [-10, 20, 190, 120], rotation: 90 } as const
 const hash = Array<number>(32).fill(42)
@@ -387,19 +387,30 @@ describe('native object tools', () => {
       { kind: 'removeObject', target: { page: 0, id: first.id, profile: first.profile } })).toBeUndefined()
   })
 
-  it('renders only admitted profile controls and localized refusal details', () => {
+  it('renders only admitted profile controls and associates each refusal with the object region', () => {
     for (const locale of ['en', 'uk'] as const) {
       const document = documentWith([])
-      const markup = (refusal: 'FLOW_PDF_NATIVE_OBJECT_STATE' | null) => renderToStaticMarkup(createElement(PdfNativeEditPanel, {
+      const markup = (refusal: NativePdfObjectPage['refusal']) => renderToStaticMarkup(createElement(PdfNativeEditPanel, {
         ...dependencies, locale, initialDocument: { ...document, snapshot: { ...document.snapshot,
           scene: { ...document.snapshot.scene, objectPages: [{ page: 0, objects: [], canAdd: !refusal, refusal }] } } },
       }))
-      expect(markup(null)).toContain(nativePdfText(locale, 'object.profile.image'))
-      expect(markup(null)).toContain(nativePdfText(locale, 'object.profile.polygon'))
-      expect(markup(null)).toContain(nativePdfText(locale, 'object.geometry.help'))
-      expect(markup(null)).toContain(nativePdfText(locale, 'object.file'))
-      expect(markup('FLOW_PDF_NATIVE_OBJECT_STATE')).not.toContain(nativePdfText(locale, 'object.profile.polygon'))
-      expect(markup('FLOW_PDF_NATIVE_OBJECT_STATE')).toContain(nativePdfText(locale, 'object.reason.state'))
+      const admitted = markup(null)
+      for (const message of ['object.profile.image', 'object.profile.line', 'object.profile.rectangle',
+        'object.profile.polygon', 'object.geometry.help', 'object.file'] as const) {
+        expect(admitted).toContain(nativePdfText(locale, message))
+      }
+      for (const [code, message] of [
+        ['FLOW_PDF_NATIVE_OBJECT_STATE', 'object.reason.state'],
+        ['FLOW_PDF_NATIVE_OBJECT_GEOMETRY', 'object.reason.geometry'],
+        ['FLOW_PDF_NATIVE_OBJECT_ASSET', 'object.reason.asset'],
+        ['FLOW_PDF_NATIVE_OBJECT_PROFILE', 'object.reason.profile'],
+      ] as const) {
+        const refused = markup(code)
+        const description = refused.match(/class="native-stack native-object-tools"[^>]+aria-describedby="([^"]+)"/u)?.[1]
+        expect(description).toBeDefined()
+        expect(refused).toContain(`<p id="${description}" class="native-help">${nativePdfText(locale, message)}</p>`)
+        expect(refused).not.toContain(nativePdfText(locale, 'object.profile.polygon'))
+      }
     }
   })
 })

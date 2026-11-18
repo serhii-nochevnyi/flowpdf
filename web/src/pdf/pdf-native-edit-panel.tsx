@@ -528,9 +528,14 @@ export function PdfNativeEditPanel({
   const objectBounds = geometry && nativeObjectBounds(coordinates, geometry.bounds)
   const objectMove = selectedObject && objectBounds && moveObjectTransform(selectedObject.bounds, objectBounds)
   const strokeWidth = objectProfile === 'line' ? objectUnits(stroke) : 0
+  const strokeValid = strokeWidth >= 1 && strokeWidth <= NATIVE_PDF_LIMITS.graphicStrokeWidth
+    && (!objectBounds || 2 * Math.ceil(strokeWidth / 2) < Math.min(
+      objectBounds[2] - objectBounds[0], objectBounds[3] - objectBounds[1],
+    ))
   const canPaint = !!objectBounds && (objectProfile === 'image' ? asset?.status === 'ready'
-    : objectProfile !== 'line' || (strokeWidth >= 1 && strokeWidth <= NATIVE_PDF_LIMITS.graphicStrokeWidth
-      && 2 * Math.ceil(strokeWidth / 2) < Math.min(objectBounds[2] - objectBounds[0], objectBounds[3] - objectBounds[1])))
+    : objectProfile !== 'line' || strokeValid)
+  const objectPageReason = objectPage?.refusal ? objectRefusalReasons[objectPage.refusal]
+    : objectPage?.canAdd === false ? 'object.addUnavailable' : null
   const objectForm = !!geometry && (objectPage?.canAdd === true || !!selectedObject)
   const textPage = snapshot?.scene.textPages?.find((entry) => entry.page === page?.id)
   const islands = verifiedIslands(snapshot, pageId)
@@ -1052,10 +1057,10 @@ export function PdfNativeEditPanel({
               <p key={index} lang={fragment.lang} dir="auto">{fragment.value}</p>)}
           </div>
           <p>{extracted ? t(extracted.text.length ? 'projection.partial' : 'projection.empty') : t('projection.unavailable')}</p>
-          {objectPage && <section className="native-stack native-object-tools" aria-labelledby={`${id}-objects`}>
+          {objectPage && <section className="native-stack native-object-tools" aria-labelledby={`${id}-objects`}
+            aria-describedby={objectPageReason ? `${id}-object-page-reason` : undefined}>
             <h3 id={`${id}-objects`} tabIndex={-1}>{t('object.title')}</h3>
-            {objectPage.refusal && <p className="native-help">{t(objectRefusalReasons[objectPage.refusal])}</p>}
-            {!objectPage.refusal && !objectPage.canAdd && <p className="native-help">{t('object.addUnavailable')}</p>}
+            {objectPageReason && <p id={`${id}-object-page-reason`} className="native-help">{t(objectPageReason)}</p>}
             {(objectPage.canAdd || objectPage.objects.length > 0) && <label>{t('object.title')}
               <select id={`${id}-object-selector`} value={selectedObject ? objectKey(selectedObject) : ''}
                 disabled={busy !== null}
@@ -1125,10 +1130,10 @@ export function PdfNativeEditPanel({
                   onChange={(event) => { setColor(event.currentTarget.value); clearFeedback() }} /></label>
                 {objectProfile === 'line' && <label>{t('object.stroke')}
                   <input type="text" inputMode="decimal" className="native-text-line" value={stroke}
-                    aria-describedby={!canPaint && objectBounds ? `${id}-object-stroke-error` : undefined}
+                    aria-invalid={!strokeValid} aria-describedby={strokeValid ? undefined : `${id}-object-stroke-error`}
                     onChange={(event) => { setStroke(event.currentTarget.value); clearFeedback() }} />
                 </label>}
-                {objectProfile === 'line' && objectBounds && !canPaint &&
+                {objectProfile === 'line' && !strokeValid &&
                   <p id={`${id}-object-stroke-error`} className="native-help">{t('object.stroke.invalid')}</p>}
               </>}
               {selectedObject && objectBounds && !objectMove && <p className="native-help">{t('object.reason.geometry')}</p>}
