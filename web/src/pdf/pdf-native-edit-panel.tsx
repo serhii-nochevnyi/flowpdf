@@ -422,8 +422,10 @@ export function PdfNativeEditPanel({
     setPageId(destination.id)
     setDraft(recovered)
     setComposition(false)
-    setStatus(recovered ? ['status.draftRestored']
-      : ['navigation.position', { page: pages.indexOf(destination) + 1, total: pages.length }])
+    setStatus([recovered ? 'status.draftRestored' : 'navigation.position', {
+      page: pages.indexOf(destination) + 1,
+      total: pages.length,
+    }])
   }
 
   function chooseNote(note: Note) {
@@ -525,9 +527,15 @@ export function PdfNativeEditPanel({
           setDraft(recovered)
           setComposition(false)
         }
-        setStatus(pageId === pending.pageId ? ['status.unseen'] : ['status.unseenPage', {
-          page: result.snapshot.scene.pages.findIndex((item) => item.id === pending.pageId) + 1,
-        }])
+        if (pending.draft === null) {
+          setStatus(['status.unseenNoDraft'])
+        } else if (pageId === pending.pageId) {
+          setStatus(['status.unseen'])
+        } else {
+          setStatus(['status.unseenPage', {
+            page: result.snapshot.scene.pages.findIndex((item) => item.id === pending.pageId) + 1,
+          }])
+        }
       } else if (result.status === 'accepted' && result.snapshot.binding.revision === pending.before.binding.revision + 1) {
         focusTarget = publish(pending, result.snapshot) ?? focusTarget
       } else {

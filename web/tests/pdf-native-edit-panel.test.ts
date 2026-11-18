@@ -212,6 +212,15 @@ describe('native note workspace', () => {
       expect(parameters(nativePdfMessages.uk[key])).toEqual(parameters(nativePdfMessages.en[key]))
     }
     expect(nativePdfText('en', 'navigation.position', { page: 2, total: 3 })).toBe('Page 2 of 3')
+    for (const locale of ['uk', 'en'] as const) {
+      for (const page of [1, 2]) {
+        const position = { page, total: 2 }
+        expect(nativePdfText(locale, 'status.draftRestored', position))
+          .toContain(nativePdfText(locale, 'navigation.position', position))
+      }
+      expect(nativePdfText(locale, 'status.unseen')).toContain(nativePdfText(locale, 'status.unseenNoDraft'))
+      expect(nativePdfText(locale, 'status.unseenNoDraft')).not.toBe(nativePdfText(locale, 'status.unseen'))
+    }
     const markup = renderToStaticMarkup(createElement(PdfNativeEditPanel, dependencies))
     expect(markup).toContain('PDF ще не відкрито')
     expect(markup).toContain('aria-live="polite"')
