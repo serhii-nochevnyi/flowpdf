@@ -311,7 +311,9 @@ for (const locale of ['uk', 'en'] satisfies NativePdfLocale[]) {
         finishRead()
       }
       await expect.element(control('download.edited')).toBeEnabled()
-      expect(required(panel, '[role=alert]').textContent).toContain(t('reason.structure'))
+      const importAlert = required(panel, '[role=alert]').textContent
+      expect(importAlert).toContain('FLOW_PDF_NATIVE_IMPORT_REFUSED')
+      expect(importAlert).toContain(t('error.importRefused'))
       expect(edited.dataset.outputHash).toBe(savedHash)
       expect(notes()).toHaveLength(1)
 
