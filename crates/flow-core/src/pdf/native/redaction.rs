@@ -928,11 +928,18 @@ struct Path {
     output: usize,
     points: Vec<[i64; 2]>,
     closed: bool,
-    rectangle: bool,
 }
 
+type Point = [i64; 2];
+
 impl Path {
-    fn bounds(mut self, paint: &str, width: i64) -> Result<Rect> {
+    fn should_remove(
+        mut self,
+        paint: &str,
+        graphics: Graphics,
+        scope: Scope<'_, '_>,
+        work: &mut usize,
+    ) -> Result<bool> {
         let stroke = !matches!(paint, "f" | "F" | "f*");
         let fill = !matches!(paint, "S" | "s");
         let closed = self.closed || matches!(paint, "s" | "b" | "b*");
@@ -949,20 +956,197 @@ impl Path {
         {
             return Err(Unsupported);
         }
-        let pad = if !stroke {
-            0
-        } else if !self.rectangle && self.points.len() > 2 {
-            width * 10
-        } else {
-            (width + 1) / 2
-        };
-        let [mut l, mut b] = self.points[0];
-        let [mut r, mut t] = self.points[0];
-        for [x, y] in self.points {
-            (l, b, r, t) = (l.min(x), b.min(y), r.max(x), t.max(y));
+
+        let mut remove = false;
+        if fill {
+            spend(work, self.points.len() * self.points.len())?;
+            if !strictly_convex(&self.points) {
+                return Err(Unsupported);
+            }
+            remove |= polygon_hits(&self.points, graphics.matrix, scope, work, false)?;
         }
-        Ok([l - pad, b - pad, r + pad, t + pad])
+        if stroke {
+            remove |= stroke_hits(&self.points, closed, graphics, scope, work)?;
+        }
+        Ok(remove)
     }
+}
+
+fn edge_pairs(points: &[Point]) -> impl Iterator<Item = (Point, Point)> + '_ {
+    points
+        .iter()
+        .copied()
+        .zip(points.iter().copied().cycle().skip(1))
+}
+
+fn difference([x, y]: Point, [u, v]: Point) -> Point {
+    [x - u, y - v]
+}
+
+fn translated([x, y]: Point, [u, v]: Point) -> Point {
+    [x + u, y + v]
+}
+
+fn cross([x, y]: Point, [u, v]: Point) -> i128 {
+    i128::from(x) * i128::from(v) - i128::from(y) * i128::from(u)
+}
+
+fn side(a: Point, b: Point, point: Point) -> i128 {
+    cross(difference(b, a), difference(point, a))
+}
+
+fn strictly_convex(points: &[Point]) -> bool {
+    let orientation = side(points[0], points[1], points[2]).signum();
+    orientation != 0
+        && edge_pairs(points).all(|(a, b)| {
+            points
+                .iter()
+                .copied()
+                .all(|p| p == a || p == b || side(a, b, p).signum() == orientation)
+        })
+        && points
+            .iter()
+            .enumerate()
+            .all(|(i, p)| !points[..i].contains(p))
+}
+
+fn polygon_hits(
+    points: &[Point],
+    matrix: Matrix,
+    scope: Scope<'_, '_>,
+    work: &mut usize,
+    include_boundary: bool,
+) -> Result<bool> {
+    let bounds = matrix.bounds(point_bounds(points))?;
+    if !contains(scope.clip, bounds) {
+        return Err(Unsupported);
+    }
+    let [a, b, c, d, e, f] = matrix.0;
+    let corners = points
+        .iter()
+        .map(|&[x, y]| {
+            [a * x + c * y + e * POINT, b * x + d * y + f * POINT]
+                .map(|n| (n + POINT / 2).div_euclid(POINT))
+        })
+        .collect::<Vec<_>>();
+    spend(work, corners.len() * corners.len())?;
+    if !strictly_convex(&corners) {
+        return Err(Unsupported);
+    }
+    spend(work, scope.marks.len() * corners.len())?;
+    let orientation = side(corners[0], corners[1], corners[2]).signum();
+    let [min_x, min_y, max_x, max_y] = point_bounds(&corners);
+    Ok(scope.marks.iter().any(|mark| {
+        let [left, bottom, right, top] = mark.rect;
+        let overlaps_axes = if include_boundary {
+            min_x <= right && left <= max_x && min_y <= top && bottom <= max_y
+        } else {
+            intersects([min_x, min_y, max_x, max_y], mark.rect)
+        };
+        intersects(bounds, mark.rect)
+            && overlaps_axes
+            && edge_pairs(&corners).all(|(a, b)| {
+                [[left, bottom], [right, bottom], [right, top], [left, top]]
+                    .into_iter()
+                    .any(|point| {
+                        let signed = side(a, b, point) * orientation;
+                        signed > 0 || (include_boundary && signed == 0)
+                    })
+            })
+    }))
+}
+
+fn point_bounds(points: &[Point]) -> Rect {
+    let [x, y] = points[0];
+    points.iter().fold([x, y, x, y], |[l, b, r, t], &[x, y]| {
+        [l.min(x), b.min(y), r.max(x), t.max(y)]
+    })
+}
+
+fn rounded_ratio(num: i128, den: i128) -> Result<i64> {
+    let sign = den.signum();
+    let den = den.abs();
+    i64::try_from((num * sign + den / 2).div_euclid(den)).map_err(|_| Unsupported)
+}
+
+fn stroke_hits(
+    points: &[Point],
+    closed: bool,
+    graphics: Graphics,
+    scope: Scope<'_, '_>,
+    work: &mut usize,
+) -> Result<bool> {
+    let count = if closed {
+        points.len()
+    } else {
+        points.len() - 1
+    };
+    let width = i128::from(graphics.width);
+    let mut normals = Vec::with_capacity(count);
+    let mut remove = false;
+    for (a, b) in edge_pairs(points).take(count) {
+        let [dx, dy] = difference(b, a).map(i128::from);
+        let length = (dx * dx + dy * dy).isqrt();
+        let normal = [
+            rounded_ratio(-dy * width, 2 * length)?,
+            rounded_ratio(dx * width, 2 * length)?,
+        ];
+        normals.push(normal);
+        remove |= polygon_hits(
+            &[
+                translated(a, normal),
+                translated(b, normal),
+                difference(b, normal),
+                difference(a, normal),
+            ],
+            graphics.matrix,
+            scope,
+            work,
+            true,
+        )?;
+    }
+
+    let joins = if closed { 0..points.len() } else { 1..count };
+    for index in joins {
+        let previous = (index + points.len() - 1) % points.len();
+        let center = points[index];
+        let incoming = difference(center, points[previous]);
+        let outgoing = difference(points[(index + 1) % points.len()], center);
+        let turn = cross(incoming, outgoing);
+        if turn == 0 {
+            if i128::from(incoming[0]) * i128::from(outgoing[0])
+                + i128::from(incoming[1]) * i128::from(outgoing[1])
+                <= 0
+            {
+                return Err(Unsupported);
+            }
+            continue;
+        }
+
+        let outside = -(turn.signum() as i64);
+        let a = translated(center, normals[previous].map(|n| n * outside));
+        let b = translated(center, normals[index].map(|n| n * outside));
+        let numerator = cross(difference(b, a), outgoing);
+        let [dx, dy] = incoming.map(i128::from);
+        let offset = [
+            rounded_ratio(dx * numerator, turn)?,
+            rounded_ratio(dy * numerator, turn)?,
+        ];
+        let mut join = vec![center, a];
+        if offset
+            .iter()
+            .all(|axis| i128::from(*axis).abs() <= width * 6)
+        {
+            let tip = translated(a, offset);
+            let [x, y] = difference(tip, center).map(i128::from);
+            if x * x + y * y <= 25 * width * width {
+                join.push(tip);
+            }
+        }
+        join.push(b);
+        remove |= polygon_hits(&join, graphics.matrix, scope, work, true)?;
+    }
+    Ok(remove)
 }
 
 struct TextBlock {
@@ -1174,8 +1358,7 @@ impl<'a> Scan<'a> {
                     "f" | "F" | "f*" | "S" | "s" | "B" | "B*" | "b" | "b*" if args.is_empty() => {
                         let paint = path.take().ok_or(Malformed)?;
                         let (paint_start, paint_output) = (paint.start, paint.output);
-                        let bounds = graphics.matrix.bounds(paint.bounds(op, graphics.width)?)?;
-                        if scope.remove(bounds, &mut self.work)? {
+                        if paint.should_remove(op, graphics, scope, &mut self.work)? {
                             output.truncate(paint_output);
                             record_removal(&mut removals, paint_start, end);
                             removed = true;
@@ -1200,7 +1383,6 @@ impl<'a> Scan<'a> {
                             output: output.len(),
                             points: vec![numbers(&args)?],
                             closed: false,
-                            rectangle: false,
                         })
                     }
                     "re" => {
@@ -1212,7 +1394,6 @@ impl<'a> Scan<'a> {
                             start,
                             output: output.len(),
                             closed: true,
-                            rectangle: true,
                             points: vec![[x, y], [x + w, y], [x + w, y + h], [x, y + h]],
                         });
                     }
