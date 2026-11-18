@@ -253,7 +253,9 @@ for (const locale of ['en', 'uk'] as const) {
         await text('geometry.height').fill(String(height))
       }
       const addMark = async (count: number) => {
-        await activate(redactionButton('redaction.add').element())
+        const add = redactionButton('redaction.add')
+        await expect.element(add, { timeout: 5_000 }).toBeEnabled()
+        await activate(add.element())
         await expect.poll(() => marksOnPage().length).toBe(count)
       }
       const openConfirmation = async (kind: 'clear' | 'apply', pages: string) => {
