@@ -192,13 +192,22 @@ function sameFieldObject(left: NativePdfFieldView, right: NativePdfFieldView) {
 
 export function rebindNativeField(
   prior: NativePdfFieldView, fields: readonly NativePdfFieldView[], page: number,
+  previousFields?: readonly NativePdfFieldView[],
 ): NativePdfFieldView | undefined {
-  const matches = fields.filter((field) => field.page === page && sameFieldObject(prior, field)
+  const matches = fields.filter((field) => field.page === page
     && field.name === prior.name && field.kind === prior.kind && field.value === prior.value
     && field.checked === prior.checked && field.canEditAppearance === prior.canEditAppearance
     && field.refusal === prior.refusal && (prior.rect && field.rect
       ? sameNativeBytes(prior.rect, field.rect) : prior.rect === field.rect))
-  return matches.length === 1 ? matches[0] : undefined
+  const [match] = matches
+  if (matches.length !== 1 || !match) return undefined
+  if (!previousFields || !prior.canEditAppearance || !prior.name || !prior.kind || !prior.rect) {
+    return sameFieldObject(prior, match) ? match : undefined
+  }
+  const previous = previousFields.filter((field) => field.page === prior.page && field.name === prior.name)
+  return previous.length === 1 && sameNativeBytes(previous[0]!.id, prior.id)
+    && fields.filter((field) => field.page === page && field.name === prior.name).length === 1
+    ? match : undefined
 }
 
 function draftFromField(field: NativePdfFieldView, snapshot: NativePdfSnapshot): FieldDraft | null {
@@ -1123,12 +1132,13 @@ export function PdfNativeEditPanel({
 
   function publishFieldSelection(
     result: NativePdfSnapshot, command?: NativePdfSessionCommand, retained?: ReadonlyMap<number, number>,
+    previousFields?: readonly NativePdfFieldView[],
   ) {
     const nextFields = result.fields ?? []
     const destination = (index: number) => retained ? retained.get(index) : index
     const rebind = (field: NativePdfFieldView) => {
       const index = destination(field.page)
-      return index === undefined ? undefined : rebindNativeField(field, nextFields, index)
+      return index === undefined ? undefined : rebindNativeField(field, nextFields, index, previousFields)
     }
     const drafts = [...savedFieldDrafts.current.values()]
     savedFieldDrafts.current.clear()
@@ -1142,6 +1152,14 @@ export function PdfNativeEditPanel({
     if (command && isNativeFieldCommand(command) && ('name' in command
       || (selectedField && 'field' in command && sameNativeBytes(command.field, selectedField.id)))) {
       const name = 'name' in command ? command.name : selectedField?.name
+      if (command.kind === 'removeField') {
+        const saved = savedFieldDrafts.current.get('')
+        savedFieldDrafts.current.delete('')
+        setFieldSelection(null)
+        setFieldDraft(saved?.draft ?? null)
+        setFieldFeedback(saved?.feedback ?? null)
+        return
+      }
       const next = nextFields.find((field) => field.canEditAppearance && field.name === name)
       const verified = next && draftFromField(next, result)
       setFieldSelection(next ?? null)
@@ -1225,7 +1243,7 @@ export function PdfNativeEditPanel({
   function publishPage({ before, pageCommand }: PendingPageAction, result: NativePdfSnapshot, verified = true) {
     const nextPage = acceptedPageIndex(result)
     const retained = verified ? retainedPageIndexes(before, result) : new Map<number, number>()
-    publishFieldSelection(result, pageCommand, retained)
+    publishFieldSelection(result, pageCommand, retained, before.fields ?? [])
     recoveredDrafts.current.reindex(before, result, retained)
     setTextDrafts((current) => rebindNativeTextDrafts(current, before, result, retained))
     const savedObjects = [...pageObjectDrafts.current.values()]
@@ -1355,7 +1373,8 @@ export function PdfNativeEditPanel({
       uncertain.current = null
       if ('pageCommand' in pending) {
         if (result.status === 'unseen') {
-          publishFieldSelection(result.snapshot, undefined, retainedPageIndexes(pending.before, result.snapshot))
+          publishFieldSelection(result.snapshot, undefined, retainedPageIndexes(pending.before, result.snapshot),
+            pending.before.fields ?? [])
           setAccepted((current) => current && { ...current, snapshot: result.snapshot })
           setStatus(['status.unseenNoDraft'])
         } else {

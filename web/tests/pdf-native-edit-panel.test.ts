@@ -538,6 +538,17 @@ describe('native field drafts', () => {
     expect(rebindNativeField(field, [{ ...next, canEditAppearance: false }], 1)).toBeUndefined()
   })
 
+  it('rebinds a renumbered field only with unique verified identity on the retained page', () => {
+    const next = { ...field, id: hash.map(() => 43), object: { ...ref, objectNumber: 2 }, page: 1 }
+    const other = { ...next, object: { ...ref, objectNumber: 3 }, value: 'Different' }
+    expect(rebindNativeField(field, [next, { ...other, page: 2 }], 1, [field])).toBe(next)
+    expect(rebindNativeField(field, [next, other], 1, [field])).toBeUndefined()
+    expect(rebindNativeField(field, [{ ...next, object: ref }, other], 1, [field])).toBeUndefined()
+    expect(rebindNativeField(field, [next], 1, [field, { ...other, page: 0 }])).toBeUndefined()
+    expect(rebindNativeField(field, [other], 1, [field])).toBeUndefined()
+    expect(rebindNativeField(field, [next], 0, [field])).toBeUndefined()
+  })
+
   it('names unsupported widgets and their refusal without rendering edit controls for them', () => {
     const initialDocument = documentWith([])
     const widget: NativePdfFieldView = {
