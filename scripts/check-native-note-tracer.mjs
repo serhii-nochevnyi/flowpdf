@@ -62,7 +62,6 @@ export function requirePassedCi(ref, command = execute) {
     }
   }
 
-  // Workflow-specific lookup includes newer queued runs that have no check yet.
   const { workflow_runs: runs, total_count: runCount } = get(`actions/workflows/${workflowFile}/runs?head_sha=${sha}&per_page=100`)
   requireEvidence(Array.isArray(runs) && runs.length > 0 && runs.length < 100 && runCount === runs.length &&
     runs.every((run) => Number.isSafeInteger(run.run_number)), 'NATIVE_NOTE_TRACER_RUN_UNAVAILABLE')

@@ -62,8 +62,6 @@ export function createNativePdfRuntime(
     return coordinator
   }
 
-  // A replacement needs a separate session until its admission succeeds.
-  // If startup fails, the panel can retry on the next file selection.
   let initial: NativePdfEditCoordinator | undefined
   try {
     initial = createCoordinator()
