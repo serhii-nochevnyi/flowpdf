@@ -687,12 +687,17 @@ pub(super) fn stage(
     if changes_positions
         && let Some(preferences) = dict(graph, catalog(graph)?)?.get("ViewerPreferences")
     {
-        let preferences = graph
-            .resolve_metered(preferences, &mut graph.remaining_work())?
-            .as_dictionary()
-            .ok_or(Unsupported)?;
-        if preferences.contains_key("PrintPageRange") {
-            return Err(Unsupported.into());
+        let mut work = graph.remaining_work();
+        match graph.resolve_metered(preferences, &mut work)? {
+            PdfValue::Null => {}
+            preferences => {
+                let preferences = preferences.as_dictionary().ok_or(Unsupported)?;
+                if let Some(range) = preferences.get("PrintPageRange")
+                    && !matches!(graph.resolve_metered(range, &mut work)?, PdfValue::Null)
+                {
+                    return Err(Unsupported.into());
+                }
+            }
         }
     }
     let selected = match command {

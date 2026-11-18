@@ -277,6 +277,44 @@ fn print_page_ranges_refuse_structural_edits_but_allow_rotation() {
 }
 
 #[test]
+fn null_print_presets_allow_structural_edits() {
+    for (preferences, indirect) in [
+        ("null", "null"),
+        ("5 0 R", "null"),
+        ("<< /PrintPageRange null >>", "null"),
+        ("<< /PrintPageRange 5 0 R >>", "null"),
+        ("5 0 R", "<< /PrintPageRange 6 0 R >>"),
+    ] {
+        let catalog = format!("<< /Type /Catalog /Pages 2 0 R /ViewerPreferences {preferences} >>");
+        let bytes = build_pdf(&[
+            (0, &catalog),
+            (
+                0,
+                "<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 /MediaBox [0 0 300 500] >>",
+            ),
+            (0, "<< /Type /Page /Parent 2 0 R >>"),
+            (0, "<< /Type /Page /Parent 2 0 R >>"),
+            (0, indirect),
+            (0, "null"),
+        ]);
+        let mut session =
+            NativePdfSession::open_scoped(&bytes, NativeEditLimits::default(), [3; 16]).unwrap();
+        let prior = session.snapshot().clone();
+        let reorder = serde_json::from_value(serde_json::json!({
+            "kind": "reorderPage",
+            "target": {"page": 0, "stableId": prior.page_state.order[0]},
+            "position": 1,
+        }))
+        .unwrap();
+        session.apply_page(prior.binding, 1, &reorder).unwrap();
+        assert_eq!(
+            session.snapshot().page_state.order,
+            [prior.page_state.order[1], prior.page_state.order[0]],
+        );
+    }
+}
+
+#[test]
 fn malformed_page_counts_and_parents_refuse_on_open() {
     for (count, parent) in [(2, 2), (1, 1)] {
         let file = build_pdf(&[
