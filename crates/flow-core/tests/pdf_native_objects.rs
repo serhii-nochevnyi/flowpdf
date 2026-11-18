@@ -253,6 +253,31 @@ fn jpeg_asset_replaces_only_one_use_of_a_shared_raster() {
 }
 
 #[test]
+fn oversized_jpeg_frame_refuses_without_mutating_session() {
+    let mut jpeg = Vec::new();
+    image::codecs::jpeg::JpegEncoder::new(&mut jpeg)
+        .encode(&[7], 1, 1, image::ExtendedColorType::L8)
+        .unwrap();
+    let frame = jpeg
+        .windows(2)
+        .position(|bytes| bytes == [0xff, 0xc0])
+        .unwrap();
+    jpeg[frame + 5..frame + 9].copy_from_slice(&[0x10, 0x00, 0x10, 0x00]);
+    let hex: String = jpeg.iter().map(|byte| format!("{byte:02x}")).collect();
+
+    let source = fixture(b"", false, "", &[]);
+    let mut session = open(&source);
+    let error = apply(
+        &mut session,
+        json!({"kind":"addImage","page":0,"bounds":[1000,1000,5000,5000],"assetHex":hex}),
+    )
+    .unwrap_err();
+    assert_eq!(error.code(), "FLOW_PDF_NATIVE_OBJECT_ASSET");
+    assert_eq!(session.snapshot().binding.revision, 0);
+    assert_eq!(session.output_bytes(), source);
+}
+
+#[test]
 fn retained_jpeg_move_preserves_encoded_stream_and_rejects_invalid_profiles() {
     let mut jpeg = Vec::new();
     image::codecs::jpeg::JpegEncoder::new(&mut jpeg)

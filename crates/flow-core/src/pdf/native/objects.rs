@@ -1065,26 +1065,52 @@ fn image_source(hex: &str, graph: &NativePdfGraph, remaining: &mut usize) -> Res
     } else {
         None
     };
+    let (width, height) = if let Some((width, height, _)) = jpeg {
+        (width, height)
+    } else {
+        let dimensions = bytes
+            .get(8..)
+            .and_then(|header| header.strip_prefix(b"\0\0\0\x0dIHDR"))
+            .and_then(|header| header.get(..8))
+            .ok_or(Asset)?;
+        let (width, height) = dimensions.split_at(4);
+        (
+            u32::from_be_bytes(width.try_into().map_err(|_| Asset)?),
+            u32::from_be_bytes(height.try_into().map_err(|_| Asset)?),
+        )
+    };
+    let pixels = u64::from(width) * u64::from(height);
+    if pixels == 0
+        || pixels > NATIVE_MAX_IMAGE_PIXELS
+        || width.max(height) > NATIVE_MAX_IMAGE_DIMENSION
+    {
+        return Err(Asset.into());
+    }
+    let decoded_limit = graph
+        .limits
+        .max_decoded_stream_bytes
+        .min(graph.remaining_decoded());
+    let minimum_samples =
+        pixels * jpeg.map_or(1, |(_, _, color)| u64::from(color.bytes_per_pixel()));
+    if minimum_samples > decoded_limit as u64 {
+        return Err(NativeSessionError::Budget);
+    }
     let mut limits = Limits::default();
-    limits.max_image_width = Some(NATIVE_MAX_IMAGE_DIMENSION);
-    limits.max_image_height = Some(NATIVE_MAX_IMAGE_DIMENSION);
+    limits.max_image_width = Some(width);
+    limits.max_image_height = Some(height);
     limits.max_alloc = Some(*remaining as u64);
     let mut reader = ImageReader::with_format(Cursor::new(bytes.as_slice()), format);
     reader.limits(limits);
     let decoder = reader.into_decoder().map_err(|_| Asset)?;
-    let (width, height) = decoder.dimensions();
-    let pixels = u64::from(width) * u64::from(height);
-    if pixels == 0 || pixels > NATIVE_MAX_IMAGE_PIXELS {
-        return Err(Asset.into());
-    }
     let color = decoder.color_type();
-    if !matches!(color, image::ColorType::L8 | image::ColorType::Rgb8)
+    if decoder.dimensions() != (width, height)
+        || !matches!(color, image::ColorType::L8 | image::ColorType::Rgb8)
         || jpeg.is_some_and(|frame| frame != (width, height, color))
     {
         return Err(Asset.into());
     }
     let samples = usize::try_from(decoder.total_bytes()).map_err(|_| NativeSessionError::Budget)?;
-    if samples > graph.limits.max_decoded_stream_bytes || samples > graph.remaining_decoded() {
+    if samples > decoded_limit {
         return Err(NativeSessionError::Budget);
     }
     spend(remaining, samples * 3 + 4096)?;
