@@ -65,6 +65,10 @@ mod text {
         }
     }
 }
+mod verifier;
+mod verify_raster;
+mod verify_structure;
+mod verify_text;
 mod writer;
 
 pub use forms::{
@@ -88,6 +92,14 @@ pub use session::{
 pub use text::{
     NATIVE_MAX_TEXT_BYTES, NativeTextCommand, NativeTextIsland, NativeTextOperator, NativeTextPage,
     NativeTextProfile, NativeTextRefusal,
+};
+
+pub use verifier::{
+    NATIVE_REDACTION_VALIDATOR_PROFILE, NATIVE_REDACTION_VALIDATOR_VERSION, NativeRedactionContext,
+    NativeRedactionEvidenceIdentity, NativeRedactionGeometry, NativeRedactionMark,
+    NativeRedactionPageEvidence, NativeRedactionPolicy, NativeVerificationFailure,
+    NativeVerificationLane, NativeVerificationStatus, VersionedNativeRedactionEvidence,
+    verify_native_redaction,
 };
 
 #[cfg(test)]
