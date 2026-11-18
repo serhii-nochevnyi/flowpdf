@@ -1,0 +1,68 @@
+name: Native PDF note tracer
+
+on:
+  push:
+    branches:
+      - feat/FLOWPDF-09-controlled-native-pdf-editing
+      - feat/accessible-native-note-workspace-and-rea
+  pull_request:
+    branches:
+      - feat/FLOWPDF-09-controlled-native-pdf-editing
+
+permissions:
+  contents: read
+
+jobs:
+  native_pdf_note_tracer:
+    name: native-pdf-note-tracer
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      FLOWPDF_TRACER_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+      RUSTUP_HOME: ${{ github.workspace }}/work/toolchains/rustup
+      CARGO_HOME: ${{ github.workspace }}/work/toolchains/cargo
+      PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}/work/playwright
+    steps:
+      - name: Check out source head
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ env.FLOWPDF_TRACER_HEAD }}
+          persist-credentials: false
+      - name: Verify exact checkout
+        run: |
+          test "$(git rev-parse HEAD)" = "$FLOWPDF_TRACER_HEAD"
+          test -z "$(git status --porcelain)"
+      - name: Set up pinned Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '24.10.0'
+      - name: Provision locked tools
+        run: |
+          npm install --global --no-audit --no-fund npm@11.9.0
+          test "$(npm --version)" = 11.9.0
+          rustup toolchain install 1.97.1 --profile minimal --component rustfmt --component clippy --target wasm32-unknown-unknown
+          mkdir -p "$CARGO_HOME/bin"
+          asset=wasm-bindgen-0.2.108-x86_64-unknown-linux-musl.tar.gz
+          archive="$RUNNER_TEMP/$asset"
+          curl --fail --silent --show-error --location --proto '=https' --output "$archive" "https://github.com/wasm-bindgen/wasm-bindgen/releases/download/0.2.108/$asset"
+          printf '%s  %s\n' d15d7e476feec78d0ec9edc27b8f77279ec7a3e6227756e7036e5cd2066800f4 "$archive" | sha256sum --check
+          tar -xOf "$archive" "${asset%.tar.gz}/wasm-bindgen" > "$CARGO_HOME/bin/wasm-bindgen"
+          printf '%s  %s\n' cc1c66ada99eb67a0d1518f1af95f47b870cbad9461de4db4a6ccc5e4aa2b2cc "$CARGO_HOME/bin/wasm-bindgen" | sha256sum --check
+          chmod 0755 "$CARGO_HOME/bin/wasm-bindgen"
+          cargo fetch --locked
+          npm ci --no-audit --no-fund
+          npx --no-install playwright install --with-deps chromium
+      - name: Build generated WASM and web output
+        env:
+          CARGO_NET_OFFLINE: 'true'
+        run: npm run build:web
+      - name: Run bilingual Chromium note tracer
+        run: npm run test:browser -- web/tests/pdf-native-edit.browser.test.ts
+      - name: Bundle the production editor
+        run: npm run build:vite
+      - name: Run built-editor Chromium smoke
+        run: node scripts/check-native-note-built.mjs
+      - name: Verify source checkout stayed unchanged
+        run: |
+          test "$(git rev-parse HEAD)" = "$FLOWPDF_TRACER_HEAD"
+          git diff --quiet HEAD --

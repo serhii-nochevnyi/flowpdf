@@ -28,6 +28,7 @@ import {
 } from './voice-controls.js'
 import { SemanticDocument } from './semantic-document.js'
 import { PageViewport } from '../layout/page-viewport.js'
+import { PdfNativeEditPanel, type PdfNativeEditPanelProps } from '../pdf/pdf-native-edit-panel.js'
 import { PdfPreview } from '../pdf/pdf-preview.js'
 import { PdfReaderPanel } from '../pdf/pdf-reader-panel.js'
 import { PdfReconstructionPanel } from '../pdf/pdf-reconstruction-panel.js'
@@ -94,23 +95,29 @@ export type {
 
 export type { FoundationInspectorLocale }
 
+export type EditorNativePdfRuntime = Pick<PdfNativeEditPanelProps, 'createCoordinator' | 'sourceStore'>
+
 export interface EditorAppProps {
+  readonly nativePdf?: EditorNativePdfRuntime
   readonly controller?: EditorController
   readonly controllerDependencies?: EditorControllerDependencies
   readonly options?: EditorAppOptions
   readonly formProjectionScheduler?: FormProjectionScheduler
   readonly pdfReaderScheduler?: EditorPdfReaderScheduler
   readonly pdfReconstructionScheduler?: EditorPdfReconstructionScheduler
+  readonly pdfReconstructionReaderScheduler?: EditorPdfReaderScheduler
   readonly voiceRecognitionConstructor?: VoiceControlsProps['recognitionConstructor']
 }
 
 export function EditorApp({
   controller: suppliedController,
+  nativePdf,
   controllerDependencies,
   options = {},
   formProjectionScheduler: suppliedFormProjectionScheduler,
   pdfReaderScheduler: suppliedPdfReaderScheduler,
   pdfReconstructionScheduler: suppliedPdfReconstructionScheduler,
+  pdfReconstructionReaderScheduler,
   voiceRecognitionConstructor,
 }: EditorAppProps) {
   const [controller] = useState(
@@ -133,6 +140,7 @@ export function EditorApp({
     suppliedPdfReaderScheduler ?? controllerDependencies?.pdfReaderScheduler
   const pdfReconstructionScheduler =
     suppliedPdfReconstructionScheduler ?? controllerDependencies?.pdfReconstructionScheduler
+  const reconstructionReader = pdfReconstructionReaderScheduler ?? pdfReaderScheduler
   const snapshot = useSyncExternalStore(
     controller.subscribe,
     controller.getSnapshot,
@@ -289,14 +297,16 @@ export function EditorApp({
           ? {}
           : { recognitionConstructor: voiceRecognitionConstructor })}
       />
-      {pdfReconstructionScheduler !== undefined && pdfReaderScheduler !== undefined ? (
+      {nativePdf && <PdfNativeEditPanel {...nativePdf} locale={locale} />}
+      {pdfReaderScheduler && (pdfReconstructionScheduler === undefined || pdfReconstructionReaderScheduler) && (
+        <PdfReaderPanel scheduler={pdfReaderScheduler} locale={locale} />
+      )}
+      {pdfReconstructionScheduler && reconstructionReader && (
         <PdfReconstructionPanel
-          readerScheduler={pdfReaderScheduler}
+          readerScheduler={reconstructionReader}
           reconstructionScheduler={pdfReconstructionScheduler}
-          locale={options.locale ?? 'uk'}
+          locale={locale}
         />
-      ) : pdfReaderScheduler === undefined ? null : (
-        <PdfReaderPanel scheduler={pdfReaderScheduler} locale={options.locale ?? 'uk'} />
       )}
       {accepted === null ? (
         <div className="empty-state" data-empty-document="">
@@ -437,6 +447,9 @@ export async function mountEditorApp(
   options: EditorAppOptions = {},
   dependencies: EditorControllerDependencies = {},
   voiceRecognitionConstructor?: VoiceControlsProps['recognitionConstructor'],
+  mount: Pick<EditorAppProps, 'nativePdf' | 'pdfReconstructionReaderScheduler'> & {
+    readonly signal?: AbortSignal
+  } = {},
 ): Promise<EditorController> {
   const controller = new EditorController(options, dependencies)
   const reactRoot = createRoot(root)
@@ -444,6 +457,10 @@ export async function mountEditorApp(
     <EditorApp
       controller={controller}
       options={options}
+      {...(mount.nativePdf === undefined ? {} : { nativePdf: mount.nativePdf })}
+      {...(mount.pdfReconstructionReaderScheduler === undefined
+        ? {}
+        : { pdfReconstructionReaderScheduler: mount.pdfReconstructionReaderScheduler })}
       {...(dependencies.pdfReaderScheduler === undefined
         ? {}
         : { pdfReaderScheduler: dependencies.pdfReaderScheduler })}
@@ -455,8 +472,23 @@ export async function mountEditorApp(
         : { voiceRecognitionConstructor })}
     />,
   )
-  await controller.initialize()
-  return controller
+  function unmount() {
+    mount.signal?.removeEventListener('abort', unmount)
+    reactRoot.unmount()
+    controller.dispose()
+  }
+  if (mount.signal?.aborted) {
+    unmount()
+    return controller
+  }
+  mount.signal?.addEventListener('abort', unmount, { once: true })
+  try {
+    await controller.initialize()
+    return controller
+  } catch (error) {
+    if (!mount.signal?.aborted) unmount()
+    throw error
+  }
 }
 
 function createDefaultFormProjectionScheduler(): FormProjectionScheduler {

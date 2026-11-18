@@ -11,12 +11,7 @@ import { assertSupportedNodeVersion } from './node-version.mjs'
 
 assertSupportedNodeVersion()
 
-export function validateWasmBindgenIntegrity({
-  approved,
-  report,
-  receipt,
-  binaryBytes,
-}) {
+function validateProvenance(approved, report) {
   if (approved?.name !== 'wasm-bindgen-cli' || approved.kind !== 'tool') {
     throw new Error('wasm-bindgen-cli approval is missing or not a tool')
   }
@@ -27,6 +22,21 @@ export function validateWasmBindgenIntegrity({
   if (reported?.version !== approved.version || reported.kind !== 'tool') {
     throw new Error('wasm-bindgen-cli report identity differs from approval')
   }
+}
+
+export function validateLinuxReleaseBindgen({ approved, report, binaryBytes }) {
+  validateProvenance(approved, report)
+  const { assetSha256, binarySha256 } = approved.linuxRelease ?? {}
+  if (![assetSha256, binarySha256].every((value) => /^[a-f0-9]{64}$/.test(value ?? ''))) {
+    throw new Error('wasm-bindgen Linux release checksums are not approved')
+  }
+  if (createHash('sha256').update(binaryBytes).digest('hex') !== binarySha256) {
+    throw new Error('wasm-bindgen Linux release binary checksum mismatch')
+  }
+}
+
+export function validateWasmBindgenIntegrity({ approved, report, receipt, binaryBytes }) {
+  validateProvenance(approved, report)
   const receiptKey = `wasm-bindgen-cli ${approved.version} (registry+https://github.com/rust-lang/crates.io-index)`
   const install = receipt?.installs?.[receiptKey]
   if (install?.version_req !== `=${approved.version}` || !install.bins?.includes('wasm-bindgen')) {
@@ -66,6 +76,11 @@ export function verifyInstalledTool(root) {
   const binary = resolve(cargoHome, 'bin/wasm-bindgen')
   const approved = config.crates?.find((entry) => entry.name === 'wasm-bindgen-cli')
   const binaryBytes = readFileSync(binary)
+  if (process.platform === 'linux' && process.arch === 'x64') {
+    validateLinuxReleaseBindgen({ approved, report, binaryBytes })
+    validateWasmBindgenVersion(approved, executeTrustedCopy(binaryBytes))
+    return
+  }
   verifyWasmBindgenTool({
     approved,
     report,

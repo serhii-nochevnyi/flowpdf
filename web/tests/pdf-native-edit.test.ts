@@ -445,3 +445,70 @@ describe('native worker scope', () => {
     }), { interval: 1 })
   })
 })
+
+describe('native PDF runtime composition', () => {
+  it('reports startup failure and allows another attempt without restarting the app', async () => {
+    const { createNativePdfRuntime } = await import('../src/layout/layout-runtime.js')
+    const terminate = vi.fn()
+    const construct = vi.fn()
+      .mockImplementationOnce(() => { throw new Error('unavailable') })
+      .mockImplementationOnce(() => { throw new Error('still unavailable') })
+    class RuntimeWorker {
+      onmessage = null
+      onerror = null
+      onmessageerror = null
+      postMessage = vi.fn()
+      terminate = terminate
+
+      constructor() {
+        construct()
+      }
+    }
+    const runtime = createNativePdfRuntime(RuntimeWorker as unknown as typeof Worker)
+    try {
+      expect(() => runtime.createCoordinator()).toThrow('FLOW_PDF_NATIVE_WORKER_STARTUP')
+      const coordinator = runtime.createCoordinator()
+      expect(coordinator.snapshot().phase).toBe('idle')
+      expect(construct).toHaveBeenCalledTimes(3)
+    } finally {
+      runtime.dispose()
+    }
+    expect(terminate).toHaveBeenCalledOnce()
+  })
+
+  it('prepares one worker, isolates replacement admission and tears down owned sessions', async () => {
+    const { createNativePdfRuntime } = await import('../src/layout/layout-runtime.js')
+    const { PdfSourceStore } = await import('../persistence/pdf-source-store.js')
+    const entryPoints: string[] = []
+    const terminate = vi.fn()
+    class RuntimeWorker {
+      onmessage = null
+      onerror = null
+      onmessageerror = null
+      postMessage = vi.fn()
+      terminate = terminate
+
+      constructor(url: URL, options: WorkerOptions) {
+        entryPoints.push(url.pathname)
+        expect(options.type).toBe('module')
+      }
+    }
+    const store = new PdfSourceStore()
+    const closeStore = vi.spyOn(store, 'close')
+    const runtime = createNativePdfRuntime(RuntimeWorker as unknown as typeof Worker, store)
+    expect(runtime.sourceStore).toBe(store)
+    expect(entryPoints).toHaveLength(1)
+    expect(entryPoints[0]).toMatch(/pdf-native-edit-worker-entry\.ts$/)
+    const originalCoordinator = runtime.createCoordinator()
+    expect(entryPoints).toHaveLength(1)
+    const replacement = runtime.createCoordinator()
+    expect(replacement).not.toBe(originalCoordinator)
+    expect(entryPoints).toHaveLength(2)
+    replacement.dispose()
+    runtime.dispose()
+    expect(originalCoordinator.snapshot().phase).toBe('invalidated')
+    expect(terminate).toHaveBeenCalledTimes(2)
+    expect(closeStore).toHaveBeenCalledOnce()
+    expect(() => runtime.createCoordinator()).toThrow('FLOW_PDF_NATIVE_WORKER_FAILED')
+  })
+})

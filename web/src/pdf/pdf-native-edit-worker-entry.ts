@@ -3,7 +3,8 @@ import { installNativePdfWorker, type NativePdfWorkerScope } from './pdf-native-
 import type { NativePdfWasmBoundary } from './pdf-native-edit-protocol.js'
 
 const scope = globalThis as unknown as NativePdfWorkerScope
-const ready = init().then(() => {
+const ready = Promise.resolve().then(async () => {
+  await init()
   const wasm = generated as Readonly<Partial<NativePdfWasmBoundary>>
   const {
     native_pdf_open, native_pdf_command, native_pdf_snapshot, native_pdf_close, verify_native_pdf_response,
