@@ -184,7 +184,6 @@ fn content<'a>(
     if stream.data.is_empty() {
         return Ok(None);
     }
-    // keep its original stream while the unique Contents slot is replaced.
     if graph
         .reverse
         .get(&reference)
