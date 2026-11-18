@@ -1500,11 +1500,7 @@ impl<'a> Cursor<'a> {
         }
         self.position += 1;
         let start = self.position;
-        let max_encoded_len = if self.exact {
-            MAX_PDF_IDENTITY_BYTES * 3
-        } else {
-            MAX_PDF_IDENTITY_BYTES
-        };
+        let max_encoded_len = MAX_PDF_IDENTITY_BYTES * 3;
         while self.position < self.bytes.len() && !is_delimiter(self.bytes[self.position]) {
             if self.position - start == max_encoded_len {
                 return Err(PdfReadError::Syntax);

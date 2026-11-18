@@ -374,6 +374,13 @@ impl NativePdfGraph {
             if dict.get("Subtype").and_then(PdfValue::as_name) != Some("Text") {
                 continue;
             }
+            let Some(contents) = dict.get("Contents") else {
+                continue;
+            };
+            let contents = self.resolve_metered(contents, &mut work)?;
+            if matches!(contents, PdfValue::Null) {
+                continue;
+            }
             let values = self
                 .resolve_metered(
                     dict.get("Rect").ok_or(NativeEditError::Malformed)?,
@@ -394,14 +401,7 @@ impl NativePdfGraph {
                 continue;
             };
             let rect = [left, bottom, right, top];
-            let Some(contents) = dict.get("Contents") else {
-                continue;
-            };
-            let bytes = match self.resolve_metered(contents, &mut work)? {
-                PdfValue::Null => continue,
-                PdfValue::String(bytes) => bytes,
-                _ => return Err(NativeEditError::Malformed),
-            };
+            let bytes = contents.as_bytes().ok_or(NativeEditError::Malformed)?;
             spend(
                 &mut remaining,
                 bytes
@@ -875,6 +875,7 @@ mod tests {
                     _ => None,
                 })
                 .unwrap();
+            annotation.remove("Rect");
             if explicit_null {
                 annotation.insert("Contents".into(), PdfValue::Null);
             } else {
@@ -896,15 +897,7 @@ mod tests {
                 .as_dictionary()
                 .unwrap();
             assert_eq!(annotation["Subtype"].as_name(), Some("Text"));
-            assert_eq!(
-                annotation["Rect"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .map(PdfValue::as_integer)
-                    .collect::<Vec<_>>(),
-                original.rect.map(Some)
-            );
+            assert!(!annotation.contains_key("Rect"));
             assert!(match annotation.get("Contents") {
                 Some(PdfValue::Null) => explicit_null,
                 None => !explicit_null,
