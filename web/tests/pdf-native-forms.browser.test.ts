@@ -189,13 +189,13 @@ for (const locale of ['en', 'uk'] as const) {
       await expect.element(fields.getByText(t('field.owned'), { exact: true })).toBeVisible()
       const originalTextKey = (select('field.select').element() as HTMLSelectElement).value
 
-      await input('field.value').fill('Bob')
       const value = input('field.value').element()
       value.dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true }))
+      await input('field.value').fill('Bob')
       await expect.element(button('field.save')).toBeDisabled()
       await userEvent.keyboard('{Enter}')
       await expect.element(fields.getByText(t('field.accepted', { value: 'Alice' }), { exact: true })).toBeVisible()
-      value.dispatchEvent(new CompositionEvent('compositionend', { bubbles: true }))
+      value.dispatchEvent(new CompositionEvent('compositionend', { bubbles: true, data: 'Bob' }))
       await mutate('field.save')
       expect(document.activeElement).toBe(button('field.save').element())
 
@@ -289,7 +289,7 @@ for (const locale of ['en', 'uk'] as const) {
       expect(finalPlain.pages).toHaveLength(2)
       expect(finalPlain.fields.map((field) => [field.name, field.page])).toEqual([[longName, 1], ['approved', 1]])
       await choose('field.select', originalTextKey)
-      await expect.element(fields.getByText(t('field.onPage', { name: longName, page: 2 }), { exact: true })).toBeVisible()
+      await expect.element(fields.getByRole('paragraph').filter({ hasText: t('field.onPage', { name: longName, page: 2 }) })).toBeVisible()
       expect(fields.element().scrollWidth).toBeLessThanOrEqual(fields.element().clientWidth + 1)
       expect(panel.element().scrollWidth).toBeLessThanOrEqual(panel.element().clientWidth + 1)
       await confirmRemoval(longName, 2)
