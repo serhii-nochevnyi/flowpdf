@@ -131,6 +131,32 @@ export function nativeNoteDraftAfter(
   return accepted
 }
 
+export function nativeNoteDraftAfterAcceptance(
+  { command, before, pageId, draft }: PendingNoteAction, result: NativePdfSnapshot,
+  displayedPageId: number, current: Draft | null,
+): Draft | null {
+  if (displayedPageId !== pageId || current === null) return current
+  if (command.kind === 'add' ? current !== draft : current.note !== command.note) return current
+  if (command.kind === 'remove') return null
+
+  const page = result.scene.pages.find((item) => item.id === pageId)
+  if (!page?.geometry) return null
+  const notes = notesOf(page)
+  if (command.kind === 'add') {
+    const priorIds = new Set(notesOf(before.scene.pages.find((item) => item.id === pageId)).map((note) => note.id))
+    const added = notes.find((note) => !priorIds.has(note.id))
+    return added ? draftFrom(added, page.geometry) : null
+  }
+  const target = notes.find((note) => note.id === command.note)
+  return target ? nativeNoteDraftAfter(command.kind, current, target, page.geometry) : null
+}
+
+export function nativeNoteDraftForPage(
+  recovered: Pick<PendingNoteAction, 'pageId' | 'draft'> | null, pageId: number,
+): Draft | null {
+  return recovered?.pageId === pageId ? recovered.draft : null
+}
+
 const refusalReasons = new Map<string, NativePdfMessage>([
   ['FLOW_PDF_NATIVE_IMPORT_REFUSED', 'error.importRefused'],
   ['FLOW_PDF_NATIVE_BINDING_MISMATCH', 'error.stale'],
@@ -193,6 +219,7 @@ export function PdfNativeEditPanel({
   const composition = useRef(false)
   const [confirm, setConfirm] = useState<{ readonly snapshot: NativePdfSnapshot; readonly note: number } | null>(null)
   const uncertain = useRef<PendingNoteAction | null>(null)
+  const recoveredDraft = useRef<Pick<PendingNoteAction, 'pageId' | 'draft'> | null>(null)
   const focusAfterRender = useRef<string | HTMLElement | null>(null)
   const dialog = useRef<HTMLDialogElement>(null)
   const cancelConfirmation = useRef<HTMLButtonElement>(null)
@@ -307,6 +334,7 @@ export function PdfNativeEditPanel({
       setCoordinator(candidate)
       previous?.dispose()
       uncertain.current = null
+      recoveredDraft.current = null
       setAccepted({ filename, snapshot: result })
       setPageId(result.scene.pages[0]?.id ?? 0)
       setZoom(0)
@@ -325,28 +353,33 @@ export function PdfNativeEditPanel({
 
   function choosePage(destination: Page | undefined) {
     if (locked.current || destination === undefined || destination.id === pageId) return
+    const recovered = nativeNoteDraftForPage(recoveredDraft.current, destination.id)
     setPageId(destination.id)
-    setDraft(null)
+    setDraft(recovered)
     setComposition(false)
-    setStatus(['navigation.position', { page: pages.indexOf(destination) + 1, total: pages.length }])
+    setStatus(recovered ? ['status.unseen']
+      : ['navigation.position', { page: pages.indexOf(destination) + 1, total: pages.length }])
   }
 
   function chooseNote(note: Note) {
     if (geometry === null || locked.current) return
+    const recovered = nativeNoteDraftForPage(recoveredDraft.current, pageId)
     setComposition(false)
-    setDraft(draftFrom(note, geometry))
+    setDraft(recovered?.note === note.id ? recovered : draftFrom(note, geometry))
     focusAfterRender.current = `${id}-contents`
   }
 
   function startNote() {
     if (!canAdd || locked.current) return
+    const recovered = nativeNoteDraftForPage(recoveredDraft.current, pageId)
     setComposition(false)
-    setDraft({ note: null, contents: '', x: '0', y: '0' })
+    setDraft(recovered?.note === null ? recovered : { note: null, contents: '', x: '0', y: '0' })
     focusAfterRender.current = `${id}-contents`
   }
 
   function cancelDraft() {
     if (locked.current || composition.current) return
+    discardRecoveredDraft()
     setComposition(false)
     clearFeedback()
     if (selected && geometry) {
@@ -358,31 +391,27 @@ export function PdfNativeEditPanel({
     }
   }
 
-  function publish(pending: PendingNoteAction, result: NativePdfSnapshot, invoker: HTMLElement | null) {
-    const { command, before } = pending
+  function discardRecoveredDraft() {
+    const recovered = nativeNoteDraftForPage(recoveredDraft.current, pageId)
+    if (recovered && recovered.note === draft?.note) recoveredDraft.current = null
+  }
+
+  function publish(pending: PendingNoteAction, result: NativePdfSnapshot) {
     setAccepted((current) => current && { ...current, snapshot: result })
-    setStatus([command.kind === 'remove' ? 'note.removed' : 'status.accepted', { revision: result.binding.revision }])
-    if (pageId !== pending.pageId || draft !== pending.draft) return
-    const destinationId = command.kind === 'add' || command.kind === 'move' ? command.page : pending.pageId
-    const destination = result.scene.pages.find((item) => item.id === destinationId)
-    const destinationNotes = notesOf(destination)
-    const previousNotes = notesOf(before.scene.pages.find((item) => item.id === destinationId))
-    let target: Note | undefined
-    if (command.kind === 'add') {
-      const previousIds = new Set(previousNotes.map((note) => note.id))
-      target = destinationNotes.find((note) => !previousIds.has(note.id))
-      focusAfterRender.current = `${id}-add`
-    } else if (command.kind === 'remove') {
-      const removedIndex = previousNotes.findIndex((note) => note.id === command.note)
-      target = destinationNotes[Math.min(removedIndex, destinationNotes.length - 1)]
-      focusAfterRender.current = target ? `${id}-note-${target.id}` : `${id}-add`
-    } else {
-      target = destinationNotes.find((note) => note.id === command.note)
-      if (document.activeElement === document.body) focusAfterRender.current = invoker
-    }
-    setDraft(target && destination?.geometry
-      ? nativeNoteDraftAfter(command.kind, pending.draft, target, destination.geometry)
-      : null)
+    setStatus([pending.command.kind === 'remove' ? 'note.removed' : 'status.accepted', { revision: result.binding.revision }])
+    setDraft((current) => nativeNoteDraftAfterAcceptance(pending, result, pageId, current))
+  }
+
+  function acceptedFocusTarget(pending: PendingNoteAction, result: NativePdfSnapshot): string | null {
+    const { command, before } = pending
+    if (pageId !== pending.pageId) return null
+    if (command.kind === 'add' && draft === pending.draft) return `${id}-add`
+    if (command.kind !== 'remove' || draft?.note !== command.note) return null
+    const previousNotes = notesOf(before.scene.pages.find((item) => item.id === pageId))
+    const destinationNotes = notesOf(result.scene.pages.find((item) => item.id === pageId))
+    const removedIndex = previousNotes.findIndex((note) => note.id === command.note)
+    const target = destinationNotes[Math.min(removedIndex, destinationNotes.length - 1)]
+    return target ? `${id}-note-${target.id}` : `${id}-add`
   }
 
   async function act(command: NativePdfNoteCommand, invoker: HTMLElement | null) {
@@ -394,12 +423,15 @@ export function PdfNativeEditPanel({
     }
     locked.current = true
     const pending = { command, before: snapshot, pageId, draft }
+    discardRecoveredDraft()
     clearFeedback()
     setBusy('mutating')
     try {
       const result = await coordinator.command(command)
       if (!mounted.current) return
-      publish(pending, result, invoker)
+      publish(pending, result)
+      focusAfterRender.current = acceptedFocusTarget(pending, result)
+        ?? (document.activeElement === document.body ? invoker : null)
     } catch (cause) {
       if (!mounted.current) return
       if (coordinator.snapshot().phase === 'reconciliationRequired') {
@@ -423,23 +455,33 @@ export function PdfNativeEditPanel({
       const result = await coordinator.reconcile()
       if (!mounted.current) return
       uncertain.current = null
+      let focusTarget = `${id}-notes`
       if (result.status === 'unseen') {
         setAccepted((current) => current && { ...current, snapshot: result.snapshot })
-        setStatus(['status.unseen'])
+        recoveredDraft.current = { pageId: pending.pageId, draft: pending.draft }
+        const recovered = nativeNoteDraftForPage(recoveredDraft.current, pageId)
+        if (recovered) {
+          setDraft(recovered)
+          setComposition(false)
+        }
+        setStatus(pageId === pending.pageId ? ['status.unseen'] : ['status.unseenPage', {
+          page: result.snapshot.scene.pages.findIndex((item) => item.id === pending.pageId) + 1,
+        }])
       } else if (result.status === 'accepted' && result.snapshot.binding.revision === pending.before.binding.revision + 1) {
-        publish(pending, result.snapshot, null)
+        publish(pending, result.snapshot)
+        focusTarget = acceptedFocusTarget(pending, result.snapshot) ?? focusTarget
       } else {
         setAccepted((current) => current && { ...current, snapshot: result.snapshot })
         setDraft(null)
         setError(['error.stale'])
-        focusAfterRender.current = `${id}-notes`
       }
-      if (focusAfterRender.current === null
-        && (document.activeElement === document.body || document.activeElement === invoker)) {
-        focusAfterRender.current = `${id}-notes`
-      }
+      if (document.activeElement === invoker) focusAfterRender.current = focusTarget
     } catch (cause) {
-      if (mounted.current) setFailure(cause, false)
+      if (!mounted.current) return
+      setFailure(cause, false)
+      if (coordinator.snapshot().phase !== 'reconciliationRequired' && document.activeElement === invoker) {
+        focusAfterRender.current = `${id}-notes`
+      }
     } finally {
       locked.current = false
       if (mounted.current) setBusy(null)
@@ -541,8 +583,9 @@ export function PdfNativeEditPanel({
               return original
             }, origin)
           }}>{t('session.reopen')}</button>}
-          {needsReconcile && <button type="button" disabled={busy !== null} onClick={(event) => void reconcile(event.currentTarget)}>
-            {t('session.reconcile')}</button>}
+          {(needsReconcile || service?.phase === 'reconciling' || busy === 'reconciling')
+            && <button type="button" aria-disabled={busy !== null} onClick={(event) => void reconcile(event.currentTarget)}>
+              {t('session.reconcile')}</button>}
         </div>
         <p className="native-help" id={`${id}-file-limit`}>{t('limit.file', { limit: pdfLimit })}</p>
         {accepted && <p data-native-filename="" dir="auto"><bdi>{accepted.filename}</bdi></p>}

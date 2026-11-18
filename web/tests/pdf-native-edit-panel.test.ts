@@ -6,6 +6,8 @@ import {
   nativeDownloadName,
   nativeMarkerPosition,
   nativeNoteDraftAfter,
+  nativeNoteDraftAfterAcceptance,
+  nativeNoteDraftForPage,
   nativeNoteRect,
   nativeNoteTextError,
   type NativePdfAcceptedDocument,
@@ -47,6 +49,61 @@ describe('native note workspace', () => {
     const final = { ...edited, rect: moved.rect }
     expect(nativeNoteDraftAfter('move', afterSave, final, geometry)).toEqual(pending)
     expect(nativeNoteDraftAfter('edit', afterMove, final, geometry)).toEqual(pending)
+  })
+
+  it('refreshes a reselected target from accepted readback and keeps other selections', () => {
+    const original = note(2)
+    const other = note(3)
+    const before = documentWith([original, other]).snapshot
+    const edited = { ...original, contents: 'Verified readback' }
+    const result = documentWith([edited, other]).snapshot
+    const selected = { note: 2, contents: original.contents, x: '25', y: '30' }
+    const pending = {
+      command: { kind: 'edit', note: 2, contents: 'Submitted' } as const,
+      before, pageId: 0, draft: { ...selected, contents: 'Submitted' },
+    }
+    expect(nativeNoteDraftAfterAcceptance(pending, result, 0, selected))
+      .toEqual({ ...selected, contents: edited.contents })
+    const moved = { ...original, rect: [10, 50, 34, 74] as const }
+    expect(nativeNoteDraftAfterAcceptance({
+      ...pending, command: { kind: 'move', note: 2, page: 0, rect: moved.rect },
+    }, documentWith([moved, other]).snapshot, 0, selected))
+      .toEqual({ ...selected, x: '20', y: '30' })
+    const unrelated = { ...selected, note: 3 }
+    expect(nativeNoteDraftAfterAcceptance(pending, result, 0, unrelated)).toBe(unrelated)
+    expect(nativeNoteDraftAfterAcceptance(pending, result, 1, selected)).toBe(selected)
+
+    const removal = { ...pending, command: { kind: 'remove', note: 2 } as const }
+    const removed = documentWith([other]).snapshot
+    expect(nativeNoteDraftAfterAcceptance(removal, removed, 0, selected)).toBeNull()
+    expect(nativeNoteDraftAfterAcceptance(removal, removed, 0, unrelated)).toBe(unrelated)
+  })
+
+  it('selects a verified added note only when its submitted draft is still active', () => {
+    const draft = { note: null, contents: 'New', x: '0', y: '0' }
+    const added = note(3)
+    const pending = {
+      command: { kind: 'add', page: 0, rect: added.rect, contents: draft.contents } as const,
+      before: documentWith([note(2)]).snapshot, pageId: 0, draft,
+    }
+    const result = documentWith([note(2), added]).snapshot
+    expect(nativeNoteDraftAfterAcceptance(pending, result, 0, draft))
+      .toEqual({ note: 3, contents: added.contents, x: '10', y: '10' })
+    expect(nativeNoteDraftAfterAcceptance(pending, result, 0, null)).toBeNull()
+    const otherDraft = { ...draft }
+    expect(nativeNoteDraftAfterAcceptance(pending, result, 0, otherDraft)).toBe(otherDraft)
+  })
+
+  it('recovers an unseen command draft only on its original page', () => {
+    for (const id of [null, 2]) {
+      const draft = { note: id, contents: 'Unseen', x: '17', y: '28' }
+      const pending = { pageId: 1, draft }
+      expect(nativeNoteDraftForPage(pending, 0)).toBeNull()
+      expect(nativeNoteDraftForPage(pending, 1)).toBe(draft)
+      expect(nativeNoteDraftForPage(pending, 2)).toBeNull()
+      expect(nativeNoteDraftForPage(pending, 1)).toBe(draft)
+    }
+    expect(nativeNoteDraftForPage(null, 1)).toBeNull()
   })
 
   it('blocks blank, composing, malformed and over-limit UTF-8 drafts', () => {
