@@ -10,7 +10,7 @@ import { createNativePdfRuntime } from '../src/layout/layout-runtime.js'
 import { nativePdfText, type NativePdfMessage } from '../src/pdf/pdf-native-edit-messages.js'
 import { NATIVE_PDF_LIMITS, nativeHexBytes, type NativePdfObjectPage, type NativePdfGraphic, type NativePdfRect, type NativePdfWorkerRequest } from '../src/pdf/pdf-native-edit-protocol.js'
 
-function objectPdf(transform = '30 0 0 40 100 120', clip = '') {
+function objectPdf(transform = '30 0 0 40 100 120', clip = '', blankFirstPage = false) {
   const encoder = new TextEncoder()
   const stream = (data: string, attributes = '') => `<< /Length ${data.length}${attributes} >>\nstream\n${data}\nendstream`
   const objects = [
@@ -19,7 +19,7 @@ function objectPdf(transform = '30 0 0 40 100 120', clip = '') {
     '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 320 420] /Resources 5 0 R /Contents 6 0 R >>',
     '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 320 420] /Resources 5 0 R /Contents 7 0 R >>',
     '<< /XObject << /Shared 8 0 R >> >>',
-    stream(`q ${clip}${transform} cm /Shared Do Q\n20 30 10 12 re f\n`),
+    stream(blankFirstPage ? '' : `q ${clip}${transform} cm /Shared Do Q\n20 30 10 12 re f\n`),
     stream('q 15 0 0 18 90 90 cm /Shared Do Q\n10 12 24 26 re f\n'),
     stream('UVW', ' /Type /XObject /Subtype /Image /Width 1 /Height 1 /BitsPerComponent 8 /ColorSpace /DeviceRGB'),
   ]
@@ -64,14 +64,14 @@ for (const locale of ['uk', 'en'] as const) {
       downloads.push(fetch(this.href).then(async (response) => new Uint8Array(await response.arrayBuffer())))
     })
     let staleId: readonly number[] | undefined
-    let dropReplacement = false
+    let droppedCommand: 'replaceImage' | 'addGraphic' | null = null
     const postMessage = Worker.prototype.postMessage
     const worker = vi.spyOn(Worker.prototype, 'postMessage').mockImplementation(
       function (this: Worker, ...args: Parameters<Worker['postMessage']>) {
         const envelope = args[0] as Partial<NativePdfWorkerRequest> | undefined
         const request = envelope?.request
-        if (dropReplacement && request?.operation === 'command' && request.command.kind === 'replaceImage') {
-          dropReplacement = false
+        if (request?.operation === 'command' && request.command.kind === droppedCommand) {
+          droppedCommand = null
           return
         }
         if (staleId && request?.operation === 'command' && 'target' in request.command) {
@@ -173,6 +173,24 @@ for (const locale of ['uk', 'en'] as const) {
         return snapshot
       }
 
+      await open(objectPdf(undefined, '', true), 'blank-first-page.pdf')
+      await profile.selectOptions('rectangle')
+      await geometry(['41', '22', '18', '24'])
+      droppedCommand = 'addGraphic'
+      const blankHash = outputHash()
+      const beforeUnseenAdd = commandCount()
+      await activate(button('object.add').element())
+      const reconcileAdd = button('session.reconcile')
+      await expect.element(reconcileAdd, { timeout: 35_000 }).toBeEnabled()
+      await activate(button('navigation.next').element())
+      await activate(button('navigation.previous').element())
+      await activate(reconcileAdd.element())
+      await expect.element(panel.getByRole('status')).toHaveTextContent(t('status.unseen'))
+      await expect.element(objects.getByRole('textbox', { name: t('object.x'), exact: true })).toHaveValue('41')
+      await expect.element(button('object.add')).toBeEnabled()
+      expect(commandCount()).toBe(beforeUnseenAdd + 1)
+      expect(outputHash()).toBe(blankHash)
+
       await open(objectPdf('30 1 0 40 100 120'), 'skew.pdf')
       await expect.element(objects.getByText(t('object.reason.geometry'))).toBeVisible()
       expect(objects.getByRole('button', { name: t('object.add') }).query()).toBeNull()
@@ -230,12 +248,12 @@ for (const locale of ['uk', 'en'] as const) {
       await geometry([draftX, '121', '31', '41'])
       chooseFile(asset(), new File([grayPng], 'replacement.png', { type: 'image/png' }))
       await expect.element(objects.getByText(t('object.file.ready'), { exact: false })).toBeVisible()
-      dropReplacement = true
+      droppedCommand = 'replaceImage'
       const beforeUnseen = outputHash()
       await activate(button('object.replace').element())
       const reconcile = button('session.reconcile')
       await expect.element(reconcile, { timeout: 35_000 }).toBeEnabled()
-      expect(dropReplacement).toBe(false)
+      expect(droppedCommand).toBeNull()
       const beforeReconcile = commandCount()
       await activate(button('navigation.next').element())
       await activate(reconcile.element())
@@ -342,5 +360,5 @@ for (const locale of ['uk', 'en'] as const) {
       worker.mockRestore()
       root.remove()
     }
-  }, 60_000)
+  }, 95_000)
 }

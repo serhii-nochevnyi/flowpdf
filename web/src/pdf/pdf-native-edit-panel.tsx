@@ -916,8 +916,8 @@ export function PdfNativeEditPanel({
               draft: pending.objectDraft,
             }
             if (pageId !== pending.pageId) setStatus(['status.unseenPage', { page: pageIndex + 1 }])
-            else if (coordinates !== pending.objectDraft.coordinates) setStatus(['status.unseenObject'])
-            else setStatus([restoreObject(pageId, result.snapshot) ? 'status.unseen' : 'status.unseenNoDraft'])
+            else if (!matchesObjectDraftTarget(recoveredObject.current.target, selectedObject)) setStatus(['status.unseenObject'])
+            else setStatus([restoreObject(pageId, result.snapshot, selectedObject ?? null) ? 'status.unseen' : 'status.unseenNoDraft'])
           }
         } else if (!('draft' in pending) && pending.command.kind === 'replaceText') {
           const command = pending.command
