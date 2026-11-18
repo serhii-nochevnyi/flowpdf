@@ -265,7 +265,7 @@ impl NativePdfGraph {
         let existing = match page_dict.get("Annots") {
             None => &[][..],
             Some(value) => self
-                .resolve(value)?
+                .resolve_metered(value, &mut work)?
                 .as_array()
                 .ok_or(NativeEditError::Malformed)?,
         };
@@ -358,24 +358,47 @@ impl NativePdfGraph {
         let Some(annots) = dict.get("Annots") else {
             return Ok(Vec::new());
         };
+        let mut work = self.limits.max_work;
         let annots = self
-            .resolve(annots)?
+            .resolve_metered(annots, &mut work)?
             .as_array()
             .ok_or(NativeEditError::Malformed)?;
         let mut result = Vec::new();
         let mut remaining = self.limits.max_retained_bytes;
-        let mut work = self.limits.max_work;
         for value in annots {
             spend(&mut work, 1)?;
             let dict = self
-                .resolve(value)?
+                .resolve_metered(value, &mut work)?
                 .as_dictionary()
                 .ok_or(NativeEditError::Malformed)?;
             if dict.get("Subtype").and_then(PdfValue::as_name) != Some("Text") {
                 continue;
             }
+            let values = self
+                .resolve_metered(
+                    dict.get("Rect").ok_or(NativeEditError::Malformed)?,
+                    &mut work,
+                )?
+                .as_array()
+                .ok_or(NativeEditError::Malformed)?;
+            if values.len() != 4
+                || values
+                    .iter()
+                    .any(|value| !matches!(value, PdfValue::Integer(_) | PdfValue::ExactReal(_)))
+            {
+                return Err(NativeEditError::Malformed);
+            }
+            let [Some(left), Some(bottom), Some(right), Some(top)] =
+                std::array::from_fn(|index| values[index].as_integer())
+            else {
+                continue;
+            };
+            let rect = [left, bottom, right, top];
             let bytes = self
-                .resolve(dict.get("Contents").ok_or(NativeEditError::Malformed)?)?
+                .resolve_metered(
+                    dict.get("Contents").ok_or(NativeEditError::Malformed)?,
+                    &mut work,
+                )?
                 .as_bytes()
                 .ok_or(NativeEditError::Malformed)?;
             spend(
@@ -398,17 +421,6 @@ impl NativePdfGraph {
             } else {
                 String::from_utf8(bytes.to_vec()).map_err(|_| NativeEditError::Unsupported)?
             };
-            let values = self
-                .resolve(dict.get("Rect").ok_or(NativeEditError::Malformed)?)?
-                .as_array()
-                .ok_or(NativeEditError::Malformed)?;
-            if values.len() != 4 {
-                return Err(NativeEditError::Malformed);
-            }
-            let mut rect = [0; 4];
-            for (target, value) in rect.iter_mut().zip(values) {
-                *target = value.as_integer().ok_or(NativeEditError::Unsupported)?;
-            }
             result.push(PlainTextNote {
                 page_index,
                 contents,
@@ -418,10 +430,15 @@ impl NativePdfGraph {
         Ok(result)
     }
 
-    fn resolve<'a>(&'a self, mut value: &'a PdfValue) -> Result<&'a PdfValue, NativeEditError> {
+    fn resolve_metered<'a>(
+        &'a self,
+        mut value: &'a PdfValue,
+        work: &mut usize,
+    ) -> Result<&'a PdfValue, NativeEditError> {
         for _ in 0..=self.limits.max_nesting {
             match value {
                 PdfValue::Reference(reference) => {
+                    spend(work, 1)?;
                     value = self
                         .objects
                         .get(reference)
@@ -452,7 +469,9 @@ impl NativePdfGraph {
             .and_then(PdfValue::as_reference)
             .ok_or(NativeEditError::Malformed)?;
         let mut seen = BTreeSet::new();
-        self.walk_pages(pages, None, false, 0, &mut seen)?;
+        let mut work = self.work;
+        self.walk_pages(pages, None, false, 0, &mut seen, &mut work)?;
+        self.work = work;
         if self.pages.is_empty() {
             return Err(NativeEditError::Malformed);
         }
@@ -466,8 +485,9 @@ impl NativePdfGraph {
         inherited_box: bool,
         depth: usize,
         seen: &mut BTreeSet<PdfObjectRef>,
+        work: &mut usize,
     ) -> Result<usize, NativeEditError> {
-        spend(&mut self.work, 1)?;
+        spend(work, 1)?;
         if depth > self.limits.max_nesting || !seen.insert(reference) {
             return Err(NativeEditError::Malformed);
         }
@@ -481,7 +501,7 @@ impl NativePdfGraph {
         }
         let has_box = if let Some(value) = dict.get("MediaBox") {
             let values = self
-                .resolve(value)?
+                .resolve_metered(value, work)?
                 .as_array()
                 .ok_or(NativeEditError::Malformed)?;
             if values.len() != 4 || values.iter().any(|v| v.as_number().is_none()) {
@@ -499,7 +519,11 @@ impl NativePdfGraph {
             inherited_box
         };
         if let Some(resources) = dict.get("Resources") {
-            if self.resolve(resources)?.as_dictionary().is_none() {
+            if self
+                .resolve_metered(resources, work)?
+                .as_dictionary()
+                .is_none()
+            {
                 return Err(NativeEditError::Malformed);
             }
         }
@@ -509,11 +533,15 @@ impl NativePdfGraph {
                     return Err(NativeEditError::Malformed);
                 }
                 if let Some(contents) = dict.get("Contents") {
-                    match self.resolve(contents)? {
+                    match self.resolve_metered(contents, work)? {
                         PdfValue::Stream(_) | PdfValue::Null => {}
                         PdfValue::Array(values) => {
                             for value in values {
-                                if !matches!(self.resolve(value)?, PdfValue::Stream(_)) {
+                                spend(work, 1)?;
+                                if !matches!(
+                                    self.resolve_metered(value, work)?,
+                                    PdfValue::Stream(_)
+                                ) {
                                     return Err(NativeEditError::Malformed);
                                 }
                             }
@@ -523,11 +551,12 @@ impl NativePdfGraph {
                 }
                 if let Some(annots) = dict.get("Annots") {
                     for annot in self
-                        .resolve(annots)?
+                        .resolve_metered(annots, work)?
                         .as_array()
                         .ok_or(NativeEditError::Malformed)?
                     {
-                        if self.resolve(annot)?.as_dictionary().is_none() {
+                        spend(work, 1)?;
+                        if self.resolve_metered(annot, work)?.as_dictionary().is_none() {
                             return Err(NativeEditError::Malformed);
                         }
                     }
@@ -537,9 +566,10 @@ impl NativePdfGraph {
             }
             Some("Pages") => {
                 let kids = self
-                    .resolve(dict.get("Kids").ok_or(NativeEditError::Malformed)?)?
+                    .resolve_metered(dict.get("Kids").ok_or(NativeEditError::Malformed)?, work)?
                     .as_array()
                     .ok_or(NativeEditError::Malformed)?;
+                spend(work, kids.len())?;
                 let kids: Vec<_> = kids
                     .iter()
                     .map(|v| v.as_reference().ok_or(NativeEditError::Malformed))
@@ -557,6 +587,7 @@ impl NativePdfGraph {
                             has_box,
                             depth + 1,
                             seen,
+                            work,
                         )?)
                         .ok_or(NativeEditError::Budget)?;
                 }
@@ -766,6 +797,55 @@ mod tests {
         graph.retained = retained;
         assert_eq!(before, graph.rewrite().unwrap());
         assert_eq!(graph.original_bytes(), bytes);
+    }
+
+    #[test]
+    fn page_validation_charges_kid_entries_and_contents_reference() {
+        let payload = miniz_oxide::deflate::compress_to_vec_zlib(b"q Q", 6);
+        let bytes = super::super::tests::fixture("", &payload);
+        let mut graph = NativePdfGraph::open(&bytes, NativeEditLimits::default()).unwrap();
+
+        graph.pages.clear();
+        graph.work = 3;
+        assert_eq!(graph.validate_pages(), Err(NativeEditError::Budget));
+
+        graph.pages.clear();
+        graph.work = 4;
+        graph.validate_pages().unwrap();
+        assert_eq!(graph.work, 0);
+        assert_eq!(graph.pages.len(), 1);
+    }
+
+    #[test]
+    fn decimal_annotation_survives_rewrite_alongside_whole_point_note() {
+        let payload = miniz_oxide::deflate::compress_to_vec_zlib(b"q Q", 6);
+        let bytes = super::super::tests::fixture("", &payload);
+        let mut graph = NativePdfGraph::open(&bytes, NativeEditLimits::default()).unwrap();
+        let note = PlainTextNote {
+            page_index: 0,
+            contents: "Whole-point note".into(),
+            rect: [1, 2, 3, 4],
+        };
+        graph.add_note(note.clone()).unwrap();
+        for object in graph.objects.values_mut() {
+            if let PdfValue::Dictionary(dict) = object
+                && let Some(PdfValue::Array(rect)) = dict.get_mut("Rect")
+            {
+                rect[0] = PdfValue::ExactReal("1.25".into());
+            }
+        }
+        let imported = graph.rewrite().unwrap();
+        let mut graph = NativePdfGraph::open(&imported, NativeEditLimits::default()).unwrap();
+        graph.add_note(note.clone()).unwrap();
+        let output = graph.rewrite().unwrap();
+        let reopened = NativePdfGraph::open(&output, NativeEditLimits::default()).unwrap();
+        assert_eq!(reopened.notes(0).unwrap(), vec![note]);
+        assert!(reopened.objects.values().any(|object| {
+            matches!(
+                object.as_dictionary().and_then(|dict| dict.get("Rect")).and_then(PdfValue::as_array),
+                Some([PdfValue::ExactReal(token), ..]) if token == "1.25"
+            )
+        }));
     }
 
     #[test]

@@ -609,7 +609,7 @@ impl PdfReader {
                     cursor.limits.max_decoded_stream_bytes.min(remaining);
             }
             let encoded = raw.clone();
-            let data = decode_stream(&dictionary, raw, &cursor.limits)?;
+            let data = decode_stream(&dictionary, raw, &cursor.limits, cursor.exact)?;
             cursor.charge(data.len())?;
             value = PdfValue::Stream(PdfStream {
                 dict: dictionary,
@@ -1017,6 +1017,7 @@ fn decode_stream(
     dictionary: &BTreeMap<String, PdfValue>,
     raw: Vec<u8>,
     limits: &PdfReaderLimits,
+    exact: bool,
 ) -> Result<Vec<u8>, PdfReadError> {
     let Some(filter) = dictionary.get("Filter") else {
         if raw.len() > limits.max_decoded_stream_bytes {
@@ -1038,6 +1039,7 @@ fn decode_stream(
             }
             Ok(raw)
         }
+        "DCTDecode" | "DCT" if exact => Err(PdfReadError::FilterUnsupported),
         "DCTDecode" | "DCT" => {
             if raw.len() > limits.max_decoded_stream_bytes {
                 return Err(PdfReadError::DecodedStreamLimit);
@@ -1062,45 +1064,44 @@ fn decode_stream(
             Ok(decoded)
         }
         "ASCIIHexDecode" | "AHx" => {
-            let decoded = decode_ascii_hex(&raw, limits.max_decoded_stream_bytes)?;
+            let decoded = decode_ascii_hex(raw, limits.max_decoded_stream_bytes)?;
             Ok(decoded)
         }
         _ => Err(PdfReadError::FilterUnsupported),
     }
 }
 
-fn decode_ascii_hex(bytes: &[u8], limit: usize) -> Result<Vec<u8>, PdfReadError> {
-    let mut output = Vec::new();
-    let mut high: Option<u8> = None;
-    for byte in bytes {
-        if is_pdf_space(*byte) {
+fn decode_ascii_hex(mut bytes: Vec<u8>, limit: usize) -> Result<Vec<u8>, PdfReadError> {
+    let mut decoded = 0;
+    let mut high = None;
+    for index in 0..bytes.len() {
+        let byte = bytes[index];
+        if is_pdf_space(byte) {
             continue;
         }
-        if *byte == b'>' {
+        if byte == b'>' {
             break;
         }
-        let nibble = match byte {
-            b'0'..=b'9' => byte - b'0',
-            b'a'..=b'f' => byte - b'a' + 10,
-            b'A'..=b'F' => byte - b'A' + 10,
-            _ => return Err(PdfReadError::Syntax),
-        };
+        let nibble = hex_nibble(byte).ok_or(PdfReadError::Syntax)?;
         if let Some(high) = high.take() {
-            output.push((high << 4) | nibble);
+            if decoded == limit {
+                return Err(PdfReadError::DecodedStreamLimit);
+            }
+            bytes[decoded] = (high << 4) | nibble;
+            decoded += 1;
         } else {
             high = Some(nibble);
         }
-        if output.len() > limit {
-            return Err(PdfReadError::DecodedStreamLimit);
-        }
     }
     if let Some(high) = high {
-        output.push(high << 4);
+        if decoded == limit {
+            return Err(PdfReadError::DecodedStreamLimit);
+        }
+        bytes[decoded] = high << 4;
+        decoded += 1;
     }
-    if output.len() > limit {
-        return Err(PdfReadError::DecodedStreamLimit);
-    }
-    Ok(output)
+    bytes.truncate(decoded);
+    Ok(bytes)
 }
 
 pub(crate) fn report_active_content(
@@ -1530,6 +1531,9 @@ impl<'a> Cursor<'a> {
         if output.contains(&0) {
             return Err(PdfReadError::Syntax);
         }
+        if !self.exact {
+            return String::from_utf8(output).map_err(|_| PdfReadError::Syntax);
+        }
         Ok(output.into_iter().map(char::from).collect())
     }
 
@@ -1682,4 +1686,31 @@ fn parse_signed_i64(bytes: &[u8]) -> Result<i64, PdfReadError> {
         value = -value;
     }
     i64::try_from(value).map_err(|_| PdfReadError::NumericLimit)
+}
+
+#[cfg(test)]
+mod retained_reader_tests {
+    use super::*;
+
+    #[test]
+    fn scene_names_decode_utf8_while_retained_names_keep_encoded_bytes() {
+        let mut cursor = Cursor::new(b"/#D0#90", 0, PdfReaderLimits::default());
+        assert_eq!(cursor.parse_name().unwrap(), "А");
+        cursor.set_position(0);
+        cursor.exact = true;
+        assert_eq!(cursor.parse_name().unwrap(), "\u{d0}\u{90}");
+    }
+
+    #[test]
+    fn ascii_hex_checks_limits_for_complete_and_padded_bytes() {
+        assert_eq!(decode_ascii_hex(b"41 2>".to_vec(), 2).unwrap(), b"A ");
+        assert!(matches!(
+            decode_ascii_hex(b"41>".to_vec(), 0),
+            Err(PdfReadError::DecodedStreamLimit)
+        ));
+        assert!(matches!(
+            decode_ascii_hex(b"41 2>".to_vec(), 1),
+            Err(PdfReadError::DecodedStreamLimit)
+        ));
+    }
 }

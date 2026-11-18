@@ -306,6 +306,7 @@ mod tests {
             "/F (file)",
             "/DecodeParms << /Predictor 12 >>",
             "/Filter /Unknown",
+            "/Filter /DCTDecode",
             "/Filter [/FlateDecode /FlateDecode]",
             "/Type /ObjStm",
             "/Type /XRef",
