@@ -394,13 +394,14 @@ impl NativePdfGraph {
                 continue;
             };
             let rect = [left, bottom, right, top];
-            let bytes = self
-                .resolve_metered(
-                    dict.get("Contents").ok_or(NativeEditError::Malformed)?,
-                    &mut work,
-                )?
-                .as_bytes()
-                .ok_or(NativeEditError::Malformed)?;
+            let Some(contents) = dict.get("Contents") else {
+                continue;
+            };
+            let bytes = match self.resolve_metered(contents, &mut work)? {
+                PdfValue::Null => continue,
+                PdfValue::String(bytes) => bytes,
+                _ => return Err(NativeEditError::Malformed),
+            };
             spend(
                 &mut remaining,
                 bytes
@@ -846,6 +847,70 @@ mod tests {
                 Some([PdfValue::ExactReal(token), ..]) if token == "1.25"
             )
         }));
+    }
+
+    #[test]
+    fn imported_annotation_without_contents_survives_alongside_readable_note() {
+        let payload = miniz_oxide::deflate::compress_to_vec_zlib(b"q Q", 6);
+        let bytes = super::super::tests::fixture("", &payload);
+        let original = PlainTextNote {
+            page_index: 0,
+            contents: String::new(),
+            rect: [10, 20, 30, 40],
+        };
+        let added = PlainTextNote {
+            page_index: 0,
+            contents: "Review note".into(),
+            rect: [1, 2, 3, 4],
+        };
+
+        for explicit_null in [false, true] {
+            let mut graph = NativePdfGraph::open(&bytes, NativeEditLimits::default()).unwrap();
+            graph.add_note(original.clone()).unwrap();
+            let annotation = graph
+                .objects
+                .values_mut()
+                .find_map(|value| match value {
+                    PdfValue::Dictionary(dict) if dict.contains_key("Rect") => Some(dict),
+                    _ => None,
+                })
+                .unwrap();
+            if explicit_null {
+                annotation.insert("Contents".into(), PdfValue::Null);
+            } else {
+                annotation.remove("Contents");
+            }
+            let imported = graph.rewrite().unwrap();
+            let mut graph = NativePdfGraph::open(&imported, NativeEditLimits::default()).unwrap();
+            graph.add_note(added.clone()).unwrap();
+            let output = graph.rewrite().unwrap();
+            let reopened = NativePdfGraph::open(&output, NativeEditLimits::default()).unwrap();
+            assert_eq!(reopened.notes(0).unwrap(), vec![added.clone()]);
+
+            let page = reopened.objects[&reopened.pages[0]]
+                .as_dictionary()
+                .unwrap();
+            let annots = page["Annots"].as_array().unwrap();
+            assert_eq!(annots.len(), 2);
+            let annotation = reopened.objects[&annots[0].as_reference().unwrap()]
+                .as_dictionary()
+                .unwrap();
+            assert_eq!(annotation["Subtype"].as_name(), Some("Text"));
+            assert_eq!(
+                annotation["Rect"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(PdfValue::as_integer)
+                    .collect::<Vec<_>>(),
+                original.rect.map(Some)
+            );
+            assert!(match annotation.get("Contents") {
+                Some(PdfValue::Null) => explicit_null,
+                None => !explicit_null,
+                _ => false,
+            });
+        }
     }
 
     #[test]

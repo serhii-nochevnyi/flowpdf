@@ -189,6 +189,8 @@ pub(super) fn rewrite(graph: &NativePdfGraph) -> Result<Vec<u8>, NativeEditError
 
 #[cfg(test)]
 mod tests {
+    use crate::pdf::reader::{PdfReadError, PdfReaderLimits, open_pdf};
+
     use super::super::{NativeEditLimits, PlainTextNote};
     use super::*;
 
@@ -278,6 +280,34 @@ mod tests {
             }
         }
         assert_eq!(graph.original_bytes(), source);
+    }
+
+    #[test]
+    fn native_name_keys_and_values_survive_canonical_escaping() {
+        let raw_name = "é".repeat(64);
+        let retained_name = "\u{c3}\u{a9}".repeat(64);
+        let source = independent(&[], &format!("/Custom << /{raw_name} /{raw_name} >>"));
+        assert!(open_pdf(&source, PdfReaderLimits::default()).is_ok());
+        let graph = NativePdfGraph::open(&source, NativeEditLimits::default()).unwrap();
+        let output = graph.rewrite().unwrap();
+        assert!(matches!(
+            open_pdf(&output, PdfReaderLimits::default()),
+            Err(PdfReadError::Syntax)
+        ));
+        let reopened = NativePdfGraph::open(&output, NativeEditLimits::default()).unwrap();
+        for graph in [&graph, &reopened] {
+            let dictionary = graph.trailer["Custom"].as_dictionary().unwrap();
+            assert_eq!(
+                dictionary[&retained_name].as_name(),
+                Some(retained_name.as_str())
+            );
+        }
+
+        let over_limit = independent(&[], &format!("/Custom /{}", "A".repeat(129)));
+        assert!(matches!(
+            NativePdfGraph::open(&over_limit, NativeEditLimits::default()),
+            Err(NativeEditError::Reader(PdfReadError::Syntax))
+        ));
     }
 
     #[test]

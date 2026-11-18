@@ -1500,21 +1500,26 @@ impl<'a> Cursor<'a> {
         }
         self.position += 1;
         let start = self.position;
+        let max_encoded_len = if self.exact {
+            MAX_PDF_IDENTITY_BYTES * 3
+        } else {
+            MAX_PDF_IDENTITY_BYTES
+        };
         while self.position < self.bytes.len() && !is_delimiter(self.bytes[self.position]) {
+            if self.position - start == max_encoded_len {
+                return Err(PdfReadError::Syntax);
+            }
             self.position += 1;
         }
-        if self.position - start > MAX_PDF_IDENTITY_BYTES {
-            return Err(PdfReadError::Syntax);
-        }
-        self.charge(
-            (self.position - start)
-                .checked_mul(2)
-                .ok_or(PdfReadError::InputSizeLimit)?,
-        )?;
-        let mut output = Vec::with_capacity(self.position - start);
+        let capacity = (self.position - start).min(MAX_PDF_IDENTITY_BYTES);
+        self.charge(capacity)?;
+        let mut output = Vec::with_capacity(capacity);
         let bytes = &self.bytes[start..self.position];
         let mut index = 0;
         while index < bytes.len() {
+            if output.len() == MAX_PDF_IDENTITY_BYTES {
+                return Err(PdfReadError::Syntax);
+            }
             if bytes[index] == b'#' {
                 if index + 2 >= bytes.len() {
                     return Err(PdfReadError::Syntax);
@@ -1534,7 +1539,11 @@ impl<'a> Cursor<'a> {
         if !self.exact {
             return String::from_utf8(output).map_err(|_| PdfReadError::Syntax);
         }
-        Ok(output.into_iter().map(char::from).collect())
+        let utf8_len = output.len() + output.iter().filter(|byte| !byte.is_ascii()).count();
+        self.charge(utf8_len)?;
+        let mut name = String::with_capacity(utf8_len);
+        name.extend(output.into_iter().map(char::from));
+        Ok(name)
     }
 
     fn parse_literal_string(&mut self) -> Result<Vec<u8>, PdfReadError> {
