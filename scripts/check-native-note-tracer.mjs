@@ -1,4 +1,5 @@
 import { execFileSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { delimiter, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -8,8 +9,15 @@ const workflowFile = 'pdf-native-note-tracer.yml'
 const workflowPath = `.github/workflows/${workflowFile}`
 const workflowName = 'Native PDF note tracer'
 const jobName = 'native-pdf-note-tracer'
-const runnerLabel = 'flowpdf-phase9'
-const buildStep = 'Build and trace native notes'
+const workflowSha256 = '62f76deaa269fe69c7e44dcd54458f26ab4d65ea0b195fc1636a6c65788cd2d4'
+const requiredSteps = [
+  'Verify exact checkout',
+  'Build generated WASM and web output',
+  'Run bilingual Chromium note tracer',
+  'Bundle the production editor',
+  'Run built-editor Chromium smoke',
+  'Verify source checkout stayed unchanged',
+]
 const shaPattern = /^[a-f0-9]{40}$/
 const apiTimeout = 20_000
 
@@ -17,13 +25,14 @@ function requireEvidence(condition, code) {
   if (!condition) throw new Error(code)
 }
 
-function execute(argv, { timeout = apiTimeout, env = process.env } = {}) {
+function execute(argv, { timeout = apiTimeout, env = process.env, raw = false } = {}) {
   const [command, ...args] = argv
   // Keep subprocess output out of gate diagnostics, including gh auth errors.
-  return execFileSync(command, args, {
+  const output = execFileSync(command, args, {
     cwd: root, env, encoding: 'utf8', timeout, maxBuffer: 8 * 1024 * 1024,
     stdio: ['ignore', 'pipe', 'pipe'],
-  }).trim()
+  })
+  return raw ? output : output.trim()
 }
 
 function call(command, argv, code, options) {
@@ -62,13 +71,17 @@ export function requirePassedCi(ref, command = execute) {
     }
   }
 
-  const { workflow_runs: runs, total_count: runCount } = get(`actions/workflows/${workflowFile}/runs?head_sha=${sha}&per_page=100`)
+  const workflow = call(command, ['git', 'show', `${sha}:${workflowPath}`],
+    'NATIVE_NOTE_TRACER_WORKFLOW_UNAVAILABLE', { raw: true })
+  requireEvidence(createHash('sha256').update(workflow).digest('hex') === workflowSha256,
+    'NATIVE_NOTE_TRACER_WORKFLOW_NOT_APPROVED')
+  const { workflow_runs: runs, total_count: runCount } = get(`actions/workflows/${workflowFile}/runs?event=push&head_sha=${sha}&per_page=100`)
   requireEvidence(Array.isArray(runs) && runs.length > 0 && runs.length < 100 && runCount === runs.length &&
     runs.every((run) => Number.isSafeInteger(run.run_number)), 'NATIVE_NOTE_TRACER_RUN_UNAVAILABLE')
   const [run] = [...runs].sort((a, b) => b.run_number - a.run_number)
   requireEvidence(run?.head_sha === sha && run.repository?.full_name?.toLowerCase() === repository &&
     run.name === workflowName && run.path === workflowPath &&
-    ['push', 'pull_request'].includes(run.event) &&
+    run.event === 'push' &&
     Number.isSafeInteger(run.id) && run.id > 0 &&
     Number.isSafeInteger(run.run_attempt) && run.run_attempt > 0 &&
     run.status === 'completed' && run.conclusion === 'success', 'NATIVE_NOTE_TRACER_RUN_NOT_PASSED')
@@ -77,14 +90,22 @@ export function requirePassedCi(ref, command = execute) {
   const matchingJobs = Array.isArray(jobs) && jobCount === jobs.length && jobs.length < 100
     ? jobs.filter((job) => job.name === jobName) : []
   const [job] = matchingJobs
+  let stepNumber = 0
+  const stepsPassed = Array.isArray(job?.steps) && requiredSteps.every((name) => {
+    const matches = job.steps.filter((step) => step.name === name)
+    const [step] = matches
+    if (matches.length !== 1 || step.status !== 'completed' || step.conclusion !== 'success'
+        || !Number.isSafeInteger(step.number) || step.number <= stepNumber) return false
+    stepNumber = step.number
+    return true
+  })
   requireEvidence(matchingJobs.length === 1 && job.run_id === run.id &&
     (job.run_attempt === undefined || job.run_attempt === run.run_attempt) && job.head_sha === sha &&
     Number.isSafeInteger(job.id) && job.id > 0 &&
     typeof job.check_run_url === 'string' &&
     /^https:\/\/api\.github\.com\/repos\/serhii-nochevnyi\/flowpdf\/check-runs\/\d+$/.test(job.check_run_url) &&
-    job.workflow_name === workflowName && job.labels?.includes('self-hosted') &&
-    job.labels?.includes(runnerLabel) && job.status === 'completed' && job.conclusion === 'success' &&
-    job.steps?.some((step) => step.name === buildStep && step.status === 'completed' && step.conclusion === 'success'),
+    job.workflow_name === workflowName && job.labels?.includes('ubuntu-24.04') &&
+    !job.labels.includes('self-hosted') && job.status === 'completed' && job.conclusion === 'success' && stepsPassed,
   'NATIVE_NOTE_TRACER_JOB_NOT_PASSED')
 
   const { check_runs: checks, total_count: count } = get(

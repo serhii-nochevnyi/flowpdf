@@ -6,6 +6,7 @@ import { join } from 'node:path'
 import test from 'node:test'
 
 import {
+  validateLinuxReleaseBindgen,
   validateWasmBindgenInstallation,
   verifyInstalledTool,
   verifyWasmBindgenTool,
@@ -120,4 +121,19 @@ test('a checksum-mismatched sentinel executable is never invoked by the filesyst
 
   assert.throws(() => verifyInstalledTool(root), /checksum mismatch/)
   await assert.rejects(() => access(marker))
+})
+
+test('accepts the pinned Linux release and rejects a changed executable', () => {
+  const linux = {
+    ...approved,
+    linuxRelease: {
+      assetSha256: 'a'.repeat(64),
+      binarySha256: createHash('sha256').update(trustedBinary).digest('hex'),
+    },
+  }
+  assert.doesNotThrow(() => validateLinuxReleaseBindgen({ approved: linux, report, binaryBytes: trustedBinary }))
+  assert.throws(() => validateLinuxReleaseBindgen({ approved: linux, report, binaryBytes: Buffer.from('changed') }),
+    /Linux release binary checksum mismatch/)
+  assert.throws(() => validateLinuxReleaseBindgen({ approved, report, binaryBytes: trustedBinary }),
+    /Linux release checksums are not approved/)
 })
