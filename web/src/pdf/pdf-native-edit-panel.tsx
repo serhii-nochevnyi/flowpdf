@@ -1089,7 +1089,7 @@ export function PdfNativeEditPanel({
               <p id={`${id}-object-bounds`} className="native-help">{t('object.geometry.help')}</p>
               <div className="native-coordinates">
                 {coordinateLabels.map((label, index) => <label key={label}>{t(`object.${label}`)}
-                  <input type="text" inputMode="decimal" className="native-text-line" value={coordinates[index]}
+                  <input type="text" inputMode="decimal" className="native-text-line" value={coordinates[index] ?? ''}
                     aria-invalid={!objectBounds} aria-describedby={`${id}-object-bounds${objectBounds ? '' : ` ${id}-object-invalid`}`}
                     onChange={(event) => {
                       const next = [...coordinates] as [string, string, string, string]
