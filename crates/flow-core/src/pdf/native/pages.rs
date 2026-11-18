@@ -80,7 +80,7 @@ impl NativePageState {
     }
 }
 
-fn dict(graph: &NativePdfGraph, reference: Ref) -> Result<&Dict, NativeEditError> {
+pub(super) fn dict(graph: &NativePdfGraph, reference: Ref) -> Result<&Dict, NativeEditError> {
     graph
         .objects
         .get(&reference)
@@ -88,7 +88,10 @@ fn dict(graph: &NativePdfGraph, reference: Ref) -> Result<&Dict, NativeEditError
         .ok_or(Malformed)
 }
 
-fn dict_mut(graph: &mut NativePdfGraph, reference: Ref) -> Result<&mut Dict, NativeEditError> {
+pub(super) fn dict_mut(
+    graph: &mut NativePdfGraph,
+    reference: Ref,
+) -> Result<&mut Dict, NativeEditError> {
     match graph.objects.get_mut(&reference) {
         Some(PdfValue::Dictionary(value)) => Ok(value),
         _ => Err(Malformed),
@@ -117,11 +120,18 @@ fn array_refs(
         .collect()
 }
 
-fn refs(values: impl IntoIterator<Item = Ref>) -> PdfValue {
+pub(super) fn refs(values: impl IntoIterator<Item = Ref>) -> PdfValue {
     PdfValue::Array(values.into_iter().map(PdfValue::Reference).collect())
 }
 
-fn allocate(graph: &mut NativePdfGraph, value: Dict) -> Result<Ref, NativeEditError> {
+pub(super) fn allocate(graph: &mut NativePdfGraph, value: Dict) -> Result<Ref, NativeEditError> {
+    allocate_value(graph, PdfValue::Dictionary(value))
+}
+
+pub(super) fn allocate_value(
+    graph: &mut NativePdfGraph,
+    value: PdfValue,
+) -> Result<Ref, NativeEditError> {
     if graph.objects.len() >= graph.limits.max_objects {
         return Err(Budget);
     }
@@ -133,11 +143,11 @@ fn allocate(graph: &mut NativePdfGraph, value: Dict) -> Result<Ref, NativeEditEr
         object_number: number.checked_add(1).ok_or(Budget)?,
         generation: 0,
     };
-    graph.objects.insert(key, PdfValue::Dictionary(value));
+    graph.objects.insert(key, value);
     Ok(key)
 }
 
-fn catalog(graph: &NativePdfGraph) -> Result<Ref, NativeEditError> {
+pub(super) fn catalog(graph: &NativePdfGraph) -> Result<Ref, NativeEditError> {
     reference(&graph.trailer, "Root")
 }
 
@@ -218,7 +228,7 @@ fn replace_kids(
     Ok(())
 }
 
-fn annotations(graph: &NativePdfGraph, page: Ref) -> Result<Vec<Ref>, NativeEditError> {
+pub(super) fn annotations(graph: &NativePdfGraph, page: Ref) -> Result<Vec<Ref>, NativeEditError> {
     dict(graph, page)?
         .get("Annots")
         .map_or(Ok(Vec::new()), |annots| {
@@ -253,7 +263,25 @@ fn exclusive_array_member(
     Ok(())
 }
 
-fn form_dict(graph: &NativePdfGraph, owner: Ref) -> Result<&Dict, NativeEditError> {
+pub(super) fn exclusive_container<'a>(
+    graph: &'a NativePdfGraph,
+    owner: Ref,
+    value: &'a PdfValue,
+) -> Result<&'a PdfValue, NativeEditError> {
+    let Some(reference) = value.as_reference() else {
+        return Ok(value);
+    };
+    if !graph
+        .reverse
+        .get(&reference)
+        .is_some_and(|owners| owners.len() == 1 && owners.contains(&owner))
+    {
+        return Err(Unsupported);
+    }
+    graph.objects.get(&reference).ok_or(Malformed)
+}
+
+pub(super) fn form_dict(graph: &NativePdfGraph, owner: Ref) -> Result<&Dict, NativeEditError> {
     let values = dict(graph, owner)?;
     if owner == catalog(graph)? {
         return values
@@ -264,18 +292,25 @@ fn form_dict(graph: &NativePdfGraph, owner: Ref) -> Result<&Dict, NativeEditErro
     Ok(values)
 }
 
-fn form_fields(graph: &NativePdfGraph) -> Result<(Ref, Vec<Ref>), NativeEditError> {
+pub(super) fn form_fields(graph: &NativePdfGraph) -> Result<(Ref, Vec<Ref>), NativeEditError> {
     let catalog = catalog(graph)?;
     let form = dict(graph, catalog)?.get("AcroForm").ok_or(Unsupported)?;
     let owner = form.as_reference().unwrap_or(catalog);
+    exclusive_container(graph, catalog, form)?;
     let fields = form_dict(graph, owner)?.get("Fields").ok_or(Unsupported)?;
+    let array = exclusive_container(graph, owner, fields)?
+        .as_array()
+        .ok_or(Unsupported)?;
+    if array.len() > super::forms::MAX_FIELDS {
+        return Err(Budget);
+    }
     Ok((
         owner,
         array_refs(graph, fields, &mut graph.remaining_work())?,
     ))
 }
 
-fn replace_form_fields(
+pub(super) fn replace_form_fields(
     graph: &mut NativePdfGraph,
     owner: Ref,
     fields: Vec<Ref>,
@@ -328,17 +363,11 @@ fn widget_field(graph: &NativePdfGraph, annot: Ref) -> Result<Ref, NativeEditErr
     }
     match field_values.get("Kids") {
         None if field == annot => {}
-        Some(children)
-            if field != annot
-                && array_refs(graph, children, &mut graph.remaining_work())? == [annot] =>
-        {
-            let container = children.as_reference().unwrap_or(field);
-            if container != field
-                && !graph
-                    .reverse
-                    .get(&container)
-                    .is_some_and(|owners| owners.len() == 1 && owners.contains(&field))
-            {
+        Some(children) if field != annot => {
+            let children = exclusive_container(graph, field, children)?
+                .as_array()
+                .ok_or(Unsupported)?;
+            if !matches!(children, [PdfValue::Reference(child)] if *child == annot) {
                 return Err(Unsupported);
             }
         }
@@ -347,7 +376,7 @@ fn widget_field(graph: &NativePdfGraph, annot: Ref) -> Result<Ref, NativeEditErr
     Ok(field)
 }
 
-fn annotation_ownership(
+pub(super) fn annotation_ownership(
     graph: &NativePdfGraph,
     page: Ref,
     annot: Ref,
@@ -411,6 +440,17 @@ fn annotation_ownership(
         None => None,
     };
     let annots = dict(graph, page)?.get("Annots").ok_or(Malformed)?;
+    let annots_array = exclusive_container(graph, page, annots)?
+        .as_array()
+        .ok_or(Unsupported)?;
+    if annots_array
+        .iter()
+        .filter(|entry| entry.as_reference() == Some(annot))
+        .count()
+        != 1
+    {
+        return Err(Unsupported);
+    }
     exclusive_array_member(graph, page, annots, annot, extra_owner)?;
     if let Some(field) = field {
         let (form, fields) = form_fields(graph)?;
@@ -491,6 +531,7 @@ fn copy_annotations(
 ) -> Result<Vec<Ref>, NativeEditError> {
     let mut copies = Vec::new();
     let original = annotations(graph, source)?;
+    graph.charge_page_work(original.len().saturating_mul(original.len()))?;
     let mut fields_update = None;
     for annot in original {
         let field = annotation_ownership(graph, source, annot)?;
@@ -503,6 +544,9 @@ fn copy_annotations(
                 fields_update = Some(form_fields(graph)?);
             }
             let (_, fields) = fields_update.as_mut().ok_or(Malformed)?;
+            if fields.len() >= super::forms::MAX_FIELDS {
+                return Err(Budget);
+            }
             let name = unique_field_name(graph, field, fields)?;
             let widget = if field == annot {
                 copy.remove("TM");
@@ -568,7 +612,13 @@ fn remove_page_dependencies(
     let mut links = Vec::new();
     let budget = graph.remaining_work();
     let mut work = budget;
-    for annot in annotations(graph, page)? {
+    let page_annotations = annotations(graph, page)?;
+    graph.charge_page_work(
+        page_annotations
+            .len()
+            .saturating_mul(page_annotations.len()),
+    )?;
+    for annot in page_annotations {
         if !removed.insert(annot) {
             return Err(Unsupported);
         }

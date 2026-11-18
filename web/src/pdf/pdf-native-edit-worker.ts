@@ -4,6 +4,7 @@ import {
   fitsNativeJson,
   freezeNativeDto,
   isNativePageCommand,
+  isNativeFieldCommand,
   isNativeRequestId,
   isNativeStoreHash,
   isNativeWorkerRequest,
@@ -14,10 +15,12 @@ import {
   nativeHexBytes,
   readNativeResponse,
   sameNativeBytes,
-  type NativePdfEditCommand,
+  type NativePdfSessionCommand,
   type NativePdfNoteScene,
   type NativePdfObjectCommand,
   type NativePdfPageCommand,
+  type NativePdfFieldCommand,
+  type NativePdfFieldView,
   type NativePdfRequest,
   type NativePdfResponse,
   type NativePdfSnapshot,
@@ -122,7 +125,7 @@ interface Pending {
 }
 
 interface QueuedCommand {
-  readonly command: NativePdfEditCommand
+  readonly command: NativePdfSessionCommand
   readonly indexedPage: { readonly index: number; readonly stableId: number } | null
   readonly resolve: (snapshot: NativePdfVerifiedSnapshot) => void
   readonly reject: (error: NativePdfWorkerError) => void
@@ -231,7 +234,7 @@ function confirmsObjectCommand(
   }
 }
 
-function isObjectCommand(command: NativePdfEditCommand): command is NativePdfObjectCommand {
+function isObjectCommand(command: NativePdfSessionCommand): command is NativePdfObjectCommand {
   return ('target' in command && 'profile' in command.target) || command.kind === 'addImage' || command.kind === 'addGraphic'
 }
 
@@ -284,6 +287,66 @@ function confirmsPageCommand(command: NativePdfPageCommand, previous: NativePdfV
   })
 }
 
+function hasFieldTarget(id: readonly number[], snapshot: NativePdfVerifiedSnapshot): boolean {
+  return snapshot.fields?.some((field) => sameNativeBytes(field.id, id)) ?? false
+}
+
+function sameFieldValue(left: NativePdfFieldView, right: NativePdfFieldView): boolean {
+  return left.name === right.name && left.kind === right.kind && left.page === right.page
+    && left.value === right.value && left.checked === right.checked
+    && left.rect !== null && right.rect !== null && sameNativeBytes(left.rect, right.rect)
+}
+
+function confirmsFieldCommand(
+  command: NativePdfFieldCommand, previous: NativePdfVerifiedSnapshot, current: NativePdfVerifiedSnapshot,
+): boolean {
+  const previousFields = previous.fields ?? []
+  const currentFields = current.fields ?? []
+  const readOnly = previousFields.filter((field) => !field.canEditAppearance)
+  const currentReadOnly = currentFields.filter((field) => !field.canEditAppearance)
+  if (readOnly.length !== currentReadOnly.length || !readOnly.every((field, index) => {
+    const next = currentReadOnly[index]
+    return next !== undefined && field.page === next.page && field.refusal === next.refusal
+      && (field.rect === null || next.rect === null
+        ? field.rect === next.rect
+        : sameNativeBytes(field.rect, next.rect))
+  })) return false
+
+  const before = previousFields.filter((field) => field.canEditAppearance)
+  const after = currentFields.filter((field) => field.canEditAppearance)
+  if (new Set(before.map((field) => field.name)).size !== before.length
+    || new Set(after.map((field) => field.name)).size !== after.length) return false
+
+  const target = 'field' in command ? before.find((field) => sameNativeBytes(field.id, command.field)) : undefined
+  if ('field' in command && target === undefined) return false
+  const name = 'name' in command ? command.name : target?.name
+  const accepted = after.find((field) => field.name === name)
+  const untouched = before.filter((field) => field.name !== name)
+  const survivors = after.filter((field) => field.name !== name)
+  if (untouched.length !== survivors.length || !untouched.every((field) =>
+    survivors.some((next) => sameFieldValue(field, next)))) return false
+
+  if (command.kind === 'removeField') return accepted === undefined
+  if (accepted === undefined || accepted.rect === null) return false
+  switch (command.kind) {
+    case 'addTextField':
+    case 'addCheckboxField':
+      return !before.some((field) => field.name === name) && accepted.page === command.page
+        && sameNativeBytes(accepted.rect, command.rect)
+        && (command.kind === 'addTextField' ? accepted.kind === 'text' && accepted.value === command.value
+          : accepted.kind === 'checkbox' && accepted.checked === command.checked)
+    case 'setFieldText':
+      return target?.kind === 'text' && accepted.value === command.value
+        && sameFieldValue({ ...target, value: command.value }, accepted)
+    case 'setFieldChecked':
+      return target?.kind === 'checkbox' && accepted.checked === command.checked
+        && sameFieldValue({ ...target, checked: command.checked }, accepted)
+    case 'moveField':
+      return target !== undefined
+        && sameFieldValue({ ...target, page: command.page, rect: command.rect }, accepted)
+  }
+}
+
 function confirmsCommand(request: CommandRequest, previous: NativePdfVerifiedSnapshot, snapshot: NativePdfVerifiedSnapshot): boolean {
   const command = request.command
   if (isNativePageCommand(command)) {
@@ -297,6 +360,11 @@ function confirmsCommand(request: CommandRequest, previous: NativePdfVerifiedSna
     return snapshot.binding.revision === previous.binding.revision + 1
       && snapshot.consumedRequest === request.requestId
       && confirmsObjectCommand(command, previous, snapshot)
+  }
+  if (isNativeFieldCommand(command)) {
+    return snapshot.binding.revision === previous.binding.revision + 1
+      && snapshot.consumedRequest === request.requestId
+      && confirmsFieldCommand(command, previous, snapshot)
   }
   if (command.kind === 'replaceText') return confirmedNativeReplacement(command, previous, snapshot) !== null
   for (const page of snapshot.scene.pages) {
@@ -406,7 +474,7 @@ export class NativePdfEditCoordinator {
     }
   }
 
-  command(command: NativePdfEditCommand): Promise<NativePdfVerifiedSnapshot> {
+  command(command: NativePdfSessionCommand): Promise<NativePdfVerifiedSnapshot> {
     if (this.uncertain !== null) return Promise.reject(new NativePdfWorkerError(RECONCILIATION_REQUIRED, this.uncertain.requestId))
     if (this.state.phase !== 'ready' && this.state.phase !== 'mutating') {
       return Promise.reject(new NativePdfWorkerError('FLOW_PDF_NATIVE_SESSION_UNAVAILABLE'))
@@ -444,7 +512,7 @@ export class NativePdfEditCoordinator {
         || !sameNativeBytes(current.pageState.order, previous.pageState.order)
         || current.pageState.selected !== previous.pageState.selected))
         || (reply.status === 'accepted'
-          && (current.consumedRequest === requestId || isObjectCommand(command.command) || isNativePageCommand(command.command))
+          && (current.consumedRequest === requestId || isObjectCommand(command.command) || isNativePageCommand(command.command) || isNativeFieldCommand(command.command))
           && !confirmsCommand(command, previous, current))) {
         throw new NativePdfWorkerError(RESPONSE_INVALID, requestId)
       }
@@ -526,6 +594,8 @@ export class NativePdfEditCoordinator {
     if (this.state.phase !== 'ready' || current === null) return
     let queued = this.queue.shift()
     while (queued && ((queued.command.kind === 'replaceText' && !textTarget(current, queued.command))
+      || (isNativeFieldCommand(queued.command) && 'field' in queued.command
+        && !hasFieldTarget(queued.command.field, current))
       || (isNativePageCommand(queued.command)
         && current.pageState.order[queued.command.target.page] !== queued.command.target.stableId)
       || (queued.indexedPage !== null

@@ -56,6 +56,35 @@ export type NativePdfObjectCommand =
   | { readonly kind: 'moveObject'; readonly target: NativePdfObjectTarget; readonly transform: readonly [number, number, number, number, number, number] }
   | { readonly kind: 'removeObject'; readonly target: NativePdfObjectTarget }
 
+const fieldRefusals = [
+  'FLOW_PDF_NATIVE_FIELD_PROFILE',
+  'FLOW_PDF_NATIVE_FIELD_REFERENCE',
+  'FLOW_PDF_NATIVE_FIELD_APPEARANCE',
+  'FLOW_PDF_NATIVE_FIELD_GLYPH',
+  'FLOW_PDF_NATIVE_FIELD_GEOMETRY',
+] as const
+
+export type NativePdfFieldCommand =
+  | { readonly kind: 'addTextField'; readonly page: number; readonly rect: NativePdfRect; readonly name: string; readonly value: string }
+  | { readonly kind: 'addCheckboxField'; readonly page: number; readonly rect: NativePdfRect; readonly name: string; readonly checked: boolean }
+  | { readonly kind: 'setFieldText'; readonly field: readonly number[]; readonly value: string }
+  | { readonly kind: 'setFieldChecked'; readonly field: readonly number[]; readonly checked: boolean }
+  | { readonly kind: 'moveField'; readonly field: readonly number[]; readonly page: number; readonly rect: NativePdfRect }
+  | { readonly kind: 'removeField'; readonly field: readonly number[] }
+
+export interface NativePdfFieldView {
+  readonly id: readonly number[]
+  readonly object: { readonly objectNumber: number; readonly generation: number }
+  readonly page: number
+  readonly kind: 'text' | 'checkbox' | null
+  readonly name: string | null
+  readonly rect: NativePdfRect | null
+  readonly value: string | null
+  readonly checked: boolean | null
+  readonly canEditAppearance: boolean
+  readonly refusal: typeof fieldRefusals[number] | null
+}
+
 export interface NativePdfPageTarget {
   readonly page: number
   readonly stableId: number
@@ -77,6 +106,7 @@ export interface NativePdfPageState {
 
 export type NativePdfCommand = NativePdfNoteCommand | NativePdfTextCommand | NativePdfObjectCommand
 export type NativePdfEditCommand = NativePdfCommand | NativePdfPageCommand
+export type NativePdfSessionCommand = NativePdfEditCommand | NativePdfFieldCommand
 
 const objectRefusals = [
   'FLOW_PDF_NATIVE_OBJECT_STATE',
@@ -161,6 +191,7 @@ export interface NativePdfSnapshot {
   readonly pageState?: NativePdfPageState
   readonly scene: NativePdfNoteScene
   readonly outputHex: string
+  readonly fields?: readonly NativePdfFieldView[]
 }
 
 export interface NativePdfVerifiedSnapshot extends NativePdfSnapshot {
@@ -179,7 +210,7 @@ interface BoundRequest extends RequestIdentity {
 
 export type NativePdfRequest =
   | (RequestIdentity & { readonly operation: 'open'; readonly epoch: readonly number[]; readonly bytesHex: string })
-  | (BoundRequest & { readonly operation: 'command'; readonly outputHash: readonly number[]; readonly command: NativePdfEditCommand })
+  | (BoundRequest & { readonly operation: 'command'; readonly outputHash: readonly number[]; readonly command: NativePdfSessionCommand })
   | (BoundRequest & { readonly operation: 'snapshot' })
   | (BoundRequest & { readonly operation: 'close' })
 
@@ -236,7 +267,9 @@ export type NativePdfTransportCode =
 const hexDigits = '0123456789abcdef'
 const textRefusalCodes = new Set<string>(textRefusals)
 const objectRefusalCodes = new Set<string>(objectRefusals)
+const fieldRefusalCodes = new Set<string>(fieldRefusals)
 const rustErrorCodes = new Set([
+  ...fieldRefusals,
   ...textRefusals,
   ...objectRefusals,
   'FLOW_PDF_NATIVE_REQUEST_DECODE',
@@ -421,11 +454,47 @@ export function isNativePageCommand(value: unknown): value is NativePdfPageComma
   }
 }
 
-function isNativeCommand(value: unknown): value is NativePdfEditCommand {
+function fieldName(value: unknown): value is string {
+  return typeof value === 'string' && value.length > 0 && value.length <= 64 && !/[^A-Za-z0-9_-]/u.test(value)
+}
+
+function fieldText(value: unknown): value is string {
+  return fitsNativeJson(value, 1024) && contents(value) && !/[\u0000-\u001f\u007f-\u009f]/u.test(value)
+}
+
+function fieldRect(value: unknown): value is NativePdfRect {
+  return rect(value) && value.every((coordinate) => Math.abs(coordinate) <= 1_000_000) && value[2] - value[0] >= 8 && value[3] - value[1] >= 8
+}
+
+export function isNativeFieldCommand(value: unknown): value is NativePdfFieldCommand {
+  if (typeof value !== 'object' || value === null) return false
+  const command = value as Record<string, unknown>
+  switch (command.kind) {
+    case 'addTextField':
+      return shape(command, 'kind', 'page', 'rect', 'name', 'value') && pageId(command.page)
+        && fieldRect(command.rect) && fieldName(command.name) && fieldText(command.value)
+    case 'addCheckboxField':
+      return shape(command, 'kind', 'page', 'rect', 'name', 'checked') && pageId(command.page)
+        && fieldRect(command.rect) && fieldName(command.name) && typeof command.checked === 'boolean'
+    case 'setFieldText':
+      return shape(command, 'kind', 'field', 'value') && hash(command.field) && fieldText(command.value)
+    case 'setFieldChecked':
+      return shape(command, 'kind', 'field', 'checked') && hash(command.field) && typeof command.checked === 'boolean'
+    case 'moveField':
+      return shape(command, 'kind', 'field', 'page', 'rect') && hash(command.field)
+        && pageId(command.page) && fieldRect(command.rect)
+    case 'removeField':
+      return shape(command, 'kind', 'field') && hash(command.field)
+    default:
+      return false
+  }
+}
+
+function isNativeCommand(value: unknown): value is NativePdfSessionCommand {
   return isNativeNoteCommand(value)
     || (shape(value, 'kind', 'island', 'text') && value.kind === 'replaceText'
       && hash(value.island) && contents(value.text))
-    || objectCommand(value) || isNativePageCommand(value)
+    || objectCommand(value) || isNativePageCommand(value) || isNativeFieldCommand(value)
 }
 
 export function isNativeWorkerRequest(value: unknown): value is NativePdfWorkerRequest {
@@ -563,11 +632,28 @@ function pageState(value: unknown, count: number): boolean {
     && value.canDelete === (count > 1) && value.maxPosition === count - 1
 }
 
+function fieldViews(value: unknown, count: number): boolean {
+  return Array.isArray(value) && value.length > 0 && value.every((field: unknown) =>
+    shape(field, 'id', 'object', 'page', 'kind', 'name', 'rect', 'value', 'checked', 'canEditAppearance', 'refusal')
+    && hash(field.id) && objectRef(field.object) && integer(field.page, 0, count - 1)
+    && (field.canEditAppearance === true
+      ? field.refusal === null && fieldName(field.name) && fieldRect(field.rect)
+        && (field.kind === 'text' ? fieldText(field.value) && field.checked === null
+          : field.kind === 'checkbox' && field.value === null && typeof field.checked === 'boolean')
+      : field.canEditAppearance === false && (field.rect === null || fieldRect(field.rect))
+        && field.kind === null && field.name === null && field.value === null && field.checked === null
+        && typeof field.refusal === 'string' && fieldRefusalCodes.has(field.refusal)))
+}
+
 function snapshot(value: unknown): value is NativePdfVerifiedSnapshot {
-  return shape(value, 'binding', 'originStoreHash', 'outputHash', 'consumedRequest', 'scene', 'outputHex', 'pageState')
+  if (typeof value !== 'object' || value === null) return false
+  const keys = ['binding', 'originStoreHash', 'outputHash', 'consumedRequest', 'scene', 'outputHex', 'pageState']
+  if (Object.hasOwn(value, 'fields')) keys.push('fields')
+  return shape(value, ...keys)
     && binding(value.binding) && isNativeStoreHash(value.originStoreHash) && hash(value.outputHash)
     && integer(value.consumedRequest, value.binding.revision) && scene(value.scene) && bytesHex(value.outputHex)
     && pageState(value.pageState, value.scene.pages.length)
+    && (!Object.hasOwn(value, 'fields') || fieldViews(value.fields, value.scene.pages.length))
     && sameNativeBytes(value.outputHash, value.scene.outputHash)
     && (value.binding.revision === 0) === (value.consumedRequest === 0)
     && (value.binding.revision !== 0 || sameNativeBytes(value.binding.originHash, value.outputHash))
@@ -590,7 +676,7 @@ function isNativeResponse(value: unknown): value is NativePdfResponse {
 
   if (value.status === 'failed') {
     return value.snapshot === null && typeof value.code === 'string' && rustErrorCodes.has(value.code)
-      && (!(textRefusalCodes.has(value.code) || objectRefusalCodes.has(value.code))
+      && (!(textRefusalCodes.has(value.code) || objectRefusalCodes.has(value.code) || fieldRefusalCodes.has(value.code))
         || (value.operation === 'command' && value.requestId > 0))
       && (value.code !== 'FLOW_PDF_NATIVE_IMPORT_REFUSED' || (value.operation === 'open' && value.requestId > 0))
       && (value.requestId === 0 ? value.binding === null && value.originStoreHash === null

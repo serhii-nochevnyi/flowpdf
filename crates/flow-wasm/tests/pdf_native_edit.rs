@@ -683,3 +683,156 @@ fn serialized_page_delete_refuses_an_unowned_destination_and_keeps_output() {
     assert_eq!(lookup["snapshot"], initial);
     call(native_pdf_close, bound("close", 3, &initial));
 }
+
+#[test]
+fn field_commands_reopen_values_and_refuse_stale_or_forged_targets() {
+    let (_, mut current) = open();
+    let command = |request_id, snapshot: &Value, body: Value| {
+        let mut request = bound("command", request_id, snapshot);
+        request["outputHash"] = snapshot["outputHash"].clone();
+        request["command"] = body;
+        call(native_pdf_command, request)
+    };
+    for (request_id, body) in [
+        (
+            2,
+            json!({"kind":"addTextField","page":0,"name":"recipient","rect":[10,10,150,35],"value":"Alice"}),
+        ),
+        (
+            3,
+            json!({"kind":"addCheckboxField","page":0,"name":"approved","rect":[10,50,30,70],"checked":false}),
+        ),
+    ] {
+        let response = command(request_id, &current, body);
+        assert_eq!(response["status"], "applied", "{response}");
+        current = response["snapshot"].clone();
+    }
+    assert_eq!(current["fields"][0]["value"], "Alice");
+    assert_eq!(current["fields"][1]["checked"], false);
+    let stale = current["fields"][0]["id"].clone();
+
+    let duplicate = command(
+        4,
+        &current,
+        json!({"kind":"duplicatePage","target":{
+            "page":0,"stableId":current["pageState"]["order"][0],
+        }}),
+    );
+    assert_eq!(duplicate["status"], "applied", "{duplicate}");
+    let mut current = duplicate["snapshot"].clone();
+    assert_eq!(current["fields"].as_array().unwrap().len(), 4);
+    assert_ne!(current["fields"][0]["name"], current["fields"][2]["name"]);
+    let deletion = command(
+        5,
+        &current,
+        json!({"kind":"deletePage","target":{
+            "page":0,"stableId":current["pageState"]["order"][0],
+        }}),
+    );
+    assert_eq!(deletion["status"], "applied", "{deletion}");
+    current = deletion["snapshot"].clone();
+    assert_eq!(current["fields"].as_array().unwrap().len(), 2);
+    let text = current["fields"][0]["id"].clone();
+    for (body, reason) in [
+        (
+            json!({"kind":"setFieldText","field":stale,"value":"Bob"}),
+            "FLOW_PDF_NATIVE_FIELD_REFERENCE",
+        ),
+        (
+            json!({"kind":"setFieldText","field":text,"value":"Ї"}),
+            "FLOW_PDF_NATIVE_FIELD_GLYPH",
+        ),
+        (
+            json!({"kind":"setFieldChecked","field":text,"checked":true}),
+            "FLOW_PDF_NATIVE_FIELD_PROFILE",
+        ),
+        (
+            json!({"kind":"moveField","field":text,"page":0,"rect":[30,40,800,900]}),
+            "FLOW_PDF_NATIVE_FIELD_GEOMETRY",
+        ),
+        (
+            json!({"kind":"setFieldText","field":text,"value":"Bob","canEditAppearance":true}),
+            "FLOW_PDF_NATIVE_REQUEST_DECODE",
+        ),
+        (
+            json!({"kind":"addRadioField","page":0,"name":"choice","rect":[10,10,30,30]}),
+            "FLOW_PDF_NATIVE_REQUEST_DECODE",
+        ),
+        (
+            json!({"kind":"addCheckboxField","page":0,"name":"a".repeat(65),"rect":[10,10,30,30],"checked":true}),
+            "FLOW_PDF_NATIVE_REQUEST_DECODE",
+        ),
+        (
+            json!({"kind":"setFieldText","field":text,"value":"Ї".repeat(513)}),
+            "FLOW_PDF_NATIVE_REQUEST_DECODE",
+        ),
+    ] {
+        let refusal = command(6, &current, body);
+        assert_eq!(refusal["code"], reason, "{refusal}");
+        assert!(refusal["snapshot"].is_null());
+    }
+    let response = command(
+        6,
+        &current,
+        json!({"kind":"setFieldText","field":text,"value":"Bob"}),
+    );
+    assert_eq!(response["status"], "applied", "{response}");
+    current = response["snapshot"].clone();
+    assert_eq!(current["fields"][0]["value"], "Bob");
+
+    let move_field = command(
+        7,
+        &current,
+        json!({
+            "kind":"moveField","field":current["fields"][0]["id"],"page":0,"rect":[25,30,170,60],
+        }),
+    );
+    assert_eq!(move_field["status"], "applied", "{move_field}");
+    current = move_field["snapshot"].clone();
+    assert_eq!(current["fields"][0]["rect"], json!([25, 30, 170, 60]));
+    assert_eq!(current["fields"][0]["value"], "Bob");
+
+    let mut removal = bound("command", 8, &current);
+    removal["outputHash"] = current["outputHash"].clone();
+    removal["command"] = json!({"kind":"removeField","field":current["fields"][0]["id"]});
+    let response = call(native_pdf_command, removal);
+    assert_eq!(response["status"], "applied", "{response}");
+    assert_eq!(response["snapshot"]["fields"].as_array().unwrap().len(), 1);
+    let accepted = call(native_pdf_snapshot, bound("snapshot", 8, &current));
+    assert_eq!(accepted["status"], "accepted");
+    assert_eq!(accepted["snapshot"], response["snapshot"]);
+}
+
+#[test]
+fn field_capability_forgery_still_refuses_after_rehashing_the_response() {
+    let (_, original) = open();
+    let mut request = bound("command", 2, &original);
+    request["outputHash"] = original["outputHash"].clone();
+    request["command"] = json!({
+        "kind":"addCheckboxField","page":0,"rect":[10,10,30,30],"name":"approved","checked":false,
+    });
+    let response = native_pdf_command(request.to_string());
+    assert!(verify_native_pdf_response(response.clone()));
+    let parsed: Value = serde_json::from_str(&response).unwrap();
+    assert_eq!(parsed["status"], "applied");
+    let result_hash = parsed["resultHash"].as_str().unwrap();
+    let without_hash = response.replace(result_hash, "");
+    for (old, new) in [
+        (
+            r#""canEditAppearance":true"#,
+            r#""canEditAppearance":false"#,
+        ),
+        (r#""checked":false"#, r#""checked":true"#),
+    ] {
+        assert!(without_hash.contains(old));
+        let edited = without_hash.replacen(old, new, 1);
+        let mut hash = blake3::Hasher::new();
+        hash.update(b"flowpdf:native-wire:v1");
+        hash.update(edited.as_bytes());
+        let forged = edited.replace(
+            r#""resultHash":"""#,
+            &format!(r#""resultHash":"{}""#, hash.finalize().to_hex()),
+        );
+        assert!(!verify_native_pdf_response(forged));
+    }
+}
