@@ -63,12 +63,15 @@ interface PendingNoteAction {
   readonly draft: Draft | null
 }
 
+type TextIslandFingerprint = Pick<NativePdfTextIsland, 'text' | 'profile' | 'operator' | 'bounds' | 'maxAdvance'>
+
 interface TextDraft {
   readonly pageId: number
   readonly selected: boolean
   readonly refusal: NativePdfMessage | null
   readonly island: readonly number[]
   readonly replacement: string
+  readonly suspended?: { readonly stableId: number; readonly fingerprint: TextIslandFingerprint }
 }
 
 interface PendingPageAction {
@@ -339,7 +342,7 @@ function verifiedIslands(snapshot: NativePdfSnapshot | undefined, pageId: number
   return page?.refusal === null ? page.islands : []
 }
 
-function sameTextIsland(left: NativePdfTextIsland, right: NativePdfTextIsland) {
+function sameTextIsland(left: TextIslandFingerprint, right: TextIslandFingerprint) {
   return left.text === right.text && left.profile === right.profile && left.operator === right.operator
     && left.maxAdvance === right.maxAdvance && left.bounds.every((value, index) => value === right.bounds[index])
 }
@@ -351,11 +354,27 @@ export function rebindNativeTextDrafts(
   return drafts.flatMap((draft) => {
     const pageId = retained ? retained.get(draft.pageId) : draft.pageId
     if (pageId === undefined) return []
-    const previous = verifiedIslands(before, draft.pageId)
-    const original = previous.find(({ id }) => sameNativeBytes(id, draft.island))
-    if (!original || previous.filter((island) => sameTextIsland(original, island)).length !== 1) return []
-    const matches = verifiedIslands(after, pageId).filter((island) => sameTextIsland(original, island))
-    return matches.length === 1 ? [{ ...draft, pageId, island: matches[0]!.id }] : []
+    const { suspended, ...active } = draft
+    const stableId = before.pageState?.order[draft.pageId]
+    const samePage = stableId !== undefined && after.pageState?.order[pageId] === stableId
+    if (stableId !== undefined && !samePage) return []
+    let fingerprint: TextIslandFingerprint
+    if (suspended) {
+      if (!samePage || stableId !== suspended.stableId) return []
+      fingerprint = suspended.fingerprint
+    } else {
+      const previous = verifiedIslands(before, draft.pageId)
+      const original = previous.find(({ id }) => sameNativeBytes(id, draft.island))
+      if (!original || previous.filter((island) => sameTextIsland(original, island)).length !== 1) return []
+      const { text, profile, operator, bounds, maxAdvance } = original
+      fingerprint = { text, profile, operator, bounds, maxAdvance }
+    }
+    const textPage = after.scene.textPages?.find((entry) => entry.page === pageId)
+    if (samePage && textPage?.refusal === 'FLOW_PDF_NATIVE_TEXT_OWNERSHIP') {
+      return [{ ...active, pageId, suspended: { stableId, fingerprint } }]
+    }
+    const matches = verifiedIslands(after, pageId).filter((island) => sameTextIsland(fingerprint, island))
+    return matches.length === 1 ? [{ ...active, pageId, island: matches[0]!.id }] : []
   })
 }
 
@@ -743,7 +762,7 @@ export function PdfNativeEditPanel({
   const fieldDescription = `${id}-field-help ${id}-field-feedback`
   const textPage = snapshot?.scene.textPages?.find((entry) => entry.page === page?.id)
   const islands = verifiedIslands(snapshot, pageId)
-  const textDraft = textDrafts.find((entry) => entry.pageId === pageId && entry.selected)
+  const textDraft = textDrafts.find((entry) => entry.pageId === pageId && entry.selected && !entry.suspended)
   const textRefusal = textDraft?.refusal
   const selectedIsland = islands.find((island) => textDraft && sameNativeBytes(textDraft.island, island.id))
   const replacementError = textDraft ? nativeReplacementError(textDraft.replacement, composing) : null
@@ -1012,14 +1031,14 @@ export function PdfNativeEditPanel({
   }
 
   function chooseNote(note: Note) {
-    if (geometry === null || locked.current) return
+    if (geometry === null || locked.current || navigationRequest.current) return
     setComposition(false)
     setDraft(recoveredDrafts.current.get(pageId, note.id) ?? draftFrom(note, geometry))
     focusAfterRender.current = `${id}-contents`
   }
 
   function startNote() {
-    if (!canAdd || locked.current) return
+    if (!canAdd || locked.current || navigationRequest.current) return
     setComposition(false)
     setDraft(recoveredDrafts.current.get(pageId, null) ?? { note: null, contents: '', x: '0', y: '0' })
     focusAfterRender.current = `${id}-contents`
@@ -1046,7 +1065,7 @@ export function PdfNativeEditPanel({
   }
 
   function updateDraft(next: Draft) {
-    if (locked.current) return
+    if (locked.current || navigationRequest.current) return
     recoveredDrafts.current.update(pageId, next)
     setDraft(next)
   }
@@ -1243,6 +1262,7 @@ export function PdfNativeEditPanel({
   async function act(command: NativePdfSessionCommand, invoker: HTMLElement | null) {
     if (locked.current || composition.current || !coordinator || !canEdit || !snapshot) return
     const pageOperation = isNativePageCommand(command)
+    if (!pageOperation && navigationRequest.current) return
     if (pageOperation) {
       if (!canManagePages || command.target.page !== pageTarget?.page || command.target.stableId !== pageTarget.stableId
         || (command.kind === 'deletePage' && !pageState?.canDelete)
@@ -1642,9 +1662,9 @@ export function PdfNativeEditPanel({
             {objectPageReason && <p id={`${id}-object-page-reason`} className="native-help">{t(objectPageReason)}</p>}
             {(objectPage.canAdd || objectPage.objects.length > 0) && <label>{t('object.title')}
               <select id={`${id}-object-selector`} value={selectedObject ? objectKey(selectedObject) : ''}
-                disabled={busy !== null}
+                disabled={navigationBlocked}
                 onChange={(event) => {
-                  if (locked.current) return
+                  if (locked.current || navigationRequest.current) return
                   const object = objectPage.objects.find((entry) => objectKey(entry) === event.target.value)
                   const restored = snapshot && restoreObject(pageId, snapshot, object ?? null)
                   if (restored === 'unseen') setStatus(['status.unseen'])
@@ -1657,7 +1677,7 @@ export function PdfNativeEditPanel({
                 </option>)}
               </select>
             </label>}
-            {objectForm && <fieldset className="native-stack" disabled={!canEdit}>
+            {objectForm && <fieldset className="native-stack" disabled={!canEdit || navigationBlocked}>
               <legend>{t('object.geometry')}</legend>
               <label>{t('object.profile.label')}
                 <select value={objectProfile} disabled={selectedObject?.kind === 'image'} onChange={(event) => {
@@ -1763,9 +1783,9 @@ export function PdfNativeEditPanel({
                 return <li key={key}>
                   <button type="button" id={`${id}-island-button-${key}`} aria-labelledby={`${id}-island-${key}`}
                     aria-describedby={`${id}-island-preview-${key}`}
-                    aria-pressed={island === selectedIsland} disabled={busy !== null}
+                    aria-pressed={island === selectedIsland} disabled={navigationBlocked}
                     onClick={() => {
-                      if (locked.current) return
+                      if (locked.current || navigationRequest.current) return
                       setComposition(false)
                       if (island !== selectedIsland) {
                         const saved = textDrafts.find((entry) => entry.pageId === pageId
@@ -1785,7 +1805,7 @@ export function PdfNativeEditPanel({
                 </li>
               })}
             </ul>}
-            {selectedIsland && textDraft && <fieldset className="native-stack" disabled={busy !== null}>
+            {selectedIsland && textDraft && <fieldset className="native-stack" disabled={navigationBlocked}>
               <label htmlFor={`${id}-original-text`}>{t('text.original')}</label>
               <input id={`${id}-original-text`} className="native-text-line" type="text" readOnly
                 dir="auto" lang="" value={selectedIsland.text} aria-describedby={`${id}-island-bounds`} />
@@ -1800,7 +1820,7 @@ export function PdfNativeEditPanel({
                 aria-invalid={(replacementError !== null && !composing && textDraft.replacement !== '') || !!textRefusal}
                 onCompositionStart={() => setComposition(true)} onCompositionEnd={() => setComposition(false)}
                 onChange={(event) => {
-                  if (locked.current) return
+                  if (locked.current || navigationRequest.current) return
                   updateTextDraft({ ...textDraft, replacement: event.target.value, refusal: null })
                 }} />
               <p className="native-help" id={`${id}-text-help`}>{t('text.help')}</p>
@@ -1942,7 +1962,7 @@ export function PdfNativeEditPanel({
             {page.annotations.map((item, index) => item.kind === 'plainNote' ? (
               <li key={item.id}>
                 <button type="button" id={`${id}-note-${item.id}`} data-native-note-id={item.id}
-                  aria-pressed={selected?.id === item.id} disabled={busy !== null || geometry === null}
+                  aria-pressed={selected?.id === item.id} disabled={navigationBlocked || geometry === null}
                   onClick={() => chooseNote(item)}>
                   {t('note.open', { number: item.id })}
                   {selected?.id === item.id && <span>{t('object.selected')}</span>}
@@ -1954,11 +1974,11 @@ export function PdfNativeEditPanel({
             </li>)}
           </ul>}
           {draft?.note !== null && <div>
-            <button type="button" className={selected ? undefined : 'native-primary'} id={`${id}-add`} disabled={!canAdd}
+            <button type="button" className={selected ? undefined : 'native-primary'} id={`${id}-add`} disabled={!canAdd || navigationBlocked}
               aria-describedby={canAdd ? undefined : `${id}-unavailable`} onClick={startNote}>{t('note.add')}</button>
           </div>}
           {!canAdd && <p className="native-help" id={`${id}-unavailable`}>{t('capability.unavailable', { reason: unavailable ?? t('note.unavailable') })}</p>}
-          {draft && <fieldset className="native-stack" disabled={busy !== null}>
+          {draft && <fieldset className="native-stack" disabled={navigationBlocked}>
             <label htmlFor={`${id}-contents`}>{t('note.contents')}</label>
             <textarea id={`${id}-contents`} value={draft.contents} dir="auto" lang="" readOnly={!canEdit}
               aria-describedby={`${id}-note-limit ${id}-note-count ${id}-note-error`}
