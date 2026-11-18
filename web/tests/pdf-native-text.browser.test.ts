@@ -1,6 +1,8 @@
 import { expect, test, vi } from 'vitest'
 import { page, userEvent } from 'vitest/browser'
 
+import init from '../generated/flow_wasm.js'
+
 import '../src/styles.css'
 import '../src/editor/editor.css'
 import { PdfSourceStore, hashPdfSourceBytes } from '../persistence/pdf-source-store.js'
@@ -76,6 +78,7 @@ end end`, '')
 for (const locale of ['uk', 'en'] as const) {
   test(`native text replacement and refusals use verified PDF bytes in ${locale}`, async () => {
     await page.viewport(320, 900)
+    await init()
     const response = await fetch(new URL('../../crates/flow-core/data/NotoSans-Regular.ttf', import.meta.url))
     expect(response.ok).toBe(true)
     const font = new Uint8Array(await response.arrayBuffer())
