@@ -10,7 +10,7 @@ import { createNativePdfRuntime } from '../src/layout/layout-runtime.js'
 import { nativePdfText, type NativePdfMessage } from '../src/pdf/pdf-native-edit-messages.js'
 import { NATIVE_PDF_LIMITS, nativeHexBytes, type NativePdfObjectPage, type NativePdfGraphic, type NativePdfRect, type NativePdfWorkerRequest } from '../src/pdf/pdf-native-edit-protocol.js'
 
-function objectPdf(transform = '30 0 0 40 100 120') {
+function objectPdf(transform = '30 0 0 40 100 120', clip = '') {
   const encoder = new TextEncoder()
   const stream = (data: string, attributes = '') => `<< /Length ${data.length}${attributes} >>\nstream\n${data}\nendstream`
   const objects = [
@@ -19,7 +19,7 @@ function objectPdf(transform = '30 0 0 40 100 120') {
     '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 320 420] /Resources 5 0 R /Contents 6 0 R >>',
     '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 320 420] /Resources 5 0 R /Contents 7 0 R >>',
     '<< /XObject << /Shared 8 0 R >> >>',
-    stream(`q ${transform} cm /Shared Do Q\n20 30 10 12 re f\n`),
+    stream(`q ${clip}${transform} cm /Shared Do Q\n20 30 10 12 re f\n`),
     stream('q 15 0 0 18 90 90 cm /Shared Do Q\n10 12 24 26 re f\n'),
     stream('UVW', ' /Type /XObject /Subtype /Image /Width 1 /Height 1 /BitsPerComponent 8 /ColorSpace /DeviceRGB'),
   ]
@@ -111,7 +111,7 @@ for (const locale of ['uk', 'en'] as const) {
 
       async function geometry(values: readonly string[]) {
         for (const [index, key] of (['object.x', 'object.y', 'object.width', 'object.height'] as const).entries()) {
-          const input = objects.getByRole('textbox', { name: t(key) }).element() as HTMLInputElement
+          const input = objects.getByRole('textbox', { name: t(key), exact: true }).element() as HTMLInputElement
           input.focus()
           input.select()
           await userEvent.keyboard(values[index]!)
@@ -167,6 +167,12 @@ for (const locale of ['uk', 'en'] as const) {
       expect(objects.getByRole('button', { name: t('object.add') }).query()).toBeNull()
       expect(await download('download.original')).toEqual(objectPdf('30 1 0 40 100 120'))
 
+      const clipped = objectPdf(undefined, '0 0 110 140 re W n ')
+      await open(clipped, 'clipped.pdf')
+      await expect.element(objects.getByText(t('object.reason.state'))).toBeVisible()
+      expect(selector.query()).toBeNull()
+      expect(await download('download.original')).toEqual(clipped)
+
       const source = objectPdf()
       await open(source, 'shared.pdf')
       const original = await inspect(source)
@@ -180,6 +186,7 @@ for (const locale of ['uk', 'en'] as const) {
       expect(root.scrollWidth).toBeLessThanOrEqual(320)
       expect(button('object.add').element().getBoundingClientRect().height).toBeGreaterThanOrEqual(44)
       expect(selector.element().getBoundingClientRect().height).toBeGreaterThanOrEqual(44)
+      expect(objects.getByRole('textbox', { name: t('object.x') }).element().getBoundingClientRect().height).toBeGreaterThanOrEqual(44)
       const before = commandCount()
       await geometry(['310', '20', '30', '40'])
       await expect.element(objects.getByText(t('object.geometry.invalid'))).toBeVisible()
@@ -198,14 +205,8 @@ for (const locale of ['uk', 'en'] as const) {
       await expect.element(objects.getByText('<invalid>.png', { exact: true })).toBeVisible()
       expect(commandCount()).toBe(before)
 
-      await selector.selectOptions((selector.element() as HTMLSelectElement).options[1]!.value)
-      const oldHash = outputHash()
-      staleId = original.scene.objectPages?.[0]?.objects[0]?.id
-      expect(staleId).toBeDefined()
-      await activate(button('object.move').element())
-      await expect.element(panel.getByRole('alert')).toHaveTextContent(t('error.stale'))
-      expect(outputHash()).toBe(oldHash)
-      await selector.selectOptions('')
+      await activate(button('object.cancel').element())
+      await expect.element(objects.getByRole('textbox', { name: t('object.x') })).toHaveValue('')
       await geometry(['10', '20', '30', '40'])
       chooseFile(asset(), new File([grayPng], 'gray.png', { type: 'image/png' }))
       await expect.element(objects.getByText(t('object.file.ready'), { exact: false })).toBeVisible()
@@ -213,6 +214,7 @@ for (const locale of ['uk', 'en'] as const) {
       await accepted('object.add', [addedImage, baseImage, baseGraphic], 0)
 
       await selector.selectOptions((selector.element() as HTMLSelectElement).options[2]!.value)
+      const originalTarget = (selector.element() as HTMLSelectElement).value
       chooseFile(asset(), new File([grayPng], 'replacement.png', { type: 'image/png' }))
       await expect.element(objects.getByText(t('object.file.ready'), { exact: false })).toBeVisible()
       await accepted('object.replace', [addedImage, image([...baseImage.bounds]), baseGraphic], 1)
@@ -220,7 +222,8 @@ for (const locale of ['uk', 'en'] as const) {
       await accepted('object.move', [addedImage, image([105125, 125000, 135125, 165000]), baseGraphic], 1)
       const beforeRefusal = await download('download.edited')
       const beforeRefusalHash = outputHash()
-      staleId = original.scene.objectPages?.[0]?.objects[0]?.id
+      expect((selector.element() as HTMLSelectElement).value).not.toBe(originalTarget)
+      staleId = Array.from(nativeHexBytes(originalTarget))
       await geometry(['110', '125', '30', '40'])
       await activate(button('object.move').element())
       await expect.element(panel.getByRole('alert')).toHaveTextContent(t('error.stale'))
@@ -235,15 +238,27 @@ for (const locale of ['uk', 'en'] as const) {
         await expect.element(dialog.getByRole('button', { name: t('note.remove.cancel') })).toHaveFocus()
         const selected = (selector.element() as HTMLSelectElement).selectedOptions[0]?.textContent?.trim()
         expect(dialog.element().textContent).toContain(selected)
+        const beforeCancel = outputHash()
+        const commandsBeforeCancel = commandCount()
         await userEvent.keyboard('{Escape}')
         expect(document.activeElement).toBe(trigger)
+        expect(outputHash()).toBe(beforeCancel)
+        expect(commandCount()).toBe(commandsBeforeCancel)
         await activate(trigger)
         await accepted('object.remove', expected)
       }
 
       await remove([addedImage, baseGraphic])
-      await profile.selectOptions('rectangle')
+      await profile.selectOptions('line')
       await geometry(['70', '20', '20', '30'])
+      await expect.element(objects.getByText(t('object.graphic.line.help'))).toBeVisible()
+      const stroke = objects.getByRole('textbox', { name: t('object.stroke') }).element() as HTMLInputElement
+      stroke.focus()
+      stroke.select()
+      await userEvent.keyboard('32')
+      await expect.element(objects.getByText(t('object.stroke.invalid'))).toBeVisible()
+      await expect.element(button('object.add')).toBeDisabled()
+      await profile.selectOptions('rectangle')
       const rectangle = graphic('rectangle', [70000, 20000, 90000, 50000])
       await accepted('object.add', [rectangle, addedImage, baseGraphic], 0)
       await profile.selectOptions('polygon')

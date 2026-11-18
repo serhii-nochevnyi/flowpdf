@@ -87,7 +87,7 @@ const objectProfiles = ['image', 'rectangle', 'line', 'polygon'] as const
 const coordinateLabels = ['x', 'y', 'width', 'height'] as const
 
 function objectUnits(value: string) {
-  if (!/^(?:\d+(?:[.,]\d{0,3})?|[.,]\d{1,3})$/u.test(value)) return NaN
+  if (!/^(?:\d+(?:[.,]\d{1,3})?|[.,]\d{1,3})$/u.test(value)) return NaN
   return Math.round(Number(value.replace(',', '.')) * 1000)
 }
 
@@ -142,17 +142,19 @@ export function rebindNativeObject(
   const next = pageObjects(after, pageId)
   let index = previous.findIndex((entry) => sameNativeBytes(entry.id, selected.id))
   if (index < 0) return undefined
+  let expectedCount = previous.length
   if ((command.kind === 'addImage' || command.kind === 'addGraphic') && command.page === pageId) {
-    return next.length === previous.length + 1 ? next[index + 1] : undefined
+    expectedCount++
+    index++
   }
   if (command.kind === 'removeObject' && command.target.page === pageId) {
     const removed = previous.findIndex((entry) => sameNativeBytes(entry.id, command.target.id))
-    if (removed < 0 || index === removed || next.length !== previous.length - 1) return undefined
+    if (removed < 0 || index === removed) return undefined
+    expectedCount--
     if (index > removed) index--
-    return next[index]
   }
   const candidate = next[index]
-  if (next.length !== previous.length || !candidate || candidate.kind !== selected.kind) return undefined
+  if (next.length !== expectedCount || !candidate || candidate.kind !== selected.kind) return undefined
   const changesSelection = 'target' in command && command.target.page === pageId
     && sameNativeBytes(command.target.id, selected.id)
   return changesSelection || (candidate.profile === selected.profile && sameNativeBytes(candidate.bounds, selected.bounds))
@@ -1050,7 +1052,7 @@ export function PdfNativeEditPanel({
               <p key={index} lang={fragment.lang} dir="auto">{fragment.value}</p>)}
           </div>
           <p>{extracted ? t(extracted.text.length ? 'projection.partial' : 'projection.empty') : t('projection.unavailable')}</p>
-          {objectPage && <section className="native-stack" aria-labelledby={`${id}-objects`}>
+          {objectPage && <section className="native-stack native-object-tools" aria-labelledby={`${id}-objects`}>
             <h3 id={`${id}-objects`} tabIndex={-1}>{t('object.title')}</h3>
             {objectPage.refusal && <p className="native-help">{t(objectRefusalReasons[objectPage.refusal])}</p>}
             {!objectPage.refusal && !objectPage.canAdd && <p className="native-help">{t('object.addUnavailable')}</p>}
@@ -1118,6 +1120,7 @@ export function PdfNativeEditPanel({
                   <bdi>{asset.name}</bdi>{' — '}{t(asset.status === 'failed' ? asset.reason : `object.file.${asset.status}`)}
                 </>}</p>
               </> : <>
+                <p className="native-help">{t(`object.graphic.${objectProfile}.help`)}</p>
                 <label>{t('object.color')}<input type="color" value={color}
                   onChange={(event) => { setColor(event.currentTarget.value); clearFeedback() }} /></label>
                 {objectProfile === 'line' && <label>{t('object.stroke')}

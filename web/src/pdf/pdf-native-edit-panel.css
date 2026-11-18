@@ -241,3 +241,8 @@
 .pdf-native-edit-panel .native-coordinates input {
   box-sizing: border-box;
 }
+
+.pdf-native-edit-panel .native-object-tools .native-actions button {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}

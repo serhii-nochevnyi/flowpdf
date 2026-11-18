@@ -363,9 +363,10 @@ describe('native object tools', () => {
   it('converts page-local points and rejects incomplete, excessive, or off-page geometry', () => {
     const pageBounds = [-10, 20, 190, 120] as const
     expect(nativeObjectBounds(['1.125', '2', '40', '30'], pageBounds)).toEqual([-8875, 22000, 31125, 52000])
+    expect(nativeObjectBounds(['1,125', '2', '40', '30'], pageBounds)).toEqual([-8875, 22000, 31125, 52000])
     for (const draft of [
       ['', '2', '40', '30'], ['0', '0', '0', '30'], ['-1', '2', '40', '30'],
-      ['1.0001', '2', '40', '30'], ['180', '2', '40', '30'],
+      ['1.0001', '2', '40', '30'], ['180', '2', '40', '30'], ['1,', '2', '40', '30'],
     ] as const) expect(nativeObjectBounds(draft, pageBounds)).toBeNull()
   })
 
@@ -380,6 +381,8 @@ describe('native object tools', () => {
     })
     expect(rebindNativeObject(withObjects([first]), withObjects([inserted, second]), 0, first,
       { kind: 'addImage', page: 0, bounds: first.bounds, assetHex: '00' })).toBe(second)
+    expect(rebindNativeObject(withObjects([first, second]), withObjects([inserted]), 0, second,
+      { kind: 'removeObject', target: { page: 0, id: first.id, profile: first.profile } })).toBe(inserted)
     expect(rebindNativeObject(withObjects([first]), withObjects([]), 0, first,
       { kind: 'removeObject', target: { page: 0, id: first.id, profile: first.profile } })).toBeUndefined()
   })
@@ -393,6 +396,8 @@ describe('native object tools', () => {
       }))
       expect(markup(null)).toContain(nativePdfText(locale, 'object.profile.image'))
       expect(markup(null)).toContain(nativePdfText(locale, 'object.profile.polygon'))
+      expect(markup(null)).toContain(nativePdfText(locale, 'object.geometry.help'))
+      expect(markup(null)).toContain(nativePdfText(locale, 'object.file'))
       expect(markup('FLOW_PDF_NATIVE_OBJECT_STATE')).not.toContain(nativePdfText(locale, 'object.profile.polygon'))
       expect(markup('FLOW_PDF_NATIVE_OBJECT_STATE')).toContain(nativePdfText(locale, 'object.reason.state'))
     }

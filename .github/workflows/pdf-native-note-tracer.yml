@@ -61,7 +61,7 @@ jobs:
       - name: Run bilingual Chromium text replacement tracer
         run: PLAYWRIGHT_BROWSERS_PATH=./work/playwright npx --no-install vitest run --project browser web/tests/pdf-native-text.browser.test.ts
       - name: Run bilingual Chromium object editing tracer
-        run: npm run test:browser -- web/tests/pdf-native-objects.browser.test.ts
+        run: PLAYWRIGHT_BROWSERS_PATH=./work/playwright npm run test:browser -- web/tests/pdf-native-objects.browser.test.ts --no-cache --configLoader runner --browser.screenshotFailures=false
       - name: Bundle the production editor
         run: npm run build:vite
       - name: Run built-editor Chromium smoke
