@@ -1,14 +1,76 @@
 // @contract: Bounded graph-level editing of admitted classic-xref PDFs.
 // @security: Errors exclude document data and authored text.
+mod forms;
 #[cfg_attr(not(test), allow(dead_code))]
 mod graph;
 mod notes;
 mod objects;
 mod pages;
 mod session;
-mod text;
+mod text {
+    include!("text.rs");
+
+    pub(super) struct FieldFont(Font);
+
+    impl FieldFont {
+        pub(super) fn admit(graph: &NativePdfGraph, dict: &Dict) -> Option<Self> {
+            font_profile(graph, dict).ok().map(Self)
+        }
+
+        pub(super) fn operand(
+            &self,
+            value: &str,
+            width: i64,
+            height: i64,
+        ) -> Result<String, super::NativeFieldRefusal> {
+            use super::NativeFieldRefusal::{Appearance, Geometry, Glyph};
+            use std::fmt::Write as _;
+            let font = &self.0;
+            let codes: Vec<_> = value
+                .chars()
+                .map(|scalar| font.reverse.get(&scalar).copied().ok_or(Glyph))
+                .collect::<Result<_, _>>()?;
+            if !codes.is_empty() {
+                let show = Show {
+                    operand: 0..0,
+                    font: String::new(),
+                    size: 10 * SCALE,
+                    origin: [2 * SCALE, 4 * SCALE],
+                    codes: Vec::new(),
+                    array: false,
+                };
+                if value.chars().any(|scalar| scalar != ' ') {
+                    let (_, metrics) = font.measure(&show, &codes).map_err(|_| Geometry)?;
+                    if !contains(
+                        [0, 0, width * SCALE, height * SCALE],
+                        metrics.wire_bounds().map_err(|_| Geometry)?,
+                    ) {
+                        return Err(Geometry);
+                    }
+                } else if codes.iter().map(|code| font.codes[code].width).sum::<i64>() * 10
+                    > (width - 2) * SCALE * SCALE
+                {
+                    return Err(Geometry);
+                }
+            }
+            let mut encoded = String::new();
+            for code in codes {
+                if font.code_width == 1 {
+                    write!(encoded, "{code:02X}").map_err(|_| Appearance)?;
+                } else {
+                    write!(encoded, "{code:04X}").map_err(|_| Appearance)?;
+                }
+            }
+            Ok(encoded)
+        }
+    }
+}
 mod writer;
 
+pub use forms::{
+    NATIVE_MAX_FIELD_NAME_BYTES, NATIVE_MAX_FIELD_TEXT_BYTES, NativeFieldCommand, NativeFieldKind,
+    NativeFieldRefusal, NativeFieldView,
+};
 pub use graph::{NativeEditError, NativeEditLimits};
 pub use notes::{NativeNoteCommand, NativeNoteId, NativePageGeometry, NativePageId};
 pub use objects::{

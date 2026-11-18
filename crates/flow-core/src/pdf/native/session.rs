@@ -6,6 +6,7 @@ use thiserror::Error;
 
 use super::super::reader::{PdfObjectRef, PdfValue};
 use super::super::scene::{NativePdfAnnotation, NativePdfNoteScene};
+use super::forms::{self, NativeFieldCommand, NativeFieldRefusal, NativeFieldView};
 use super::graph::{NativeEditError, NativeEditLimits, NativePdfGraph, collect_refs, spend};
 use super::notes::{self, ExpectedNote, NativeNoteCommand, NativeNoteId};
 
@@ -58,6 +59,7 @@ pub struct NativeSnapshot {
     pub consumed_request: u64,
     pub scene: NativePdfNoteScene,
     pub page_state: NativePageState,
+    pub fields: Vec<NativeFieldView>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -89,6 +91,8 @@ pub enum NativeSessionError {
     Text(NativeTextRefusal),
     #[error("native PDF object edit refused")]
     Object(NativeObjectRefusal),
+    #[error("native PDF field edit refused")]
+    Field(NativeFieldRefusal),
     #[error("native PDF note is invalid")]
     InvalidNote,
     #[error("native PDF session budget exhausted")]
@@ -118,6 +122,12 @@ impl From<NativeObjectRefusal> for NativeSessionError {
     }
 }
 
+impl From<NativeFieldRefusal> for NativeSessionError {
+    fn from(error: NativeFieldRefusal) -> Self {
+        Self::Field(error)
+    }
+}
+
 impl NativeSessionError {
     pub const fn code(&self) -> &'static str {
         match self {
@@ -131,6 +141,7 @@ impl NativeSessionError {
             Self::TargetUnavailable => "FLOW_PDF_NATIVE_TARGET_UNAVAILABLE",
             Self::Text(error) => error.code(),
             Self::Object(error) => error.code(),
+            Self::Field(error) => error.code(),
             Self::InvalidNote => "FLOW_PDF_NATIVE_NOTE_INVALID",
             Self::Budget => "FLOW_PDF_NATIVE_BUDGET_EXHAUSTED",
             Self::Postcondition => "FLOW_PDF_NATIVE_POSTCONDITION_FAILED",
@@ -144,6 +155,7 @@ enum Command<'a> {
     Text(&'a NativeTextCommand),
     Object(&'a NativeObjectCommand),
     Page(NativePageCommand),
+    Field(&'a NativeFieldCommand),
 }
 
 enum Expected<'a> {
@@ -151,6 +163,7 @@ enum Expected<'a> {
     Text(text::ExpectedText<'a>),
     Object(objects::ExpectedObject),
     Page(u64),
+    Field(forms::ExpectedField),
 }
 
 struct RequestRecord {
@@ -195,7 +208,9 @@ impl NativePdfSession {
             origin_hash,
             revision: 0,
         };
-        let (scene, remaining_retained) = accepted_scene(&graph, &ids, origin_hash, binding, 0, 0)?;
+        let (scene, mut remaining_retained) =
+            accepted_scene(&graph, &ids, origin_hash, binding, 0, 0)?;
+        let fields = forms::project(&graph, &scene.pages, binding, &mut remaining_retained)?;
         let snapshot = NativeSnapshot {
             binding,
             output_hash: origin_hash,
@@ -205,6 +220,7 @@ impl NativePdfSession {
             consumed_request: 0,
             scene,
             page_state: page_state(&graph, &ids, None),
+            fields,
         };
         Ok(Self {
             origin: None,
@@ -310,6 +326,33 @@ impl NativePdfSession {
         command: &NativePageCommand,
     ) -> Result<NativeEditReceipt, NativeSessionError> {
         self.apply_command(binding, request_id, Command::Page(*command))
+    }
+
+    pub fn apply_field(
+        &mut self,
+        binding: NativeBinding,
+        request_id: u64,
+        command: &NativeFieldCommand,
+    ) -> Result<NativeEditReceipt, NativeSessionError> {
+        self.apply_command(binding, request_id, Command::Field(command))
+    }
+
+    pub fn verify_page_and_field_projection(
+        bytes: &[u8],
+        limits: NativeEditLimits,
+        binding: NativeBinding,
+        claimed_scene: [u8; 32],
+        state: &NativePageState,
+        claimed_fields: &[NativeFieldView],
+    ) -> Result<bool, NativeSessionError> {
+        let graph = NativePdfGraph::open(bytes, limits)?;
+        let ids = initial_ids(&graph);
+        let hash = *blake3::hash(bytes).as_bytes();
+        let (scene, mut remaining) = accepted_scene(&graph, &ids, hash, binding, 0, 0)?;
+        Ok(scene.scene_hash == claimed_scene
+            && state.valid_for_count(scene.pages.len())
+            && (binding.revision != 0 || *state == page_state(&graph, &ids, None))
+            && forms::project(&graph, &scene.pages, binding, &mut remaining)? == claimed_fields)
     }
 
     pub fn verify_page_projection(
@@ -436,7 +479,9 @@ impl NativePdfSession {
         let digest = command_digest(command)?;
         // @security: Reserve output bytes separately from the writer workspace and reopen graph.
         let output_share = match command {
-            Command::Text(_) | Command::Object(_) | Command::Page(_) => remaining / 5,
+            Command::Text(_) | Command::Object(_) | Command::Page(_) | Command::Field(_) => {
+                remaining / 5
+            }
             Command::Note(_) => remaining / 4,
         };
         let output_budget = self.snapshot.limits.max_output_bytes.min(output_share);
@@ -482,6 +527,19 @@ impl NativePdfSession {
                     ids.insert(object, NativeNoteId(0));
                 }
                 Expected::Text(expected)
+            }
+            Command::Field(command) => {
+                let expected = forms::stage(
+                    &mut staged,
+                    &self.snapshot.scene.pages,
+                    &self.snapshot.fields,
+                    command,
+                )?;
+                ids.retain(|reference, _| staged.objects.contains_key(reference));
+                for reference in staged.objects.keys() {
+                    ids.entry(*reference).or_insert(NativeNoteId(0));
+                }
+                Expected::Field(expected)
             }
             Command::Page(command) => {
                 let target = command.target();
@@ -571,7 +629,7 @@ impl NativePdfSession {
             revision,
             ..binding
         };
-        let (scene, scene_remaining) = accepted_scene(
+        let (scene, mut scene_remaining) = accepted_scene(
             &reopened,
             &ids,
             output_hash,
@@ -579,12 +637,17 @@ impl NativePdfSession {
             self.origin_bytes().len(),
             record_count,
         )?;
+        let fields = forms::project(&reopened, &scene.pages, next_binding, &mut scene_remaining)?;
         let selected_page = match &expected {
             Expected::Page(id) => Some(*id),
             _ => None,
         };
         let (note, text_island, object) = match expected {
             Expected::Page(_) => (NativeNoteId(0), None, None),
+            Expected::Field(expected) => {
+                expected.verify(&fields)?;
+                (NativeNoteId(0), None, None)
+            }
             Expected::Note(expected) => {
                 verify_note(&scene, &expected)?;
                 (expected.id, None, None)
@@ -638,6 +701,7 @@ impl NativePdfSession {
         self.snapshot.consumed_request = request_id;
         self.snapshot.output_hash = output_hash;
         self.snapshot.scene = scene;
+        self.snapshot.fields = fields;
         if self.records.len() == NATIVE_REQUEST_HISTORY {
             self.records.pop_front();
         }
@@ -690,6 +754,10 @@ fn command_digest(command: Command<'_>) -> Result<[u8; 32], NativeSessionError> 
     let mut digest = blake3::Hasher::new();
     match command {
         Command::Page(command) => serde_json::to_writer(&mut digest, &command),
+        Command::Field(command) => {
+            command.validate()?;
+            serde_json::to_writer(&mut digest, command)
+        }
         Command::Note(command) => {
             if let NativeNoteCommand::Add { contents, .. }
             | NativeNoteCommand::Edit { contents, .. } = command

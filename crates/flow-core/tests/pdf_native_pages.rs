@@ -395,3 +395,42 @@ fn split_text_widget_and_direct_form_clone_as_independent_owners() {
     assert_eq!(output.matches("/FT /Tx").count(), 1);
     assert!(!output.contains("/T <637573746F6D6572>"));
 }
+
+#[test]
+fn owned_checkbox_copies_remain_independently_editable_after_page_deletion() {
+    use flow_core::pdf::native::NativeFieldCommand;
+    use serde_json::json;
+
+    let bytes = fixture();
+    let mut pdf =
+        NativePdfSession::open_scoped(&bytes, NativeEditLimits::default(), [3; 16]).unwrap();
+    let add = serde_json::from_value::<NativeFieldCommand>(json!({
+        "kind": "addCheckboxField", "page": 0, "rect": [10,10,35,35], "name": "approval", "checked": false,
+    })).unwrap();
+    pdf.apply_field(pdf.snapshot().binding, 1, &add).unwrap();
+    let duplicate = command("duplicatePage", 0, pdf.snapshot());
+    pdf.apply_page(pdf.snapshot().binding, 2, &duplicate)
+        .unwrap();
+    let fields = &pdf.snapshot().fields;
+    assert_eq!(fields.len(), 2);
+    assert_ne!(fields[0].name, fields[1].name);
+    assert_ne!(fields[0].id, fields[1].id);
+    let toggle = serde_json::from_value::<NativeFieldCommand>(json!({
+        "kind": "setFieldChecked", "field": fields[1].id, "checked": true,
+    }))
+    .unwrap();
+    pdf.apply_field(pdf.snapshot().binding, 3, &toggle).unwrap();
+    assert_eq!(pdf.snapshot().fields[0].checked, Some(false));
+    assert_eq!(pdf.snapshot().fields[1].checked, Some(true));
+    let delete = command("deletePage", 0, pdf.snapshot());
+    pdf.apply_page(pdf.snapshot().binding, 4, &delete).unwrap();
+    assert_eq!(pdf.snapshot().fields.len(), 1);
+    assert_eq!(pdf.snapshot().fields[0].page, 0);
+    assert_eq!(pdf.snapshot().fields[0].checked, Some(true));
+    let toggle = serde_json::from_value::<NativeFieldCommand>(json!({
+        "kind": "setFieldChecked", "field": pdf.snapshot().fields[0].id, "checked": false,
+    }))
+    .unwrap();
+    pdf.apply_field(pdf.snapshot().binding, 5, &toggle).unwrap();
+    assert_eq!(pdf.snapshot().fields[0].checked, Some(false));
+}

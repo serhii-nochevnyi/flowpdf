@@ -3,10 +3,11 @@
 #![forbid(unsafe_code)]
 
 use flow_core::pdf::native::{
-    NATIVE_MAX_GRAPHIC_POINTS, NATIVE_MAX_IMAGE_BYTES, NATIVE_MAX_IMAGE_DIMENSION,
-    NATIVE_MAX_IMAGE_PIXELS, NATIVE_MAX_STROKE_WIDTH, NativeObjectCommand, NativeObjectPage,
-    NativeObjectRefusal, NativePageCommand, NativePageState, NativeTextCommand, NativeTextPage,
-    NativeTextRefusal,
+    NATIVE_MAX_FIELD_NAME_BYTES, NATIVE_MAX_FIELD_TEXT_BYTES, NATIVE_MAX_GRAPHIC_POINTS,
+    NATIVE_MAX_IMAGE_BYTES, NATIVE_MAX_IMAGE_DIMENSION, NATIVE_MAX_IMAGE_PIXELS,
+    NATIVE_MAX_STROKE_WIDTH, NativeFieldCommand, NativeFieldRefusal, NativeFieldView,
+    NativeObjectCommand, NativeObjectPage, NativeObjectRefusal, NativePageCommand, NativePageState,
+    NativeTextCommand, NativeTextPage, NativeTextRefusal,
 };
 use flow_core::pdf::{
     NATIVE_MAX_NOTE_BYTES, NATIVE_REQUEST_HISTORY, NativeBinding, NativeEditError,
@@ -1396,6 +1397,48 @@ enum NativeWireCommand {
     Text(NativeTextCommand),
     Object(NativeObjectCommand),
     Page(NativePageCommand),
+    Field(NativeFieldCommand),
+}
+
+#[derive(Deserialize)]
+struct NativeCommandBounds {
+    #[serde(rename = "command")]
+    _command: NativeFieldInputBounds,
+}
+
+#[derive(Deserialize)]
+struct NativeFieldInputBounds {
+    #[serde(
+        default,
+        rename = "name",
+        deserialize_with = "native_check_string_bound::<_, NATIVE_MAX_FIELD_NAME_BYTES>"
+    )]
+    _name: (),
+    #[serde(
+        default,
+        rename = "value",
+        deserialize_with = "native_check_string_bound::<_, NATIVE_MAX_FIELD_TEXT_BYTES>"
+    )]
+    _value: (),
+}
+
+fn native_check_string_bound<'de, D: serde::Deserializer<'de>, const LIMIT: usize>(
+    deserializer: D,
+) -> Result<(), D::Error> {
+    struct Check<const LIMIT: usize>;
+    impl<const LIMIT: usize> serde::de::Visitor<'_> for Check<LIMIT> {
+        type Value = ();
+        fn expecting(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(out, "a string of at most {LIMIT} UTF-8 bytes")
+        }
+        fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<(), E> {
+            if value.len() > LIMIT {
+                return Err(E::custom("field input exceeds its byte limit"));
+            }
+            Ok(())
+        }
+    }
+    deserializer.deserialize_str(Check::<LIMIT>)
 }
 
 impl NativeRequest {
@@ -1517,6 +1560,8 @@ struct NativeWireSnapshot<S> {
     output_hash: [u8; 32],
     consumed_request: u64,
     page_state: NativePageState,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    fields: Vec<NativeFieldView>,
     scene: S,
     output_hex: String,
 }
@@ -1883,6 +1928,9 @@ impl NativeRegistryEntry {
             NativeWireCommand::Text(command) => {
                 self.session.apply_text(binding, request_id, command)
             }
+            NativeWireCommand::Field(command) => {
+                self.session.apply_field(binding, request_id, command)
+            }
             NativeWireCommand::Page(command) => {
                 self.session.apply_page(binding, request_id, command)
             }
@@ -1911,6 +1959,7 @@ impl NativeRegistryEntry {
             output_hash: snapshot.output_hash,
             consumed_request: snapshot.consumed_request,
             page_state: snapshot.page_state.clone(),
+            fields: snapshot.fields.clone(),
             scene: &snapshot.scene,
             output_hex: encode_hex(self.session.output_bytes()),
         }
@@ -1958,6 +2007,12 @@ fn native_dispatch(operation: NativeOperation, json: &str) -> String {
     };
     if json.len() > limit {
         response.code = Some(NATIVE_BUDGET.to_owned());
+        return serialize_native_response(response);
+    }
+    // @security: Check field string sizes before the tagged command decoder owns their values.
+    if operation == NativeOperation::Command
+        && serde_json::from_str::<NativeCommandBounds>(json).is_err()
+    {
         return serialize_native_response(response);
     }
     let Ok(request) = serde_json::from_str::<NativeRequest>(json) else {
@@ -2095,12 +2150,13 @@ fn verify_native_snapshot(response: &NativeResponse<NativeVerifiedScene>) -> Opt
         return None;
     }
     snapshot.scene.verify()?;
-    NativePdfSession::verify_page_projection(
+    NativePdfSession::verify_page_and_field_projection(
         &bytes,
         native_edit_limits(),
         snapshot.binding,
         snapshot.scene.scene_hash,
         &snapshot.page_state,
+        &snapshot.fields,
     )
     .ok()?
     .then_some(())
@@ -2139,6 +2195,19 @@ pub fn verify_native_pdf_response(response_json: String) -> bool {
                 && response.code.as_ref().is_some_and(|code| {
                     if code == NATIVE_IMPORT_REFUSED {
                         return response.operation == NativeOperation::Open
+                            && response.request_id > 0;
+                    }
+                    if [
+                        NativeFieldRefusal::Profile,
+                        NativeFieldRefusal::Reference,
+                        NativeFieldRefusal::Appearance,
+                        NativeFieldRefusal::Geometry,
+                        NativeFieldRefusal::Glyph,
+                    ]
+                    .iter()
+                    .any(|reason| reason.code() == code)
+                    {
+                        return response.operation == NativeOperation::Command
                             && response.request_id > 0;
                     }
                     if [
