@@ -676,6 +676,25 @@ pub(super) fn stage(
     {
         return Err(Unsupported.into());
     }
+    let changes_positions = match command {
+        RotatePage { .. } => false,
+        ReorderPage { position, .. } => {
+            (position as usize) < order.len() && position as usize != index
+        }
+        DeletePage { .. } => order.len() > 1,
+        InsertBlankPage { .. } | DuplicatePage { .. } => true,
+    };
+    if changes_positions
+        && let Some(preferences) = dict(graph, catalog(graph)?)?.get("ViewerPreferences")
+    {
+        let preferences = graph
+            .resolve_metered(preferences, &mut graph.remaining_work())?
+            .as_dictionary()
+            .ok_or(Unsupported)?;
+        if preferences.contains_key("PrintPageRange") {
+            return Err(Unsupported.into());
+        }
+    }
     let selected = match command {
         RotatePage { degrees, .. } if matches!(degrees, -90 | 90) => {
             dict_mut(graph, page)?.insert(

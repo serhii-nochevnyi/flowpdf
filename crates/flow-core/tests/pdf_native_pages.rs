@@ -224,6 +224,59 @@ fn final_page_and_external_dependencies_refuse_without_changing_output() {
 }
 
 #[test]
+fn print_page_ranges_refuse_structural_edits_but_allow_rotation() {
+    for preferences in ["<< /PrintPageRange [1 1] >>", "5 0 R"] {
+        let catalog = format!("<< /Type /Catalog /Pages 2 0 R /ViewerPreferences {preferences} >>");
+        let bytes = build_pdf(&[
+            (0, &catalog),
+            (
+                0,
+                "<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 /MediaBox [0 0 300 500] >>",
+            ),
+            (0, "<< /Type /Page /Parent 2 0 R >>"),
+            (0, "<< /Type /Page /Parent 2 0 R >>"),
+            (0, "<< /PrintPageRange 6 0 R >>"),
+            (0, "[1 1]"),
+        ]);
+        let mut session =
+            NativePdfSession::open_scoped(&bytes, NativeEditLimits::default(), [3; 16]).unwrap();
+        let prior = session.snapshot().clone();
+        let target = serde_json::json!({"page": 0, "stableId": prior.page_state.order[0]});
+        for intent in [
+            serde_json::json!({"kind": "reorderPage", "target": target, "position": 1}),
+            serde_json::json!({"kind": "deletePage", "target": target}),
+            serde_json::json!({"kind": "insertBlankPage", "target": target, "side": "after"}),
+            serde_json::json!({"kind": "duplicatePage", "target": target}),
+        ] {
+            let command = serde_json::from_value(intent).unwrap();
+            assert_eq!(
+                session
+                    .apply_page(prior.binding, 1, &command)
+                    .unwrap_err()
+                    .code(),
+                "FLOW_PDF_NATIVE_UNSUPPORTED",
+            );
+            assert_eq!(session.output_bytes(), bytes);
+            assert_eq!(session.snapshot().binding, prior.binding);
+            assert_eq!(session.snapshot().page_state, prior.page_state);
+        }
+        let rotate = serde_json::from_value(
+            serde_json::json!({"kind": "rotatePage", "target": target, "degrees": 90}),
+        )
+        .unwrap();
+        session.apply_page(prior.binding, 1, &rotate).unwrap();
+        assert_eq!(session.snapshot().page_state.order, prior.page_state.order);
+        assert_eq!(
+            session.snapshot().scene.pages[0]
+                .geometry
+                .unwrap()
+                .rotation(),
+            90
+        );
+    }
+}
+
+#[test]
 fn malformed_page_counts_and_parents_refuse_on_open() {
     for (count, parent) in [(2, 2), (1, 1)] {
         let file = build_pdf(&[
