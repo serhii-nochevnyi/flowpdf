@@ -167,11 +167,7 @@
 }
 
 .pdf-native-edit-panel .native-marker[data-selected="true"] { z-index: 1; }
-.pdf-native-edit-panel .native-marker[data-selected="true"] > span,
-.pdf-native-edit-panel .native-note-list [aria-pressed="true"] {
-  outline: 3px solid var(--accent);
-  outline-offset: 2px;
-}
+.pdf-native-edit-panel .native-marker[data-selected="true"] > span { background: var(--accent); }
 
 .pdf-native-edit-panel .native-note-list {
   display: grid;
