@@ -358,20 +358,20 @@ fn shows(data: &[u8]) -> TextResult<Vec<Show>> {
                 let codes = match (array, token) {
                     (false, ContentToken::String(bytes)) => bytes.clone(),
                     (true, ContentToken::Array(items)) => {
-                        let mut bytes = Vec::new();
+                        let mut bytes = None;
                         for item in items {
                             match item {
                                 ContentToken::String(chunk) => {
-                                    if !bytes.is_empty() || chunk.len() > NATIVE_MAX_TEXT_BYTES {
+                                    if bytes.is_some() || chunk.len() > NATIVE_MAX_TEXT_BYTES {
                                         return Err(Layout);
                                     }
-                                    bytes.extend_from_slice(chunk);
+                                    bytes = Some(chunk.clone());
                                 }
                                 ContentToken::Integer(0) => {}
                                 _ => return Err(Layout),
                             }
                         }
-                        bytes
+                        bytes.ok_or(Layout)?
                     }
                     _ => return Err(Layout),
                 };
@@ -1017,7 +1017,7 @@ impl Font {
     fn measure(&self, show: &Show, codes: &[u16]) -> TextResult<(String, Metrics)> {
         use NativeTextRefusal::{Layout, Mapping};
 
-        // Keep all lengths exact until projection. The denominator includes
+        // Use a common denominator for PDF widths and font outline coordinates.
         let upem = i128::from(self.upem);
         let width_scale = i128::from(SCALE * SCALE);
         let denominator = width_scale * upem;
@@ -1361,5 +1361,15 @@ mod tests {
         assert_eq!(shows[0].codes, b"AA");
         assert_eq!(&content[shows[0].operand.clone()], b"[(AA) 0]");
         assert_eq!(shows[0].origin, [20_125, 100_000]);
+    }
+
+    #[test]
+    fn tj_array_rejects_multiple_strings_even_if_one_is_empty() {
+        for content in [
+            b"BT /F1 12 Tf [() (AA)] TJ ET".as_slice(),
+            b"BT /F1 12 Tf [(AA) ()] TJ ET".as_slice(),
+        ] {
+            assert!(matches!(shows(content), Err(NativeTextRefusal::Layout)));
+        }
     }
 }
