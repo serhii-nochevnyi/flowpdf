@@ -246,3 +246,11 @@
   white-space: normal;
   overflow-wrap: anywhere;
 }
+
+.pdf-native-edit-panel .native-page-tools {
+  min-inline-size: 0;
+}
+
+.pdf-native-edit-panel .native-page-tools legend {
+  font-weight: 600;
+}

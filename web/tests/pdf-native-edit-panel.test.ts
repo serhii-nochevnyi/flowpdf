@@ -442,3 +442,39 @@ describe('native object tools', () => {
     }
   })
 })
+
+describe('native page management', () => {
+  for (const locale of ['en', 'uk'] as const) {
+    it(`shows accepted page bounds and explains final-page deletion in ${locale}`, () => {
+      const initial = documentWith([])
+      const markup = renderToStaticMarkup(createElement(PdfNativeEditPanel, {
+        ...dependencies, locale, initialDocument: {
+          ...initial,
+          snapshot: { ...initial.snapshot, pageState: { order: [42], selected: 42, canDelete: false, maxPosition: 0 } },
+        },
+      }))
+      expect(markup).toMatch(/aria-describedby="([^"]+-final-page)"[^>]*>/)
+      const reasonId = markup.match(/aria-describedby="([^"]+-final-page)"/)?.[1]
+      expect(markup).toContain(`id="${reasonId}"`)
+      expect(markup).toContain(nativePdfText(locale, 'page.final'))
+      expect(markup).toContain(nativePdfText(locale, 'navigation.position', { page: 1, total: 1 }))
+      expect(markup).toContain(nativePdfText(locale, 'page.position'))
+    })
+  }
+})
+
+it('renders the Rust-selected stable page after its position changes', () => {
+  const initial = documentWith([])
+  const first = initial.snapshot.scene.pages[0]!
+  const snapshot = {
+    ...initial.snapshot,
+    pageState: { order: [86, 42], selected: 42, canDelete: true, maxPosition: 1 },
+    scene: { ...initial.snapshot.scene, pages: [first, { ...first, id: 1, annotations: [note(2)] }] },
+  }
+  const markup = renderToStaticMarkup(createElement(PdfNativeEditPanel, {
+    ...dependencies, locale: 'en', initialDocument: { ...initial, snapshot },
+  }))
+  expect(markup).toContain('Page 2 of 2')
+  expect(markup).toContain('data-native-note-id="2"')
+  expect(markup).not.toContain(nativePdfText('en', 'page.final'))
+})
