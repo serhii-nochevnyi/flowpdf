@@ -326,6 +326,8 @@ export function PdfNativeEditPanel({
 }: PdfNativeEditPanelProps) {
   const id = useId()
   const t = (key: NativePdfMessage, parameters?: Message[1]) => nativePdfText(locale, key, parameters)
+  const pointFormat = new Intl.NumberFormat(locale, { maximumFractionDigits: 3 })
+  const formatPoint = (thousandths: number) => pointFormat.format(thousandths / 1000)
   const [accepted, setAccepted] = useState(initialDocument)
   const [coordinator, setCoordinator] = useState<Coordinator | null>(null)
   const coordinatorRef = useRef<Coordinator | null>(null)
@@ -869,8 +871,8 @@ export function PdfNativeEditPanel({
               <input id={`${id}-original-text`} className="native-text-line" type="text" readOnly
                 dir="auto" lang="" value={selectedIsland.text} aria-describedby={`${id}-island-bounds`} />
               <p className="native-help" id={`${id}-island-bounds`}>{t('text.bounds', {
-                left: selectedIsland.bounds[0], bottom: selectedIsland.bounds[1],
-                right: selectedIsland.bounds[2], top: selectedIsland.bounds[3],
+                left: formatPoint(selectedIsland.bounds[0]), bottom: formatPoint(selectedIsland.bounds[1]),
+                right: formatPoint(selectedIsland.bounds[2]), top: formatPoint(selectedIsland.bounds[3]),
               })}</p>
               <label htmlFor={`${id}-replacement`}>{t('text.replacement')}</label>
               <input id={`${id}-replacement`} className="native-text-line" type="text" dir="auto" lang=""
