@@ -5,7 +5,8 @@
 use flow_core::pdf::native::{
     NATIVE_MAX_GRAPHIC_POINTS, NATIVE_MAX_IMAGE_BYTES, NATIVE_MAX_IMAGE_DIMENSION,
     NATIVE_MAX_IMAGE_PIXELS, NATIVE_MAX_STROKE_WIDTH, NativeObjectCommand, NativeObjectPage,
-    NativeObjectRefusal, NativeTextCommand, NativeTextPage, NativeTextRefusal,
+    NativeObjectRefusal, NativePageCommand, NativePageState, NativeTextCommand, NativeTextPage,
+    NativeTextRefusal,
 };
 use flow_core::pdf::{
     NATIVE_MAX_NOTE_BYTES, NATIVE_REQUEST_HISTORY, NativeBinding, NativeEditError,
@@ -1394,6 +1395,7 @@ enum NativeWireCommand {
     Note(NativeNoteCommand),
     Text(NativeTextCommand),
     Object(NativeObjectCommand),
+    Page(NativePageCommand),
 }
 
 impl NativeRequest {
@@ -1514,6 +1516,7 @@ struct NativeWireSnapshot<S> {
     origin_store_hash: String,
     output_hash: [u8; 32],
     consumed_request: u64,
+    page_state: NativePageState,
     scene: S,
     output_hex: String,
 }
@@ -1880,6 +1883,9 @@ impl NativeRegistryEntry {
             NativeWireCommand::Text(command) => {
                 self.session.apply_text(binding, request_id, command)
             }
+            NativeWireCommand::Page(command) => {
+                self.session.apply_page(binding, request_id, command)
+            }
             NativeWireCommand::Object(command) => {
                 self.session.apply_object(binding, request_id, command)
             }
@@ -1904,6 +1910,7 @@ impl NativeRegistryEntry {
             origin_store_hash: self.origin_store_hash.clone(),
             output_hash: snapshot.output_hash,
             consumed_request: snapshot.consumed_request,
+            page_state: snapshot.page_state.clone(),
             scene: &snapshot.scene,
             output_hex: encode_hex(self.session.output_bytes()),
         }
@@ -2088,12 +2095,12 @@ fn verify_native_snapshot(response: &NativeResponse<NativeVerifiedScene>) -> Opt
         return None;
     }
     snapshot.scene.verify()?;
-    NativePdfSession::verify_edit_projection(
+    NativePdfSession::verify_page_projection(
         &bytes,
         native_edit_limits(),
         snapshot.binding,
-        &snapshot.scene.text_pages,
-        &snapshot.scene.object_pages,
+        snapshot.scene.scene_hash,
+        &snapshot.page_state,
     )
     .ok()?
     .then_some(())
@@ -2173,6 +2180,7 @@ pub fn verify_native_pdf_response(response_json: String) -> bool {
                             | "FLOW_PDF_NATIVE_REQUEST_INVALID"
                             | "FLOW_PDF_NATIVE_REQUEST_CONFLICT"
                             | "FLOW_PDF_NATIVE_TARGET_UNAVAILABLE"
+                            | "FLOW_PDF_NATIVE_FINAL_PAGE"
                             | NATIVE_POSTCONDITION
                     )
                 })

@@ -234,7 +234,10 @@ impl NativePdfGraph {
         self.decoded
     }
 
-    pub(super) fn reserve_replacement_stream(&mut self, size: usize) -> Result<(), NativeEditError> {
+    pub(super) fn reserve_replacement_stream(
+        &mut self,
+        size: usize,
+    ) -> Result<(), NativeEditError> {
         let cost = size
             .checked_mul(2)
             .and_then(|bytes| bytes.checked_add(1024))
@@ -466,7 +469,7 @@ impl NativePdfGraph {
         Ok(result)
     }
 
-    fn resolve_metered<'a>(
+    pub(super) fn resolve_metered<'a>(
         &'a self,
         mut value: &'a PdfValue,
         work: &mut usize,
@@ -484,6 +487,54 @@ impl NativePdfGraph {
             }
         }
         Err(NativeEditError::Malformed)
+    }
+
+    pub(super) fn reserve_page_copy(
+        &mut self,
+        reference: PdfObjectRef,
+    ) -> Result<(), NativeEditError> {
+        let value = self
+            .objects
+            .get(&reference)
+            .ok_or(NativeEditError::Malformed)?;
+        reserve_page_value(value, &mut self.work, &mut self.retained)
+    }
+
+    pub(super) fn charge_page_work(&mut self, work: usize) -> Result<(), NativeEditError> {
+        spend(&mut self.work, work)
+    }
+
+    pub(super) fn refresh_page_graph(
+        &mut self,
+        removed: &BTreeSet<PdfObjectRef>,
+    ) -> Result<(), NativeEditError> {
+        let mut pending = Vec::new();
+        for value in self.trailer.values() {
+            collect_refs(value, &mut pending, &mut self.work, &mut self.retained)?;
+        }
+        let mut reachable = BTreeSet::new();
+        let mut reverse = BTreeMap::<_, BTreeSet<_>>::new();
+        while let Some(owner) = pending.pop() {
+            spend(&mut self.work, 1)?;
+            if removed.contains(&owner) {
+                return Err(NativeEditError::Unsupported);
+            }
+            if !reachable.insert(owner) {
+                continue;
+            }
+            let value = self.objects.get(&owner).ok_or(NativeEditError::Malformed)?;
+            let mut refs = Vec::new();
+            collect_refs(value, &mut refs, &mut self.work, &mut self.retained)?;
+            for reference in refs {
+                reverse.entry(reference).or_default().insert(owner);
+                pending.push(reference);
+            }
+        }
+        self.objects
+            .retain(|reference, _| reachable.contains(reference));
+        self.reverse = reverse;
+        self.pages.clear();
+        self.validate_pages()
     }
 
     fn validate_pages(&mut self) -> Result<(), NativeEditError> {
@@ -532,7 +583,14 @@ impl NativePdfGraph {
             .get(&reference)
             .and_then(PdfValue::as_dictionary)
             .ok_or(NativeEditError::Malformed)?;
-        if dict.get("Parent").and_then(PdfValue::as_reference) != parent {
+        let parent_valid = match parent {
+            Some(expected) => dict.get("Parent").and_then(PdfValue::as_reference) == Some(expected),
+            None => {
+                !dict.contains_key("Parent")
+                    && dict.get("Type").and_then(PdfValue::as_name) == Some("Pages")
+            }
+        };
+        if !parent_valid {
             return Err(NativeEditError::Malformed);
         }
         let has_box = if let Some(value) = dict.get("MediaBox") {
@@ -635,6 +693,33 @@ impl NativePdfGraph {
             _ => Err(NativeEditError::Malformed),
         }
     }
+}
+
+fn reserve_page_value(
+    value: &PdfValue,
+    work: &mut usize,
+    retained: &mut usize,
+) -> Result<(), NativeEditError> {
+    spend(work, 1)?;
+    spend(retained, 128)?;
+    match value {
+        PdfValue::String(bytes) => spend(retained, bytes.len())?,
+        PdfValue::Name(text) | PdfValue::ExactReal(text) => spend(retained, text.len())?,
+        PdfValue::Array(values) => {
+            for value in values {
+                reserve_page_value(value, work, retained)?;
+            }
+        }
+        PdfValue::Dictionary(dict) => {
+            for (key, value) in dict {
+                spend(retained, key.len())?;
+                reserve_page_value(value, work, retained)?;
+            }
+        }
+        PdfValue::Stream(_) => return Err(NativeEditError::Unsupported),
+        _ => {}
+    }
+    Ok(())
 }
 
 pub(super) fn collect_refs(

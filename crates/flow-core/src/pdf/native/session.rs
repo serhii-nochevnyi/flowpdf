@@ -10,12 +10,15 @@ use super::graph::{NativeEditError, NativeEditLimits, NativePdfGraph, collect_re
 use super::notes::{self, ExpectedNote, NativeNoteCommand, NativeNoteId};
 
 use super::objects::{self, NativeObjectCommand, NativeObjectPage, NativeObjectRefusal};
+use super::pages::{self, NativePageCommand, NativePageState};
 use super::text::{self, NativeTextCommand, NativeTextPage, NativeTextRefusal};
 
 pub const NATIVE_REQUEST_HISTORY: usize = 128;
 pub const NATIVE_MAX_NOTE_BYTES: usize = 16 * 1024;
 const REQUEST_RECORD_BYTES: usize = 512;
 const SESSION_BYTES: usize = 1024;
+const FIRST_PAGE_OBJECT_ID: u64 = 1 << 52;
+const PAGE_OBJECT_ID_LIMIT: u64 = 1 << 53;
 const OBJECT_ID_BYTES: usize = 128;
 
 static NEXT_SESSION: AtomicU64 = AtomicU64::new(1);
@@ -39,6 +42,8 @@ pub struct NativeEditReceipt {
     pub text_island: Option<[u8; 32]>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub object: Option<[u8; 32]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub selected_page: Option<u64>,
     pub output_hash: [u8; 32],
     pub scene_hash: [u8; 32],
 }
@@ -52,6 +57,7 @@ pub struct NativeSnapshot {
     pub request_history_limit: usize,
     pub consumed_request: u64,
     pub scene: NativePdfNoteScene,
+    pub page_state: NativePageState,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -77,6 +83,8 @@ pub enum NativeSessionError {
     ReconciliationRequired,
     #[error("native PDF edit target is unavailable")]
     TargetUnavailable,
+    #[error("native PDF must retain at least one page")]
+    FinalPage,
     #[error("native PDF text replacement refused")]
     Text(NativeTextRefusal),
     #[error("native PDF object edit refused")]
@@ -119,6 +127,7 @@ impl NativeSessionError {
             Self::InvalidRequest => "FLOW_PDF_NATIVE_REQUEST_INVALID",
             Self::RequestConflict => "FLOW_PDF_NATIVE_REQUEST_CONFLICT",
             Self::ReconciliationRequired => "FLOW_PDF_NATIVE_RECONCILIATION_REQUIRED",
+            Self::FinalPage => "FLOW_PDF_NATIVE_FINAL_PAGE",
             Self::TargetUnavailable => "FLOW_PDF_NATIVE_TARGET_UNAVAILABLE",
             Self::Text(error) => error.code(),
             Self::Object(error) => error.code(),
@@ -134,12 +143,14 @@ enum Command<'a> {
     Note(&'a NativeNoteCommand),
     Text(&'a NativeTextCommand),
     Object(&'a NativeObjectCommand),
+    Page(NativePageCommand),
 }
 
 enum Expected<'a> {
     Note(ExpectedNote<'a>),
     Text(text::ExpectedText<'a>),
     Object(objects::ExpectedObject),
+    Page(u64),
 }
 
 struct RequestRecord {
@@ -155,6 +166,7 @@ pub struct NativePdfSession {
     snapshot: NativeSnapshot,
     records: VecDeque<RequestRecord>,
     remaining_retained: usize,
+    next_page_object_id: u64,
     #[cfg(test)]
     fail_at: Option<FailurePoint>,
 }
@@ -192,6 +204,7 @@ impl NativePdfSession {
             request_history_limit: NATIVE_REQUEST_HISTORY,
             consumed_request: 0,
             scene,
+            page_state: page_state(&graph, &ids, None),
         };
         Ok(Self {
             origin: None,
@@ -200,6 +213,7 @@ impl NativePdfSession {
             snapshot,
             records: VecDeque::new(),
             remaining_retained,
+            next_page_object_id: FIRST_PAGE_OBJECT_ID,
             #[cfg(test)]
             fail_at: None,
         })
@@ -289,6 +303,31 @@ impl NativePdfSession {
         self.apply_command(binding, request_id, Command::Object(command))
     }
 
+    pub fn apply_page(
+        &mut self,
+        binding: NativeBinding,
+        request_id: u64,
+        command: &NativePageCommand,
+    ) -> Result<NativeEditReceipt, NativeSessionError> {
+        self.apply_command(binding, request_id, Command::Page(*command))
+    }
+
+    pub fn verify_page_projection(
+        bytes: &[u8],
+        limits: NativeEditLimits,
+        binding: NativeBinding,
+        claimed_scene: [u8; 32],
+        state: &NativePageState,
+    ) -> Result<bool, NativeSessionError> {
+        let graph = NativePdfGraph::open(bytes, limits)?;
+        let ids = initial_ids(&graph);
+        let hash = *blake3::hash(bytes).as_bytes();
+        let (scene, _) = accepted_scene(&graph, &ids, hash, binding, 0, 0)?;
+        Ok(scene.scene_hash == claimed_scene
+            && state.valid_for_count(scene.pages.len())
+            && (binding.revision != 0 || *state == page_state(&graph, &ids, None)))
+    }
+
     pub fn verify_edit_projection(
         bytes: &[u8],
         limits: NativeEditLimits,
@@ -340,10 +379,24 @@ impl NativePdfSession {
         if binding.revision != self.snapshot.binding.revision {
             return Err(NativeSessionError::RevisionMismatch);
         }
+        if let Command::Page(command) = command {
+            let target = command.target();
+            if self.snapshot.page_state.order.get(target.page as usize) != Some(&target.stable_id) {
+                return Err(NativeSessionError::TargetUnavailable);
+            }
+            if matches!(command, NativePageCommand::DeletePage { .. })
+                && !self.snapshot.page_state.can_delete
+            {
+                return Err(NativeSessionError::FinalPage);
+            }
+        }
         let revision = binding
             .revision
             .checked_add(1)
             .ok_or(NativeSessionError::Budget)?;
+        if revision >= FIRST_PAGE_OBJECT_ID - (1 << 48) {
+            return Err(NativeSessionError::Budget);
+        }
         let record_count = (self.records.len() + 1).min(NATIVE_REQUEST_HISTORY);
         let content_cost = match command {
             Command::Note(
@@ -383,7 +436,7 @@ impl NativePdfSession {
         let digest = command_digest(command)?;
         // @security: Reserve output bytes separately from the writer workspace and reopen graph.
         let output_share = match command {
-            Command::Text(_) | Command::Object(_) => remaining / 5,
+            Command::Text(_) | Command::Object(_) | Command::Page(_) => remaining / 5,
             Command::Note(_) => remaining / 4,
         };
         let output_budget = self.snapshot.limits.max_output_bytes.min(output_share);
@@ -400,6 +453,7 @@ impl NativePdfSession {
         let mut staged = NativePdfGraph::open(self.output_bytes(), staged_limits)?;
         let mut ids = self.ids.clone();
         let mut staged_remaining = None;
+        let mut next_page_object_id = self.next_page_object_id;
         let expected = match command {
             Command::Note(command) => Expected::Note(notes::stage(
                 &mut staged,
@@ -428,6 +482,27 @@ impl NativePdfSession {
                     ids.insert(object, NativeNoteId(0));
                 }
                 Expected::Text(expected)
+            }
+            Command::Page(command) => {
+                let target = command.target();
+                let index = target.page as usize;
+                let rotation = self.snapshot.scene.pages[index]
+                    .geometry
+                    .ok_or(NativeSessionError::TargetUnavailable)?
+                    .rotation();
+                let selected = pages::stage(&mut staged, command, index, rotation)?;
+                ids.retain(|reference, _| staged.objects.contains_key(reference));
+                for reference in staged.objects.keys() {
+                    if let std::collections::btree_map::Entry::Vacant(entry) = ids.entry(*reference)
+                    {
+                        if next_page_object_id >= PAGE_OBJECT_ID_LIMIT {
+                            return Err(NativeSessionError::Budget);
+                        }
+                        entry.insert(NativeNoteId(next_page_object_id));
+                        next_page_object_id += 1;
+                    }
+                }
+                Expected::Page(ids[&selected].0)
             }
             Command::Object(command) => {
                 use NativeObjectCommand::*;
@@ -504,7 +579,12 @@ impl NativePdfSession {
             self.origin_bytes().len(),
             record_count,
         )?;
+        let selected_page = match &expected {
+            Expected::Page(id) => Some(*id),
+            _ => None,
+        };
         let (note, text_island, object) = match expected {
+            Expected::Page(_) => (NativeNoteId(0), None, None),
             Expected::Note(expected) => {
                 verify_note(&scene, &expected)?;
                 (expected.id, None, None)
@@ -525,6 +605,7 @@ impl NativePdfSession {
             note,
             text_island,
             object,
+            selected_page,
             output_hash,
             scene_hash: scene.scene_hash,
         };
@@ -532,6 +613,17 @@ impl NativePdfSession {
             .try_reserve_exact(usize::from(self.records.len() < NATIVE_REQUEST_HISTORY))
             .map_err(|_| NativeSessionError::Budget)?;
 
+        let state = page_state(
+            &reopened,
+            &ids,
+            selected_page.or(self.snapshot.page_state.selected),
+        );
+        if !state.valid_for_count(scene.pages.len()) {
+            return Err(NativeSessionError::Postcondition);
+        }
+        if let Command::Page(command) = command {
+            self.verify_page_geometry(command, &scene, &state)?;
+        }
         let previous = std::mem::replace(&mut self.graph, reopened);
         if self.origin.is_none() {
             self.origin = Some(previous.source);
@@ -540,6 +632,8 @@ impl NativePdfSession {
             - reopen_limits.max_retained_bytes
             + scene_remaining;
         self.ids = ids;
+        self.next_page_object_id = next_page_object_id;
+        self.snapshot.page_state = state;
         self.snapshot.binding = receipt.binding;
         self.snapshot.consumed_request = request_id;
         self.snapshot.output_hash = output_hash;
@@ -554,11 +648,48 @@ impl NativePdfSession {
         });
         Ok(receipt)
     }
+
+    fn verify_page_geometry(
+        &self,
+        command: NativePageCommand,
+        scene: &NativePdfNoteScene,
+        state: &NativePageState,
+    ) -> Result<(), NativeSessionError> {
+        let target = command.target();
+        let prior = &self.snapshot;
+        let positions: BTreeMap<_, _> = prior
+            .page_state
+            .order
+            .iter()
+            .copied()
+            .zip(&prior.scene.pages)
+            .collect();
+        let source = &prior.scene.pages[target.page as usize];
+        for (page, id) in scene.pages.iter().zip(&state.order) {
+            let before = positions.get(id).copied().unwrap_or(source).geometry;
+            let valid = if let NativePageCommand::RotatePage { degrees, .. } = command
+                && *id == target.stable_id
+            {
+                before.zip(page.geometry).is_some_and(|(before, after)| {
+                    before.bounds() == after.bounds()
+                        && (before.rotation() + i64::from(degrees)).rem_euclid(360)
+                            == after.rotation()
+                })
+            } else {
+                before == page.geometry
+            };
+            if !valid {
+                return Err(NativeSessionError::Postcondition);
+            }
+        }
+        Ok(())
+    }
 }
 
 fn command_digest(command: Command<'_>) -> Result<[u8; 32], NativeSessionError> {
     let mut digest = blake3::Hasher::new();
     match command {
+        Command::Page(command) => serde_json::to_writer(&mut digest, &command),
         Command::Note(command) => {
             if let NativeNoteCommand::Add { contents, .. }
             | NativeNoteCommand::Edit { contents, .. } = command
@@ -581,6 +712,23 @@ fn command_digest(command: Command<'_>) -> Result<[u8; 32], NativeSessionError> 
     }
     .map_err(|_| NativeSessionError::InvalidRequest)?;
     Ok(*digest.finalize().as_bytes())
+}
+
+fn page_state(
+    graph: &NativePdfGraph,
+    ids: &BTreeMap<PdfObjectRef, NativeNoteId>,
+    selected: Option<u64>,
+) -> NativePageState {
+    NativePageState {
+        order: graph
+            .pages
+            .iter()
+            .map(|reference| ids[reference].0)
+            .collect(),
+        selected,
+        can_delete: graph.pages.len() > 1,
+        max_position: (graph.pages.len() - 1) as u32,
+    }
 }
 
 fn initial_ids(graph: &NativePdfGraph) -> BTreeMap<PdfObjectRef, NativeNoteId> {
@@ -610,7 +758,10 @@ fn accepted_scene(
     spend(&mut remaining, separate_origin)?;
     spend(
         &mut remaining,
-        SESSION_BYTES + ids.len() * OBJECT_ID_BYTES + request_count * REQUEST_RECORD_BYTES,
+        SESSION_BYTES
+            + ids.len() * OBJECT_ID_BYTES
+            + request_count * REQUEST_RECORD_BYTES
+            + graph.pages.len() * std::mem::size_of::<u64>(),
     )?;
     let pages = notes::project(graph, ids, &mut remaining)?;
     let text_pages = text::project(graph, &pages, output_hash, binding, &mut remaining)?;

@@ -6,27 +6,28 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 fn pdf(width: u32) -> String {
-    let mut pdf = "%PDF-1.7\n".to_owned();
-    let mut offsets = vec![];
-    let page = format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {width} 792] >>");
-    for (index, value) in [
+    fixture_pdf(&[
         "<< /Type /Catalog /Pages 2 0 R >>",
         "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
-        &page,
-    ]
-    .into_iter()
-    .enumerate()
-    {
+        &format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {width} 792] >>"),
+    ])
+}
+
+fn fixture_pdf(objects: &[&str]) -> String {
+    let mut pdf = "%PDF-1.7\n".to_owned();
+    let mut offsets = vec![];
+    for (index, value) in objects.iter().enumerate() {
         offsets.push(pdf.len());
         pdf.push_str(&format!("{} 0 obj\n{value}\nendobj\n", index + 1));
     }
     let xref = pdf.len();
-    pdf.push_str("xref\n0 4\n0000000000 65535 f \n");
+    let size = objects.len() + 1;
+    pdf.push_str(&format!("xref\n0 {size}\n0000000000 65535 f \n"));
     for offset in offsets {
         pdf.push_str(&format!("{offset:010} 00000 n \n"));
     }
     pdf.push_str(&format!(
-        "trailer\n<< /Size 4 /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n"
+        "trailer\n<< /Size {size} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n"
     ));
     pdf
 }
@@ -583,4 +584,102 @@ fn serialized_image_crud_rejects_forged_profiles_and_malformed_assets() {
         response["snapshot"]["scene"]["objectPages"][0]["objects"],
         json!([])
     );
+}
+
+fn page_edit(snapshot: &Value, request_id: u64, command: Value) -> Value {
+    let mut request = bound("command", request_id, snapshot);
+    request["outputHash"] = snapshot["outputHash"].clone();
+    request["command"] = command;
+    call(native_pdf_command, request)
+}
+
+#[test]
+fn serialized_pages_report_authoritative_order_and_selection() {
+    let (_, initial) = open();
+    let original = initial["pageState"]["order"][0].clone();
+    let target = json!({"page":0,"stableId":original});
+    for (command, code) in [
+        (
+            json!({"kind":"deletePage","target":target}),
+            "FLOW_PDF_NATIVE_FINAL_PAGE",
+        ),
+        (
+            json!({"kind":"insertBlankPage","target":target,"side":"after","bytesHex":"00"}),
+            "FLOW_PDF_NATIVE_REQUEST_DECODE",
+        ),
+        (
+            json!({"kind":"rotatePage","target":{"page":0,"stableId":1},"degrees":90}),
+            "FLOW_PDF_NATIVE_TARGET_UNAVAILABLE",
+        ),
+    ] {
+        let reply = page_edit(&initial, 2, command);
+        assert_eq!(reply["status"], "failed", "{reply}");
+        assert_eq!(reply["code"], code);
+    }
+    assert_eq!(initial["pageState"]["canDelete"], false);
+    let mut state = initial;
+    for (request_id, command) in [
+        (
+            2,
+            json!({"kind":"add","page":0,"rect":[10,20,40,60],"contents":"Ї"}),
+        ),
+        (3, json!({"kind":"rotatePage","target":target,"degrees":90})),
+        (
+            4,
+            json!({"kind":"insertBlankPage","target":target,"side":"before"}),
+        ),
+        (
+            5,
+            json!({"kind":"duplicatePage","target":{"page":1,"stableId":original}}),
+        ),
+        (
+            6,
+            json!({"kind":"reorderPage","target":{"page":1,"stableId":original},"position":2}),
+        ),
+        (
+            7,
+            json!({"kind":"deletePage","target":{"page":2,"stableId":original}}),
+        ),
+    ] {
+        let reply = page_edit(&state, request_id, command);
+        assert_eq!(reply["status"], "applied", "{reply}");
+        let accepted = call(native_pdf_snapshot, bound("snapshot", request_id, &state));
+        assert_eq!(accepted["status"], "accepted");
+        assert_eq!(accepted["snapshot"], reply["snapshot"]);
+        state = reply["snapshot"].clone();
+    }
+    assert_eq!(state["pageState"]["maxPosition"], 1);
+    assert_eq!(
+        state["pageState"]["selected"],
+        state["pageState"]["order"][1]
+    );
+    assert_eq!(state["scene"]["pages"][1]["geometry"]["rotation"], 90);
+    assert_eq!(
+        state["scene"]["pages"][1]["annotations"][0]["contents"],
+        "Ї"
+    );
+    assert_eq!(
+        state["scene"]["pages"][1]["annotations"][0]["rect"],
+        json!([10, 20, 40, 60])
+    );
+    call(native_pdf_close, bound("close", 8, &state));
+}
+
+#[test]
+fn serialized_page_delete_refuses_an_unowned_destination_and_keeps_output() {
+    let bytes = fixture_pdf(&[
+        "<< /Type /Catalog /Pages 2 0 R /Dests << /Permanent [3 0 R /Fit] >> >>",
+        "<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 /MediaBox [0 0 612 792] >>",
+        "<< /Type /Page /Parent 2 0 R >>",
+        "<< /Type /Page /Parent 2 0 R >>",
+    ]);
+    let initial = call(native_pdf_open, open_request(bytes.as_bytes()))["snapshot"].clone();
+    let target = json!({"page":0,"stableId":initial["pageState"]["order"][0]});
+    let refused = page_edit(&initial, 2, json!({"kind":"deletePage","target":target}));
+    assert_eq!(refused["status"], "failed");
+    assert_eq!(refused["code"], "FLOW_PDF_NATIVE_UNSUPPORTED");
+    let lookup = call(native_pdf_snapshot, bound("snapshot", 2, &initial));
+    assert_eq!(lookup["status"], "unseen");
+    assert_eq!(lookup["snapshot"], initial);
+    call(native_pdf_close, bound("close", 3, &initial));
 }

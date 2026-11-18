@@ -4,7 +4,7 @@ import {
   nativeBytesHex,
   type NativePdfRequest,
   type NativePdfResponse,
-  type NativePdfSnapshot,
+  type NativePdfVerifiedSnapshot,
   type NativePdfWasmBoundary,
   type NativePdfWorkerRequest,
   type NativePdfWorkerResponse,
@@ -58,9 +58,10 @@ function fakePort(timeout = 30_000) {
 function openReply(request: NativePdfRequest): Extract<NativePdfResponse, { operation: 'open'; status: 'opened' }> {
   if (request.operation !== 'open') throw new Error('expected open')
   const binding = { sessionId: 1, epoch: request.epoch, originHash: hash(1), revision: 0 }
-  const snapshot: NativePdfSnapshot = {
+  const snapshot: NativePdfVerifiedSnapshot = {
     binding, originStoreHash: request.originStoreHash, outputHash: hash(1), consumedRequest: 0,
     outputHex: request.bytesHex,
+    pageState: { order: [196608], selected: null, canDelete: false, maxPosition: 0 },
     scene: {
       outputHash: hash(1), sceneHash: hash(10), pages: [
         { id: 0, object: { objectNumber: 3, generation: 0 }, geometry: { bounds: [0, 0, 100, 100], rotation: 0 },
@@ -75,13 +76,13 @@ function openReply(request: NativePdfRequest): Extract<NativePdfResponse, { oper
   }
 }
 
-function addReply(request: NativePdfRequest, previous: NativePdfSnapshot): Extract<NativePdfResponse, { status: 'applied' }> {
+function addReply(request: NativePdfRequest, previous: NativePdfVerifiedSnapshot): Extract<NativePdfResponse, { status: 'applied' }> {
   if (request.operation !== 'command' || request.command.kind !== 'add') throw new Error('expected add')
   const revision = request.binding.revision + 1
   const binding = { ...request.binding, revision }
   const outputHash = hash(10 + revision)
   const page = previous.scene.pages[0]!
-  const snapshot: NativePdfSnapshot = {
+  const snapshot: NativePdfVerifiedSnapshot = {
     ...previous, binding, outputHash, consumedRequest: request.requestId,
     outputHex: nativeBytesHex(Uint8Array.of(revision)),
     scene: {
@@ -638,5 +639,71 @@ describe('native PDF runtime composition', () => {
     expect(terminate).toHaveBeenCalledTimes(2)
     expect(closeStore).toHaveBeenCalledOnce()
     expect(() => runtime.createCoordinator()).toThrow('FLOW_PDF_NATIVE_WORKER_FAILED')
+  })
+})
+
+describe('verified page readback', () => {
+  it.each(['applied', 'reconciled'] as const)('publishes page changes through %s', async (mode) => {
+    const lane = fakePort()
+    let current = await opened(lane)
+    const target = (page: number, stableId: number) => ({ page, stableId })
+    const source = 196608
+    const blank = 4503599627370496
+    const copy = blank + 1
+    for (const [command, order, selected, rotations] of [
+      [{ kind: 'insertBlankPage', target: target(0, source), side: 'before' }, [blank, source], blank, [0, 0]],
+      [{ kind: 'rotatePage', target: target(1, source), degrees: -90 }, [blank, source], source, [0, 270]],
+      [{ kind: 'duplicatePage', target: target(1, source) }, [blank, source, copy], copy, [0, 270, 270]],
+      [{ kind: 'reorderPage', target: target(1, source), position: 2 }, [blank, copy, source], source, [0, 270, 270]],
+      [{ kind: 'deletePage', target: target(2, source) }, [blank, copy], copy, [0, 270]],
+    ] as const) {
+      const applying = lane.coordinator.command(command)
+      const staleNote = command.kind === 'insertBlankPage'
+        ? expect(lane.coordinator.command(note('queued for the old index')))
+          .rejects.toMatchObject({ code: 'FLOW_PDF_NATIVE_TARGET_UNAVAILABLE' })
+        : null
+      const refused = mode === 'reconciled'
+        ? expect(applying).rejects.toMatchObject({ code: 'FLOW_PDF_NATIVE_RESPONSE_INVALID' })
+        : null
+      const dispatch = await lane.take()
+      expect(dispatch.request).toMatchObject({ command, binding: current.binding })
+      const revision = current.binding.revision + 1
+      const outputHash = hash(60 + revision)
+      const snapshot: NativePdfVerifiedSnapshot = {
+        ...current, binding: { ...current.binding, revision }, consumedRequest: dispatch.request.requestId,
+        outputHash, outputHex: '04',
+        pageState: { order, selected, canDelete: true, maxPosition: order.length - 1 },
+        scene: { outputHash, sceneHash: hash(70 + revision), pages: order.map((_, id) => ({
+          id, object: { objectNumber: id + 3, generation: 0 },
+          geometry: { bounds: [0, 0, 100, 100], rotation: rotations[id]! },
+          canAddNote: true, annotations: [],
+        })) },
+      }
+      const receipt = {
+        protocolVersion: 1, requestId: dispatch.request.requestId, operation: 'command',
+        binding: current.binding, originStoreHash: current.originStoreHash, status: 'applied',
+        snapshot, code: null, limits: NATIVE_PDF_LIMITS, resultHash: 'cd'.repeat(32),
+      } as const
+      if (mode === 'reconciled') {
+        lane.deliver(dispatch, { ...receipt, snapshot: {
+          ...snapshot, pageState: { ...snapshot.pageState, selected: null },
+        } })
+        await refused
+        expect(lane.coordinator.snapshot().accepted).toEqual(current)
+        const reconciling = lane.coordinator.reconcile()
+        const lookup = await lane.take()
+        lane.deliver(lookup, { ...receipt, operation: 'snapshot', status: 'accepted' })
+        await expect(reconciling).resolves.toMatchObject({ status: 'accepted', snapshot })
+      } else {
+        lane.deliver(dispatch, receipt)
+        await expect(applying).resolves.toEqual(snapshot)
+      }
+      await staleNote
+      current = snapshot
+    }
+    await expect(lane.coordinator.command({ kind: 'rotatePage', target: target(1, source), degrees: 90 }))
+      .rejects.toMatchObject({ code: 'FLOW_PDF_NATIVE_TARGET_UNAVAILABLE' })
+    expect(lane.sent).toEqual([])
+    lane.coordinator.dispose()
   })
 })
