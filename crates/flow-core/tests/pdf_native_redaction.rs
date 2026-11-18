@@ -457,3 +457,46 @@ fn output_budget_refusal_creates_no_candidate() {
     assert!(session.redaction_candidate_status().is_none());
     assert_eq!(session.redaction_marks().len(), 1);
 }
+
+#[test]
+fn redaction_keeps_disjoint_paint_inside_overlapping_path_bounds() {
+    let diagonal = b"10 10 m\n80 80 l\nS";
+    let triangle = b"10 10 m\n80 10 l\n80 80 l\nh\nf*";
+    let square = b"18 63 6 6 re\nf";
+    let content = [
+        b"0 0 1 RG ".as_slice(),
+        diagonal,
+        b" 0 1 0 rg ",
+        triangle,
+        b" 1 0 0 rg ",
+        square,
+    ]
+    .concat();
+    let source = pdf(
+        vec![
+            b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+            b"<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 100 100] >>".to_vec(),
+            b"<< /Type /Page /Parent 2 0 R /Contents 4 0 R >>".to_vec(),
+            flate("", &content),
+        ],
+        "",
+    );
+    let mut session = open(&source);
+    let binding = session.snapshot().binding;
+    add(&mut session, 0, [19_000, 64_000, 23_000, 68_000]);
+    session.stage_redaction(binding, 1).unwrap();
+    let evidence = session.verify_redaction(binding, 1).unwrap();
+    assert!(evidence.checks_passed(), "{evidence:?}");
+    session.publish_redaction(binding, 1).unwrap();
+
+    let reopened = open(session.output_bytes());
+    let output = reopened.output_bytes();
+    for retained in [diagonal.as_slice(), triangle.as_slice()] {
+        assert!(
+            output
+                .windows(retained.len())
+                .any(|window| window == retained)
+        );
+    }
+    assert!(!output.windows(square.len()).any(|window| window == square));
+}
