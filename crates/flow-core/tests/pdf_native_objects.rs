@@ -274,7 +274,16 @@ fn display_p3_png_refuses_without_mutating_the_accepted_snapshot() {
     )
     .unwrap();
     let selected = target(&session, 0, 0);
-    let before = session.snapshot();
+    let state = |session: &NativePdfSession| {
+        let snapshot = session.snapshot();
+        (
+            snapshot.binding,
+            snapshot.output_hash,
+            snapshot.scene.scene_hash,
+            snapshot.consumed_request,
+        )
+    };
+    let before = state(&session);
     let bytes = session.output_bytes().to_vec();
     let error = apply(
         &mut session,
@@ -282,11 +291,7 @@ fn display_p3_png_refuses_without_mutating_the_accepted_snapshot() {
     )
     .unwrap_err();
     assert_eq!(error.code(), "FLOW_PDF_NATIVE_OBJECT_ASSET");
-    let after = session.snapshot();
-    assert_eq!(after.binding, before.binding);
-    assert_eq!(after.output_hash, before.output_hash);
-    assert_eq!(after.scene.scene_hash, before.scene.scene_hash);
-    assert_eq!(after.consumed_request, before.consumed_request);
+    assert_eq!(state(&session), before);
     assert_eq!(session.output_bytes(), bytes);
 }
 
