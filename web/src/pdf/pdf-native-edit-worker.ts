@@ -3,7 +3,6 @@ import {
   NATIVE_PDF_PROTOCOL_VERSION,
   fitsNativeJson,
   freezeNativeDto,
-  isNativeNoteCommand,
   isNativeRequestId,
   isNativeStoreHash,
   isNativeWorkerRequest,
@@ -14,11 +13,12 @@ import {
   nativeHexBytes,
   readNativeResponse,
   sameNativeBytes,
-  type NativePdfNoteCommand,
+  type NativePdfCommand,
   type NativePdfNoteScene,
   type NativePdfRequest,
   type NativePdfResponse,
   type NativePdfSnapshot,
+  type NativePdfTextCommand,
   type NativePdfWasmBoundary,
   type NativePdfWorkerRequest,
   type NativePdfWorkerResponse,
@@ -118,7 +118,7 @@ interface Pending {
 }
 
 interface QueuedCommand {
-  readonly command: NativePdfNoteCommand
+  readonly command: NativePdfCommand
   readonly resolve: (snapshot: NativePdfSnapshot) => void
   readonly reject: (error: NativePdfWorkerError) => void
 }
@@ -141,8 +141,34 @@ function errorFor(error: unknown, requestId?: number): NativePdfWorkerError {
   return error instanceof NativePdfWorkerError ? error : new NativePdfWorkerError(WORKER_FAILED, requestId)
 }
 
+function textTarget(snapshot: NativePdfSnapshot, command: NativePdfTextCommand) {
+  for (const page of snapshot.scene.textPages ?? []) {
+    if (page.refusal !== null) continue
+    const index = page.islands.findIndex(({ id }) => sameNativeBytes(id, command.island))
+    const island = page.islands[index]
+    if (island) return { page: page.page, index, island }
+  }
+  return null
+}
+
+export function confirmedNativeReplacement(
+  command: NativePdfTextCommand, previous: NativePdfSnapshot, snapshot: NativePdfSnapshot,
+) {
+  const target = textTarget(previous, command)
+  if (!target) return null
+  const page = snapshot.scene.textPages?.find(({ page }) => page === target.page)
+  const replacement = page?.refusal === null ? page.islands[target.index] : undefined
+  const original = target.island
+  if (!replacement || replacement.text !== command.text || replacement.profile !== original.profile
+    || replacement.operator !== original.operator || sameNativeBytes(replacement.id, original.id)) return null
+  const [left, bottom, right, top] = replacement.bounds
+  const [l, b, r, t] = original.bounds
+  return l <= left && b <= bottom && right <= r && top <= t ? replacement : null
+}
+
 function confirmsCommand(request: CommandRequest, previous: NativePdfSnapshot, snapshot: NativePdfSnapshot): boolean {
   const command = request.command
+  if (command.kind === 'replaceText') return confirmedNativeReplacement(command, previous, snapshot) !== null
   for (const page of snapshot.scene.pages) {
     for (const note of page.annotations) {
       if (note.kind !== 'plainNote') continue
@@ -250,12 +276,15 @@ export class NativePdfEditCoordinator {
     }
   }
 
-  command(command: NativePdfNoteCommand): Promise<NativePdfSnapshot> {
+  command(command: NativePdfCommand): Promise<NativePdfSnapshot> {
     if (this.uncertain !== null) return Promise.reject(new NativePdfWorkerError(RECONCILIATION_REQUIRED, this.uncertain.requestId))
     if (this.state.phase !== 'ready' && this.state.phase !== 'mutating') {
       return Promise.reject(new NativePdfWorkerError('FLOW_PDF_NATIVE_SESSION_UNAVAILABLE'))
     }
-    if (!isNativeNoteCommand(command)) return Promise.reject(new NativePdfWorkerError(REQUEST_INVALID))
+    const current = this.state.accepted
+    if (!current || !isNativeWorkerRequest({ dispatchId: 1, request: {
+      ...this.boundRequest('command', 1, current), outputHash: current.outputHash, command,
+    } })) return Promise.reject(new NativePdfWorkerError(REQUEST_INVALID))
     const owned = freezeNativeDto(structuredClone(command))
     return new Promise((resolve, reject) => {
       this.queue.push({ command: owned, resolve, reject })
@@ -350,7 +379,7 @@ export class NativePdfEditCoordinator {
     this.invalidate(WORKER_FAILED)
   }
 
-  private boundRequest<O extends 'close' | 'snapshot'>(operation: O, requestId: number, snapshot: NativePdfSnapshot) {
+  private boundRequest<O extends 'close' | 'snapshot' | 'command'>(operation: O, requestId: number, snapshot: NativePdfSnapshot) {
     return { protocolVersion: NATIVE_PDF_PROTOCOL_VERSION, operation, requestId,
       binding: snapshot.binding, originStoreHash: snapshot.originStoreHash } as const
   }
@@ -358,7 +387,11 @@ export class NativePdfEditCoordinator {
   private pump(): void {
     const current = this.state.accepted
     if (this.state.phase !== 'ready' || current === null) return
-    const queued = this.queue.shift()
+    let queued = this.queue.shift()
+    while (queued?.command.kind === 'replaceText' && !textTarget(current, queued.command)) {
+      queued.reject(new NativePdfWorkerError('FLOW_PDF_NATIVE_TARGET_UNAVAILABLE'))
+      queued = this.queue.shift()
+    }
     if (queued === undefined) return
     const requestId = this.nextRequestId++
     const request: CommandRequest = freezeNativeDto({

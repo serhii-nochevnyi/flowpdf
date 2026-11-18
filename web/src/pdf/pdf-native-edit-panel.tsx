@@ -12,7 +12,7 @@ import {
   type NativePdfTextRefusal,
 } from './pdf-native-edit-protocol.js'
 import {
-  NativePdfWorkerError, type NativePdfEditCoordinator,
+  confirmedNativeReplacement, NativePdfWorkerError, type NativePdfEditCoordinator,
 } from './pdf-native-edit-worker.js'
 import './pdf-native-edit-panel.css'
 
@@ -519,16 +519,8 @@ export function PdfNativeEditPanel({
     setTextRefusal(null)
     if (!('draft' in pending)) {
       const { command, before } = pending
-      const previous = before.scene.textPages?.find((entry) => entry.page === pending.pageId)?.islands
-        .find((island) => sameNativeBytes(island.id, command.island))
-      const current = result.scene.textPages?.find((entry) => entry.page === pending.pageId)
-      if (previous && current?.refusal === null) {
-        const [left, bottom, right, top] = previous.bounds
-        const replacement = current.islands.find(({ bounds: [l, b, r, t], text, profile, operator }) =>
-          left <= l && bottom <= b && r <= right && t <= top && text === command.text
-          && profile === previous.profile && operator === previous.operator)
-        if (replacement && pageId === pending.pageId) return `${id}-island-button-${islandKey(replacement)}`
-      }
+      const replacement = confirmedNativeReplacement(command, before, result)
+      if (replacement && pageId === pending.pageId) return `${id}-island-button-${islandKey(replacement)}`
       return `${id}-text-islands`
     }
 
@@ -572,6 +564,7 @@ export function PdfNativeEditPanel({
       setFailure(cause, false)
       if (command.kind === 'replaceText' && coordinator.snapshot().phase === 'ready') {
         setTextRefusal(refusal(cause)[1])
+        focusAfterRender.current = `${id}-replacement`
       }
     } finally {
       locked.current = false
@@ -785,8 +778,9 @@ export function PdfNativeEditPanel({
           </div>
           <p>{extracted ? t(extracted.text.length ? 'projection.partial' : 'projection.empty') : t('projection.unavailable')}</p>
           <section className="native-stack" aria-labelledby={`${id}-text-islands`}>
-            <h3 id={`${id}-text-islands`} tabIndex={-1}>{t('text.title')}</h3>
-            {islands.length === 0 && <p className="native-help">{textPage?.refusal
+            <h3 id={`${id}-text-islands`} tabIndex={-1}
+              aria-describedby={islands.length === 0 ? `${id}-text-capability` : undefined}>{t('text.title')}</h3>
+            {islands.length === 0 && <p id={`${id}-text-capability`} className="native-help native-text-feedback">{textPage?.refusal
               ? t('text.readOnly', { reason: t(textRefusalReasons[textPage.refusal]) })
               : t('text.unavailable')}</p>}
             {islands.length > 0 && <ul className="native-note-list" aria-labelledby={`${id}-text-islands`}>
@@ -833,7 +827,7 @@ export function PdfNativeEditPanel({
                   setTextRefusal(null)
                 }} />
               <p className="native-help" id={`${id}-text-help`}>{t('text.help')}</p>
-              <p className="native-help" id={`${id}-text-feedback`}>
+              <p className="native-help native-text-feedback" id={`${id}-text-feedback`}>
                 {!canEdit ? (unavailable ?? t('text.unavailable'))
                   : textRefusal ? t('text.refused', { reason: t(textRefusal) })
                     : replacementError === 'limit' ? t('text.limit', { limit: noteLimit })

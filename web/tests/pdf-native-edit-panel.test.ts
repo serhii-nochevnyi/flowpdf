@@ -321,6 +321,9 @@ describe('native text replacement', () => {
           ...dependencies, initialDocument: { ...initial, snapshot: { ...initial.snapshot, scene } }, locale,
         }))
         expect(markup).toContain(nativePdfText(locale, reason))
+        const description = markup.match(/<h3[^>]+aria-describedby="([^"]+)"[^>]*>/u)?.[1]
+        expect(description).toBeDefined()
+        expect(markup).toContain(`<p id="${description}" class="native-help native-text-feedback">`)
         expect(markup).not.toContain(nativePdfText(locale, 'text.apply'))
       }
     }

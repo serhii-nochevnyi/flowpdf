@@ -87,6 +87,8 @@
   line-height: 1.5;
 }
 
+.pdf-native-edit-panel .native-text-feedback { overflow-wrap: anywhere; }
+
 .pdf-native-edit-panel textarea { min-height: 96px; resize: vertical; }
 .pdf-native-edit-panel .native-file {
   position: relative;

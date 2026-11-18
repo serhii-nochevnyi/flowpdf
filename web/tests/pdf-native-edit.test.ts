@@ -100,15 +100,83 @@ function addReply(request: NativePdfRequest, previous: NativePdfSnapshot): Extra
   }
 }
 
-async function opened(lane: ReturnType<typeof fakePort>) {
+const textIsland = { id: hash(41), text: 'ЇAA', bounds: [30, 140, 56, 152],
+  profile: 'identityHCidFontType2', operator: 'Tj', maxAdvance: 26 } as const
+const replaceText = { kind: 'replaceText', island: textIsland.id, text: 'ЇA' } as const
+
+async function opened(lane: ReturnType<typeof fakePort>, withText = false) {
   const opening = lane.coordinator.open(original())
   const dispatch = await lane.take()
-  lane.deliver(dispatch, openReply(dispatch.request))
+  const reply = openReply(dispatch.request)
+  const { snapshot } = reply
+  lane.deliver(dispatch, withText ? {
+    ...reply, snapshot: { ...snapshot, scene: { ...snapshot.scene,
+      textPages: [{ page: 0, refusal: null, islands: [textIsland] }],
+    } },
+  } : reply)
   return opening
 }
 
 describe('native PDF edit coordinator', () => {
   afterEach(() => { vi.useRealTimers() })
+
+  it.each(['applied', 'reconciled'] as const)('publishes a verified text replacement (%s) and rejects stale queued targets', async (mode) => {
+    const lane = fakePort()
+    const initial = await opened(lane, true)
+    const applying = lane.coordinator.command(replaceText)
+    const outcome = mode === 'reconciled'
+      ? expect(applying).rejects.toMatchObject({ code: 'FLOW_PDF_NATIVE_RESPONSE_INVALID' })
+      : null
+    const stale = expect(lane.coordinator.command(replaceText)).rejects.toMatchObject({
+      code: 'FLOW_PDF_NATIVE_TARGET_UNAVAILABLE',
+    })
+    const dispatch = await lane.take()
+    expect(dispatch.request).toMatchObject({ binding: initial.binding, outputHash: initial.outputHash, command: replaceText })
+    expect(lane.coordinator.snapshot().accepted).toBe(initial)
+    const outputHash = hash(42)
+    const snapshot = {
+      ...initial, binding: { ...initial.binding, revision: 1 },
+      outputHash, outputHex: '04', consumedRequest: dispatch.request.requestId,
+      scene: { ...initial.scene, outputHash, sceneHash: hash(43), textPages: [{ page: 0, refusal: null,
+        islands: [{ ...textIsland, id: hash(44), text: replaceText.text }],
+      }] },
+    }
+    const receipt = {
+      protocolVersion: 1, requestId: dispatch.request.requestId, operation: 'command',
+      binding: initial.binding, originStoreHash: initial.originStoreHash, status: 'applied',
+      snapshot, code: null, limits: NATIVE_PDF_LIMITS, resultHash: 'bb'.repeat(32),
+    } as const
+    if (mode === 'reconciled') {
+      lane.deliver(dispatch, { ...receipt, snapshot: {
+        ...snapshot, scene: { ...snapshot.scene, textPages: [{ page: 0, refusal: null, islands: [
+          { ...textIsland, id: hash(44) },
+          { ...textIsland, id: hash(45), text: replaceText.text },
+        ] }] },
+      } })
+      await outcome
+      expect(lane.coordinator.snapshot()).toMatchObject({ phase: 'reconciliationRequired', accepted: initial })
+      const reconciling = lane.coordinator.reconcile()
+      const lookup = await lane.take()
+      lane.deliver(lookup, { ...receipt, operation: 'snapshot', status: 'accepted' })
+      await expect(reconciling).resolves.toMatchObject({ status: 'accepted', snapshot })
+    } else {
+      lane.deliver(dispatch, receipt)
+      await expect(applying).resolves.toEqual(snapshot)
+    }
+    await stale
+    expect(lane.coordinator.snapshot()).toMatchObject({ phase: 'ready', accepted: snapshot })
+    expect(lane.sent).toEqual([])
+    lane.coordinator.dispose()
+  })
+
+  it('requires a current verified text island before dispatch', async () => {
+    const lane = fakePort()
+    const initial = await opened(lane)
+    await expect(lane.coordinator.command(replaceText)).rejects.toMatchObject({ code: 'FLOW_PDF_NATIVE_TARGET_UNAVAILABLE' })
+    expect(lane.coordinator.snapshot().accepted).toBe(initial)
+    expect(lane.sent).toEqual([])
+    lane.coordinator.dispose()
+  })
 
   it('returns to idle after a verified reader refusal and allows another open', async () => {
     const lane = fakePort()
