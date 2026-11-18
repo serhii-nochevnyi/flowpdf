@@ -132,6 +132,7 @@ const rustErrorCodes = new Set([
   'FLOW_PDF_NATIVE_LIMITS_INVALID',
   'FLOW_PDF_NATIVE_UNSUPPORTED',
   'FLOW_PDF_NATIVE_GRAPH_MALFORMED',
+  'FLOW_PDF_NATIVE_IMPORT_REFUSED',
   'FLOW_PDF_NATIVE_NOTE_INVALID',
   'FLOW_PDF_NATIVE_REQUEST_INVALID',
   'FLOW_PDF_NATIVE_REQUEST_CONFLICT',
@@ -324,6 +325,7 @@ function isNativeResponse(value: unknown): value is NativePdfResponse {
 
   if (value.status === 'failed') {
     return value.snapshot === null && typeof value.code === 'string' && rustErrorCodes.has(value.code)
+      && (value.code !== 'FLOW_PDF_NATIVE_IMPORT_REFUSED' || (value.operation === 'open' && value.requestId > 0))
       && (value.requestId === 0 ? value.binding === null && value.originStoreHash === null
         : isNativeStoreHash(value.originStoreHash) && (value.operation === 'open' ? value.binding === null : binding(value.binding)))
   }
