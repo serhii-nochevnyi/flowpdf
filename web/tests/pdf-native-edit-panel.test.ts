@@ -2,12 +2,12 @@ import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
 import {
+  NativeNoteDraftRecovery,
   PdfNativeEditPanel,
   nativeDownloadName,
   nativeMarkerPosition,
   nativeNoteDraftAfter,
   nativeNoteDraftAfterAcceptance,
-  nativeNoteDraftForPage,
   nativeNoteRect,
   nativeNoteTextError,
   type NativePdfAcceptedDocument,
@@ -72,11 +72,27 @@ describe('native note workspace', () => {
     const unrelated = { ...selected, note: 3 }
     expect(nativeNoteDraftAfterAcceptance(pending, result, 0, unrelated)).toBe(unrelated)
     expect(nativeNoteDraftAfterAcceptance(pending, result, 1, selected)).toBe(selected)
+  })
 
-    const removal = { ...pending, command: { kind: 'remove', note: 2 } as const }
-    const removed = documentWith([other]).snapshot
-    expect(nativeNoteDraftAfterAcceptance(removal, removed, 0, selected)).toBeNull()
-    expect(nativeNoteDraftAfterAcceptance(removal, removed, 0, unrelated)).toBe(unrelated)
+  it('selects the next surviving note, the preceding note, or Add after removal', () => {
+    const previous = note(2)
+    const target = note(3)
+    const next = note(4)
+    const draft = { note: 3, contents: 'Pending', x: '17', y: '28' }
+    const command = { kind: 'remove', note: 3 } as const
+    const afterRemoval = (before: readonly NativePdfAnnotation[], after: readonly NativePdfAnnotation[]) =>
+      nativeNoteDraftAfterAcceptance({ command, before: documentWith(before).snapshot, pageId: 0, draft },
+        documentWith(after).snapshot, 0, draft)
+    expect(afterRemoval([previous, target, next], [previous, next]))
+      .toEqual({ note: 4, contents: next.contents, x: '10', y: '10' })
+    expect(afterRemoval([previous, target], [previous])?.note).toBe(2)
+    expect(afterRemoval([target], [])).toBeNull()
+
+    const pending = { command, before: documentWith([previous, target, next]).snapshot, pageId: 0, draft }
+    const result = documentWith([previous, next]).snapshot
+    const unrelated = { ...draft, note: 2 }
+    expect(nativeNoteDraftAfterAcceptance(pending, result, 0, unrelated)).toBe(unrelated)
+    expect(nativeNoteDraftAfterAcceptance(pending, result, 1, draft)).toBe(draft)
   })
 
   it('selects a verified added note only when its submitted draft is still active', () => {
@@ -94,16 +110,74 @@ describe('native note workspace', () => {
     expect(nativeNoteDraftAfterAcceptance(pending, result, 0, otherDraft)).toBe(otherDraft)
   })
 
-  it('recovers an unseen command draft only on its original page', () => {
-    for (const id of [null, 2]) {
-      const draft = { note: id, contents: 'Unseen', x: '17', y: '28' }
-      const pending = { pageId: 1, draft }
-      expect(nativeNoteDraftForPage(pending, 0)).toBeNull()
-      expect(nativeNoteDraftForPage(pending, 1)).toBe(draft)
-      expect(nativeNoteDraftForPage(pending, 2)).toBeNull()
-      expect(nativeNoteDraftForPage(pending, 1)).toBe(draft)
-    }
-    expect(nativeNoteDraftForPage(null, 1)).toBeNull()
+  it('keeps corrections and independent unseen drafts across navigation and selection', () => {
+    const recovery = new NativeNoteDraftRecovery()
+    const first = { note: 2, contents: 'First unseen', x: '17', y: '28' }
+    const corrected = { ...first, contents: 'Corrected after recovery', x: '19' }
+    const other = { ...first, note: 3, contents: 'Second unseen' }
+    const newNote = { ...first, note: null, contents: 'New note' }
+    expect(recovery.restoreUnseen({ pageId: 0, draft: first }, 0, first)).toBe(first)
+    recovery.update(0, corrected)
+    expect(recovery.restoreUnseen({ pageId: 0, draft: other }, 1, newNote)).toBe(newNote)
+    expect(recovery.restoreUnseen({ pageId: 1, draft: newNote }, 1, null)).toBe(newNote)
+    expect(recovery.get(0)).toBe(corrected)
+    expect(recovery.get(0, 2)).toBe(corrected)
+    expect(recovery.get(0, 3)).toBe(other)
+    expect(recovery.get(0, null)).toBeNull()
+    expect(recovery.get(1, null)).toBe(newNote)
+    expect(recovery.get(1, 2)).toBeNull()
+    expect(recovery.restoreUnseen({ pageId: 0, draft: other }, 0, corrected)).toBe(corrected)
+    recovery.discard(0, 2)
+    expect(recovery.get(0, 2)).toBeNull()
+    expect(recovery.get(0, 3)).toBe(other)
+  })
+
+  it('retires only accepted fields or the removed draft, even when another note is displayed', () => {
+    const recovery = new NativeNoteDraftRecovery()
+    const original = note(2)
+    const other = { note: 3, contents: 'Other draft', x: '10', y: '10' }
+    const draft = { note: 2, contents: 'Recovered edit', x: '20', y: '30' }
+    const before = documentWith([original, note(3)]).snapshot
+    const edited = { ...original, contents: draft.contents }
+    const moved = { ...original, rect: [10, 50, 34, 74] as const }
+    const edit = { kind: 'edit', note: 2, contents: draft.contents } as const
+    const move = { kind: 'move', note: 2, page: 0, rect: moved.rect } as const
+
+    recovery.restoreUnseen({ pageId: 0, draft }, 0, draft)
+    recovery.restoreUnseen({ pageId: 0, draft: other }, 0, other)
+    const afterSave = documentWith([edited, note(3)]).snapshot
+    recovery.accept({ command: edit, before, pageId: 0, draft }, afterSave)
+    expect(recovery.get(0, 2)).toEqual(draft)
+    const afterBoth = documentWith([{ ...moved, contents: draft.contents }, note(3)]).snapshot
+    recovery.accept({ command: move, before: afterSave, pageId: 0, draft }, afterBoth)
+    expect(recovery.get(0, 2)).toBeNull()
+
+    recovery.restoreUnseen({ pageId: 0, draft }, 0, other)
+    const afterMove = documentWith([moved, note(3)]).snapshot
+    recovery.accept({ command: move, before, pageId: 0, draft }, afterMove)
+    expect(recovery.get(0, 2)).toEqual(draft)
+    const remove = { kind: 'remove', note: 2 } as const
+    recovery.accept({ command: remove, before: afterMove, pageId: 0, draft }, documentWith([note(3)]).snapshot)
+    expect(recovery.get(0, 2)).toBeNull()
+    expect(recovery.get(0, 3)).toBe(other)
+
+    recovery.accept({ command: edit, before, pageId: 0, draft: null }, afterSave)
+    expect(recovery.get(0, 2)).toBeNull()
+  })
+
+  it('clears the new-note draft on acceptance and retains a new note on another page', () => {
+    const recovery = new NativeNoteDraftRecovery()
+    const draft = { note: null, contents: 'First new note', x: '10', y: '10' }
+    const other = { ...draft, contents: 'Second new note' }
+    const added = { ...note(2), contents: draft.contents }
+    recovery.restoreUnseen({ pageId: 0, draft }, 0, draft)
+    recovery.restoreUnseen({ pageId: 1, draft: other }, 1, other)
+    recovery.accept({
+      command: { kind: 'add', page: 0, rect: added.rect, contents: draft.contents },
+      before: documentWith([]).snapshot, pageId: 0, draft,
+    }, documentWith([added]).snapshot)
+    expect(recovery.get(0, null)).toBeNull()
+    expect(recovery.get(1, null)).toBe(other)
   })
 
   it('blocks blank, composing, malformed and over-limit UTF-8 drafts', () => {
