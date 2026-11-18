@@ -10,6 +10,9 @@ const workflowPath = `.github/workflows/${workflowFile}`
 const workflowName = 'Native PDF note tracer'
 const jobName = 'native-pdf-note-tracer'
 const approvedHarness = [
+  ['Cargo.toml', '57b1628917c2d4d4fdb08ae2b842f06dfbd1769729f1955cd31fde802e09bd38'],
+  ['crates/flow-core/Cargo.toml', '5b54d3ade52e260aa29e31a86aef7123042d594fb0af04a6ba765b1c099d6d3e'],
+  ['crates/flow-wasm/Cargo.toml', '1a76efa99818f2f129f40af76b952942dbc1bf4abb983daae2d1616874e05373'],
   ['.github/workflows/pdf-native-note-tracer.yml', '62f76deaa269fe69c7e44dcd54458f26ab4d65ea0b195fc1636a6c65788cd2d4'],
   ['package.json', 'a5686497377219cf6c5279e057fa831e445547226a39dc5418a31d5a4be9ab74'],
   ['package-lock.json', 'f1e5575f8687ea0fbf7f5abffddaa640116c8f24d09a724009d1b5210bceb3fd'],
