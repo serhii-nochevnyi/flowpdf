@@ -459,6 +459,11 @@ describe('native page management', () => {
       expect(markup).toContain(nativePdfText(locale, 'page.final'))
       expect(markup).toContain(nativePdfText(locale, 'navigation.position', { page: 1, total: 1 }))
       expect(markup).toContain(nativePdfText(locale, 'page.position'))
+      for (const action of ['navigation.previous', 'navigation.next', 'page.reorder', 'page.earlier', 'page.later', 'page.delete'] as const) {
+        const label = nativePdfText(locale, action)
+        expect(markup.match(/<button[^>]* disabled=""[^>]*>[^<]*<\/button>/gu))
+          .toEqual(expect.arrayContaining([expect.stringContaining(`>${label}</button>`)]))
+      }
     })
   }
 })

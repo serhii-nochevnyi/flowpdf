@@ -533,7 +533,7 @@ export function PdfNativeEditPanel({
   const mounted = useRef(false)
   const locked = useRef(false)
   const navigationRequest = useRef<AbortController | null>(null)
-  const [navigation, setNavigation] = useState<{ readonly page: number; readonly failed: boolean } | null>(null)
+  const [navigation, setNavigation] = useState<{ readonly page: number; readonly position: number; readonly failed: boolean } | null>(null)
   const [busy, setBusy] = useState<'opening' | 'mutating' | 'reconciling' | null>(null)
   const [status, setStatus] = useState<Message | null>(null)
   const [error, setError] = useState<Message | null>(null)
@@ -737,10 +737,11 @@ export function PdfNativeEditPanel({
 
   async function choosePage(destination: Page | undefined, invoker: HTMLElement) {
     if (locked.current || navigationRequest.current || navigationBlocked || destination === undefined || destination.id === pageId) return
+    const position = pages.indexOf(destination) + 1
     if (coordinator && service?.phase === 'ready' && snapshot === service.accepted) {
       const request = new AbortController()
       navigationRequest.current = request
-      setNavigation({ page: destination.id, failed: false })
+      setNavigation({ page: destination.id, position, failed: false })
       let projected: Page | undefined
       try {
         const scene = await coordinator.project(request.signal)
@@ -751,7 +752,7 @@ export function PdfNativeEditPanel({
       if (!mounted.current || request.signal.aborted || navigationRequest.current !== request) return
       navigationRequest.current = null
       if (!projected) {
-        setNavigation({ page: destination.id, failed: true })
+        setNavigation({ page: destination.id, position, failed: true })
         if (document.activeElement === document.body) focusAfterRender.current = `${id}-page-retry`
         return
       }
@@ -768,7 +769,7 @@ export function PdfNativeEditPanel({
     setDraft(recovered)
     setComposition(false)
     setStatus([restoredObject ? 'status.objectDraftRestored' : recovered ? 'status.draftRestored' : 'navigation.position', {
-      page: pages.indexOf(destination) + 1,
+      page: position,
       total: pages.length,
     }])
   }
@@ -1157,7 +1158,7 @@ export function PdfNativeEditPanel({
   const announcement = busy === 'opening' ? t('status.opening')
     : busy === 'mutating' ? t('status.pending')
       : busy === 'reconciling' ? t('status.reconciling')
-        : navigation ? t(navigation.failed ? 'navigation.error' : 'navigation.pending', { page: navigation.page + 1 })
+        : navigation ? t(navigation.failed ? 'navigation.error' : 'navigation.pending', { page: navigation.position })
           : status === null ? '' : t(...status)
   const bounds = geometry && t('geometry.bounds', {
     x: geometry.bounds[2] - geometry.bounds[0] - geometrySize[0],
@@ -1231,26 +1232,26 @@ export function PdfNativeEditPanel({
       </div>}
       <div className="native-workspace">
         <div className="native-stack">
-          <div className="native-actions" role="group" aria-label={t('navigation.label')}>
+          <div className="native-actions native-page-navigation" role="group" aria-label={t('navigation.label')}>
             <button type="button" disabled={pageIndex <= 0 || navigationBlocked}
               onClick={(event) => void choosePage(pages[pageIndex - 1], event.currentTarget)}>{t('navigation.previous')}</button>
             <button type="button" disabled={pageIndex < 0 || pageIndex >= pages.length - 1 || navigationBlocked}
               onClick={(event) => void choosePage(pages[pageIndex + 1], event.currentTarget)}>{t('navigation.next')}</button>
             <label>{t('navigation.select')}
               <select id={pageSelectorId} disabled={pages.length === 0 || navigationBlocked} value={page?.id ?? ''}
-                onChange={(event) => void choosePage(pages[Number(event.target.value)], event.currentTarget)}>
+                onChange={(event) => void choosePage(pages.find((entry) => entry.id === Number(event.target.value)), event.currentTarget)}>
                 {pages.map((item, index) => <option key={item.id} value={item.id}>{index + 1}</option>)}
               </select>
             </label>
             <label>{t('navigation.zoom')}
-              <select disabled={geometry === null || busy !== null} value={zoom} onChange={(event) => setZoom(Number(event.target.value))}>
+              <select disabled={geometry === null || navigationBlocked} value={zoom} onChange={(event) => setZoom(Number(event.target.value))}>
                 <option value={0}>{t('navigation.fit')}</option>
                 {[50, 100, 150, 200].map((percent) => <option key={percent} value={percent}>{percent}%</option>)}
               </select>
             </label>
-            <button type="button" disabled={geometry === null || busy !== null} onClick={() => setZoom(0)}>{t('navigation.fit')}</button>
+            <button type="button" disabled={geometry === null || navigationBlocked} onClick={() => setZoom(0)}>{t('navigation.fit')}</button>
             {navigation?.failed && <button type="button" id={`${id}-page-retry`} disabled={navigationBlocked}
-              onClick={(event) => void choosePage(pages[navigation.page], event.currentTarget)}>{t('navigation.retry')}</button>}
+              onClick={(event) => void choosePage(pages.find((entry) => entry.id === navigation.page), event.currentTarget)}>{t('navigation.retry')}</button>}
           </div>
           {pageState && page && <fieldset className="native-stack native-page-tools" disabled={!canManagePages}>
             <legend>{t('page.title')}</legend>
@@ -1570,7 +1571,7 @@ export function PdfNativeEditPanel({
             ? t('navigation.position', { page: confirm.pageCommand.target.page + 1, total: confirm.snapshot.scene.pages.length })
             : 'target' in confirm ? confirm.label : t('note.confirmTarget', { number: confirm.note, page: pageIndex + 1 }))}</p>
           <div className="native-actions">
-            <button type="button" ref={cancelConfirmation} onClick={() => setConfirm(null)}>{t('note.remove.cancel')}</button>
+            <button type="button" ref={cancelConfirmation} onClick={() => setConfirm(null)}>{t(deletingPage ? 'page.keep' : 'note.remove.cancel')}</button>
             <button type="button" className="native-destructive" onClick={() => {
               if (confirm === null) return
               setConfirm(null)
