@@ -1,0 +1,25 @@
+name: Native PDF note tracer
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  native_pdf_note_tracer:
+    name: native-pdf-note-tracer
+    runs-on: [self-hosted, flowpdf-phase9]
+    timeout-minutes: 30
+    env:
+      FLOWPDF_TRACER_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - name: Check out source head
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ env.FLOWPDF_TRACER_HEAD }}
+          persist-credentials: false
+          clean: false # Keep preprovisioned locked dependencies and caches.
+      - name: Build and trace native notes
+        run: node scripts/check-native-note-tracer.mjs --run
