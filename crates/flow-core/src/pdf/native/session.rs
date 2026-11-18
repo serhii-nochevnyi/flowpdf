@@ -116,25 +116,28 @@ pub struct NativePdfSession {
     ids: BTreeMap<PdfObjectRef, NativeNoteId>,
     snapshot: NativeSnapshot,
     records: VecDeque<RequestRecord>,
+    remaining_retained: usize,
     #[cfg(test)]
     fail_at: Option<FailurePoint>,
 }
 
 impl NativePdfSession {
-    pub fn open(bytes: &[u8], limits: NativeEditLimits) -> Result<Self, NativeSessionError> {
-        Self::open_scoped(bytes, limits, [0; 16])
-    }
-
+    // @contract: Callers provide a fresh nonzero epoch for each runtime.
     pub fn open_scoped(
         bytes: &[u8],
         limits: NativeEditLimits,
         epoch: [u8; 16],
     ) -> Result<Self, NativeSessionError> {
+        if epoch == [0; 16] {
+            return Err(NativeSessionError::BindingMismatch);
+        }
         let graph = NativePdfGraph::open(bytes, limits)?;
         let session_id = NEXT_SESSION
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
             .map_err(|_| NativeSessionError::Budget)?;
         let origin_hash = *blake3::hash(bytes).as_bytes();
+        let mut remaining = graph.remaining_retained();
+        spend(&mut remaining, graph.objects.len() * OBJECT_ID_BYTES)?;
         let ids = graph
             .objects
             .keys()
@@ -147,7 +150,7 @@ impl NativePdfSession {
                 )
             })
             .collect();
-        let scene = accepted_scene(&graph, &ids, origin_hash, 0, 0)?;
+        let (scene, remaining_retained) = accepted_scene(&graph, &ids, origin_hash, 0, 0)?;
         let snapshot = NativeSnapshot {
             binding: NativeBinding {
                 epoch,
@@ -168,6 +171,7 @@ impl NativePdfSession {
             ids,
             snapshot,
             records: VecDeque::new(),
+            remaining_retained,
             #[cfg(test)]
             fail_at: None,
         })
@@ -254,27 +258,50 @@ impl NativePdfSession {
         if binding.revision != self.snapshot.binding.revision {
             return Err(NativeSessionError::RevisionMismatch);
         }
-        let digest = command_digest(command)?;
         let revision = binding
             .revision
             .checked_add(1)
             .ok_or(NativeSessionError::Budget)?;
         let record_count = (self.records.len() + 1).min(NATIVE_REQUEST_HISTORY);
-        let mut reopen_limits = self.snapshot.limits;
-        reopen_limits.max_source_bytes = reopen_limits.max_output_bytes;
-        let mut staged = NativePdfGraph::open(self.output_bytes(), self.graph.limits)?;
-        staged.limits.max_source_bytes = reopen_limits.max_source_bytes;
-        let mut remaining = staged.remaining_retained();
         let content_cost = match command {
             NativeNoteCommand::Add { contents, .. } | NativeNoteCommand::Edit { contents, .. } => {
-                contents.len() * 4
+                if contents.len() > NATIVE_MAX_NOTE_BYTES {
+                    return Err(NativeSessionError::InvalidNote);
+                }
+                contents.len() * 8
             }
             _ => 0,
         };
+        let annotation_cost = match command {
+            NativeNoteCommand::Add { page, .. } | NativeNoteCommand::Move { page, .. } => self
+                .snapshot
+                .scene
+                .pages
+                .get(page.0 as usize)
+                .map_or(0, |page| {
+                    page.annotations.len() * 2 * std::mem::size_of::<PdfValue>()
+                }),
+            _ => 0,
+        };
+        let mut remaining = self.remaining_retained;
         spend(
             &mut remaining,
-            4096 + content_cost + self.ids.len() * OBJECT_ID_BYTES,
+            4096 + content_cost + annotation_cost + (self.ids.len() + 1) * OBJECT_ID_BYTES,
         )?;
+        let digest = command_digest(command)?;
+        // @security: Reserve output bytes separately from the writer workspace and reopen graph.
+        let output_budget = self.snapshot.limits.max_output_bytes.min(remaining / 4);
+        spend(&mut remaining, output_budget)?;
+        if remaining == 0 || output_budget == 0 {
+            return Err(NativeSessionError::Budget);
+        }
+        let mut staged_limits = self.snapshot.limits;
+        if binding.revision != 0 {
+            staged_limits.max_source_bytes = staged_limits.max_output_bytes;
+        }
+        staged_limits.max_retained_bytes = remaining;
+        staged_limits.max_output_bytes = output_budget;
+        let mut staged = NativePdfGraph::open(self.output_bytes(), staged_limits)?;
         let mut ids = self.ids.clone();
         let expected = notes::stage(
             &mut staged,
@@ -287,6 +314,7 @@ impl NativePdfSession {
         if self.fail_at == Some(FailurePoint::Serialize) {
             staged.limits.max_output_bytes = 1;
         }
+        staged.limits.max_source_bytes = self.snapshot.limits.max_output_bytes;
         let output = staged.rewrite()?;
         #[cfg(test)]
         let output = if self.fail_at == Some(FailurePoint::Reopen) {
@@ -294,10 +322,18 @@ impl NativePdfSession {
         } else {
             output
         };
+        let mut reopen_limits = self.snapshot.limits;
+        reopen_limits.max_source_bytes = reopen_limits.max_output_bytes;
+        reopen_limits.max_retained_bytes = staged.remaining_retained();
+        if reopen_limits.max_retained_bytes == 0 {
+            return Err(NativeSessionError::Budget);
+        }
         let reopened = NativePdfGraph::open(&output, reopen_limits)?;
         let ids = preserve_and_remap(&staged, &reopened, &ids)?;
         let output_hash = *blake3::hash(&output).as_bytes();
-        let scene = accepted_scene(
+        drop(staged);
+        drop(output);
+        let (scene, scene_remaining) = accepted_scene(
             &reopened,
             &ids,
             output_hash,
@@ -323,6 +359,9 @@ impl NativePdfSession {
         if self.origin.is_none() {
             self.origin = Some(previous.source);
         }
+        self.remaining_retained = self.snapshot.limits.max_retained_bytes
+            - reopen_limits.max_retained_bytes
+            + scene_remaining;
         self.ids = ids;
         self.snapshot.binding = receipt.binding;
         self.snapshot.consumed_request = request_id;
@@ -347,8 +386,9 @@ fn command_digest(command: &NativeNoteCommand) -> Result<[u8; 32], NativeSession
     {
         return Err(NativeSessionError::InvalidNote);
     }
-    let encoded = serde_json::to_vec(command).map_err(|_| NativeSessionError::InvalidRequest)?;
-    Ok(*blake3::hash(&encoded).as_bytes())
+    let mut digest = blake3::Hasher::new();
+    serde_json::to_writer(&mut digest, command).map_err(|_| NativeSessionError::InvalidRequest)?;
+    Ok(*digest.finalize().as_bytes())
 }
 
 fn accepted_scene(
@@ -357,7 +397,7 @@ fn accepted_scene(
     output_hash: [u8; 32],
     separate_origin: usize,
     request_count: usize,
-) -> Result<NativePdfNoteScene, NativeSessionError> {
+) -> Result<(NativePdfNoteScene, usize), NativeSessionError> {
     let mut remaining = graph.remaining_retained();
     spend(&mut remaining, separate_origin)?;
     spend(
@@ -365,7 +405,7 @@ fn accepted_scene(
         SESSION_BYTES + ids.len() * OBJECT_ID_BYTES + request_count * REQUEST_RECORD_BYTES,
     )?;
     let pages = notes::project(graph, ids, &mut remaining)?;
-    NativePdfNoteScene::new(output_hash, pages)
+    Ok((NativePdfNoteScene::new(output_hash, pages)?, remaining))
 }
 
 fn verify_note(
@@ -395,7 +435,7 @@ fn preserve_and_remap(
     ids: &BTreeMap<PdfObjectRef, NativeNoteId>,
 ) -> Result<BTreeMap<PdfObjectRef, NativeNoteId>, NativeSessionError> {
     let mut work = staged.remaining_work();
-    let mut remaining = staged.remaining_retained();
+    let mut remaining = reopened.remaining_retained();
     spend(&mut remaining, staged.objects.len() * 512)?;
     let mut pending = Vec::new();
     for (key, value) in &staged.trailer {
@@ -528,7 +568,7 @@ mod tests {
         };
         assert!(NativePdfGraph::open(&bytes, limits).is_ok());
         assert!(matches!(
-            NativePdfSession::open(&bytes, limits),
+            NativePdfSession::open_scoped(&bytes, limits, [1; 16]),
             Err(NativeSessionError::Budget)
         ));
     }
@@ -538,7 +578,7 @@ mod tests {
         let encoded = miniz_oxide::deflate::compress_to_vec_zlib(b"q Q", 6);
         let bytes = super::super::tests::fixture("", &encoded);
         let defaults = NativeEditLimits::default();
-        let mut session = NativePdfSession::open(&bytes, defaults).unwrap();
+        let mut session = NativePdfSession::open_scoped(&bytes, defaults, [1; 16]).unwrap();
         session
             .apply(
                 session.snapshot().binding,
@@ -559,7 +599,7 @@ mod tests {
         };
         assert!(NativePdfGraph::open(output, limits).is_ok());
         assert!(matches!(
-            NativePdfSession::open(output, limits),
+            NativePdfSession::open_scoped(output, limits, [1; 16]),
             Err(NativeSessionError::Budget)
         ));
     }
@@ -568,7 +608,8 @@ mod tests {
     fn serialization_and_reopen_failures_leave_accepted_state_untouched() {
         let encoded = miniz_oxide::deflate::compress_to_vec_zlib(b"q Q", 6);
         let bytes = super::super::tests::fixture("", &encoded);
-        let mut session = NativePdfSession::open(&bytes, NativeEditLimits::default()).unwrap();
+        let mut session =
+            NativePdfSession::open_scoped(&bytes, NativeEditLimits::default(), [1; 16]).unwrap();
         let add = NativeNoteCommand::Add {
             page: NativePageId(0),
             rect: [1, 2, 3, 4],

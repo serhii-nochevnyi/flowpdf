@@ -9,7 +9,8 @@ use flow_core::{
 #[test]
 fn note_crud_reads_reopened_output_and_reconciles_requests() {
     let source = graph::fixture("", "/Annots 33 0 R");
-    let mut session = NativePdfSession::open(&source, NativeEditLimits::default()).unwrap();
+    let mut session =
+        NativePdfSession::open_scoped(&source, NativeEditLimits::default(), [1; 16]).unwrap();
     let initial = session.snapshot().clone();
     let page = initial.scene.pages[0].id;
     let other = initial.scene.pages[1].id;
@@ -159,7 +160,8 @@ fn assert_note(
 
 fn reopen_accepted(session: &NativePdfSession) -> NativePdfSession {
     let output = session.output_bytes();
-    let reopened = NativePdfSession::open(output, NativeEditLimits::default()).unwrap();
+    let reopened =
+        NativePdfSession::open_scoped(output, NativeEditLimits::default(), [1; 16]).unwrap();
     let snapshot = session.snapshot();
     assert_eq!(
         reopened.snapshot().binding.origin_hash,
@@ -179,10 +181,87 @@ fn reopen_accepted(session: &NativePdfSession) -> NativePdfSession {
 }
 
 #[test]
+fn old_runtime_epoch_cannot_edit_replacement_session() {
+    let bytes = graph::fixture("", "");
+    let limits = NativeEditLimits::default();
+    let old = NativePdfSession::open_scoped(&bytes, limits, [1; 16]).unwrap();
+    let mut replacement = NativePdfSession::open_scoped(&bytes, limits, [2; 16]).unwrap();
+    let initial = replacement.snapshot().binding;
+    let mut delayed = old.snapshot().binding;
+    delayed.session_id = initial.session_id;
+    let add = NativeNoteCommand::Add {
+        page: replacement.snapshot().scene.pages[0].id,
+        rect: [20, 30, 40, 50],
+        contents: "Delayed".into(),
+    };
+
+    assert!(matches!(
+        NativePdfSession::open_scoped(&bytes, limits, [0; 16]),
+        Err(NativeSessionError::BindingMismatch)
+    ));
+    assert_eq!(
+        replacement.apply(delayed, 1, &add),
+        Err(NativeSessionError::BindingMismatch)
+    );
+    assert_eq!(replacement.snapshot().binding, initial);
+    assert_eq!(replacement.output_bytes(), bytes);
+    assert_eq!(
+        replacement.lookup(initial, 1),
+        Ok(NativeRequestLookup::Unseen)
+    );
+}
+
+#[test]
+fn pdf_17_note_preserves_pdfdocencoding_across_rewrite() {
+    let bytes = graph::fixture_with_contents("", "/Annots 33 0 R", "<EFBBBF4E6F7465>");
+    let mut session =
+        NativePdfSession::open_scoped(&bytes, NativeEditLimits::default(), [1; 16]).unwrap();
+    let NativePdfAnnotation::PlainNote(note) = &session.snapshot().scene.pages[0].annotations[0]
+    else {
+        panic!("expected a plain imported note");
+    };
+    let (id, rect) = (note.id, note.rect);
+    assert_eq!(note.contents, "ï»¿Note");
+
+    session
+        .apply(
+            session.snapshot().binding,
+            1,
+            &NativeNoteCommand::Add {
+                page: session.snapshot().scene.pages[1].id,
+                rect: [20, 30, 40, 50],
+                contents: "Another note".into(),
+            },
+        )
+        .unwrap();
+    let reopened = reopen_accepted(&session);
+    let NativePdfAnnotation::PlainNote(reopened_note) =
+        &reopened.snapshot().scene.pages[0].annotations[0]
+    else {
+        panic!("expected the reopened imported note");
+    };
+    assert_eq!(reopened_note.rect, rect);
+    assert_eq!(reopened_note.contents, "ï»¿Note");
+    assert!(matches!(
+        &session.snapshot().scene.pages[0].annotations[0],
+        NativePdfAnnotation::PlainNote(note) if note.id == id && note.contents == reopened_note.contents
+    ));
+    assert!(
+        session
+            .output_bytes()
+            .windows(b"<EFBBBF4E6F7465>".len())
+            .any(|bytes| bytes == b"<EFBBBF4E6F7465>")
+    );
+    assert_eq!(session.origin_bytes(), bytes);
+}
+
+#[test]
 fn stale_or_wrong_bindings_and_invalid_payloads_preserve_accepted_output() {
     let bytes = graph::fixture("", "");
-    let mut session = NativePdfSession::open(&bytes, NativeEditLimits::default()).unwrap();
-    let other = NativePdfSession::open(&bytes, NativeEditLimits::default()).unwrap();
+    let mut session =
+        NativePdfSession::open_scoped(&bytes, NativeEditLimits::default(), [1; 16]).unwrap();
+    let other =
+        NativePdfSession::open_scoped(&bytes, NativeEditLimits::default(), [1; 16]).unwrap();
     let initial = session.snapshot().binding;
     let page = session.snapshot().scene.pages[0].id;
     let add = |rect, contents| NativeNoteCommand::Add {
@@ -240,7 +319,8 @@ fn stale_or_wrong_bindings_and_invalid_payloads_preserve_accepted_output() {
 #[test]
 fn evicted_requests_can_only_reconcile() {
     let bytes = graph::fixture("", "");
-    let mut session = NativePdfSession::open(&bytes, NativeEditLimits::default()).unwrap();
+    let mut session =
+        NativePdfSession::open_scoped(&bytes, NativeEditLimits::default(), [1; 16]).unwrap();
     let initial = session.snapshot().binding;
     let page = session.snapshot().scene.pages[0].id;
     let add = NativeNoteCommand::Add {
@@ -273,7 +353,8 @@ fn evicted_requests_can_only_reconcile() {
 #[test]
 fn a_skipped_request_id_cannot_mutate_after_a_higher_id_is_accepted() {
     let bytes = graph::fixture("", "");
-    let mut session = NativePdfSession::open(&bytes, NativeEditLimits::default()).unwrap();
+    let mut session =
+        NativePdfSession::open_scoped(&bytes, NativeEditLimits::default(), [1; 16]).unwrap();
     let initial = session.snapshot().binding;
     let command = NativeNoteCommand::Add {
         page: session.snapshot().scene.pages[0].id,
@@ -300,7 +381,8 @@ fn a_skipped_request_id_cannot_mutate_after_a_higher_id_is_accepted() {
 #[test]
 fn imported_notes_keep_identity_across_renumbering_and_aliases_remain_read_only() {
     let bytes = graph::fixture("", "/Annots 33 0 R");
-    let mut session = NativePdfSession::open(&bytes, NativeEditLimits::default()).unwrap();
+    let mut session =
+        NativePdfSession::open_scoped(&bytes, NativeEditLimits::default(), [1; 16]).unwrap();
     let NativePdfAnnotation::PlainNote(note) = &session.snapshot().scene.pages[0].annotations[0]
     else {
         panic!("expected a plain imported note")
@@ -326,7 +408,8 @@ fn imported_notes_keep_identity_across_renumbering_and_aliases_remain_read_only(
     assert_ne!(note.object, object);
 
     let bytes = graph::fixture("", "/Annots [30 5 R] /Custom 30 5 R");
-    let mut session = NativePdfSession::open(&bytes, NativeEditLimits::default()).unwrap();
+    let mut session =
+        NativePdfSession::open_scoped(&bytes, NativeEditLimits::default(), [1; 16]).unwrap();
     assert!(matches!(
         session.snapshot().scene.pages[0].annotations[0],
         NativePdfAnnotation::ReadOnly { .. }
@@ -342,7 +425,8 @@ fn imported_notes_keep_identity_across_renumbering_and_aliases_remain_read_only(
 #[test]
 fn shared_annotation_array_preserves_geometry_but_disables_note_writes() {
     let bytes = graph::fixture("/Shared 33 0 R", "/Annots 33 0 R");
-    let mut session = NativePdfSession::open(&bytes, NativeEditLimits::default()).unwrap();
+    let mut session =
+        NativePdfSession::open_scoped(&bytes, NativeEditLimits::default(), [1; 16]).unwrap();
     let scene = &session.snapshot().scene;
     let page = &scene.pages[0];
     assert_eq!(page.geometry.unwrap().bounds(), [10, 20, 170, 110]);
@@ -373,10 +457,10 @@ fn shared_annotation_array_preserves_geometry_but_disables_note_writes() {
 fn request_history_budget_refuses_before_acceptance() {
     let bytes = graph::fixture("", "");
     let limits = NativeEditLimits {
-        max_retained_bytes: 60 * 1024,
+        max_retained_bytes: 128 * 1024,
         ..NativeEditLimits::default()
     };
-    let mut session = NativePdfSession::open(&bytes, limits).unwrap();
+    let mut session = NativePdfSession::open_scoped(&bytes, limits, [1; 16]).unwrap();
     let page = session.snapshot().scene.pages[0].id;
     let add = NativeNoteCommand::Add {
         page,
@@ -384,7 +468,6 @@ fn request_history_budget_refuses_before_acceptance() {
         contents: "One".into(),
     };
     let first = session.apply(session.snapshot().binding, 1, &add).unwrap();
-    // Keep the PDF graph and text constant so only the receipt history grows.
     let edit = NativeNoteCommand::Edit {
         note: first.note,
         contents: "One".into(),

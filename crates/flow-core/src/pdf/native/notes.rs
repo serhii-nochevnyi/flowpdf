@@ -227,10 +227,10 @@ impl RefMultiplicity {
         graph: &NativePdfGraph,
         object: PdfObjectRef,
         work: &mut usize,
-        mut scratch: usize,
+        remaining: &mut usize,
     ) -> Result<Self, NativeSessionError> {
         let mut refs = Vec::new();
-        collect_refs(&graph.objects[&object], &mut refs, work, &mut scratch)?;
+        collect_refs(&graph.objects[&object], &mut refs, work, remaining)?;
         refs.sort_unstable();
         Ok(Self { refs })
     }
@@ -280,17 +280,19 @@ pub(super) fn project(
     remaining: &mut usize,
 ) -> Result<Vec<NativePdfNotePage>, NativeSessionError> {
     let mut work = graph.remaining_work();
-    let mut scratch = *remaining;
+    let before_trailer = *remaining;
     let mut refs = Vec::new();
     for value in graph.trailer.values() {
-        collect_refs(value, &mut refs, &mut work, &mut scratch)?;
+        collect_refs(value, &mut refs, &mut work, remaining)?;
     }
+    let trailer_cost = before_trailer - *remaining;
     let trailer_refs: BTreeSet<_> = refs.into_iter().collect();
     let mut pages = Vec::new();
     for (index, &page) in graph.pages.iter().enumerate() {
         spend(&mut work, (graph.limits.max_nesting + 1) * 4)?;
         let geometry = geometry(graph, page);
-        let mut owner_refs = RefMultiplicity::read(graph, page, &mut work, *remaining)?;
+        let before_owner = *remaining;
+        let mut owner_refs = RefMultiplicity::read(graph, page, &mut work, remaining)?;
         let dict = graph.objects[&page]
             .as_dictionary()
             .ok_or(NativeSessionError::Postcondition)?;
@@ -306,11 +308,14 @@ pub(super) fn project(
                     .is_some()
             {
                 owner = reference;
-                owner_refs = RefMultiplicity::read(graph, owner, &mut work, *remaining)?;
+                drop(owner_refs);
+                *remaining = before_owner;
+                owner_refs = RefMultiplicity::read(graph, owner, &mut work, remaining)?;
             } else {
                 can_add_note = false;
             }
         }
+        let owner_cost = before_owner - *remaining;
         spend(remaining, 256)?;
         let mut annotations = Vec::new();
         let values = page_annots(graph, page)?;
@@ -335,7 +340,11 @@ pub(super) fn project(
                 && let Some((rect, bytes)) = plain_note(dict, page, geometry)
             {
                 spend(&mut work, bytes.len())?;
-                if let Some(contents) = decode_contents(bytes) {
+                let decode_budget = bytes.len() * 8;
+                spend(remaining, decode_budget)?;
+                let contents = decode_contents(bytes);
+                *remaining += decode_budget;
+                if let Some(contents) = contents {
                     spend(remaining, contents.capacity())?;
                     annotations.push(NativePdfAnnotation::PlainNote(NativePdfNote {
                         id: *id,
@@ -375,6 +384,8 @@ pub(super) fn project(
                 rect,
             });
         }
+        drop(owner_refs);
+        *remaining += owner_cost;
         pages.push(NativePdfNotePage {
             id: NativePageId(index as u32),
             object: page,
@@ -383,6 +394,8 @@ pub(super) fn project(
             annotations,
         });
     }
+    drop(trailer_refs);
+    *remaining += trailer_cost;
     Ok(pages)
 }
 
@@ -396,8 +409,6 @@ fn decode_contents(bytes: &[u8]) -> Option<String> {
             .map(|c| u16::from_be_bytes([c[0], c[1]]))
             .collect();
         String::from_utf16(&units).ok()?
-    } else if let Some(bytes) = bytes.strip_prefix(&[0xef, 0xbb, 0xbf]) {
-        std::str::from_utf8(bytes).ok()?.to_owned()
     } else {
         const ACCENTS: [char; 8] = ['˘', 'ˇ', 'ˆ', '˙', '˝', '˛', '˚', '˜'];
         const SPECIAL: [char; 31] = [

@@ -3,6 +3,10 @@ use std::fmt::Write;
 use flow_core::{NativeEditLimits, NativeNoteCommand, NativePdfSession};
 
 pub(crate) fn fixture(extra: &str, annots: &str) -> Vec<u8> {
+    fixture_with_contents(extra, annots, "(Imported)")
+}
+
+pub(crate) fn fixture_with_contents(extra: &str, annots: &str, contents: &str) -> Vec<u8> {
     let objects = [
         (11, 2, format!("<< /Type /Catalog /Pages 12 0 R /Custom 26 9 R {extra} >>")),
         (12, 0, "<< /Type /Pages /Kids [13 3 R 14 0 R] /Count 2 /MediaBox [0 0 200 120] /Resources 26 9 R >>".into()),
@@ -11,7 +15,7 @@ pub(crate) fn fixture(extra: &str, annots: &str) -> Vec<u8> {
         (21, 0, "<< /Length 22 7 R /Filter /ASCIIHexDecode >>\nstream\n71 20 51>\nendstream".into()),
         (22, 7, "9".into()),
         (26, 9, "<< /Custom /A#23B#FF /D +.1234567890123456789 /V [true false <00FF>] >>".into()),
-        (30, 5, "<< /Type /Annot /Subtype /Text /Contents (Imported) /Rect [20 30 40 50] /P 13 3 R >>".into()),
+        (30, 5, format!("<< /Type /Annot /Subtype /Text /Contents {contents} /Rect [20 30 40 50] /P 13 3 R >>")),
         (31, 0, "<< /Type /Annot /Subtype /Square /Rect [20 30 40 50] >>".into()),
         (32, 0, "<< /Subtype /Text /Contents (With appearance) /Rect [20 30 40 50] /AP << /N 21 0 R >> >>".into()),
         (33, 0, "[30 5 R 31 0 R 32 0 R]".into()),
@@ -39,7 +43,8 @@ pub(crate) fn fixture(extra: &str, annots: &str) -> Vec<u8> {
 #[test]
 fn rewrite_preserves_exact_values_and_shared_encoded_stream() {
     let source = fixture("", "/Annots 33 0 R");
-    let mut session = NativePdfSession::open(&source, NativeEditLimits::default()).unwrap();
+    let mut session =
+        NativePdfSession::open_scoped(&source, NativeEditLimits::default(), [1; 16]).unwrap();
     let page = session.snapshot().scene.pages[0].id;
     let binding = session.snapshot().binding;
     session
@@ -69,7 +74,11 @@ fn rewrite_preserves_exact_values_and_shared_encoded_stream() {
 #[test]
 fn unsafe_reachable_values_refuse_admission() {
     for extra in ["/Bad 99 0 R", "/Bad 26 0 R", "/OpenAction (private)"] {
-        let result = NativePdfSession::open(&fixture(extra, ""), NativeEditLimits::default());
+        let result = NativePdfSession::open_scoped(
+            &fixture(extra, ""),
+            NativeEditLimits::default(),
+            [1; 16],
+        );
         assert!(result.is_err());
     }
 }
