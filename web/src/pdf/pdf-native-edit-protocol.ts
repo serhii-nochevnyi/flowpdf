@@ -208,11 +208,58 @@ interface BoundRequest extends RequestIdentity {
   readonly binding: NativePdfBinding
 }
 
+export type NativePdfRedactionMarkAction =
+  | { readonly kind: 'addMark' | 'removeMark'; readonly pageId: number; readonly rect: NativePdfRect }
+  | { readonly kind: 'clearMarks' }
+
+export interface NativePdfRedactionCandidate {
+  readonly hash: readonly number[]
+  readonly validatorVersion: 1
+  readonly validatorProfile: 'classic-xref-owned-144dpi-v1'
+  readonly affectedPages: readonly number[]
+}
+
+export type NativePdfRedactionAction =
+  | NativePdfRedactionMarkAction
+  | { readonly kind: 'stage' }
+  | { readonly kind: 'status'; readonly candidate: NativePdfRedactionCandidate | null }
+  | { readonly kind: 'verify' | 'publish' | 'readPublished' | 'cancel'; readonly candidate: NativePdfRedactionCandidate }
+
+type NativePdfVerificationStatus = 'pending' | 'passed' | 'failed' | 'unavailable' | 'inconclusive'
+
+interface NativePdfRedactionCheck {
+  readonly status: NativePdfVerificationStatus
+  readonly coveredPages: number
+}
+
+export interface NativePdfRedactionVerification {
+  readonly status: NativePdfVerificationStatus
+  readonly structure: NativePdfRedactionCheck
+  readonly text: NativePdfRedactionCheck
+  readonly raster: NativePdfRedactionCheck
+}
+
+export interface NativePdfRedactionResult {
+  readonly action: NativePdfRedactionAction['kind']
+  readonly acceptedHash: readonly number[]
+  readonly markCount: number
+  readonly candidate: NativePdfRedactionCandidate | null
+  readonly verification: NativePdfRedactionVerification | null
+  readonly published: boolean
+}
+
+export type NativePdfRedactionRequest = BoundRequest & {
+  readonly operation: 'redaction'
+  readonly acceptedHash: readonly number[]
+  readonly action: NativePdfRedactionAction
+}
+
 export type NativePdfRequest =
   | (RequestIdentity & { readonly operation: 'open'; readonly epoch: readonly number[]; readonly bytesHex: string })
   | (BoundRequest & { readonly operation: 'command'; readonly outputHash: readonly number[]; readonly command: NativePdfSessionCommand })
   | (BoundRequest & { readonly operation: 'snapshot' })
   | (BoundRequest & { readonly operation: 'close' })
+  | NativePdfRedactionRequest
 
 interface ResponseIdentity {
   readonly protocolVersion: typeof NATIVE_PDF_PROTOCOL_VERSION
@@ -232,6 +279,8 @@ export type NativePdfResponse =
   | (BoundResponse & { readonly operation: 'command'; readonly status: 'applied'; readonly snapshot: NativePdfVerifiedSnapshot })
   | (BoundResponse & { readonly operation: 'snapshot'; readonly status: 'accepted' | 'unseen' | 'evicted'; readonly snapshot: NativePdfVerifiedSnapshot })
   | (BoundResponse & { readonly operation: 'close'; readonly status: 'closed'; readonly snapshot: null })
+  | (BoundResponse & { readonly operation: 'redaction'; readonly status: 'redaction'; readonly snapshot: null; readonly redaction: NativePdfRedactionResult })
+  | (BoundResponse & { readonly operation: 'redaction'; readonly status: 'published'; readonly snapshot: NativePdfVerifiedSnapshot; readonly redaction: NativePdfRedactionResult })
   | (ResponseIdentity & {
     readonly operation: NativePdfRequest['operation']
     readonly status: 'failed'
@@ -246,6 +295,7 @@ export interface NativePdfWasmBoundary {
   native_pdf_command(json: string): string
   native_pdf_snapshot(json: string): string
   native_pdf_close(json: string): string
+  native_pdf_redaction(json: string): string
   verify_native_pdf_response(json: string): boolean
 }
 
@@ -287,6 +337,12 @@ const rustErrorCodes = new Set([
   'FLOW_PDF_NATIVE_TARGET_UNAVAILABLE',
   'FLOW_PDF_NATIVE_FINAL_PAGE',
   'FLOW_PDF_NATIVE_POSTCONDITION_FAILED',
+])
+const redactionErrorCodes = new Set([
+  'FLOW_PDF_NATIVE_REDACTION_BUSY',
+  'FLOW_PDF_NATIVE_REDACTION_CANDIDATE_UNAVAILABLE',
+  'FLOW_PDF_NATIVE_REDACTION_UNVERIFIED',
+  'FLOW_PDF_NATIVE_REDACTION_MARK_INVALID',
 ])
 
 export function fitsNativeJson(value: unknown, limit: number): value is string {
@@ -349,6 +405,26 @@ function binding(value: unknown): value is NativePdfBinding {
 
 function rect(value: unknown): value is NativePdfRect {
   return tuple(value, 4, Number.MIN_SAFE_INTEGER)
+}
+
+function redactionCandidate(value: unknown): value is NativePdfRedactionCandidate {
+  return shape(value, 'hash', 'validatorVersion', 'validatorProfile', 'affectedPages')
+    && hash(value.hash) && value.validatorVersion === 1 && value.validatorProfile === 'classic-xref-owned-144dpi-v1'
+    && Array.isArray(value.affectedPages) && value.affectedPages.length > 0 && value.affectedPages.length <= 256
+    && value.affectedPages.every(isNativeRequestId) && new Set(value.affectedPages).size === value.affectedPages.length
+}
+
+function redactionAction(value: unknown): value is NativePdfRedactionAction {
+  if (shape(value, 'kind')) return value.kind === 'clearMarks' || value.kind === 'stage'
+  if (shape(value, 'kind', 'pageId', 'rect')) {
+    return (value.kind === 'addMark' || value.kind === 'removeMark') && isNativeRequestId(value.pageId)
+      && tuple(value.rect, 4, -1_000_000_000, 1_000_000_000)
+      && value.rect[0]! < value.rect[2]! && value.rect[1]! < value.rect[3]!
+  }
+  return shape(value, 'kind', 'candidate') && (value.kind === 'status' && value.candidate === null
+    || (value.kind === 'status' || value.kind === 'verify' || value.kind === 'publish'
+      || value.kind === 'readPublished' || value.kind === 'cancel')
+      && redactionCandidate(value.candidate))
 }
 
 function pageId(value: unknown): boolean {
@@ -512,6 +588,10 @@ export function isNativeWorkerRequest(value: unknown): value is NativePdfWorkerR
       if (!shape(request, ...bound, 'outputHash', 'command') || !binding(request.binding)
         || !hash(request.outputHash) || !isNativeCommand(request.command)) return false
       break
+    case 'redaction':
+      if (!shape(request, ...bound, 'acceptedHash', 'action') || !binding(request.binding)
+        || !hash(request.acceptedHash) || !redactionAction(request.action)) return false
+      break
     case 'snapshot':
     case 'close':
       if (!shape(request, ...bound) || !binding(request.binding)) return false
@@ -659,12 +739,66 @@ function snapshot(value: unknown): value is NativePdfVerifiedSnapshot {
     && (value.binding.revision !== 0 || sameNativeBytes(value.binding.originHash, value.outputHash))
 }
 
+function verificationStatus(value: unknown): value is NativePdfVerificationStatus {
+  return value === 'pending' || value === 'passed' || value === 'failed' || value === 'unavailable' || value === 'inconclusive'
+}
+
+function redactionCheck(value: unknown, pages: number): value is NativePdfRedactionCheck {
+  return shape(value, 'status', 'coveredPages') && verificationStatus(value.status)
+    && value.coveredPages === (value.status === 'passed' ? pages : 0)
+}
+
+function redactionVerification(value: unknown, pages: number): value is NativePdfRedactionVerification {
+  if (!shape(value, 'status', 'structure', 'text', 'raster') || !verificationStatus(value.status)
+    || !redactionCheck(value.structure, pages) || !redactionCheck(value.text, pages)
+    || !redactionCheck(value.raster, pages)) return false
+  const checks = [value.structure.status, value.text.status, value.raster.status]
+  switch (value.status) {
+    case 'pending': return checks.every((status) => status === 'pending')
+    case 'passed': return checks.every((status) => status === 'passed')
+    case 'failed': return true
+    case 'unavailable': return !checks.includes('failed') && checks.includes('unavailable')
+    case 'inconclusive': return !checks.includes('failed') && !checks.includes('unavailable')
+      && !checks.every((status) => status === 'passed') && !checks.every((status) => status === 'pending')
+  }
+}
+
+function redactionResult(value: unknown, snapshotStatus: unknown): value is NativePdfRedactionResult {
+  if (!shape(value, 'action', 'acceptedHash', 'markCount', 'candidate', 'verification', 'published')
+    || !hash(value.acceptedHash) || !integer(value.markCount, 0, 1024) || typeof value.published !== 'boolean') return false
+  let status: NativePdfVerificationStatus | null = null
+  if (redactionCandidate(value.candidate)) {
+    const count = value.candidate.affectedPages.length
+    if ((value.published ? value.markCount !== 0 : count > value.markCount)
+      || !redactionVerification(value.verification, count)) return false
+    status = value.verification.status
+  } else if (value.candidate !== null || value.verification !== null) return false
+  if (value.published && status !== 'passed') return false
+  if (snapshotStatus === 'published') return (value.action === 'publish' || value.action === 'readPublished') && value.published
+  switch (value.action) {
+    case 'addMark':
+    case 'removeMark':
+    case 'cancel': return !value.published && status === null
+    case 'clearMarks': return !value.published && status === null && value.markCount === 0
+    case 'stage': return !value.published && status === 'pending'
+    case 'verify': return !value.published && status !== null && status !== 'pending'
+    case 'status': return true
+    default: return false
+  }
+}
+
 function isNativeResponse(value: unknown): value is NativePdfResponse {
-  if (!shape(value, 'protocolVersion', 'requestId', 'operation', 'binding', 'originStoreHash',
-    'status', 'snapshot', 'code', 'limits', 'resultHash')
+  if (typeof value !== 'object' || value === null) return false
+  const keys = ['protocolVersion', 'requestId', 'operation', 'binding', 'originStoreHash',
+    'status', 'snapshot', 'code', 'limits', 'resultHash']
+  const hasRedaction = Object.hasOwn(value, 'redaction')
+  if (hasRedaction) keys.push('redaction')
+  if (!shape(value, ...keys)
     || value.protocolVersion !== NATIVE_PDF_PROTOCOL_VERSION || !integer(value.requestId, 0)
     || !isNativeStoreHash(value.resultHash)
-    || (value.operation !== 'open' && value.operation !== 'command' && value.operation !== 'snapshot' && value.operation !== 'close')) return false
+    || (value.operation !== 'open' && value.operation !== 'command' && value.operation !== 'snapshot'
+      && value.operation !== 'close' && value.operation !== 'redaction')
+    || hasRedaction !== (value.operation === 'redaction' && value.status !== 'failed')) return false
   const limits = value.limits
   const knownLimits = Object.entries(NATIVE_PDF_LIMITS)
   if (!shape(limits, ...knownLimits.map(([key]) => key))
@@ -675,7 +809,9 @@ function isNativeResponse(value: unknown): value is NativePdfResponse {
     })) return false
 
   if (value.status === 'failed') {
-    return value.snapshot === null && typeof value.code === 'string' && rustErrorCodes.has(value.code)
+    return value.snapshot === null && typeof value.code === 'string' && (rustErrorCodes.has(value.code)
+      || (redactionErrorCodes.has(value.code) && value.requestId > 0 && (value.operation === 'redaction'
+        || value.operation === 'command' && value.code === 'FLOW_PDF_NATIVE_REDACTION_BUSY')))
       && (!(textRefusalCodes.has(value.code) || objectRefusalCodes.has(value.code) || fieldRefusalCodes.has(value.code))
         || (value.operation === 'command' && value.requestId > 0))
       && (value.code !== 'FLOW_PDF_NATIVE_IMPORT_REFUSED' || (value.operation === 'open' && value.requestId > 0))
@@ -685,6 +821,11 @@ function isNativeResponse(value: unknown): value is NativePdfResponse {
   if (value.requestId === 0 || value.code !== null || !binding(value.binding)
     || !isNativeStoreHash(value.originStoreHash)) return false
   if (value.operation === 'close') return value.status === 'closed' && value.snapshot === null
+  if (value.operation === 'redaction') {
+    if ((value.status !== 'redaction' && value.status !== 'published') || !redactionResult(value.redaction, value.status)
+      || value.binding.revision === 0 && !sameNativeBytes(value.binding.originHash, value.redaction.acceptedHash)) return false
+    if (value.status === 'redaction') return value.snapshot === null
+  }
   if (!snapshot(value.snapshot) || !sameNativeSession(value.snapshot.binding, value.binding)
     || value.snapshot.originStoreHash !== value.originStoreHash) return false
   const base = value.binding.revision
@@ -693,6 +834,13 @@ function isNativeResponse(value: unknown): value is NativePdfResponse {
   switch (value.operation) {
     case 'open': return value.status === 'opened' && base === 0 && current === 0
     case 'command': return value.status === 'applied' && current === base + 1 && consumed === value.requestId
+    case 'redaction': {
+      const result = value.redaction as NativePdfRedactionResult
+      const candidate = result.candidate
+      return candidate !== null && sameNativeBytes(value.snapshot.outputHash, candidate.hash)
+        && sameNativeBytes(value.snapshot.pageState.order.filter((id) => candidate.affectedPages.includes(id)), candidate.affectedPages)
+        && current === base + 1 && consumed === value.requestId
+    }
     case 'snapshot':
       if (value.status === 'accepted') {
         return (current === base + 1 && consumed === value.requestId)
@@ -721,8 +869,19 @@ export function matchesNativeResponse(request: NativePdfRequest, response: Nativ
       : response.status === 'opened' && sameNativeBytes(request.epoch, response.binding.epoch)
         && request.bytesHex === response.snapshot.outputHex
   }
-  return response.binding !== null && sameNativeSession(request.binding, response.binding)
-    && request.binding.revision === response.binding.revision
+  if (response.binding === null || !sameNativeSession(request.binding, response.binding)
+    || request.binding.revision !== response.binding.revision) return false
+  if (request.operation !== 'redaction' || response.status === 'failed') return true
+  if (response.operation !== 'redaction' || response.redaction.action !== request.action.kind
+    || !sameNativeBytes(request.acceptedHash, response.redaction.acceptedHash)) return false
+  const actual = response.redaction.candidate
+  const action = request.action
+  if (action.kind === 'cancel' || !('candidate' in action)) return true
+  const expected = action.candidate
+  if (actual === null) return action.kind === 'status' && !response.redaction.published
+  if (expected === null) return action.kind === 'status' && !response.redaction.published
+  return actual.validatorVersion === expected.validatorVersion && actual.validatorProfile === expected.validatorProfile
+    && sameNativeBytes(actual.hash, expected.hash) && sameNativeBytes(actual.affectedPages, expected.affectedPages)
 }
 
 export function freezeNativeDto<T>(value: T): T {

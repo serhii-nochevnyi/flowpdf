@@ -1,6 +1,6 @@
 use flow_wasm::{
-    native_pdf_close, native_pdf_command, native_pdf_open, native_pdf_snapshot,
-    verify_native_pdf_response,
+    native_pdf_close, native_pdf_command, native_pdf_open, native_pdf_redaction,
+    native_pdf_snapshot, verify_native_pdf_response,
 };
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -99,6 +99,238 @@ fn bound(operation: &str, request_id: u64, snapshot: &Value) -> Value {
         "protocolVersion": 1, "operation": operation, "requestId": request_id,
         "binding": snapshot["binding"], "originStoreHash": snapshot["originStoreHash"],
     })
+}
+
+fn redaction_request(request_id: u64, snapshot: &Value, action: Value) -> Value {
+    let mut request = bound("redaction", request_id, snapshot);
+    request["acceptedHash"] = snapshot["outputHash"].clone();
+    request["action"] = action;
+    request
+}
+
+fn status_only(reply: &Value) {
+    assert!(reply["snapshot"].is_null());
+    let json = reply.to_string();
+    for forbidden in [
+        "outputHex",
+        "bytesHex",
+        "scene",
+        "annotations",
+        "contents",
+        "rasterPayload",
+        "evidence",
+    ] {
+        assert!(!json.contains(forbidden), "{json}");
+    }
+}
+
+fn redaction_pdf(size: u32) -> String {
+    let paint = "10 10 10 10 re f 40 40 10 10 re f";
+    fixture_pdf(&[
+        "<< /Type /Catalog /Pages 2 0 R >>",
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        &format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {size} {size}] /Contents 4 0 R >>"),
+        &format!("<< /Length {} >>\nstream\n{paint}\nendstream", paint.len()),
+    ])
+}
+
+#[test]
+fn redaction_wire_releases_only_the_verified_exact_output() {
+    let source = redaction_pdf(100);
+    let opened = call(native_pdf_open, open_request(source.as_bytes()));
+    let base = &opened["snapshot"];
+    let page = base["pageState"]["order"][0].clone();
+    let request = |id, action| redaction_request(id, base, action);
+    let add = |id| {
+        request(
+            id,
+            json!({"kind":"addMark","pageId":page,"rect":[12000,12000,13000,13000]}),
+        )
+    };
+    for (command, count) in [
+        (add(2), 1),
+        (
+            request(
+                3,
+                json!({"kind":"removeMark","pageId":page,"rect":[12000,12000,13000,13000]}),
+            ),
+            0,
+        ),
+        (add(4), 1),
+        (request(5, json!({"kind":"clearMarks"})), 0),
+        (add(6), 1),
+        (add(6), 1),
+    ] {
+        let reply = call(native_pdf_redaction, command);
+        assert_eq!(reply["redaction"]["markCount"], count, "{reply}");
+        status_only(&reply);
+    }
+    assert_eq!(call(native_pdf_redaction, add(4))["status"], "failed");
+    let lookup = |candidate| request(7, json!({"kind":"status","candidate":candidate}));
+    let missing = call(native_pdf_redaction, lookup(Value::Null));
+    assert!(missing["redaction"]["candidate"].is_null());
+    status_only(&missing);
+    let forged_stage = request(7, json!({"kind":"stage","passed":true}));
+    let refused = call(native_pdf_redaction, forged_stage);
+    assert_eq!(refused["code"], "FLOW_PDF_NATIVE_REQUEST_DECODE");
+    status_only(&refused);
+
+    let pending = call(native_pdf_redaction, request(7, json!({"kind":"stage"})));
+    assert_eq!(
+        pending["redaction"]["verification"]["status"], "pending",
+        "{pending}"
+    );
+    assert_eq!(pending["binding"]["revision"], 0);
+    status_only(&pending);
+    let candidate = pending["redaction"]["candidate"].clone();
+    assert_eq!(candidate["affectedPages"], json!([page]));
+    let publish = request(7, json!({"kind":"publish","candidate":candidate}));
+    let refused = call(native_pdf_redaction, publish.clone());
+    assert_eq!(refused["code"], "FLOW_PDF_NATIVE_REDACTION_UNVERIFIED");
+    status_only(&refused);
+    let mut forged = publish.clone();
+    forged["action"]["evidence"] = json!({"passed":true});
+    let refused = call(native_pdf_redaction, forged);
+    assert_eq!(refused["code"], "FLOW_PDF_NATIVE_REQUEST_DECODE");
+    status_only(&refused);
+    let verify = request(7, json!({"kind":"verify","candidate":candidate}));
+    for (field, value) in [
+        ("hash", json!(vec![0; 32])),
+        ("validatorVersion", json!(2)),
+        ("validatorProfile", json!("other")),
+        ("affectedPages", json!([42])),
+    ] {
+        let mut wrong = verify.clone();
+        wrong["action"]["candidate"][field] = value;
+        let refused = call(native_pdf_redaction, wrong);
+        assert_eq!(refused["status"], "failed");
+        status_only(&refused);
+    }
+    let mut wrong_request = verify.clone();
+    wrong_request["requestId"] = json!(8);
+    assert_eq!(
+        call(native_pdf_redaction, wrong_request)["status"],
+        "failed"
+    );
+    let mut wrong_revision = verify.clone();
+    wrong_revision["binding"]["revision"] = json!(1);
+    assert_eq!(
+        call(native_pdf_redaction, wrong_revision)["status"],
+        "failed"
+    );
+    let passed = call(native_pdf_redaction, verify);
+    status_only(&passed);
+    assert_eq!(
+        passed["redaction"]["verification"]["status"], "passed",
+        "{passed}"
+    );
+    for lane in ["structure", "text", "raster"] {
+        assert_eq!(
+            passed["redaction"]["verification"][lane],
+            json!({"status":"passed","coveredPages":1})
+        );
+    }
+    let read_published = request(7, json!({"kind":"readPublished","candidate":candidate}));
+    let premature_readback = call(native_pdf_redaction, read_published.clone());
+    assert_eq!(
+        premature_readback["code"],
+        "FLOW_PDF_NATIVE_REDACTION_UNVERIFIED"
+    );
+    status_only(&premature_readback);
+    assert_eq!(
+        call(native_pdf_snapshot, bound("snapshot", 8, base))["snapshot"],
+        *base
+    );
+    let mut edit = bound("command", 8, base);
+    edit["outputHash"] = base["outputHash"].clone();
+    edit["command"] = json!({"kind":"add","page":0,"rect":[1,2,3,4],"contents":"queued note"});
+    let blocked = call(native_pdf_command, edit);
+    assert_eq!(blocked["code"], "FLOW_PDF_NATIVE_REDACTION_BUSY");
+    status_only(&blocked);
+    let published = call(native_pdf_redaction, publish.clone());
+    assert_eq!(published["status"], "published", "{published}");
+    assert_eq!(published["snapshot"]["binding"]["revision"], 1);
+    assert_eq!(published["snapshot"]["consumedRequest"], 7);
+    assert_eq!(published["snapshot"]["outputHash"], candidate["hash"]);
+    assert_ne!(published["snapshot"]["outputHex"], base["outputHex"]);
+    let published_status = call(native_pdf_redaction, lookup(candidate.clone()));
+    status_only(&published_status);
+    assert_eq!(published_status["redaction"]["published"], true);
+    let readback = call(native_pdf_redaction, read_published);
+    assert_eq!(readback["snapshot"], published["snapshot"]);
+    assert_eq!(readback["redaction"]["action"], "readPublished");
+    assert_eq!(call(native_pdf_redaction, publish), published);
+    let mut stale = request(7, json!({"kind":"publish","candidate":candidate}));
+    stale["acceptedHash"] = json!(vec![0; 32]);
+    assert_eq!(call(native_pdf_redaction, stale)["status"], "failed");
+}
+
+#[test]
+fn redaction_wire_retains_marks_when_only_some_checks_pass() {
+    let source = redaction_pdf(3_000);
+    let opened = call(native_pdf_open, open_request(source.as_bytes()));
+    let base = &opened["snapshot"];
+    let page = &base["pageState"]["order"][0];
+    let request = |action| redaction_request(3, base, action);
+    let added = call(
+        native_pdf_redaction,
+        redaction_request(
+            2,
+            base,
+            json!({"kind":"addMark","pageId":page,"rect":[12000,12000,13000,13000]}),
+        ),
+    );
+    assert_eq!(added["redaction"]["markCount"], 1);
+    let staged = call(native_pdf_redaction, request(json!({"kind":"stage"})));
+    status_only(&staged);
+    let candidate = &staged["redaction"]["candidate"];
+    let verdict = call(
+        native_pdf_redaction,
+        request(json!({"kind":"verify","candidate":candidate})),
+    );
+    status_only(&verdict);
+    assert_eq!(
+        verdict["redaction"]["verification"]["status"], "inconclusive",
+        "{verdict}"
+    );
+    assert_eq!(
+        verdict["redaction"]["verification"]["structure"]["status"],
+        "passed"
+    );
+    assert_eq!(
+        verdict["redaction"]["verification"]["text"]["status"],
+        "passed"
+    );
+    assert_eq!(
+        verdict["redaction"]["verification"]["raster"]["status"],
+        "inconclusive"
+    );
+    let publish = request(json!({"kind":"publish","candidate":candidate}));
+    let refused = call(native_pdf_redaction, publish.clone());
+    assert_eq!(refused["code"], "FLOW_PDF_NATIVE_REDACTION_UNVERIFIED");
+    status_only(&refused);
+    assert_eq!(
+        call(native_pdf_snapshot, bound("snapshot", 4, base))["snapshot"],
+        *base
+    );
+    let cancelled = call(
+        native_pdf_redaction,
+        request(json!({"kind":"cancel","candidate":candidate})),
+    );
+    status_only(&cancelled);
+    assert_eq!(cancelled["redaction"]["markCount"], 1);
+    let missing = call(
+        native_pdf_redaction,
+        request(json!({"kind":"status","candidate":candidate})),
+    );
+    status_only(&missing);
+    assert!(missing["redaction"]["candidate"].is_null());
+    let stale = call(native_pdf_redaction, publish);
+    assert_eq!(
+        stale["code"],
+        "FLOW_PDF_NATIVE_REDACTION_CANDIDATE_UNAVAILABLE"
+    );
+    status_only(&stale);
 }
 
 #[test]

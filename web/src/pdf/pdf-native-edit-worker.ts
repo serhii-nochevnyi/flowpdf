@@ -22,6 +22,11 @@ import {
   type NativePdfFieldCommand,
   type NativePdfFieldView,
   type NativePdfRequest,
+  type NativePdfRedactionAction,
+  type NativePdfRedactionCandidate,
+  type NativePdfRedactionMarkAction,
+  type NativePdfRedactionRequest,
+  type NativePdfRedactionResult,
   type NativePdfResponse,
   type NativePdfSnapshot,
   type NativePdfVerifiedSnapshot,
@@ -38,6 +43,7 @@ const RESPONSE_INVALID = 'FLOW_PDF_NATIVE_RESPONSE_INVALID'
 const RECONCILIATION_REQUIRED = 'FLOW_PDF_NATIVE_RECONCILIATION_REQUIRED'
 const REQUEST_INVALID = 'FLOW_PDF_NATIVE_REQUEST_INVALID'
 const REPLY_LOST = 'FLOW_PDF_NATIVE_REPLY_LOST'
+const REDACTION_CANCELLED = 'FLOW_PDF_NATIVE_REDACTION_CANCELLED'
 
 export class NativePdfWorkerError extends Error {
   constructor(readonly code: string, readonly requestId?: number) {
@@ -109,14 +115,25 @@ export interface NativePdfOriginal {
 }
 
 export interface NativePdfCoordinatorState {
-  readonly phase: 'idle' | 'opening' | 'ready' | 'mutating' | 'reconciliationRequired' | 'reconciling' | 'closing' | 'invalidated'
+  readonly phase: 'idle' | 'opening' | 'ready' | 'mutating' | 'marking' | 'validating'
+    | 'reconciliationRequired' | 'reconciling' | 'closing' | 'invalidated'
   readonly accepted: NativePdfVerifiedSnapshot | null
+  readonly redaction: NativePdfRedactionResult | null
+  readonly showingPriorAccepted: boolean
   readonly pendingRequestId: number | null
   readonly code: string | null
   readonly reopenOriginal: boolean
 }
 
 type CommandRequest = Extract<NativePdfRequest, { operation: 'command' }>
+type RedactionResponse = Extract<NativePdfResponse, { status: 'redaction' | 'published' }>
+
+interface RedactionJob {
+  readonly request: NativePdfRedactionRequest
+  readonly previous: NativePdfVerifiedSnapshot
+  candidate: NativePdfRedactionCandidate | null
+  publishing: boolean
+}
 
 interface Pending {
   readonly request: NativePdfRequest
@@ -147,6 +164,10 @@ function expectPhase<T extends 'opened' | 'applied' | 'closed'>(
 
 function errorFor(error: unknown, requestId?: number): NativePdfWorkerError {
   return error instanceof NativePdfWorkerError ? error : new NativePdfWorkerError(WORKER_FAILED, requestId)
+}
+
+function requiresReadback(error: NativePdfWorkerError): boolean {
+  return error.code === REPLY_LOST || error.code === RESPONSE_INVALID || error.code === RECONCILIATION_REQUIRED
 }
 
 function textTarget(snapshot: NativePdfSnapshot, command: NativePdfTextCommand) {
@@ -394,6 +415,7 @@ function confirmsCommand(request: CommandRequest, previous: NativePdfVerifiedSna
 export class NativePdfEditCoordinator {
   private state: NativePdfCoordinatorState = Object.freeze({
     phase: 'idle', accepted: null, pendingRequestId: null, code: null, reopenOriginal: false,
+    redaction: null, showingPriorAccepted: false,
   })
   private readonly listeners = new Set<() => void>()
   private readonly pending = new Map<number, Pending>()
@@ -401,6 +423,7 @@ export class NativePdfEditCoordinator {
   private nextDispatchId = 1
   private nextRequestId = 1
   private uncertain: CommandRequest | null = null
+  private redactionJob: RedactionJob | null = null
   private original: { readonly hex: string; readonly hash: string } | null = null
   private closeFlight: Promise<void> | null = null
 
@@ -426,7 +449,8 @@ export class NativePdfEditCoordinator {
   }
 
   outputBytes(): Uint8Array | null {
-    return this.state.accepted === null ? null : nativeHexBytes(this.state.accepted.outputHex)
+    return this.state.accepted === null || this.redactionJob !== null || this.state.phase === 'invalidated'
+      ? null : nativeHexBytes(this.state.accepted.outputHex)
   }
 
   originalForReopen(): NativePdfOriginal | null {
@@ -493,7 +517,71 @@ export class NativePdfEditCoordinator {
     })
   }
 
+  async markRedaction(action: NativePdfRedactionMarkAction): Promise<NativePdfRedactionResult> {
+    if (action?.kind !== 'addMark' && action?.kind !== 'removeMark' && action?.kind !== 'clearMarks') {
+      throw new NativePdfWorkerError(REQUEST_INVALID)
+    }
+    const job = this.startRedaction(action, 'marking')
+    try {
+      const { redaction } = await this.redactionStep(job, job.request.action)
+      this.finishRedaction(job, redaction)
+      return redaction
+    } catch (cause: unknown) {
+      const error = errorFor(cause, job.request.requestId)
+      this.failRedaction(job, error)
+      throw error
+    }
+  }
+
+  async applyRedaction(signal?: AbortSignal): Promise<NativePdfRedactionResult> {
+    if (signal?.aborted) throw new NativePdfWorkerError(REDACTION_CANCELLED)
+    const job = this.startRedaction({ kind: 'stage' }, 'validating')
+    const requestId = job.request.requestId
+    try {
+      const staged = await this.redactionStep(job, job.request.action)
+      this.requireLive(requestId)
+      const candidate = staged.redaction.candidate
+      if (candidate === null) throw new NativePdfWorkerError(RESPONSE_INVALID, requestId)
+      job.candidate = candidate
+      this.update('validating', requestId, null, job.previous, staged.redaction)
+      let result = staged.redaction
+      if (!signal?.aborted) {
+        try {
+          result = (await this.redactionStep(job, { kind: 'verify', candidate })).redaction
+        } catch (cause: unknown) {
+          const error = errorFor(cause, requestId)
+          if (this.redactionJob === job && !requiresReadback(error)) {
+            const { redaction } = await this.redactionStep(job, { kind: 'cancel', candidate })
+            this.finishRedaction(job, redaction, job.previous, error.code)
+          }
+          throw error
+        }
+      }
+      this.requireLive(requestId)
+      this.update('validating', requestId, null, job.previous, result)
+      if (signal?.aborted || result.verification?.status !== 'passed') {
+        const { redaction } = await this.redactionStep(job, { kind: 'cancel', candidate })
+        result = { ...result, markCount: redaction.markCount }
+        this.finishRedaction(job, result, job.previous, signal?.aborted ? REDACTION_CANCELLED : null)
+        if (signal?.aborted) throw new NativePdfWorkerError(REDACTION_CANCELLED, requestId)
+        return result
+      }
+      job.publishing = true
+      const reply = await this.redactionStep(job, { kind: 'publish', candidate })
+      if (reply.status !== 'published') throw new NativePdfWorkerError(RESPONSE_INVALID, requestId)
+      this.finishRedaction(job, reply.redaction, reply.snapshot)
+      return reply.redaction
+    } catch (cause: unknown) {
+      const error = errorFor(cause, requestId)
+      this.failRedaction(job, error)
+      throw error
+    }
+  }
+
   async reconcile(): Promise<{ readonly status: 'accepted' | 'unseen' | 'evicted'; readonly snapshot: NativePdfVerifiedSnapshot }> {
+    if (this.state.phase === 'reconciliationRequired' && this.redactionJob !== null) {
+      return this.reconcileRedaction(this.redactionJob)
+    }
     const command = this.uncertain
     const previous = this.state.accepted
     if (this.state.phase !== 'reconciliationRequired' || command === null || previous === null) {
@@ -584,7 +672,93 @@ export class NativePdfEditCoordinator {
     this.invalidate(WORKER_FAILED)
   }
 
-  private boundRequest<O extends 'close' | 'snapshot' | 'command'>(operation: O, requestId: number, snapshot: NativePdfSnapshot) {
+  private startRedaction(action: NativePdfRedactionAction, phase: 'marking' | 'validating'): RedactionJob {
+    const previous = this.state.accepted
+    if (this.state.phase !== 'ready' || previous === null || this.queue.length !== 0 || this.redactionJob !== null) {
+      throw new NativePdfWorkerError('FLOW_PDF_NATIVE_SESSION_UNAVAILABLE')
+    }
+    const request = {
+      ...this.boundRequest('redaction', this.nextRequestId++, previous),
+      acceptedHash: previous.outputHash, action,
+    } as const
+    if (!isNativeWorkerRequest({ dispatchId: 1, request })) throw new NativePdfWorkerError(REQUEST_INVALID)
+    const job = { request: freezeNativeDto(structuredClone(request)), previous, candidate: null, publishing: false }
+    this.redactionJob = job
+    this.update(phase, request.requestId)
+    return job
+  }
+
+  private async redactionStep(job: RedactionJob, action: NativePdfRedactionAction): Promise<RedactionResponse> {
+    const request = { ...job.request, action }
+    const reply = assertSuccess(await this.send(request))
+    this.requireLive(request.requestId)
+    if (reply.operation !== 'redaction' || this.redactionJob !== job) {
+      throw new NativePdfWorkerError(RESPONSE_INVALID, request.requestId)
+    }
+    const { candidate, published } = reply.redaction
+    const { order, selected } = job.previous.pageState
+    if (published && !job.publishing
+      || candidate !== null && !sameNativeBytes(order.filter((id) => candidate.affectedPages.includes(id)), candidate.affectedPages)
+      || reply.status === 'published' && (!sameNativeBytes(reply.snapshot.pageState.order, order)
+        || reply.snapshot.pageState.selected !== selected)) {
+      throw new NativePdfWorkerError(RESPONSE_INVALID, request.requestId)
+    }
+    return reply
+  }
+
+  private async reconcileRedaction(job: RedactionJob): Promise<{
+    readonly status: 'accepted' | 'unseen'; readonly snapshot: NativePdfVerifiedSnapshot
+  }> {
+    const requestId = job.request.requestId
+    this.update('reconciling', requestId)
+    try {
+      if (job.request.action.kind !== 'stage') {
+        const { redaction } = await this.redactionStep(job, job.request.action)
+        this.finishRedaction(job, redaction)
+        return Object.freeze({ status: 'unseen', snapshot: job.previous })
+      }
+      const { redaction } = await this.redactionStep(job, { kind: 'status', candidate: job.candidate })
+      if (redaction.published && redaction.candidate !== null) {
+        const reply = await this.redactionStep(job, { kind: 'readPublished', candidate: redaction.candidate })
+        if (reply.status !== 'published') throw new NativePdfWorkerError(RESPONSE_INVALID, requestId)
+        this.finishRedaction(job, reply.redaction, reply.snapshot)
+        return Object.freeze({ status: 'accepted', snapshot: reply.snapshot })
+      }
+      if (redaction.candidate !== null) {
+        job.candidate = redaction.candidate
+        await this.redactionStep(job, { kind: 'cancel', candidate: redaction.candidate })
+      }
+      this.finishRedaction(job, redaction)
+      return Object.freeze({ status: 'unseen', snapshot: job.previous })
+    } catch (cause: unknown) {
+      const error = errorFor(cause, requestId)
+      if (this.redactionJob === job) this.update('reconciliationRequired', requestId, error.code)
+      throw error
+    }
+  }
+
+  private finishRedaction(
+    job: RedactionJob,
+    redaction: NativePdfRedactionResult,
+    accepted = job.previous,
+    code: string | null = null,
+  ): void {
+    this.requireLive(job.request.requestId)
+    this.redactionJob = null
+    this.update('ready', null, code, accepted, freezeNativeDto(redaction))
+  }
+
+  private failRedaction(job: RedactionJob, error: NativePdfWorkerError): void {
+    if (this.redactionJob !== job) return
+    if (job.candidate !== null || requiresReadback(error)) {
+      this.update('reconciliationRequired', job.request.requestId, error.code)
+    } else {
+      this.redactionJob = null
+      this.update('ready', null, error.code)
+    }
+  }
+
+  private boundRequest<O extends 'close' | 'snapshot' | 'command' | 'redaction'>(operation: O, requestId: number, snapshot: NativePdfSnapshot) {
     return { protocolVersion: NATIVE_PDF_PROTOCOL_VERSION, operation, requestId,
       binding: snapshot.binding, originStoreHash: snapshot.originStoreHash } as const
   }
@@ -624,7 +798,7 @@ export class NativePdfEditCoordinator {
     } catch (cause: unknown) {
       const error = errorFor(cause, request.requestId)
       if (this.state.phase !== 'invalidated') {
-        if (error.code === REPLY_LOST || error.code === RESPONSE_INVALID || error.code === RECONCILIATION_REQUIRED) {
+        if (requiresReadback(error)) {
           this.uncertain = request
           this.update('reconciliationRequired', request.requestId, error.code)
         } else {
@@ -701,9 +875,10 @@ export class NativePdfEditCoordinator {
     this.worker.onmessageerror = null
     this.worker.terminate()
     this.uncertain = null
+    this.redactionJob = null
     for (const pending of this.pending.values()) pending.reject(new NativePdfWorkerError(code, pending.request.requestId))
     for (const queued of this.queue.splice(0)) queued.reject(new NativePdfWorkerError(code))
-    this.update('invalidated', null, code)
+    this.update('invalidated', null, code, this.state.accepted, null)
     this.listeners.clear()
   }
 
@@ -712,8 +887,11 @@ export class NativePdfEditCoordinator {
     pendingRequestId: number | null,
     code: string | null = null,
     accepted = this.state.accepted,
+    redaction = accepted === this.state.accepted ? this.state.redaction : null,
   ): void {
-    this.state = Object.freeze({ phase, pendingRequestId, code, accepted,
+    const showingPriorAccepted = accepted !== null && (phase === 'invalidated' || this.redactionJob?.request.action.kind === 'stage'
+      || redaction?.verification != null && !redaction.published)
+    this.state = Object.freeze({ phase, pendingRequestId, code, accepted, redaction, showingPriorAccepted,
       reopenOriginal: phase === 'invalidated' && this.original !== null })
     for (const listener of this.listeners) {
       try {
