@@ -164,6 +164,7 @@ for (const locale of ['en', 'uk'] as const) {
       }
 
       async function mutate(key: NativePdfMessage, pageChange?: { page: number; total: number }) {
+        await expect.element(button(key)).toBeEnabled()
         await activate(button(key).element())
         await expect.element(status).toHaveTextContent(t(pageChange ? 'page.accepted' : 'status.accepted', {
           ...pageChange, revision: ++revision,
@@ -247,7 +248,6 @@ for (const locale of ['en', 'uk'] as const) {
       const rotate = button('page.right').element()
       const statusElement = status.element()
       await confirmRemoval(longName, 2)
-      // Simulate an accepted page operation while the field confirmation is open.
       if (!(rotate instanceof HTMLButtonElement)) throw Error('Missing rotate action')
       rotate.click()
       const rotatedStatus = t('page.accepted', { page: 3, total: 3, revision: ++revision })
