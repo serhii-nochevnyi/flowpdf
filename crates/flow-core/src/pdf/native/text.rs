@@ -1,5 +1,3 @@
-//! Closed native text profile. Recognition starts from decoded content syntax
-//! and retained resources, never from the read-only scene's extracted text.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -73,11 +71,9 @@ pub enum NativeTextProfile {
 pub struct NativeTextIsland {
     pub id: [u8; 32],
     pub text: String,
-    /// Unrotated PDF user-space edges, in thousandths of a point.
     pub bounds: Bounds,
     pub profile: NativeTextProfile,
     pub operator: NativeTextOperator,
-    /// Original advance in thousandths of a point, rounded down.
     pub max_advance: i64,
 }
 
@@ -188,8 +184,6 @@ fn content<'a>(
     if stream.data.is_empty() {
         return Ok(None);
     }
-    // Extra page/form/array owners make the source invocation ambiguous. A
-    // second reference in the same page (e.g. in a private dictionary) can
     // keep its original stream while the unique Contents slot is replaced.
     if graph
         .reverse
@@ -206,7 +200,6 @@ fn content<'a>(
             _ => false,
         }
     }
-    // A resource alias (including a possible Do invocation) is ambiguous.
     let copy_on_write = dict
         .iter()
         .any(|(key, value)| key != "Contents" && references(value, reference))
@@ -238,8 +231,6 @@ fn content<'a>(
 }
 
 fn local_stream(stream: &PdfStream) -> bool {
-    // The retained reader applies the stream filters themselves. Reject
-    // parameters and external streams that could change decoded bytes in a viewer.
     ["F", "FFilter", "FDecodeParms", "DecodeParms"]
         .into_iter()
         .all(|key| matches!(stream.dict.get(key), None | Some(PdfValue::Null)))
@@ -398,7 +389,6 @@ fn shows(data: &[u8]) -> TextResult<Vec<Show>> {
                 });
                 shown = true;
             }
-            // Explicit declarations of the default state do not change the proof.
             "Tr" | "Tc" | "Tw" | "Ts" if in_text && numbers(&[0]) => {}
             "Tz" if in_text && numbers(&[100 * SCALE]) => {}
             "cm" if !in_text && numbers(&[SCALE, 0, 0, SCALE, 0, 0]) => {}
@@ -413,8 +403,6 @@ fn shows(data: &[u8]) -> TextResult<Vec<Show>> {
                 }
             }
             "Do" => return Err(NativeTextRefusal::Ownership),
-            // Refuse operators that could paint or clip, change geometry or
-            // select resources outside the proven text state.
             _ => return Err(Layout),
         }
         operands.clear();
@@ -500,8 +488,6 @@ fn unicode(width: usize, raw: u32) -> Option<char> {
         }
         _ => return None,
     };
-    // Only single meaningful scalars are admitted. Canonical normalization is
-    // deliberately absent so the reverse map stays an exact inverse.
     (!text.is_control()
         && !matches!(
             text,
@@ -608,8 +594,6 @@ fn parse_cmap(bytes: &[u8], width: usize) -> Option<BTreeMap<u16, char>> {
         b"end",
         b"end",
     ])?;
-    // Treat a trailing comment as whitespace, but reject incomplete tokens and
-    // any additional PostScript constructs.
     while let Some(end) = cmap
         .rest
         .iter()
@@ -900,8 +884,6 @@ fn font_profile(graph: &NativePdfGraph, font: &Dict) -> TextResult<Font> {
         let width = widths.get(&code).copied().unwrap_or(default_width);
         let advance = i64::from(face.glyph_hor_advance(pdf_gid).ok_or(FontError)?);
         let upem = i64::from(face.units_per_em());
-        // Allow the PDF width to round an OpenType advance to the nearest
-        // thousandth of an em. The exact PDF width drives text positioning.
         if width == 0 || advance == 0 || (width * upem - advance * SCALE * SCALE).abs() > 500 * upem
         {
             return Err(FontError);
@@ -949,8 +931,6 @@ fn empty_glyph(loca: ttf_parser::loca::Table<'_>, glyph: GlyphId) -> bool {
     }
 }
 
-// Bound composite expansion before asking ttf-parser to traverse outline data.
-// Only XY-translated, unscaled components belong to this font profile.
 fn check_outline(
     loca: ttf_parser::loca::Table<'_>,
     data: &[u8],
@@ -1038,7 +1018,6 @@ impl Font {
         use NativeTextRefusal::{Layout, Mapping};
 
         // Keep all lengths exact until projection. The denominator includes
-        // the two decimal scales in PDF widths and the TrueType em size.
         let upem = i128::from(self.upem);
         let width_scale = i128::from(SCALE * SCALE);
         let denominator = width_scale * upem;
@@ -1058,8 +1037,6 @@ impl Font {
                 bottom = bottom.min(y + from_font(ink.y_min));
                 top = top.max(y + from_font(ink.y_max));
             }
-            // All operands, font widths, glyph counts and coordinates are
-            // bounded above. Their products and sum fit in i128.
             advance += i128::from(glyph.width) * size * upem;
         }
         if bottom >= top || text.len() > NATIVE_MAX_TEXT_BYTES {
@@ -1157,7 +1134,6 @@ impl<'a> Recognition<'a> {
             id.update(&page.object.generation.to_le_bytes());
             id.update(&content.reference.object_number.to_le_bytes());
             id.update(&content.reference.generation.to_le_bytes());
-            // The admitted invocation path is the page's sole Contents slot.
             id.update(&0_u32.to_le_bytes());
             id.update(&(show.operand.start as u64).to_le_bytes());
             id.update(&(show.operand.end as u64).to_le_bytes());

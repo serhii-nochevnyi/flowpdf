@@ -40,11 +40,9 @@ export type NativePdfTextRefusal = typeof textRefusals[number]
 export interface NativePdfTextIsland {
   readonly id: readonly number[]
   readonly text: string
-  /** Unrotated PDF user-space edges in thousandths of a point. */
   readonly bounds: NativePdfRect
   readonly profile: 'trueTypeWinAnsi' | 'identityHCidFontType2'
   readonly operator: 'Tj' | 'TJ'
-  /** Original advance in thousandths of a point, rounded down. */
   readonly maxAdvance: number
 }
 

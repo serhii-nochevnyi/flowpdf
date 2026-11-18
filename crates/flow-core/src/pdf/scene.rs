@@ -153,7 +153,6 @@ pub struct PdfSourceProvenance {
     pub operator: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stream_end: Option<u32>,
-    /// Start and exclusive end of the operands in the decoded stream.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub operand_span: Option<[u32; 2]>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

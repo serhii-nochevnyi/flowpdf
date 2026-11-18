@@ -266,7 +266,6 @@ impl NativePdfSession {
         self.apply_command(binding, request_id, Command::Text(command))
     }
 
-    /// Re-derive text capabilities from verified output bytes for wire validation.
     pub fn verify_text_projection(
         bytes: &[u8],
         limits: NativeEditLimits,
@@ -347,8 +346,6 @@ impl NativePdfSession {
         let digest = command_digest(command)?;
         // @security: Reserve output bytes separately from the writer workspace and reopen graph.
         let output_share = match command {
-            // Text replacement retains the embedded font streams in both the staged
-            // graph and the writer's readback. Leave room for those decoded copies.
             Command::Text(_) => remaining / 5,
             Command::Note(_) => remaining / 4,
         };
@@ -409,8 +406,6 @@ impl NativePdfSession {
         };
         let mut reopen_limits = self.snapshot.limits;
         reopen_limits.max_source_bytes = reopen_limits.max_output_bytes;
-        // The serialized output occupies only the bytes that the writer used.
-        // Release the unused portion of its reservation before reopening.
         reopen_limits.max_retained_bytes =
             staged.remaining_retained() + (output_budget - output.len());
         if reopen_limits.max_retained_bytes == 0 {
