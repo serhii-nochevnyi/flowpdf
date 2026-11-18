@@ -2,9 +2,10 @@
 
 #![forbid(unsafe_code)]
 
+use flow_core::pdf::native::{NativeTextCommand, NativeTextPage, NativeTextRefusal};
 use flow_core::pdf::{
-    NATIVE_MAX_NOTE_BYTES, NATIVE_REQUEST_HISTORY, NativeBinding, NativeEditError, NativeEditLimits,
-    NativeNoteCommand, NativePdfNoteScene, NativePdfSession, NativeRequestLookup,
+    NATIVE_MAX_NOTE_BYTES, NATIVE_REQUEST_HISTORY, NativeBinding, NativeEditError,
+    NativeEditLimits, NativeNoteCommand, NativePdfNoteScene, NativePdfSession, NativeRequestLookup,
     NativeSessionError, PdfObjectRef,
 };
 use flow_core::{
@@ -1367,7 +1368,7 @@ enum NativeRequest {
         binding: NativeBinding,
         origin_store_hash: String,
         output_hash: [u8; 32],
-        command: NativeNoteCommand,
+        command: NativeWireCommand,
     },
     Snapshot {
         protocol_version: u32,
@@ -1381,6 +1382,13 @@ enum NativeRequest {
         binding: NativeBinding,
         origin_store_hash: String,
     },
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum NativeWireCommand {
+    Note(NativeNoteCommand),
+    Text(NativeTextCommand),
 }
 
 impl NativeRequest {
@@ -1515,6 +1523,8 @@ struct NativeVerifiedScene {
     output_hash: [u8; 32],
     scene_hash: [u8; 32],
     pages: Vec<NativeVerifiedPage>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    text_pages: Vec<NativeTextPage>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -1663,7 +1673,10 @@ fn native_result_hash(response: &impl Serialize) -> Result<String, serde_json::E
     Ok(writer.0.finalize().to_hex().to_string())
 }
 
-fn native_session_error_code(error: NativeSessionError, reader_refusal: &'static str) -> &'static str {
+fn native_session_error_code(
+    error: NativeSessionError,
+    reader_refusal: &'static str,
+) -> &'static str {
     match error {
         NativeSessionError::Graph(NativeEditError::Reader(
             PdfReadError::InputSizeLimit
@@ -1678,6 +1691,16 @@ fn native_session_error_code(error: NativeSessionError, reader_refusal: &'static
         )) => NATIVE_BUDGET,
         NativeSessionError::Graph(NativeEditError::Reader(_)) => reader_refusal,
         error => error.code(),
+    }
+}
+
+fn native_edit_limits() -> NativeEditLimits {
+    NativeEditLimits {
+        max_source_bytes: NATIVE_PDF_BYTES,
+        max_output_bytes: NATIVE_PDF_BYTES,
+        max_retained_bytes: NATIVE_PDF_RETAINED
+            - (NATIVE_REQUEST_HISTORY * size_of::<(u64, [u8; 32])>() + 1024),
+        ..NativeEditLimits::default()
     }
 }
 
@@ -1702,14 +1725,7 @@ impl NativeRegistry {
             if encode_hex(&Sha256::digest(&bytes)) != origin_store_hash {
                 return Err(NATIVE_BINDING);
             }
-            let limits = NativeEditLimits {
-                max_source_bytes: NATIVE_PDF_BYTES,
-                max_output_bytes: NATIVE_PDF_BYTES,
-                max_retained_bytes: NATIVE_PDF_RETAINED
-                    - (NATIVE_REQUEST_HISTORY * size_of::<(u64, [u8; 32])>() + 1024),
-                ..NativeEditLimits::default()
-            };
-            let session = NativePdfSession::open_scoped(&bytes, limits, epoch)
+            let session = NativePdfSession::open_scoped(&bytes, native_edit_limits(), epoch)
                 .map_err(|error| native_session_error_code(error, NATIVE_IMPORT_REFUSED))?;
             if !native_binding_valid(session.snapshot().binding) {
                 return Err(NATIVE_BUDGET);
@@ -1810,7 +1826,7 @@ impl NativeRegistryEntry {
         binding: NativeBinding,
         request_id: u64,
         output_hash: [u8; 32],
-        command: &NativeNoteCommand,
+        command: &NativeWireCommand,
     ) -> Result<(), &'static str> {
         let current = self.session.snapshot();
         let previous_revision = current.binding.revision;
@@ -1834,10 +1850,13 @@ impl NativeRegistryEntry {
         if output_hash != expected_output {
             return Err(NATIVE_BINDING);
         }
-        let receipt = self
-            .session
-            .apply(binding, request_id, command)
-            .map_err(|error| native_session_error_code(error, NATIVE_POSTCONDITION))?;
+        let receipt = match command {
+            NativeWireCommand::Note(command) => self.session.apply(binding, request_id, command),
+            NativeWireCommand::Text(command) => {
+                self.session.apply_text(binding, request_id, command)
+            }
+        }
+        .map_err(|error| native_session_error_code(error, NATIVE_POSTCONDITION))?;
         if receipt.binding.revision < previous_revision {
             return Err(NATIVE_RECONCILE);
         }
@@ -1990,6 +2009,10 @@ impl NativeVerifiedScene {
                 .ok()?;
             }
         }
+        if !self.text_pages.is_empty() {
+            writer.0.update(b"flowpdf:native-text-pages:v1");
+            serde_json::to_writer(&mut writer, &self.text_pages).ok()?;
+        }
         (writer.0.finalize().as_bytes() == &self.scene_hash).then_some(())
     }
 }
@@ -2034,7 +2057,15 @@ fn verify_native_snapshot(response: &NativeResponse<NativeVerifiedScene>) -> Opt
     if blake3::hash(&bytes).as_bytes() != &snapshot.output_hash {
         return None;
     }
-    snapshot.scene.verify()
+    snapshot.scene.verify()?;
+    NativePdfSession::verify_text_projection(
+        &bytes,
+        native_edit_limits(),
+        snapshot.binding,
+        &snapshot.scene.text_pages,
+    )
+    .ok()?
+    .then_some(())
 }
 
 #[wasm_bindgen]
@@ -2070,6 +2101,19 @@ pub fn verify_native_pdf_response(response_json: String) -> bool {
                 && response.code.as_ref().is_some_and(|code| {
                     if code == NATIVE_IMPORT_REFUSED {
                         return response.operation == NativeOperation::Open
+                            && response.request_id > 0;
+                    }
+                    if [
+                        NativeTextRefusal::Font,
+                        NativeTextRefusal::Mapping,
+                        NativeTextRefusal::Layout,
+                        NativeTextRefusal::Ownership,
+                        NativeTextRefusal::Overflow,
+                    ]
+                    .iter()
+                    .any(|reason| reason.code() == code)
+                    {
+                        return response.operation == NativeOperation::Command
                             && response.request_id > 0;
                     }
                     matches!(

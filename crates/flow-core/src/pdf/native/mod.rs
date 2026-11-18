@@ -4,6 +4,7 @@
 mod graph;
 mod notes;
 mod session;
+mod text;
 mod writer;
 
 pub use graph::{NativeEditError, NativeEditLimits};
@@ -11,6 +12,11 @@ pub use notes::{NativeNoteCommand, NativeNoteId, NativePageGeometry, NativePageI
 pub use session::{
     NATIVE_MAX_NOTE_BYTES, NATIVE_REQUEST_HISTORY, NativeBinding, NativeEditReceipt,
     NativePdfSession, NativeRequestLookup, NativeSessionError, NativeSnapshot,
+};
+
+pub use text::{
+    NATIVE_MAX_TEXT_BYTES, NativeTextCommand, NativeTextIsland, NativeTextOperator, NativeTextPage,
+    NativeTextProfile, NativeTextRefusal,
 };
 
 #[cfg(test)]
