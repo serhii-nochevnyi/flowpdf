@@ -381,6 +381,15 @@ pub(super) fn annotation_ownership(
     page: Ref,
     annot: Ref,
 ) -> Result<Option<Ref>, NativeEditError> {
+    annotation_membership(graph, page, annot, true)
+}
+
+pub(super) fn annotation_membership(
+    graph: &NativePdfGraph,
+    page: Ref,
+    annot: Ref,
+    for_page_operation: bool,
+) -> Result<Option<Ref>, NativeEditError> {
     let values = dict(graph, annot)?;
     if values
         .get("P")
@@ -458,7 +467,7 @@ pub(super) fn annotation_ownership(
             return Err(Unsupported);
         }
         let values = form_dict(graph, form)?;
-        if ["XFA", "CO"].iter().any(|key| values.contains_key(*key)) {
+        if for_page_operation && ["XFA", "CO"].iter().any(|key| values.contains_key(*key)) {
             return Err(Unsupported);
         }
         let page_container = annots.as_reference().unwrap_or(page);

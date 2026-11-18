@@ -360,16 +360,23 @@ fn load_form(graph: &NativePdfGraph, work: &mut usize) -> FieldResult<Form> {
     {
         return Err(Reference);
     }
-    if entry.as_reference() == Some(catalog)
-        || ["XFA", "CO", "SigFlags"]
-            .iter()
-            .any(|key| values.contains_key(*key))
-        || !matches!(
-            values.get("NeedAppearances"),
-            None | Some(Value::Boolean(false))
-        )
-    {
+    if entry.as_reference() == Some(catalog) || values.contains_key("XFA") {
         return Err(Profile);
+    }
+    for key in ["CO", "SigFlags", "NeedAppearances"] {
+        let Some(value) = values.get(key) else {
+            continue;
+        };
+        match (
+            key,
+            graph.resolve_metered(value, work).map_err(|_| Profile)?,
+        ) {
+            (_, Value::Null)
+            | ("SigFlags", Value::Integer(0))
+            | ("NeedAppearances", Value::Boolean(false)) => {}
+            ("CO", Value::Array(order)) if order.is_empty() => {}
+            _ => return Err(Profile),
+        }
     }
     let font = (|| {
         let Some(resources) = values.get("DR") else {
@@ -581,7 +588,7 @@ fn recognize(
     {
         return Err(Profile);
     }
-    if pages::annotation_ownership(graph, page.object, widget).map_err(|_| Reference)?
+    if pages::annotation_membership(graph, page.object, widget, false).map_err(|_| Reference)?
         != Some(field)
     {
         return Err(Reference);

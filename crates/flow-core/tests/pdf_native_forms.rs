@@ -115,6 +115,40 @@ fn imported_checkbox_uses_parent_value_and_keeps_its_on_state_and_default() {
 }
 
 #[test]
+fn checkbox_toggle_and_create_accept_inactive_acroform_settings() {
+    for settings in [
+        "",
+        "/SigFlags 0 /CO [] /NeedAppearances false",
+        "/SigFlags null /CO null /NeedAppearances null",
+    ] {
+        let bytes = imported_field("[10 10 30 30]", "", "Off", "Btn", settings, "");
+        let mut pdf = session(&bytes);
+        let field = pdf.snapshot().fields[0].id;
+        apply(
+            &mut pdf,
+            json!({"kind":"setFieldChecked","field":field,"checked":true}),
+        )
+        .unwrap();
+        apply(
+            &mut pdf,
+            json!({"kind":"addCheckboxField","page":0,"rect":[40,40,60,60],"name":"approval","checked":false}),
+        )
+        .unwrap();
+
+        let reopened = session(pdf.output_bytes());
+        let fields = &reopened.snapshot().fields;
+        assert_eq!(fields.len(), 2);
+        for (name, checked) in [("agreement", true), ("approval", false)] {
+            let field = fields
+                .iter()
+                .find(|field| field.name.as_deref() == Some(name))
+                .unwrap();
+            assert_eq!(field.checked, Some(checked));
+        }
+    }
+}
+
+#[test]
 fn forged_geometry_appearance_and_inherited_ownership_refuse_atomically() {
     for (bounds, extra, state, reason) in [
         ("[10 10 400 30]", "", "Off", NativeFieldRefusal::Geometry),
