@@ -35,6 +35,10 @@ fn pdf(pages: &[(&str, &str)], extra: Vec<Vec<u8>>, trailer: &str) -> Vec<u8> {
         objects.push(stream("", content.as_bytes()));
     }
     objects.extend(extra);
+    pdf_objects(objects, trailer)
+}
+
+fn pdf_objects(objects: Vec<Vec<u8>>, trailer: &str) -> Vec<u8> {
     let mut bytes = b"%PDF-1.7\n%\xE2\xE3\xCF\xD3\n".to_vec();
     let mut offsets = Vec::new();
     for (index, object) in objects.iter().enumerate() {
@@ -123,6 +127,85 @@ fn fresh_structure_and_full_page_raster_pass_a_scrubbed_pair() {
     assert_eq!(evidence.raster().covered_pages()[0].page_id, 91);
 }
 
+fn independent_page_streams(
+    first: &str,
+    second: &str,
+    resources: &str,
+    extra: Vec<Vec<u8>>,
+) -> Vec<u8> {
+    let mut objects = vec![
+        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+        b"<< /Type /Pages /Kids [3 0 R 5 0 R] /Count 2 /MediaBox [0 0 100 100] >>".to_vec(),
+        format!("<< /Type /Page /Parent 2 0 R /Contents 4 0 R {resources} >>").into_bytes(),
+        stream("", first.as_bytes()),
+        format!("<< /Type /Page /Parent 2 0 R /Contents [6 0 R 7 0 R] {resources} >>").into_bytes(),
+        stream("", b"0 0 1 rg 1 0 0 1 45 45 cm"),
+        stream("", second.as_bytes()),
+    ];
+    objects.extend(extra);
+    pdf_objects(objects, "")
+}
+
+#[test]
+fn identical_vector_streams_can_have_independent_page_owners() {
+    let shape = "10 10 10 10 re f";
+    let accepted = independent_page_streams(shape, shape, "", vec![]);
+    let candidate = independent_page_streams("", shape, "", vec![]);
+    let marks = [mark(91, [9_000, 9_000, 12_000, 12_000])];
+    let evidence = verify(&accepted, &candidate, &[91, 92], &marks);
+    assert!(evidence.checks_passed(), "{evidence:?}");
+}
+
+#[test]
+fn nearby_stroke_is_preserved_when_its_ink_misses_the_mark() {
+    let stroke = "0 0 1 RG 2 w 30 50 m 50 30 l 65 30 l S";
+    let square = "1 0 0 rg 35 35 5 5 re f ";
+    let marks = [mark(91, [34_000, 34_000, 37_000, 37_000])];
+    let accepted = pdf(&[(&format!("{square}{stroke}"), "")], vec![], "");
+    let candidate = pdf(&[(stroke, "")], vec![], "");
+    let evidence = verify(&accepted, &candidate, &[91], &marks);
+    assert!(evidence.checks_passed(), "{evidence:?}");
+
+    let blank = pdf(&[("", "")], vec![], "");
+    let evidence = verify(&accepted, &blank, &[91], &marks);
+    assert_eq!(
+        evidence.raster().failure(),
+        Some(NativeVerificationFailure::RasterMismatch)
+    );
+}
+
+#[test]
+fn blank_page_accepts_direct_and_indirect_null_contents() {
+    let document = |paint: &str, contents: &str, extra: Option<Vec<u8>>| {
+        let mut objects = vec![
+            b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+            b"<< /Type /Pages /Kids [3 0 R 5 0 R] /Count 2 /MediaBox [0 0 100 100] >>".to_vec(),
+            b"<< /Type /Page /Parent 2 0 R /Contents 4 0 R >>".to_vec(),
+            stream("", paint.as_bytes()),
+            format!("<< /Type /Page /Parent 2 0 R {contents} >>").into_bytes(),
+        ];
+        objects.extend(extra);
+        pdf_objects(objects, "")
+    };
+    let marks = [mark(91, [9_000, 9_000, 12_000, 12_000])];
+    for (contents, extra) in [
+        ("/Contents null", None),
+        ("/Contents 6 0 R", Some(b"null".to_vec())),
+    ] {
+        let accepted = document(&format!("{SECRET}{PUBLIC}"), contents, extra.clone());
+        let candidate = document(PUBLIC, contents, extra);
+        let evidence = verify(&accepted, &candidate, &[91, 92], &marks);
+        assert!(evidence.checks_passed(), "{evidence:?}");
+    }
+    let invalid = document(PUBLIC, "/Contents 42", None);
+    let accepted = document(&format!("{SECRET}{PUBLIC}"), "", None);
+    let evidence = verify(&accepted, &invalid, &[91, 92], &marks);
+    assert_eq!(
+        evidence.structure().failure(),
+        Some(NativeVerificationFailure::Structure)
+    );
+}
+
 #[test]
 fn retained_metadata_or_unreachable_object_fails_structure() {
     let accepted = pdf(&[(&format!("{SECRET}{PUBLIC}"), "")], vec![], "");
@@ -204,7 +287,7 @@ fn a_scrubbed_image_requires_exact_retained_samples() {
     }
 }
 
-fn text_pdf(content: &str) -> Vec<u8> {
+fn test_font_objects(first: usize) -> Vec<Vec<u8>> {
     let font = include_bytes!("../data/NotoSans-Regular.ttf");
     let cmap = b"/CIDInit /ProcSet findresource begin 12 dict begin begincmap\n/CMapType 2 def\n/CMapName /Example def\n1 begincodespacerange\n<00> <FF>\nendcodespacerange\n2 beginbfchar\n<41> <0041>\n<42> <0042>\nendbfchar\nendcmap\nCMapName currentdict /CMap defineresource pop\nend end";
     let face = ttf_parser::Face::parse(font, 0).unwrap();
@@ -214,16 +297,31 @@ fn text_pdf(content: &str) -> Vec<u8> {
                 .unwrap(),
         )
     };
+    vec![
+        format!("<< /Type /Font /Subtype /TrueType /BaseFont /NotoSans-Regular /Encoding /WinAnsiEncoding /FirstChar 65 /LastChar 66 /Widths [{} {}] /FontDescriptor {} 0 R /ToUnicode {} 0 R >>", width('A'), width('B'), first + 1, first + 3).into_bytes(),
+        format!("<< /Type /FontDescriptor /FontName /NotoSans-Regular /Flags 32 /FontFile2 {} 0 R >>", first + 2).into_bytes(),
+        stream(&format!("/Length1 {}", font.len()), font),
+        stream("", cmap),
+    ]
+}
+
+fn text_pdf(content: &str) -> Vec<u8> {
     pdf(
         &[(content, "/Resources << /Font << /F 5 0 R >> >>")],
-        vec![
-            format!("<< /Type /Font /Subtype /TrueType /BaseFont /NotoSans-Regular /Encoding /WinAnsiEncoding /FirstChar 65 /LastChar 66 /Widths [{} {}] /FontDescriptor 6 0 R /ToUnicode 8 0 R >>", width('A'), width('B')).into_bytes(),
-            b"<< /Type /FontDescriptor /FontName /NotoSans-Regular /Flags 32 /FontFile2 7 0 R >>".to_vec(),
-            stream(&format!("/Length1 {}", font.len()), font),
-            stream("", cmap),
-        ],
+        test_font_objects(5),
         "",
     )
+}
+
+#[test]
+fn identical_text_streams_can_have_independent_page_owners() {
+    let text = "BT /F 12 Tf 10 15 Td (AB) Tj ET";
+    let resources = "/Resources << /Font << /F 8 0 R >> >>";
+    let accepted = independent_page_streams(text, text, resources, test_font_objects(8));
+    let candidate = independent_page_streams("", text, resources, test_font_objects(8));
+    let marks = [mark(91, [9_000, 16_000, 15_000, 20_000])];
+    let evidence = verify(&accepted, &candidate, &[91, 92], &marks);
+    assert!(evidence.checks_passed(), "{evidence:?}");
 }
 
 #[test]

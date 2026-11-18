@@ -137,7 +137,9 @@ pub(super) fn verify(
     let mut work = MAX_RASTER_WORK;
     let mut removed_notes = BTreeSet::new();
     let mut retained_notes = BTreeSet::new();
+    let mut removed_sources = BTreeSet::new();
     let mut removed_streams = BTreeSet::new();
+    let mut matching_sources = BTreeSet::new();
     let mut removed_operators = BTreeSet::new();
     let mut retained_operators = BTreeSet::new();
     let mut sensitive_images = BTreeSet::new();
@@ -163,7 +165,13 @@ pub(super) fn verify(
                     }
                 }
             } else {
-                let removed = marks.iter().any(|&mark| intersects(mark, paint.bounds));
+                let mut removed = false;
+                for &mark in &marks {
+                    if paint.intersects_mark(mark, &mut work)? {
+                        removed = true;
+                        break;
+                    }
+                }
                 if let PaintKind::Note(note) = &paint.kind {
                     if removed {
                         removed_notes.insert(note.id);
@@ -174,6 +182,7 @@ pub(super) fn verify(
                 if let Some(operator) = paint.source {
                     if removed {
                         removed_streams.insert(expected.stream_hashes[&operator.0]);
+                        removed_sources.insert(operator.0);
                         removed_operators.insert(operator);
                     } else {
                         retained_operators.insert(operator);
@@ -191,6 +200,11 @@ pub(super) fn verify(
         for (left, right) in scrubbed.iter().zip(&candidate_paint) {
             if !left.same_paint(right, &mut work)? {
                 return Err(RasterMismatch);
+            }
+            if let (Some((source, _)), Some((result, _))) = (left.source, right.source) {
+                if expected.stream_hashes[&source] == actual.stream_hashes[&result] {
+                    matching_sources.insert((source, result));
+                }
             }
             if let (PaintKind::Image(before), PaintKind::Image(after)) = (&left.kind, &right.kind) {
                 let source = before.data.digest;
@@ -211,12 +225,15 @@ pub(super) fn verify(
             }
         }
     }
+    let independently_retained: BTreeSet<_> = matching_sources
+        .into_iter()
+        .filter_map(|(source, result)| (!removed_sources.contains(&source)).then_some(result))
+        .collect();
     if !removed_notes.is_disjoint(&retained_notes)
         || !removed_operators.is_disjoint(&retained_operators)
-        || actual
-            .stream_hashes
-            .values()
-            .any(|hash| removed_streams.contains(hash))
+        || actual.stream_hashes.iter().any(|(id, hash)| {
+            removed_streams.contains(hash) && !independently_retained.contains(id)
+        })
         || !actual.image_hashes.is_disjoint(&sensitive_images)
     {
         return Err(RasterMismatch);
@@ -516,6 +533,29 @@ enum PaintKind<'a> {
 }
 
 impl Paint<'_> {
+    fn intersects_mark(&self, mark: Rect, work: &mut usize) -> VerifyResult<bool> {
+        if !intersects(mark, self.bounds) {
+            return Ok(false);
+        }
+        let PaintKind::Vector(vector) = &self.kind else {
+            return Ok(true);
+        };
+        if vector
+            .fill_path
+            .as_ref()
+            .is_some_and(|fill| intersects(mark, fill.bounds))
+        {
+            return Ok(true);
+        }
+        for stencil in &vector.stroke_paths {
+            spend(work, stencil.edges * 5 + 1)?;
+            if stencil.intersects_rect(mark) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     fn same_paint(&self, other: &Self, work: &mut usize) -> VerifyResult<bool> {
         if self.bounds != other.bounds {
             return Ok(false);
@@ -800,6 +840,32 @@ impl Stencil {
             bounds: combined.ok_or(UnsupportedProfile)?,
             edges,
         })
+    }
+
+    fn intersects_rect(&self, rect @ [left, bottom, right, top]: Rect) -> bool {
+        if !intersects(self.bounds, rect) {
+            return false;
+        }
+        let corners = [[left, bottom], [right, bottom], [right, top], [left, top]];
+        corners.iter().any(|&point| self.hits(point, false))
+            || self.contours.iter().any(|contour| {
+                contour
+                    .iter()
+                    .zip(contour.iter().cycle().skip(1))
+                    .take(contour.len())
+                    .any(|(&a, &b)| {
+                        if a[0].max(b[0]) < left
+                            || a[0].min(b[0]) > right
+                            || a[1].max(b[1]) < bottom
+                            || a[1].min(b[1]) > top
+                        {
+                            return false;
+                        }
+                        let direction = sub(b, a);
+                        let sides = corners.map(|corner| cross(direction, sub(corner, a)));
+                        sides.iter().any(|&side| side >= 0) && sides.iter().any(|&side| side <= 0)
+                    })
+            })
     }
 
     fn hits(&self, p: Point, evenodd: bool) -> bool {

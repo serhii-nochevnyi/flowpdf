@@ -32,7 +32,9 @@ pub(super) fn verify(
     let covered = coverage(&accepted, &candidate, order, marks)?;
     let mut before = Extraction::new();
     let mut after = Extraction::new();
+    let mut removed_sources = BTreeSet::new();
     let mut removed_streams = BTreeSet::new();
+    let mut matching_sources = BTreeSet::new();
     let mut removed_operators = BTreeSet::new();
     let mut retained_operators = BTreeSet::new();
     for (index, &page_id) in order.iter().enumerate() {
@@ -57,6 +59,7 @@ pub(super) fn verify(
                 .any(|mark| intersects(mark.rect, run.bounds));
             if removed {
                 removed_streams.insert(before.stream_digests[&run.source.0]);
+                removed_sources.insert(run.source.0);
                 removed_operators.insert(run.source);
             } else {
                 retained_operators.insert(run.source);
@@ -70,12 +73,22 @@ pub(super) fn verify(
         {
             return Err(TextMismatch);
         }
+        for (left, right) in expected.iter().zip(&found) {
+            let source = left.source.0;
+            let result = right.source.0;
+            if before.stream_digests[&source] == after.stream_digests[&result] {
+                matching_sources.insert((source, result));
+            }
+        }
     }
+    let independently_retained: BTreeSet<_> = matching_sources
+        .into_iter()
+        .filter_map(|(source, result)| (!removed_sources.contains(&source)).then_some(result))
+        .collect();
     if !removed_operators.is_disjoint(&retained_operators)
-        || after
-            .stream_digests
-            .values()
-            .any(|hash| removed_streams.contains(hash))
+        || after.stream_digests.iter().any(|(id, hash)| {
+            removed_streams.contains(hash) && !independently_retained.contains(id)
+        })
     {
         return Err(TextMismatch);
     }
