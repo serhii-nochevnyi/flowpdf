@@ -135,7 +135,6 @@ function pageObjects(snapshot: NativePdfSnapshot, pageId: number) {
   return snapshot.scene.objectPages?.find((entry) => entry.page === pageId)?.objects ?? []
 }
 
-// Rust verifies the ordered invocation sequence around the edited slot. IDs are revision-bound.
 export function rebindNativeObject(
   before: NativePdfSnapshot, after: NativePdfSnapshot, pageId: number, selected: ObjectView, command: NativePdfCommand,
 ): ObjectView | undefined {

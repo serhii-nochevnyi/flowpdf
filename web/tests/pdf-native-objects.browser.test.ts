@@ -198,7 +198,6 @@ for (const locale of ['uk', 'en'] as const) {
       await expect.element(objects.getByText('<invalid>.png', { exact: true })).toBeVisible()
       expect(commandCount()).toBe(before)
 
-      // Submit a current UI target with an obsolete identity at the worker boundary.
       await selector.selectOptions((selector.element() as HTMLSelectElement).options[1]!.value)
       const oldHash = outputHash()
       staleId = original.scene.objectPages?.[0]?.objects[0]?.id
