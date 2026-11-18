@@ -234,6 +234,20 @@ impl NativePdfGraph {
         self.decoded
     }
 
+    pub(super) fn reserve_replacement_stream(&mut self, size: usize) -> Result<(), NativeEditError> {
+        let cost = size
+            .checked_mul(2)
+            .and_then(|bytes| bytes.checked_add(1024))
+            .ok_or(NativeEditError::Budget)?;
+        let mut retained = self.retained;
+        let mut decoded = self.decoded;
+        spend(&mut retained, cost)?;
+        spend(&mut decoded, size)?;
+        self.retained = retained;
+        self.decoded = decoded;
+        Ok(())
+    }
+
     #[must_use]
     pub fn original_bytes(&self) -> &[u8] {
         &self.source
