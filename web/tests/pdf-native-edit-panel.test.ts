@@ -64,6 +64,9 @@ describe('text draft readback', () => {
     expect(rebindNativeTextDrafts([draft], withIslands([island]), withIslands([revised, duplicate]))).toEqual([])
     expect(rebindNativeTextDrafts([draft], withIslands([island, duplicate]), withIslands([revised]))).toEqual([])
     expect(rebindNativeTextDrafts([draft], withIslands([island]), withIslands([]))).toEqual([])
+    expect(rebindNativeTextDrafts([draft], withIslands([island]), withIslands([]), new Map([[0, 1]])))
+      .toEqual([{ ...draft, pageId: 1, island: duplicate.id }])
+    expect(rebindNativeTextDrafts([draft], withIslands([island]), withIslands([revised]), new Map())).toEqual([])
   })
 })
 
@@ -209,6 +212,23 @@ describe('native note workspace', () => {
     }, documentWith([added]).snapshot)
     expect(recovery.get(0, null)).toBeNull()
     expect(recovery.get(1, null)).toBe(other)
+  })
+
+  it('carries a note draft to its retained page only when the note readback still matches', () => {
+    const retainedNote = note(2)
+    const before = documentWith([retainedNote]).snapshot
+    const original = before.scene.pages[0]!
+    const moved = { ...original, id: 1, geometry: { ...geometry, rotation: 180 } }
+    const recovered = new NativeNoteDraftRecovery()
+    const draft = { note: 2, contents: 'Unsubmitted', x: '40', y: '50' }
+    recovered.remember(0, draft)
+    const after = { ...before, scene: { ...before.scene, pages: [original, moved] } }
+    recovered.reindex(before, after, new Map([[0, 1]]))
+    expect(recovered.get(0)).toBeNull()
+    expect(recovered.get(1)).toBe(draft)
+    const changed = { ...moved, annotations: [{ ...retainedNote, contents: 'Changed' }] }
+    recovered.reindex(after, { ...after, scene: { ...after.scene, pages: [original, changed] } }, new Map([[1, 1]]))
+    expect(recovered.get(1)).toBeNull()
   })
 
   it('blocks blank, composing, malformed and over-limit UTF-8 drafts', () => {
@@ -413,6 +433,14 @@ describe('native object tools', () => {
     const newObject = { ...saved, target: null }
     expect(rebindRecoveredObjectDraft(newObject, before, after, unrelated)).toBe(newObject)
     expect(rebindRecoveredObjectDraft(newObject, before, withObjects([revised], false), unrelated)).toBeNull()
+
+    const pageMove = { kind: 'reorderPage', target: { page: 0, stableId: 8 }, position: 1 } as const
+    const moved = { ...after, scene: { ...after.scene, objectPages: [
+      { page: 0, canAdd: true, refusal: null, objects: [image] },
+      { page: 1, canAdd: true, refusal: null, objects: [revised] },
+    ] } }
+    expect(rebindRecoveredObjectDraft(saved, before, moved, pageMove, 1))
+      .toEqual({ ...saved, pageId: 1, target: { ...saved.target, page: 1, id: revised.id } })
   })
 
   it('renders only admitted profile controls and associates each refusal with the object region', () => {
