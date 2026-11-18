@@ -13,7 +13,7 @@ import type { NativePdfWorkerRequest } from '../src/pdf/pdf-native-edit-protocol
 
 type Profile = 'admitted' | 'ambiguous' | 'clipped' | 'unembedded'
 
-function textPdf(font: Uint8Array<ArrayBuffer>, profile: Profile): Uint8Array<ArrayBuffer> {
+function textPdf(font: Uint8Array<ArrayBuffer>, fontLength: number, profile: Profile): Uint8Array<ArrayBuffer> {
   const encoder = new TextEncoder()
   const parts: Uint8Array<ArrayBuffer>[] = []
   let offset = 0
@@ -35,7 +35,7 @@ function textPdf(font: Uint8Array<ArrayBuffer>, profile: Profile): Uint8Array<Ar
 
   append('%PDF-1.7\n')
   object('<< /Type /Catalog /Pages 2 0 R >>')
-  object('<< /Type /Pages /Kids [3 0 R] /Count 1 >>')
+  object('<< /Type /Pages /Kids [3 0 R 11 0 R] /Count 2 >>')
   object('<< /Type /Page /Parent 2 0 R /MediaBox [0 0 320 420] /Resources << /Font << /Body 5 0 R >> >> /Contents 4 0 R >>')
   const clip = profile === 'clipped' ? '0 0 200 200 re W n\n' : ''
   object(`${clip}BT /Body 12 Tf 30 140 Td <000200010001> Tj ET\nBT /Body 12 Tf 30 180 Td <00010001> Tj ET`, '')
@@ -58,8 +58,10 @@ endcmap
 CMapName currentdict /CMap defineresource pop
 end end`, '')
   object(`<< /Type /FontDescriptor /FontName /NotoSans-Regular /Flags 32${profile === 'unembedded' ? '' : ' /FontFile2 9 0 R'} >>`)
-  object(font, ` /Length1 ${font.length}`)
+  object(font, ` /Filter /FlateDecode /Length1 ${fontLength}`)
   object(ambiguous ? Uint8Array.of(0, 0, 0, 36, 1, 160, 0, 36) : Uint8Array.of(0, 0, 0, 36, 1, 160), '')
+
+  object('<< /Type /Page /Parent 2 0 R /MediaBox [0 0 320 420] >>')
 
   const xref = offset
   const size = offsets.length + 1
@@ -81,7 +83,9 @@ for (const locale of ['uk', 'en'] as const) {
     await init()
     const response = await fetch(new URL('../../crates/flow-core/data/NotoSans-Regular.ttf', import.meta.url))
     expect(response.ok).toBe(true)
-    const font = new Uint8Array(await response.arrayBuffer())
+    const fontBytes = await response.arrayBuffer()
+    const compressed = new Blob([fontBytes]).stream().pipeThrough(new CompressionStream('deflate'))
+    const font = new Uint8Array(await new Response(compressed).arrayBuffer())
     const root = document.createElement('div')
     document.body.append(root)
     const lifecycle = new AbortController()
@@ -89,10 +93,17 @@ for (const locale of ['uk', 'en'] as const) {
     const nativePdf = createNativePdfRuntime(undefined, store)
     const postMessage = Worker.prototype.postMessage
     let pause = false
+    let drop = false
+    let dropped = 0
     let resume: (() => void) | undefined
     const worker = vi.spyOn(Worker.prototype, 'postMessage').mockImplementation(
       function (this: Worker, ...args: Parameters<Worker['postMessage']>) {
         const request = (args[0] as Partial<NativePdfWorkerRequest> | undefined)?.request
+        if (drop && request?.operation === 'command') {
+          drop = false
+          dropped++
+          return
+        }
         if (pause && request?.operation === 'command') {
           pause = false
           resume = () => Reflect.apply(postMessage, this, args)
@@ -149,7 +160,7 @@ for (const locale of ['uk', 'en'] as const) {
       for (const [profile, reason] of [
         ['ambiguous', 'reason.mapping'], ['clipped', 'reason.layout'], ['unembedded', 'reason.font'],
       ] as const) {
-        const unsupported = textPdf(font, profile)
+        const unsupported = textPdf(font, fontBytes.byteLength, profile)
         await open(unsupported, `${profile}.pdf`)
         await expect.element(panel.getByText(t(reason), { exact: false })).toBeVisible()
         await expect.element(apply).not.toBeInTheDocument()
@@ -158,7 +169,7 @@ for (const locale of ['uk', 'en'] as const) {
       }
       expect(countCommands()).toBe(0)
 
-      const source = textPdf(font, 'admitted')
+      const source = textPdf(font, fontBytes.byteLength, 'admitted')
       const origin = (await hashPdfSourceBytes(source)).slice('sha256:v1:'.length)
       await open(source, 'contracts.pdf')
       const initialHash = outputHash()
@@ -247,6 +258,46 @@ for (const locale of ['uk', 'en'] as const) {
       await expect.element(edited).toBeDisabled()
 
       expect(countCommands()).toBe(4)
+
+      await activate(island(1).element())
+      await replacement.fill('Z')
+      await activate(apply.element())
+      await expect.element(panel.getByRole('alert')).toHaveTextContent(t('reason.mapping'))
+      await activate(island(2).element())
+      await replacement.fill('Ї')
+      await activate(button('note.add').element())
+      await panel.getByRole('textbox', { name: t('note.contents') }).fill('Review note')
+      await activate(button('note.add').element())
+      await expect.element(panel.getByRole('status')).toHaveTextContent(t('status.accepted', { revision: 1 }))
+      await expect.element(replacement).toHaveValue('Ї')
+      await activate(island(1).element())
+      await expect.element(replacement).toHaveValue('Z')
+      await expect.element(replacement).toHaveAttribute('aria-invalid', 'true')
+
+      await replacement.fill('A')
+      drop = true
+      const beforeUnseen = outputHash()
+      await activate(apply.element())
+      const reconcile = button('session.reconcile')
+      await expect.element(reconcile, { timeout: 35_000 }).toBeEnabled()
+      expect(dropped).toBe(1)
+      await activate(button('navigation.next').element())
+      await expect.element(replacement).not.toBeInTheDocument()
+      const beforeReconcile = countCommands()
+      await activate(reconcile.element())
+      await expect.element(panel.getByRole('status')).toHaveTextContent(t('status.unseenIsland', { page: 1 }))
+      expect(countCommands()).toBe(beforeReconcile)
+      expect(outputHash()).toBe(beforeUnseen)
+      await activate(button('navigation.previous').element())
+      await expect.element(original).toHaveValue('ЇA')
+      await expect.element(replacement).toHaveValue('A')
+      await activate(island(2).element())
+      await expect.element(replacement).toHaveValue('Ї')
+      await activate(island(1).element())
+      await expect.element(replacement).toHaveValue('A')
+      await activate(apply.element())
+      await expect.element(panel.getByRole('status')).toHaveTextContent(t('status.accepted', { revision: 2 }))
+
       expect(controller.snapshot().accepted).toBe(semantic)
     } finally {
       lifecycle.abort()
@@ -255,5 +306,5 @@ for (const locale of ['uk', 'en'] as const) {
       click.mockRestore()
       root.remove()
     }
-  }, 60_000)
+  }, 90_000)
 }

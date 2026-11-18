@@ -11,10 +11,11 @@ import {
   nativeNoteRect,
   nativeNoteTextError,
   nativeReplacementError,
+  rebindNativeTextDrafts,
   type NativePdfAcceptedDocument,
 } from '../src/pdf/pdf-native-edit-panel.js'
 import { nativePdfMessages, nativePdfText } from '../src/pdf/pdf-native-edit-messages.js'
-import { NATIVE_PDF_LIMITS, type NativePdfAnnotation } from '../src/pdf/pdf-native-edit-protocol.js'
+import { NATIVE_PDF_LIMITS, type NativePdfAnnotation, type NativePdfTextIsland } from '../src/pdf/pdf-native-edit-protocol.js'
 
 const geometry = { bounds: [-10, 20, 190, 120], rotation: 90 } as const
 const hash = Array<number>(32).fill(42)
@@ -36,6 +37,32 @@ const dependencies = {
   createCoordinator: () => { throw Error('SSR must not create a worker') },
   sourceStore: { put: async () => { throw Error('unexpected write') }, get: async () => null },
 }
+
+describe('text draft readback', () => {
+  it('rebinds unique matches on the original page and discards ambiguous or missing targets', () => {
+    const island: NativePdfTextIsland = {
+      id: hash, text: 'Hello', bounds: [0, 30, 24, 54],
+      profile: 'trueTypeWinAnsi', operator: 'Tj', maxAdvance: 24,
+    }
+    const revised = { ...island, id: Array<number>(32).fill(43) }
+    const duplicate = { ...island, id: Array<number>(32).fill(44) }
+    const draft = { pageId: 0, island: island.id, replacement: 'Draft', selected: true, refusal: null }
+    const snapshot = documentWith([]).snapshot
+    const withIslands = (islands: readonly NativePdfTextIsland[]) => ({
+      ...snapshot,
+      scene: { ...snapshot.scene, textPages: [
+        { page: 0, islands, refusal: null },
+        { page: 1, islands: [duplicate], refusal: null },
+      ] },
+    })
+
+    expect(rebindNativeTextDrafts([draft], withIslands([island]), withIslands([revised])))
+      .toEqual([{ ...draft, island: revised.id }])
+    expect(rebindNativeTextDrafts([draft], withIslands([island]), withIslands([revised, duplicate]))).toEqual([])
+    expect(rebindNativeTextDrafts([draft], withIslands([island, duplicate]), withIslands([revised]))).toEqual([])
+    expect(rebindNativeTextDrafts([draft], withIslands([island]), withIslands([]))).toEqual([])
+  })
+})
 
 describe('native note workspace', () => {
   it('keeps the other pending fields whether Save or Move is accepted first', () => {
