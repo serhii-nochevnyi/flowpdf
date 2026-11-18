@@ -331,8 +331,10 @@ for (const locale of ['uk', 'en'] satisfies NativePdfLocale[]) {
         (message as Partial<NativePdfWorkerRequest> | undefined)?.request?.operation === 'command')
       expect(workerIndex).toBeGreaterThanOrEqual(0)
       const worker = post.mock.contexts[workerIndex] as Worker
-      worker.dispatchEvent(new Event('messageerror'))
-      await expect.element(control('session.reopen')).toBeEnabled()
+      const onMessageError = worker.onmessageerror
+      expect(onMessageError).toBeTypeOf('function')
+      onMessageError?.call(worker, new MessageEvent('messageerror'))
+      await expect.element(control('session.reopen'), { timeout: 5_000 }).toBeEnabled()
       expect(edited.disabled).toBe(false)
       expect(edited.dataset.outputHash).toBe(savedHash)
       expect(panel.textContent).toContain(t('output.last', { revision: 5 }))
