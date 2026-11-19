@@ -21,6 +21,7 @@ use super::text::{self, NativeTextCommand, NativeTextPage, NativeTextRefusal};
 use super::verifier::{
     NativeRedactionContext, NativeRedactionMark, VersionedNativeRedactionEvidence,
 };
+use super::writer::rewrite_with_workspace;
 
 pub const NATIVE_REQUEST_HISTORY: usize = 128;
 pub const NATIVE_MAX_NOTE_BYTES: usize = 16 * 1024;
@@ -237,8 +238,15 @@ impl NativePdfSession {
             origin_hash,
             revision: 0,
         };
-        let (scene, mut remaining_retained) =
-            accepted_scene(&graph, &ids, origin_hash, binding, 0, 0)?;
+        let (scene, mut remaining_retained) = accepted_scene(
+            &graph,
+            &ids,
+            origin_hash,
+            binding,
+            0,
+            0,
+            graph.remaining_retained(),
+        )?;
         let fields = forms::project(&graph, &scene.pages, binding, &mut remaining_retained)?;
         let page_state = page_state(&graph, &ids, None, &scene, &mut remaining_retained)?;
         let snapshot = NativeSnapshot {
@@ -541,7 +549,7 @@ impl NativePdfSession {
             &self.redaction_marks,
         )?;
         staged.limits.max_source_bytes = output_budget;
-        let bytes = staged.rewrite()?;
+        let bytes = rewrite_with_workspace(&staged, staged.remaining_retained() + output_budget)?;
 
         let mut reopen_limits = staged.limits;
         reopen_limits.max_retained_bytes = staged.remaining_retained();
@@ -643,6 +651,7 @@ impl NativePdfSession {
             next_binding,
             self.origin_bytes().len(),
             record_count,
+            reopened.remaining_retained(),
         )?;
         spend(&mut scene_remaining, evidence_bytes)?;
         let fields = forms::project(&reopened, &scene.pages, next_binding, &mut scene_remaining)?;
@@ -841,7 +850,8 @@ impl NativePdfSession {
             initial = initial_ids(&graph);
             &initial
         };
-        let (scene, mut remaining) = accepted_scene(&graph, ids, hash, binding, 0, 0)?;
+        let (scene, mut remaining) =
+            accepted_scene(&graph, ids, hash, binding, 0, 0, graph.remaining_retained())?;
         let mut projected_notes = scene.pages.iter().flat_map(|page| {
             page.annotations
                 .iter()
@@ -896,7 +906,15 @@ impl NativePdfSession {
         let graph = NativePdfGraph::open(bytes, limits)?;
         let ids = initial_ids(&graph);
         let hash = *blake3::hash(bytes).as_bytes();
-        let (scene, mut remaining) = accepted_scene(&graph, &ids, hash, binding, 0, 0)?;
+        let (scene, mut remaining) = accepted_scene(
+            &graph,
+            &ids,
+            hash,
+            binding,
+            0,
+            0,
+            graph.remaining_retained(),
+        )?;
         let projected = page_state(&graph, &ids, None, &scene, &mut remaining)?;
         Ok(scene.scene_hash == claimed_scene
             && state.valid_for_count(scene.pages.len())
@@ -914,7 +932,15 @@ impl NativePdfSession {
         let graph = NativePdfGraph::open(bytes, limits)?;
         let ids = initial_ids(&graph);
         let hash = *blake3::hash(bytes).as_bytes();
-        let (scene, _) = accepted_scene(&graph, &ids, hash, binding, 0, 0)?;
+        let (scene, _) = accepted_scene(
+            &graph,
+            &ids,
+            hash,
+            binding,
+            0,
+            0,
+            graph.remaining_retained(),
+        )?;
         Ok(scene.text_pages == claimed_text && scene.object_pages == claimed_objects)
     }
 
@@ -927,7 +953,15 @@ impl NativePdfSession {
         let graph = NativePdfGraph::open(bytes, limits)?;
         let ids = initial_ids(&graph);
         let hash = *blake3::hash(bytes).as_bytes();
-        let (scene, _) = accepted_scene(&graph, &ids, hash, binding, 0, 0)?;
+        let (scene, _) = accepted_scene(
+            &graph,
+            &ids,
+            hash,
+            binding,
+            0,
+            0,
+            graph.remaining_retained(),
+        )?;
         Ok(scene.text_pages == claimed)
     }
 
@@ -1155,7 +1189,8 @@ impl NativePdfSession {
             staged.limits.max_output_bytes = 1;
         }
         staged.limits.max_source_bytes = self.snapshot.limits.max_output_bytes;
-        let output = staged.rewrite()?;
+        let staged_remaining = staged_remaining.unwrap_or_else(|| staged.remaining_retained());
+        let output = rewrite_with_workspace(&staged, staged_remaining + output_budget)?;
         #[cfg(test)]
         let output = if self.fail_at == Some(FailurePoint::Reopen) {
             Vec::new()
@@ -1165,12 +1200,13 @@ impl NativePdfSession {
         let mut reopen_limits = self.snapshot.limits;
         reopen_limits.max_source_bytes = reopen_limits.max_output_bytes;
         reopen_limits.max_total_decoded_bytes = staged.remaining_decoded();
-        reopen_limits.max_retained_bytes =
-            staged_remaining.unwrap_or_else(|| staged.remaining_retained());
+        reopen_limits.max_retained_bytes = staged_remaining;
         let (reopened, ids) = reopen_rewrite(&staged, &output, output_budget, reopen_limits, &ids)?;
         let output_hash = *blake3::hash(&output).as_bytes();
+        let output_capacity = output.capacity();
         drop(staged);
         drop(output);
+        let scene_limit = reopened.limits.max_retained_bytes + output_capacity;
         let next_binding = NativeBinding {
             revision,
             ..binding
@@ -1182,6 +1218,7 @@ impl NativePdfSession {
             next_binding,
             self.origin_bytes().len(),
             record_count,
+            reopened.remaining_retained() + output_capacity,
         )?;
         let fields = forms::project(&reopened, &scene.pages, next_binding, &mut scene_remaining)?;
         let selected_page = match &expected {
@@ -1240,9 +1277,8 @@ impl NativePdfSession {
         if self.origin.is_none() {
             self.origin = Some(previous.source);
         }
-        self.remaining_retained = self.snapshot.limits.max_retained_bytes
-            - self.graph.limits.max_retained_bytes
-            + scene_remaining;
+        self.remaining_retained =
+            self.snapshot.limits.max_retained_bytes - scene_limit + scene_remaining;
         self.ids = ids;
         self.next_page_object_id = next_page_object_id;
         self.snapshot.page_state = state;
@@ -1382,8 +1418,8 @@ fn accepted_scene(
     binding: NativeBinding,
     separate_origin: usize,
     request_count: usize,
+    mut remaining: usize,
 ) -> Result<(NativePdfNoteScene, usize), NativeSessionError> {
-    let mut remaining = graph.remaining_retained();
     spend(&mut remaining, separate_origin)?;
     spend(
         &mut remaining,
