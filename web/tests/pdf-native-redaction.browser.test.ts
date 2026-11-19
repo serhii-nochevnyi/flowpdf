@@ -101,6 +101,7 @@ function controlledWorker() {
   let publishedOutput: string | undefined
   const control = {
     fault: null as Fault,
+    refusePreview: false,
     hold: null as Action | null,
     resume: undefined as (() => void) | undefined,
     requests, statuses, unpublished,
@@ -127,6 +128,13 @@ function controlledWorker() {
       return
     }
     const reply = readNativeResponse(data.json)
+    if (reply?.status === 'preview' && control.refusePreview) {
+      const refusal: NativePdfWorkerResponse = {
+        dispatchId: data.dispatchId, type: 'failed', code: 'FLOW_PDF_NATIVE_RESPONSE_INVALID',
+      }
+      port.onmessage?.(new MessageEvent('message', { data: refusal }))
+      return
+    }
     if (reply?.operation === 'redaction' && reply.status !== 'failed') {
       const result = reply.redaction
       statuses.push(result)
@@ -284,7 +292,20 @@ for (const locale of ['en', 'uk'] as const) {
         await activate((await openConfirmation('apply', pages)).element())
       }
 
+      const pageSelect = panel.getByRole('combobox', { name: t('navigation.select'), exact: true })
+      const select = () => pageSelect.element() as HTMLSelectElement
+      const assertPreviewRefusal = async () => {
+        await expect.element(panel.getByText(t('viewport.unavailable'), { exact: true })).toBeVisible()
+        expect(visibleRaster()).toBeNull()
+        expect(redactionButton('redaction.add').query()).toBeNull()
+        expect(redactionButton('redaction.apply').query()).toBeNull()
+      }
+
+      lane.control.refusePreview = true
       await putOriginal(source)
+      expect(acceptedScope()?.redactionAdmission).toBe('supported')
+      await assertPreviewRefusal()
+      await expect.element(button('note.add')).toBeEnabled()
       expect((await getDownload('download.original')).bytes).toEqual(source)
       const notes = panel.getByRole('textbox', { name: t('note.contents'), exact: true })
       await activate(button('note.add').element())
@@ -293,6 +314,14 @@ for (const locale of ['en', 'uk'] as const) {
       await panel.getByRole('spinbutton', { name: t('geometry.y'), exact: true }).fill('10')
       await activate(button('note.add').element())
       await expect.element(status).toHaveTextContent(t('status.accepted', { revision: 1 }))
+      await assertPreviewRefusal()
+      lane.control.refusePreview = false
+      const firstPageValue = select().options[0]!.value
+      const nextPageValue = select().options[1]!.value
+      await pageSelect.selectOptions(nextPageValue)
+      await expect.poll(() => visibleRaster()?.dataset.nativePreviewPage).toBe(String(acceptedScope()!.pageState.order[1]))
+      await pageSelect.selectOptions(firstPageValue)
+      await expect.poll(() => visibleRaster()?.dataset.nativePreviewPage).toBe(String(acceptedScope()!.pageState.order[0]))
       await activate(button('note.add').element())
       await notes.fill(retainedDraft)
       const ordinary = acceptedScope()!
@@ -333,6 +362,19 @@ for (const locale of ['en', 'uk'] as const) {
       expect(preRedaction.name).toBe('contract-pre-redaction.pdf')
       expect(preRedaction.bytes).toEqual(ordinaryBytes)
 
+      lane.control.refusePreview = true
+      await pageSelect.selectOptions(nextPageValue)
+      await expect.element(pageSelect).toHaveValue(nextPageValue)
+      await assertPreviewRefusal()
+      await expect.element(redaction.getByText(t('redaction.marked'), { exact: true })).toBeVisible()
+      await expect.element(redactionButton('redaction.clear')).toBeEnabled()
+      expect(lane.control.requests).toEqual(['addMark'])
+      lane.control.refusePreview = false
+      await pageSelect.selectOptions(firstPageValue)
+      await expect.poll(() => visibleRaster()?.dataset.nativePreviewHash).toBe(ordinaryHash)
+      await expect.poll(() => visibleRaster()?.dataset.nativePreviewPage).toBe(String(ordinary.pageState.order[0]))
+      await expect.element(redactionButton('redaction.apply')).toBeEnabled()
+
       await fillMark(120, 65, 15, 15)
       await addMark(2)
       await openConfirmation('clear', '1')
@@ -351,22 +393,19 @@ for (const locale of ['en', 'uk'] as const) {
       await expect.poll(() => marksOnPage().length).toBe(0)
       await fillMark(20, 20, 59, 80)
       await addMark(1)
-      const pageSelect = panel.getByRole('combobox', { name: t('navigation.select'), exact: true })
-      const select = pageSelect.element() as HTMLSelectElement
-      const nextOption = select.options[1]!
-      select.focus()
-      expect(document.activeElement).toBe(select)
-      await pageSelect.selectOptions(nextOption)
-      await expect.element(pageSelect).toHaveValue(nextOption.value)
+      const pageSelector = select()
+      pageSelector.focus()
+      expect(document.activeElement).toBe(pageSelector)
+      await pageSelect.selectOptions(nextPageValue)
+      await expect.element(pageSelect).toHaveValue(nextPageValue)
       await expect.element(panel.getByText(t('navigation.position', { page: 2, total: 2 }), { exact: true }).first()).toBeVisible()
       await expect.poll(() => visibleRaster()?.dataset.nativePreviewPage).toBe(String(ordinary.pageState.order[1]))
       expect(paintAtMark()).toEqual([0, 0, 255, 255])
       await expect.element(status).toHaveAttribute('data-native-redaction-status', 'neutral')
       await fillMark(20, 20, 20, 20)
       await addMark(1)
-      const firstOption = select.options[0]!
-      await pageSelect.selectOptions(firstOption)
-      await expect.element(pageSelect).toHaveValue(firstOption.value)
+      await pageSelect.selectOptions(firstPageValue)
+      await expect.element(pageSelect).toHaveValue(firstPageValue)
       await expect.element(notes).toHaveValue(retainedDraft)
 
       await openConfirmation('apply', new Intl.ListFormat(locale).format(['1', '2']))

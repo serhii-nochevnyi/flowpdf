@@ -49,14 +49,18 @@ const reviewedBrowserSuites = [
   ['web/tests/pdf-native-pages.browser.test.ts', '4d1e7b9af40bb99abcbbb8eb6ef275bcc32384141c233d914e4e91887fe783f5'],
   ['web/tests/pdf-native-forms.browser.test.ts', 'e3a8b28119e3a4d78215bd5694c1c740c6d8855d50bcc8dfdbc8d0319afacbcd'],
 ]
+const reviewedPageBrowserSuites = reviewedBrowserSuites.map(([path, digest]) => [path,
+  path === 'web/tests/pdf-native-pages.browser.test.ts' ? '75a10c2322c03833e9bf26edb683623779137e0aaa599875187a1a90c56e62e0' : digest,
+])
 const reviewedBrowserProfiles = [
   [...reviewedBrowserSuites,
     ['web/tests/pdf-native-redaction.browser.test.ts', 'f03b3854ae1f8b6459c400fc67dc5f43dc7185737eeb9eb3f7439ef104e0fb10']],
   [...reviewedBrowserSuites,
     ['web/tests/pdf-native-redaction.browser.test.ts', 'ba509b4cf12458746203d2b42d1cbaf955854226be3f0f5a27df91ee516abbd5']],
-  [...reviewedBrowserSuites.map(([path, digest]) => [path, path === 'web/tests/pdf-native-pages.browser.test.ts'
-    ? '75a10c2322c03833e9bf26edb683623779137e0aaa599875187a1a90c56e62e0' : digest]),
+  [...reviewedPageBrowserSuites,
     ['web/tests/pdf-native-redaction.browser.test.ts', 'ba509b4cf12458746203d2b42d1cbaf955854226be3f0f5a27df91ee516abbd5']],
+  [...reviewedPageBrowserSuites,
+    ['web/tests/pdf-native-redaction.browser.test.ts', '767e2a7818ba64e917eb7b52c1550af1c5512adc302b2e3e8e2f29164cdb8035']],
 ]
 const expandedSteps = [
   'Run bilingual Chromium text replacement tracer',
