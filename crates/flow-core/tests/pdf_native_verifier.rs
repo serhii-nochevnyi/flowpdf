@@ -175,6 +175,36 @@ fn nearby_stroke_is_preserved_when_its_ink_misses_the_mark() {
 }
 
 #[test]
+fn collapsed_diagonal_requires_retention_or_removal_by_segment_overlap() {
+    let stroke = "0 0 1 RG 0.001 w 10 10 m 80 80 l S";
+    let square = "1 0 0 rg 18 63 6 6 re f";
+    let source = pdf(&[(&format!("{stroke}\n{square}"), "")], vec![], "");
+    let stroke_only = pdf(&[(stroke, "")], vec![], "");
+    let square_only = pdf(&[(square, "")], vec![], "");
+
+    for (rect, expected, wrong) in [
+        ([19_000, 64_000, 23_000, 68_000], &stroke_only, &square_only),
+        ([39_000, 39_000, 41_000, 41_000], &square_only, &source),
+    ] {
+        let marks = [mark(91, rect)];
+        let evidence = verify(&source, expected, &[91], &marks);
+        assert!(evidence.checks_passed(), "{evidence:?}");
+        let evidence = verify(&source, wrong, &[91], &marks);
+        assert_eq!(
+            evidence.raster().failure(),
+            Some(NativeVerificationFailure::RasterMismatch)
+        );
+    }
+
+    let marks = [mark(91, [30_000, 31_001, 31_000, 32_000])];
+    let evidence = verify(&source, &source, &[91], &marks);
+    assert_eq!(
+        evidence.raster().failure(),
+        Some(NativeVerificationFailure::UnsupportedProfile)
+    );
+}
+
+#[test]
 fn near_crop_edge_stroke_is_admitted_only_when_its_paint_fits() {
     let geometry = NativeRedactionGeometry {
         crop_box: [5_000, 5_000, 95_000, 95_000],

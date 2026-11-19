@@ -50,6 +50,7 @@ async function redactionFixture(unsupported = false) {
     'BT /Body 12 Tf 25 75 Td <00020002> Tj ET',
     'BT /Body 12 Tf 105 105 Td <00010001> Tj ET',
     '1 0 0 rg 25 25 10 10 re f',
+    '0 0 1 RG 0.04 w 40 52.06 m 54 52.06 l S',
     '0 g 100 25 10 10 re f',
     'q 40 0 0 10 60 35 cm /Sample Do Q',
   ].join('\n'), '')
@@ -231,10 +232,12 @@ for (const locale of ['en', 'uk'] as const) {
       const newOutput = () => button('redaction.download').query()
       const marksOnPage = () => root.querySelectorAll('.native-redaction-mark')
       const visibleRaster = () => root.querySelector<HTMLCanvasElement>('.native-page-raster:not([hidden]) canvas')
-      const paintAtMark = () => {
-        const pixels = visibleRaster()?.getContext('2d')?.getImageData(60, 220, 1, 1).data
+      const pixelAt = (x: number, y: number) => {
+        const pixels = visibleRaster()?.getContext('2d')?.getImageData(x, y, 1, 1).data
         return pixels && Array.from(pixels)
       }
+      const paintAtMark = () => pixelAt(60, 220)
+      const fineRuleAtMark = () => pixelAt(92, 175)
       const acceptedScope = () => lane.coordinator.snapshot().accepted
       const putOriginal = async (bytes: Uint8Array<ArrayBuffer>) => {
         const picker = root.querySelector<HTMLInputElement>('[data-pdf-native-edit] input[type=file][accept*="application/pdf"]')
@@ -299,6 +302,8 @@ for (const locale of ['en', 'uk'] as const) {
       expect(visibleRaster()?.dataset.nativePreviewRevision).toBe('1')
       expect(visibleRaster()?.dataset.nativePreviewPage).toBe(String(ordinary.pageState.order[0]))
       expect(paintAtMark()).toEqual([255, 0, 0, 255])
+      expect(fineRuleAtMark()).toEqual([128, 128, 255, 255])
+      expect(pixelAt(92, 174)).toEqual([255, 255, 255, 255])
 
       await fillMark(20, 20, 0, 80)
       await expect.element(redactionButton('redaction.add')).toBeDisabled()
@@ -311,15 +316,17 @@ for (const locale of ['en', 'uk'] as const) {
       await addMark(1)
       await expect.element(redaction.getByText(t('redaction.marked'), { exact: true })).toBeVisible()
       expect(getComputedStyle(marksOnPage()[0]!).borderTopStyle).toBe('dashed')
-      const rasterBounds = visibleRaster()!.getBoundingClientRect()
+      const canvas = visibleRaster()!
+      const rasterBounds = canvas.getBoundingClientRect()
       const markBounds = marksOnPage()[0]!.getBoundingClientRect()
-      const paintedX = rasterBounds.left + rasterBounds.width * (30 / 160)
-      const paintedY = rasterBounds.top + rasterBounds.height * (110 / 140)
+      const paintedX = rasterBounds.left + rasterBounds.width * (92.5 / canvas.width)
+      const paintedY = rasterBounds.top + rasterBounds.height * (175.5 / canvas.height)
       expect(paintedX).toBeGreaterThan(markBounds.left)
       expect(paintedX).toBeLessThan(markBounds.right)
       expect(paintedY).toBeGreaterThan(markBounds.top)
       expect(paintedY).toBeLessThan(markBounds.bottom)
       expect(paintAtMark()).toEqual([255, 0, 0, 255])
+      expect(fineRuleAtMark()).toEqual([128, 128, 255, 255])
       expect(newOutput()).toBeNull()
       expect(acceptedScope()).toBe(ordinary)
       const preRedaction = await getDownload('redaction.downloadPrior')
@@ -475,6 +482,7 @@ for (const locale of ['en', 'uk'] as const) {
       await expect.poll(() => visibleRaster()?.dataset.nativePreviewHash).toBe(hash)
       expect(visibleRaster()?.dataset.nativePreviewRevision).toBe('2')
       expect(paintAtMark()).toEqual([255, 255, 255, 255])
+      expect(fineRuleAtMark()).toEqual([255, 255, 255, 255])
       expect(lane.control.unpublished.length).toBeGreaterThan(0)
       for (const message of lane.control.unpublished) {
         expect(Object.keys(message).sort()).toEqual(['dispatchId', 'json', 'type'])
@@ -505,8 +513,8 @@ for (const locale of ['en', 'uk'] as const) {
       for (const [index, before] of original.pages.entries()) {
         const paths = before.elements.flatMap((entry) => entry.kind === 'path' ? [entry.value.rect] : [])
         const remaining = scene.pages[index]!.elements.flatMap((entry) => entry.kind === 'path' ? [entry.value.rect] : [])
-        expect(paths).toHaveLength(2)
-        expect(remaining).toEqual(paths.slice(1))
+        expect(paths).toHaveLength(index === 0 ? 3 : 2)
+        expect(remaining).toEqual(paths.slice(-1))
       }
       expect(panel.element().scrollWidth).toBeLessThanOrEqual(panel.element().clientWidth)
 
