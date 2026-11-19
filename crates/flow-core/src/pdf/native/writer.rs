@@ -120,8 +120,14 @@ impl Output {
 }
 
 pub(super) fn rewrite(graph: &NativePdfGraph) -> Result<Vec<u8>, NativeEditError> {
+    rewrite_with_workspace(graph, graph.remaining_retained())
+}
+
+pub(super) fn rewrite_with_workspace(
+    graph: &NativePdfGraph,
+    mut workspace: usize,
+) -> Result<Vec<u8>, NativeEditError> {
     let mut work = graph.remaining_work();
-    let mut workspace = graph.remaining_retained();
     spend(
         &mut workspace,
         graph
@@ -156,7 +162,7 @@ pub(super) fn rewrite(graph: &NativePdfGraph) -> Result<Vec<u8>, NativeEditError
     }
     let mut out = Output {
         bytes: Vec::new(),
-        limit: graph.limits.max_output_bytes,
+        limit: graph.limits.max_output_bytes.min(workspace),
         work,
     };
     out.append(b"%PDF-1.7\n%\xE2\xE3\xCF\xD3\n")?;
@@ -187,6 +193,7 @@ pub(super) fn rewrite(graph: &NativePdfGraph) -> Result<Vec<u8>, NativeEditError
     // @invariant: The exact output must reopen before any bytes are returned.
     let mut reopen_limits = graph.limits;
     // @security: Reopen shares the edit’s cumulative retained and decoded budgets.
+    spend(&mut workspace, out.bytes.capacity())?;
     if workspace == 0 || out.work == 0 || graph.remaining_decoded() == 0 {
         return Err(NativeEditError::Budget);
     }

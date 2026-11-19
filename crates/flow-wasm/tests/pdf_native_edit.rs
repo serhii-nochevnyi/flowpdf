@@ -1127,7 +1127,7 @@ fn serialized_text_replacement_checks_capability_revision_and_output_identity() 
     assert_eq!(unchanged["snapshot"], original);
 
     let applied = call(native_pdf_command, command.clone());
-    assert_eq!(applied["status"], "applied");
+    assert_eq!(applied["status"], "applied", "code: {}", applied["code"]);
     let current = &applied["snapshot"];
     let current_target = &current["scene"]["textPages"][0]["islands"][0];
     assert_eq!(current_target["text"], "AA");
@@ -1139,10 +1139,14 @@ fn serialized_text_replacement_checks_capability_revision_and_output_identity() 
     );
     assert_eq!(current["originStoreHash"], original["originStoreHash"]);
     assert_ne!(current["outputHash"], original["outputHash"]);
+    assert_eq!(current["consumedRequest"], 2);
     assert_eq!(
         call(native_pdf_command, command.clone())["snapshot"],
         *current
     );
+    let readback = call(native_pdf_snapshot, bound("snapshot", 2, &original));
+    assert_eq!(readback["status"], "accepted");
+    assert_eq!(readback["snapshot"], *current);
     command["requestId"] = json!(3);
     assert_eq!(
         call(native_pdf_command, command.clone())["code"],
