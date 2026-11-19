@@ -858,8 +858,8 @@ fn many_outline_entries_do_not_block_unreferenced_pages() {
 
 #[test]
 fn bookmarks_spread_across_pages_fit_the_default_deletion_budget() {
-    const PAGE_COUNT: usize = 200;
-    const TARGET: usize = 99;
+    const PAGE_COUNT: usize = 600;
+    const TARGET: usize = 299;
     let targets: Vec<_> = (0..PAGE_COUNT - 1).flat_map(|page| [page, page]).collect();
     let bytes = outline_pdf(PAGE_COUNT, &targets);
     let mut session =

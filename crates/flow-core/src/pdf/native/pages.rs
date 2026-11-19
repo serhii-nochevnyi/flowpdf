@@ -227,7 +227,7 @@ pub(super) fn restrictions(
     }
     let trailer = graph.trailer_references(&mut work)?;
     let incoming_links = incoming_link_index(graph, &trailer, &mut work)?;
-    let mut parent_refs = None;
+    let mut parent_refs = PageParentReferences::new(graph);
     let mut copyable_field_count = None;
     let pages: Vec<_> = projected
         .iter()
@@ -1090,13 +1090,53 @@ impl PageDeletion {
     }
 }
 
+struct PageParentReferences {
+    outside_kids: BTreeMap<Ref, BTreeSet<Ref>>,
+    retained: usize,
+}
+
+impl PageParentReferences {
+    fn new(graph: &NativePdfGraph) -> Self {
+        Self {
+            outside_kids: BTreeMap::new(),
+            retained: graph.remaining_retained(),
+        }
+    }
+
+    fn retains_page(
+        &mut self,
+        parent: Ref,
+        values: &Dict,
+        page: Ref,
+        work: &mut usize,
+    ) -> Result<bool, NativeEditError> {
+        use std::collections::btree_map::Entry;
+
+        let refs = match self.outside_kids.entry(parent) {
+            Entry::Occupied(entry) => entry.into_mut(),
+            Entry::Vacant(entry) => {
+                spend(&mut self.retained, 128)?;
+                let mut refs = Vec::new();
+                for (key, value) in values {
+                    spend(work, 1)?;
+                    if key != "Kids" {
+                        collect_refs(value, &mut refs, work, &mut self.retained)?;
+                    }
+                }
+                entry.insert(refs.into_iter().collect())
+            }
+        };
+        Ok(refs.contains(&page))
+    }
+}
+
 fn deletion_preflight(
     graph: &NativePdfGraph,
     page: Ref,
     outlines: &OutlineIndex,
     links: &IncomingLinkIndex,
     trailer: &BTreeSet<Ref>,
-    parent_refs: &mut Option<(Ref, BTreeSet<Ref>)>,
+    parent_refs: &mut PageParentReferences,
     work: &mut usize,
 ) -> Result<PageDeletion, NativeEditError> {
     let cleanup = links.cleanup_for(page)?;
@@ -1112,41 +1152,6 @@ fn deletion_preflight(
     let parent = reference(dict(graph, page)?, "Parent")?;
     let parent_values = dict(graph, parent)?;
     let kids = parent_values.get("Kids").ok_or(Malformed)?;
-    if plan.removed.len() == 1
-        && cleanup.is_none()
-        && !outlines.removable.contains_key(&page)
-        && kids.as_array().is_some()
-        && !trailer.contains(&page)
-        && graph
-            .reverse
-            .get(&page)
-            .is_some_and(|owners| owners.len() == 1 && owners.contains(&parent))
-    {
-        if parent_refs
-            .as_ref()
-            .is_none_or(|(owner, _)| *owner != parent)
-        {
-            let mut refs = Vec::new();
-            let mut retained = graph.remaining_retained();
-            for (key, value) in parent_values {
-                if key != "Kids" {
-                    collect_refs(value, &mut refs, work, &mut retained)?;
-                }
-            }
-            *parent_refs = Some((parent, refs.into_iter().collect()));
-        }
-        if parent_refs
-            .as_ref()
-            .is_some_and(|(_, refs)| refs.contains(&page))
-        {
-            return Err(Unsupported);
-        }
-        return Ok(plan);
-    }
-    let mut children = array_refs(graph, kids, work)?;
-    children.retain(|&child| child != page);
-    plan.edit(graph, parent, work)?
-        .insert("Kids".into(), refs(children));
     if let Some(cleanup) = cleanup {
         for (&source, drops) in cleanup {
             let annots = dict(graph, source)?.get("Annots").ok_or(Malformed)?;
@@ -1165,9 +1170,21 @@ fn deletion_preflight(
         set_form_fields(plan.edit(graph, form, work)?, direct, keep)?;
     }
     plan_outline_cleanup(graph, outlines, page, &mut plan, work)?;
+    let removed_child_edge = if kids.as_array().is_some()
+        && !plan.replacements.contains_key(&parent)
+    {
+        (!parent_refs.retains_page(parent, parent_values, page, work)?).then_some((parent, page))
+    } else {
+        let mut children = array_refs(graph, kids, work)?;
+        children.retain(|&child| child != page);
+        plan.edit(graph, parent, work)?
+            .insert("Kids".into(), refs(children));
+        None
+    };
     graph.check_page_removals(
         &plan.removed,
         &plan.replacements,
+        removed_child_edge,
         trailer,
         work,
         plan.retained,
@@ -1290,14 +1307,29 @@ pub(super) fn stage(
             let trailer = graph.trailer_references(&mut work)?;
             let links = incoming_link_index(graph, &trailer, &mut work)?;
             let plan = deletion_preflight(
-                graph, page, &outlines, &links, &trailer, &mut None, &mut work,
+                graph,
+                page,
+                &outlines,
+                &links,
+                &trailer,
+                &mut PageParentReferences::new(graph),
+                &mut work,
             )?;
+            let children = if plan.replacements.contains_key(&parent) {
+                None
+            } else {
+                let mut children = array_refs(
+                    graph,
+                    dict(graph, parent)?.get("Kids").ok_or(Malformed)?,
+                    &mut work,
+                )?;
+                children.retain(|&child| child != page);
+                Some(children)
+            };
             graph.charge_page_work(budget - work)?;
             graph.charge_page_retained(graph.remaining_retained() - plan.retained)?;
             removed = plan.removed;
-            if plan.replacements.is_empty() {
-                let mut children = kids(graph, parent)?;
-                children.retain(|&child| child != page);
+            if let Some(children) = children {
                 replace_kids(graph, parent, children)?;
             }
             for (owner, values) in plan.replacements {

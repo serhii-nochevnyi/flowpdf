@@ -545,6 +545,7 @@ impl NativePdfGraph {
         &self,
         removed: &BTreeSet<PdfObjectRef>,
         replacements: &BTreeMap<PdfObjectRef, BTreeMap<String, PdfValue>>,
+        removed_child_edge: Option<(PdfObjectRef, PdfObjectRef)>,
         trailer: &BTreeSet<PdfObjectRef>,
         work: &mut usize,
         mut retained: usize,
@@ -577,7 +578,9 @@ impl NativePdfGraph {
             if let Some(owners) = self.reverse.get(&target) {
                 spend(work, owners.len())?;
                 for &owner in owners {
-                    if !replacements.contains_key(&owner) {
+                    if !replacements.contains_key(&owner)
+                        && removed_child_edge != Some((owner, target))
+                    {
                         spend(&mut retained, 128)?;
                         pending.push(owner);
                     }
@@ -1127,7 +1130,7 @@ mod tests {
         let retained = graph.remaining_retained();
 
         assert_eq!(
-            graph.check_page_removals(&removed, &replacements, &trailer, &mut work, retained),
+            graph.check_page_removals(&removed, &replacements, None, &trailer, &mut work, retained),
             Ok(())
         );
         replacements.insert(
@@ -1135,11 +1138,11 @@ mod tests {
             BTreeMap::from([("Retained".into(), PdfValue::Reference(detached))]),
         );
         assert_eq!(
-            graph.check_page_removals(&removed, &replacements, &trailer, &mut work, retained),
+            graph.check_page_removals(&removed, &replacements, None, &trailer, &mut work, retained),
             Err(NativeEditError::Unsupported)
         );
         assert_eq!(
-            graph.check_page_removals(&removed, &replacements, &trailer, &mut 0, retained),
+            graph.check_page_removals(&removed, &replacements, None, &trailer, &mut 0, retained),
             Err(NativeEditError::Budget)
         );
     }
