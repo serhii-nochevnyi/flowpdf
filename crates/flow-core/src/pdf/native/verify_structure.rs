@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::mem::size_of;
 
 use miniz_oxide::inflate::{
     TINFLStatus,
@@ -13,7 +14,7 @@ use super::verifier::{
     MAX_COORD, MAX_PAGES, NativeRedactionGeometry, NativeRedactionMark,
     NativeRedactionPageEvidence,
     NativeVerificationFailure::{Budget, Coverage, Structure, UnsupportedProfile},
-    POINT, Rect, VerifyResult, contains, spend, valid_rect,
+    POINT, Rect, Reservation, VerifyResult, Workspace, contains, spend, valid_rect,
 };
 
 pub(super) const MAX_INPUT: usize = 32 * 1024 * 1024;
@@ -76,10 +77,12 @@ pub(super) fn verify(
     candidate: &[u8],
     order: &[u64],
     marks: &[NativeRedactionMark],
+    workspace: &Workspace,
 ) -> VerifyResult<Vec<NativeRedactionPageEvidence>> {
-    let accepted = Document::open(accepted, Side::Accepted)?;
-    let candidate = Document::open(candidate, Side::Candidate)?;
-    coverage(&accepted, &candidate, order, marks)
+    let mut documents = workspace.scope();
+    let accepted = Document::open(accepted, Side::Accepted, workspace, &mut documents)?;
+    let candidate = Document::open(candidate, Side::Candidate, workspace, &mut documents)?;
+    coverage(&accepted, &candidate, order, marks, workspace)
 }
 
 fn read_error(error: PdfReadError) -> super::verifier::NativeVerificationFailure {
@@ -93,7 +96,14 @@ fn read_error(error: PdfReadError) -> super::verifier::NativeVerificationFailure
 }
 
 impl Document {
-    pub fn open(bytes: &[u8], side: Side) -> VerifyResult<Self> {
+    pub fn open(
+        bytes: &[u8],
+        side: Side,
+        workspace: &Workspace,
+        documents: &mut Reservation<'_>,
+    ) -> VerifyResult<Self> {
+        let _reader_overhead = workspace.reserve(128)?;
+        let max_retained = workspace.remaining().min(MAX_RETAINED);
         let reader = open_pdf_retained(
             bytes,
             PdfReaderLimits {
@@ -104,9 +114,11 @@ impl Document {
                 max_image_pixels: 16_000_000,
                 ..PdfReaderLimits::default()
             },
-            MAX_RETAINED,
+            max_retained,
         )
         .map_err(read_error)?;
+        let reader_cost = bytes.len() + reader.retained_cost;
+        let _reader_bytes = workspace.reserve(reader_cost)?;
         let trailer = reader.retained_trailer();
         let trailer_keys = match side {
             Side::Accepted => &["Root", "Size", "Info", "ID"][..],
@@ -124,7 +136,9 @@ impl Document {
             }
         }
         let root = reference(get(trailer, "Root")?)?;
-        let mut queue = vec![(root, Role::Catalog)];
+        let mut queue_bytes = workspace.reserve(4 * size_of::<(PdfObjectRef, Role)>())?;
+        let mut queue = Vec::with_capacity(4);
+        queue.push((root, Role::Catalog));
         if let Some(info) = trailer.get("Info") {
             queue.push((reference(info)?, Role::Info));
         }
@@ -134,10 +148,7 @@ impl Document {
             side,
         };
         let mut work = MAX_WORK.checked_sub(reader.open_work).ok_or(Budget)?;
-        let mut retained = MAX_RETAINED
-            .checked_sub(bytes.len())
-            .and_then(|left| left.checked_sub(reader.retained_cost))
-            .ok_or(Budget)?;
+        let mut retained = max_retained.checked_sub(reader_cost).ok_or(Budget)?;
         let mut decoded = MAX_DECODED;
         while let Some((id, role)) = queue.pop() {
             spend(&mut work, 1)?;
@@ -156,9 +167,25 @@ impl Document {
                 }
                 continue;
             }
-            let (value, cost, tokens) = reader
-                .retained_object(id, retained, decoded, work)
-                .map_err(read_error)?;
+            documents.tree_entry::<(PdfObjectRef, Role, PdfValue)>()?;
+            let (value, mut cost, tokens) = {
+                let _codec_state = workspace.reserve(size_of::<DecompressorOxide>())?;
+                // @security: Leave headroom for codec buffers beyond the retained reader's output.
+                let available = workspace.remaining();
+                let (value, cost, tokens) = reader
+                    .retained_object(
+                        id,
+                        retained.min(available / 2),
+                        decoded.min(available / 16),
+                        work,
+                    )
+                    .map_err(read_error)?;
+                (value, cost, tokens)
+            };
+            if let PdfValue::Stream(stream) = &value {
+                cost += stream.data.capacity() - stream.data.len();
+            }
+            documents.grow(cost)?;
             spend(&mut retained, cost)?;
             spend(&mut work, tokens)?;
             if let PdfValue::Stream(stream) = &value {
@@ -169,13 +196,27 @@ impl Document {
                 (Role::PageContents, _) if matches!(value, PdfValue::Stream(_)) => Role::Content,
                 _ => role,
             };
+            // @invariant: Every newly enqueued edge uses a reference token in this object.
+            queue_bytes.grow(2 * tokens * size_of::<(PdfObjectRef, Role)>())?;
             inspect(&value, role, side, &mut queue)?;
+            if let PdfValue::Stream(stream) = &value
+                && side == Side::Candidate
+                && stream.dict.contains_key("Filter")
+            {
+                exact_flate(stream, workspace)?;
+            }
             document.objects.insert(id, (role, value));
         }
+        drop(queue);
+        drop(queue_bytes);
         let tree = reference(get(document.dict(root)?, "Pages")?)?;
         let mut pages = Vec::new();
-        let mut visited = BTreeSet::new();
-        document.collect_pages(tree, None, &mut visited, &mut pages, 0)?;
+        {
+            let mut tree_bytes = workspace.scope();
+            let mut visited = BTreeSet::new();
+            document.collect_pages(tree, None, &mut visited, &mut pages, 0, &mut tree_bytes)?;
+        }
+        documents.grow(pages.capacity() * size_of::<PdfObjectRef>())?;
         if pages.is_empty() {
             return Err(Structure);
         }
@@ -183,11 +224,12 @@ impl Document {
         if side == Side::Candidate {
             let size = usize::try_from(get(trailer, "Size")?.as_integer().ok_or(Structure)?)
                 .map_err(|_| Structure)?;
-            document.check_physical(bytes, &reader, size)?;
+            document.check_physical(bytes, &reader, size, workspace)?;
         }
         Ok(document)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn collect_pages(
         &self,
         id: PdfObjectRef,
@@ -195,11 +237,12 @@ impl Document {
         visited: &mut BTreeSet<PdfObjectRef>,
         pages: &mut Vec<PdfObjectRef>,
         depth: usize,
+        tree_bytes: &mut Reservation<'_>,
     ) -> VerifyResult<usize> {
         if depth >= MAX_DEPTH || pages.len() >= MAX_PAGES {
             return Err(Budget);
         }
-        if !visited.insert(id) {
+        if !tree_bytes.insert(visited, id)? {
             return Err(Structure);
         }
         let dict = self.dict(id)?;
@@ -208,7 +251,7 @@ impl Document {
         }
         match name(dict, "Type") {
             Some("Page") if parent.is_some() => {
-                pages.push(id);
+                tree_bytes.push(pages, id)?;
                 Ok(1)
             }
             Some("Pages") => {
@@ -218,8 +261,14 @@ impl Document {
                 }
                 let mut count = 0;
                 for kid in kids {
-                    count +=
-                        self.collect_pages(reference(kid)?, Some(id), visited, pages, depth + 1)?;
+                    count += self.collect_pages(
+                        reference(kid)?,
+                        Some(id),
+                        visited,
+                        pages,
+                        depth + 1,
+                        tree_bytes,
+                    )?;
                 }
                 if get(dict, "Count")?.as_integer() != Some(count as i64) {
                     return Err(Structure);
@@ -265,7 +314,7 @@ impl Document {
             .filter_map(|(id, (role, _))| matches!(role, Role::Font | Role::XObject).then_some(*id))
     }
 
-    pub fn page(&self, index: usize) -> VerifyResult<Page<'_>> {
+    pub fn page(&self, index: usize, page_bytes: &mut Reservation<'_>) -> VerifyResult<Page<'_>> {
         let id = *self.pages.get(index).ok_or(Coverage)?;
         let dict = self.dict(id)?;
         let mut media = None;
@@ -322,9 +371,17 @@ impl Document {
             .map(|value| self.resolve(value))
             .transpose()?
         {
-            Some(PdfValue::Stream(_)) => vec![reference(get(dict, "Contents")?)?],
+            Some(PdfValue::Stream(_)) => {
+                page_bytes.grow(size_of::<PdfObjectRef>())?;
+                vec![reference(get(dict, "Contents")?)?]
+            }
             Some(PdfValue::Array(values)) => {
-                values.iter().map(reference).collect::<VerifyResult<_>>()?
+                page_bytes.grow(values.len() * size_of::<PdfObjectRef>())?;
+                let mut contents = Vec::with_capacity(values.len());
+                for value in values {
+                    contents.push(reference(value)?);
+                }
+                contents
             }
             None | Some(PdfValue::Null) => Vec::new(),
             _ => return Err(Structure),
@@ -348,11 +405,14 @@ impl Document {
                 if !contains(crop_box, bounds) {
                     return Err(UnsupportedProfile);
                 }
-                annotations.push((
-                    reference(item)?,
-                    bounds,
-                    get(note, "Contents")?.as_bytes().ok_or(Structure)?,
-                ));
+                page_bytes.push(
+                    &mut annotations,
+                    (
+                        reference(item)?,
+                        bounds,
+                        get(note, "Contents")?.as_bytes().ok_or(Structure)?,
+                    ),
+                )?;
             }
         }
         Ok(Page {
@@ -368,6 +428,7 @@ impl Document {
         bytes: &[u8],
         reader: &super::super::reader::PdfReader,
         size: usize,
+        workspace: &Workspace,
     ) -> VerifyResult<()> {
         if size != self.objects.len() + 1 {
             return Err(Structure);
@@ -386,6 +447,7 @@ impl Document {
             }
             rest = trim_pdf(after);
         }
+        let _offset_bytes = workspace.reserve((size - 1) * size_of::<usize>())?;
         let mut offsets = Vec::with_capacity(size - 1);
         for (index, (&id, (_, value))) in self.objects.iter().enumerate() {
             let offset = bytes.len() - rest.len();
@@ -430,14 +492,16 @@ pub(super) fn coverage(
     candidate: &Document,
     order: &[u64],
     marks: &[NativeRedactionMark],
+    workspace: &Workspace,
 ) -> VerifyResult<Vec<NativeRedactionPageEvidence>> {
     if order.len() != accepted.pages.len() || order.len() != candidate.pages.len() {
         return Err(Coverage);
     }
     let mut covered = Vec::new();
     for (index, &page_id) in order.iter().enumerate() {
-        let geometry = accepted.page(index)?.geometry;
-        if candidate.page(index)?.geometry != geometry {
+        let mut page_bytes = workspace.scope();
+        let geometry = accepted.page(index, &mut page_bytes)?.geometry;
+        if candidate.page(index, &mut page_bytes)?.geometry != geometry {
             return Err(Coverage);
         }
         let mut marked = false;
@@ -526,11 +590,7 @@ fn inspect(
         }
         match stream.dict.get("Filter") {
             None => {}
-            Some(filter) if matches!(filter.as_name(), Some("FlateDecode" | "Fl")) => {
-                if side == Side::Candidate {
-                    exact_flate(stream)?;
-                }
-            }
+            Some(filter) if matches!(filter.as_name(), Some("FlateDecode" | "Fl")) => {}
             Some(filter)
                 if side == Side::Accepted
                     && role == XObject
@@ -959,7 +1019,8 @@ pub(super) fn rect(value: &PdfValue) -> VerifyResult<Rect> {
         .ok_or(UnsupportedProfile)
 }
 
-fn exact_flate(stream: &PdfStream) -> VerifyResult<()> {
+fn exact_flate(stream: &PdfStream, workspace: &Workspace) -> VerifyResult<()> {
+    let _scratch = workspace.reserve(stream.data.len() + 1 + size_of::<DecompressorOxide>())?;
     let mut check = vec![0; stream.data.len() + 1];
     let (status, consumed, written) = decompress(
         &mut DecompressorOxide::new(),
@@ -1092,16 +1153,26 @@ mod tests {
     use super::*;
 
     #[test]
-    fn exact_flate_accepts_a_complete_stream() {
+    fn exact_flate_reserves_and_releases_comparison_scratch() {
         let data = b"0 g 10 10 12 12 re f".to_vec();
         let encoded = miniz_oxide::deflate::compress_to_vec_zlib(&data, 6);
-        let stream = PdfStream {
+        let mut stream = PdfStream {
             dict: Dict::new(),
             data,
             encoded,
             source_offset: 0,
         };
-        assert_eq!(exact_flate(&stream), Ok(()));
+        let scratch = stream.data.len() + 1 + size_of::<DecompressorOxide>();
+        let constrained = Workspace::new(scratch - 1);
+        assert_eq!(exact_flate(&stream, &constrained), Err(Budget));
+        assert_eq!(constrained.remaining(), scratch - 1);
+
+        let workspace = Workspace::new(scratch);
+        assert_eq!(exact_flate(&stream, &workspace), Ok(()));
+        assert_eq!(workspace.remaining(), scratch);
+        stream.encoded[0] = 0;
+        assert_eq!(exact_flate(&stream, &workspace), Err(Structure));
+        assert_eq!(workspace.remaining(), scratch);
     }
 
     #[test]

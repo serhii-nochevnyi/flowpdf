@@ -1,6 +1,8 @@
 // @contract: Local readback is independent of rewriting and shares the bounded PDF parser, codecs and font primitives.
 // @contract: Independent release differentials cover shared defects and PDF consumers outside this profile.
+use std::cell::Cell;
 use std::collections::BTreeSet;
+use std::mem::size_of;
 
 use serde::Serialize;
 
@@ -12,6 +14,7 @@ pub(super) const POINT: i64 = 1_000;
 pub(super) const MAX_COORD: i64 = 1_000_000 * POINT;
 pub(super) const MAX_PAGES: usize = 256;
 const MAX_MARKS: usize = 1024;
+pub(super) const STANDALONE_WORKSPACE: usize = 512 * 1024 * 1024;
 
 pub(super) type Rect = [i64; 4];
 pub(super) type VerifyResult<T> = Result<T, NativeVerificationFailure>;
@@ -259,6 +262,24 @@ pub fn verify_native_redaction(
     context: NativeRedactionContext<'_>,
     policy: NativeRedactionPolicy<'_>,
 ) -> VersionedNativeRedactionEvidence {
+    verify_with_workspace(
+        origin,
+        accepted,
+        candidate,
+        context,
+        policy,
+        STANDALONE_WORKSPACE,
+    )
+}
+
+pub(super) fn verify_with_workspace(
+    origin: &[u8],
+    accepted: &[u8],
+    candidate: &[u8],
+    context: NativeRedactionContext<'_>,
+    policy: NativeRedactionPolicy<'_>,
+    allowance: usize,
+) -> VersionedNativeRedactionEvidence {
     let mut evidence = VersionedNativeRedactionEvidence {
         identity: None,
         identity_failure: None,
@@ -273,17 +294,36 @@ pub fn verify_native_redaction(
             return evidence;
         }
     };
+    let workspace = Workspace::new(allowance);
     evidence.structure = NativeVerificationLane::from_result(
-        verify_structure::verify(accepted, candidate, context.page_order, policy.marks),
+        verify_structure::verify(
+            accepted,
+            candidate,
+            context.page_order,
+            policy.marks,
+            &workspace,
+        ),
         &identity.affected_pages,
     );
     if evidence.structure.status == NativeVerificationStatus::Passed {
         evidence.text = NativeVerificationLane::from_result(
-            verify_text::verify(accepted, candidate, context.page_order, policy.marks),
+            verify_text::verify_with_workspace(
+                accepted,
+                candidate,
+                context.page_order,
+                policy.marks,
+                &workspace,
+            ),
             &identity.affected_pages,
         );
         evidence.raster = NativeVerificationLane::from_result(
-            verify_raster::verify(accepted, candidate, context.page_order, policy.marks),
+            verify_raster::verify_with_workspace(
+                accepted,
+                candidate,
+                context.page_order,
+                policy.marks,
+                &workspace,
+            ),
             &identity.affected_pages,
         );
     }
@@ -405,6 +445,85 @@ pub(super) fn spend(remaining: &mut usize, cost: usize) -> VerifyResult<()> {
         .checked_sub(cost)
         .ok_or(NativeVerificationFailure::Budget)?;
     Ok(())
+}
+
+// @invariant: Each lane holds its reservations for the lifetime of its live workspace.
+pub(super) struct Workspace(Cell<usize>);
+
+impl Workspace {
+    pub fn new(allowance: usize) -> Self {
+        Self(Cell::new(allowance))
+    }
+
+    pub fn remaining(&self) -> usize {
+        self.0.get()
+    }
+
+    pub fn reserve(&self, bytes: usize) -> VerifyResult<Reservation<'_>> {
+        let mut reservation = self.scope();
+        reservation.grow(bytes)?;
+        Ok(reservation)
+    }
+
+    pub fn scope(&self) -> Reservation<'_> {
+        Reservation {
+            workspace: self,
+            bytes: 0,
+        }
+    }
+}
+
+pub(super) struct Reservation<'a> {
+    workspace: &'a Workspace,
+    bytes: usize,
+}
+
+impl Reservation<'_> {
+    pub fn grow(&mut self, bytes: usize) -> VerifyResult<()> {
+        let mut remaining = self.workspace.remaining();
+        spend(&mut remaining, bytes)?;
+        self.workspace.0.set(remaining);
+        self.bytes += bytes;
+        Ok(())
+    }
+
+    pub fn push<T>(&mut self, items: &mut Vec<T>, item: T) -> VerifyResult<()> {
+        if items.len() == items.capacity() {
+            let extra = items.capacity().max(4);
+            let _previous = self.workspace.reserve(items.capacity() * size_of::<T>())?;
+            self.grow(
+                extra
+                    .checked_mul(size_of::<T>())
+                    .ok_or(NativeVerificationFailure::Budget)?,
+            )?;
+            items
+                .try_reserve_exact(extra)
+                .map_err(|_| NativeVerificationFailure::Budget)?;
+        }
+        items.push(item);
+        Ok(())
+    }
+
+    pub fn tree_entry<T>(&mut self) -> VerifyResult<()> {
+        // @invariant: Allow for a new B-tree node and its slots before insertion.
+        self.grow(128 + 12 * size_of::<T>())
+    }
+
+    pub fn insert<T: Ord>(&mut self, set: &mut BTreeSet<T>, item: T) -> VerifyResult<bool> {
+        if set.contains(&item) {
+            return Ok(false);
+        }
+        self.tree_entry::<T>()?;
+        Ok(set.insert(item))
+    }
+}
+
+impl Drop for Reservation<'_> {
+    fn drop(&mut self) {
+        self.workspace
+            .0
+            .set(self.workspace.remaining() + self.bytes);
+    }
 }
 
 #[cfg(test)]
