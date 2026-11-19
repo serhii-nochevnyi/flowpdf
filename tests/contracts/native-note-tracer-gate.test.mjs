@@ -9,7 +9,7 @@ const workflow = 'Native PDF note tracer'
 const name = 'native-pdf-note-tracer'
 const url = `https://api.github.com/repos/${repo}/check-runs/73`
 
-function fixture() {
+function fixture({ expanded = true, updatedPackage = true } = {}) {
   const run = {
     id: 7, run_number: 2, run_attempt: 3, head_sha: sha, event: 'push',
     name: workflow, path: '.github/workflows/pdf-native-note-tracer.yml',
@@ -20,7 +20,15 @@ function fixture() {
     labels: ['ubuntu-24.04'], status: 'completed', conclusion: 'success',
     steps: [
       'Verify exact checkout', 'Build generated WASM and web output',
-      'Run bilingual Chromium note tracer', 'Bundle the production editor',
+      'Run bilingual Chromium note tracer',
+      ...(expanded ? [
+        'Run bilingual Chromium text replacement tracer',
+        'Run bilingual Chromium object editing tracer',
+        'Run bilingual Chromium page management tracer',
+        'Run bilingual Chromium field editing tracer',
+        'Run bilingual Chromium redaction tracer',
+      ] : []),
+      'Bundle the production editor',
       'Run built-editor Chromium smoke', 'Verify source checkout stayed unchanged',
     ].map((name, index) => ({ name, number: index + 2, status: 'completed', conclusion: 'success' })),
   }
@@ -37,7 +45,16 @@ function fixture() {
     if (argv[1] === 'show') {
       assert.ok(argv[2].startsWith(`${sha}:`))
       const path = argv[2].slice(sha.length + 1)
-      const bytes = readFileSync(new URL(`../../${path}`, import.meta.url), 'utf8')
+      let bytes = readFileSync(new URL(`../../${path}`, import.meta.url), 'utf8')
+      if (!expanded && path === run.path) {
+        bytes = bytes.replace(
+          /^      - name: Run bilingual Chromium (?:text replacement|object editing|page management|field editing|redaction) tracer\n        run: [^\n]+\n/gm,
+          '',
+        )
+      }
+      if (!updatedPackage && path === 'package.json') {
+        bytes = bytes.replace(/^    "check:phase9(?:[:a-z]+)?": .*\n/gm, '')
+      }
       return path === state.changedPath ? bytes + ' ' : bytes
     }
     if (argv[1] === 'remote') return state.origin
@@ -66,6 +83,26 @@ test('requires the configured workflow, current attempt, and exact Actions check
   })
 })
 
+test('retains the original approval and accepts reviewed expanded runs before and after the runner', () => {
+  for (const options of [{ expanded: false, updatedPackage: false }, { updatedPackage: false }, {}]) {
+    assert.equal(requirePassedCi('HEAD', fixture(options).command).sha, sha)
+  }
+  assert.throws(() => requirePassedCi('HEAD', fixture({ expanded: false }).command), /HARNESS_NOT_APPROVED/)
+})
+
+for (const step of ['text replacement', 'object editing', 'page management', 'field editing', 'redaction']) {
+  test(`requires a successful expanded ${step} step`, () => {
+    for (const conclusion of ['missing', 'skipped', 'failure']) {
+      const { job, command } = fixture()
+      const index = job.steps.findIndex(({ name }) => name.includes(step))
+      assert.ok(index >= 0)
+      if (conclusion === 'missing') job.steps.splice(index, 1)
+      else job.steps[index].conclusion = conclusion
+      assert.throws(() => requirePassedCi('HEAD', command), /JOB_NOT_PASSED/)
+    }
+  })
+}
+
 const refusals = [
   ['wrong origin', ({ state }) => { state.origin = 'https://github.com/another/flowpdf' }],
   ['unauthenticated', ({ state }) => { state.auth = false }],
@@ -79,6 +116,7 @@ const refusals = [
   ['modified build definition', ({ state }) => { state.changedPath = 'package.json' }],
   ['modified browser configuration', ({ state }) => { state.changedPath = 'vitest.config.ts' }],
   ['modified bilingual browser assertions', ({ state }) => { state.changedPath = 'web/tests/pdf-native-edit.browser.test.ts' }],
+  ['modified expanded redaction assertions', ({ state }) => { state.changedPath = 'web/tests/pdf-native-redaction.browser.test.ts' }],
   ['modified built smoke assertions', ({ state }) => { state.changedPath = 'scripts/check-native-note-built.mjs' }],
   ['pull request run', ({ run }) => { run.event = 'pull_request' }],
   ['missing mandatory step', ({ job }) => { job.steps.pop() }],

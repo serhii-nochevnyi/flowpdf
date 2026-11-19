@@ -42,6 +42,9 @@
     "check:phase7": "node scripts/check-phase7.mjs",
     "check:phase8:smoke": "node --test tests/contracts/phase8-gate.test.mjs",
     "check:phase8": "node scripts/check-phase8.mjs",
+    "check:phase9": "node scripts/check-phase9.mjs",
+    "check:phase9:smoke": "node scripts/check-phase9.mjs --smoke",
+    "check:phase9:release": "node scripts/check-phase9.mjs --strict-external",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

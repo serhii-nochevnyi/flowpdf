@@ -1,0 +1,332 @@
+{
+  "schemaVersion": 1,
+  "observedAt": "2026-11-19T00:42:18.183Z",
+  "inheritedHead": "cc39e443663acf1e194aa8717dc33d21f9a98c3f",
+  "status": "unavailable",
+  "runtime": {
+    "required": {
+      "node": "24.10.0",
+      "npm": "11.9.0",
+      "rust": "1.97.1"
+    },
+    "default": {
+      "node": "24.21.0",
+      "npm": "11.19.0"
+    },
+    "pinnedNodeProbe": "24.10.0"
+  },
+  "commands": [
+    {
+      "argv": [
+        "npm",
+        "run",
+        "check:phase9"
+      ],
+      "status": "unavailable",
+      "exitCode": 2,
+      "reason": "node-24.10.0"
+    },
+    {
+      "argv": [
+        "npm",
+        "run",
+        "build:web"
+      ],
+      "status": "unavailable",
+      "exitCode": 1,
+      "reason": "node-24.10.0"
+    },
+    {
+      "argv": [
+        "node",
+        "scripts/check-phase9.mjs",
+        "--browser"
+      ],
+      "status": "unavailable",
+      "exitCode": 2,
+      "reason": "node-24.10.0"
+    },
+    {
+      "argv": [
+        "node",
+        "scripts/check-phase9.mjs"
+      ],
+      "node": "24.10.0",
+      "status": "unavailable",
+      "exitCode": 2,
+      "reason": "npm-11.9.0"
+    },
+    {
+      "argv": [
+        "node",
+        "scripts/check-phase9.mjs",
+        "--browser"
+      ],
+      "node": "24.10.0",
+      "status": "unavailable",
+      "exitCode": 2,
+      "reason": "npm-11.9.0"
+    },
+    {
+      "argv": [
+        "npm",
+        "run",
+        "check:phase7"
+      ],
+      "status": "not-run",
+      "reason": "configured-ci-required"
+    },
+    {
+      "argv": [
+        "npm",
+        "run",
+        "check:phase8"
+      ],
+      "status": "not-run",
+      "reason": "configured-ci-required"
+    }
+  ],
+  "tasks": [
+    {
+      "id": "09-01-01",
+      "lane": "local",
+      "covers": [
+        "09-01-01",
+        "09-01-02"
+      ],
+      "status": "not-run"
+    },
+    {
+      "id": "09-18-01",
+      "lane": "local",
+      "covers": [
+        "09-18-01",
+        "09-18-02"
+      ],
+      "status": "not-run"
+    },
+    {
+      "id": "09-02-01",
+      "lane": "local",
+      "covers": [
+        "09-02-01",
+        "09-04-02",
+        "09-06-02",
+        "09-08-02",
+        "09-10-02",
+        "09-14-01"
+      ],
+      "status": "not-run"
+    },
+    {
+      "id": "09-02-02",
+      "lane": "local",
+      "covers": [
+        "09-02-02",
+        "09-14-02"
+      ],
+      "status": "not-run"
+    },
+    {
+      "id": "09-02-03",
+      "lane": "local",
+      "covers": [
+        "09-02-03",
+        "09-03-01"
+      ],
+      "status": "not-run"
+    },
+    {
+      "id": "09-19-01",
+      "lane": "local",
+      "covers": [
+        "09-19-01",
+        "09-19-02",
+        "09-05-01",
+        "09-07-01",
+        "09-09-01",
+        "09-11-01",
+        "09-15-01"
+      ],
+      "status": "not-run"
+    },
+    {
+      "id": "09-03-03",
+      "lane": "local",
+      "covers": [
+        "09-03-03"
+      ],
+      "status": "not-run"
+    },
+    {
+      "id": "09-04-01",
+      "lane": "local",
+      "covers": [
+        "09-04-01"
+      ],
+      "status": "not-run"
+    },
+    {
+      "id": "09-06-01",
+      "lane": "local",
+      "covers": [
+        "09-06-01"
+      ],
+      "status": "not-run"
+    },
+    {
+      "id": "09-08-01",
+      "lane": "local",
+      "covers": [
+        "09-08-01",
+        "09-10-01"
+      ],
+      "status": "not-run"
+    },
+    {
+      "id": "09-12-01",
+      "lane": "local",
+      "covers": [
+        "09-12-01",
+        "09-12-02",
+        "09-13-01",
+        "09-13-02"
+      ],
+      "status": "not-run"
+    },
+    {
+      "id": "09-16-01",
+      "lane": "local",
+      "covers": [
+        "09-16-01",
+        "09-20-01"
+      ],
+      "status": "not-run"
+    },
+    {
+      "id": "09-16-02",
+      "lane": "local",
+      "covers": [
+        "09-16-02",
+        "09-20-02"
+      ],
+      "status": "not-run"
+    },
+    {
+      "id": "09-17-01",
+      "lane": "smoke",
+      "covers": [
+        "09-17-01"
+      ],
+      "status": "not-run"
+    },
+    {
+      "id": "09-03-02",
+      "lane": "browser",
+      "covers": [
+        "09-03-02"
+      ],
+      "status": "not-run"
+    },
+    {
+      "id": "09-05-02",
+      "lane": "browser",
+      "covers": [
+        "09-05-02"
+      ],
+      "status": "not-run"
+    },
+    {
+      "id": "09-07-02",
+      "lane": "browser",
+      "covers": [
+        "09-07-02"
+      ],
+      "status": "not-run"
+    },
+    {
+      "id": "09-09-02",
+      "lane": "browser",
+      "covers": [
+        "09-09-02"
+      ],
+      "status": "not-run"
+    },
+    {
+      "id": "09-11-02",
+      "lane": "browser",
+      "covers": [
+        "09-11-02"
+      ],
+      "status": "not-run"
+    },
+    {
+      "id": "09-15-02",
+      "lane": "browser",
+      "covers": [
+        "09-15-02"
+      ],
+      "status": "not-run"
+    },
+    {
+      "id": "09-17-03",
+      "lane": "terminal",
+      "covers": [
+        "09-17-03"
+      ],
+      "status": "unavailable",
+      "exitCode": 2
+    }
+  ],
+  "supplemental": [
+    {
+      "id": "09-03-03",
+      "argv": [
+        "node",
+        "--test",
+        "tests/contracts/native-note-tracer-gate.test.mjs"
+      ],
+      "status": "pass",
+      "exitCode": 0,
+      "tests": 41
+    },
+    {
+      "id": "09-16-02",
+      "covers": [
+        "09-16-02",
+        "09-20-02"
+      ],
+      "argv": [
+        "node",
+        "--test",
+        "tests/contracts/pdf-native-fixtures.test.mjs"
+      ],
+      "node": "24.10.0",
+      "status": "pass",
+      "exitCode": 0,
+      "tests": 7
+    },
+    {
+      "id": "09-17-02",
+      "check": "native-corpus-adapter",
+      "node": "24.10.0",
+      "status": "pass",
+      "exitCode": 0,
+      "operations": 31
+    }
+  ],
+  "hostVerification": {
+    "status": "pending",
+    "taskIds": [
+      "09-17-01",
+      "09-17-02"
+    ]
+  },
+  "additionalEvidence": {
+    "chromium": "unavailable",
+    "assistiveTechnology": "unavailable",
+    "edge": "unavailable"
+  },
+  "localVerifierIndependence": "separate verifier with shared parsing and font code",
+  "nextRequiredInput": "Configured Node 24.10.0 and npm 11.9.0 environment with pinned Rust/WASM and Chromium"
+}
