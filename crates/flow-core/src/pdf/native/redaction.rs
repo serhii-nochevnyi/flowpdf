@@ -14,7 +14,7 @@ const POINT: i64 = 1_000;
 const MAX_COORD: i64 = 1_000_000 * POINT;
 const MAX_STREAM: usize = 512 * 1024;
 const MAX_FORM_DEPTH: usize = 8;
-pub(super) const MAX_PAGES: usize = 256;
+const MAX_PAGES: usize = 256;
 pub(super) const MAX_MARKS: usize = 1024;
 
 type Object = PdfObjectRef;
@@ -1793,12 +1793,17 @@ pub(super) fn scrub(
     apply(graph, roles, edits)
 }
 
+pub(super) fn check_raster_budget(graph: &NativePdfGraph) -> Result<()> {
+    let pages = graph.pages.len();
+    (pages <= MAX_PAGES
+        && verify_raster::within_pixel_budget((0..pages).map(|index| geometry(graph, index))))
+    .then_some(())
+    .ok_or(Budget)
+}
+
 pub(super) fn admitted(graph: &NativePdfGraph, order: &[u64]) -> bool {
     graph.original_bytes().len() <= super::verify_structure::MAX_INPUT
-        && graph.pages.len() <= MAX_PAGES
-        && verify_raster::within_pixel_budget(
-            (0..graph.pages.len()).map(|index| geometry(graph, index)),
-        )
+        && check_raster_budget(graph).is_ok()
         && scan_document(graph, order, &[]).is_ok()
 }
 
