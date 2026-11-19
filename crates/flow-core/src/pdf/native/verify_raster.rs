@@ -25,6 +25,8 @@ const MAX_DRAW_BYTES: usize = 16 * 1024 * 1024;
 const MAX_PATH_POINTS: usize = 64;
 const MAX_FORM_DEPTH: usize = 8;
 const PITCH: i64 = POINT / 2;
+const NOTE_BORDER: Pixel = [40; 3];
+const NOTE_INTERIOR: Pixel = [255, 220, 64];
 const SAMPLE_OFFSETS: [[i64; 2]; 4] = [[125, 125], [375, 125], [125, 375], [375, 375]];
 
 pub const NATIVE_PREVIEW_MAX_PIXELS: usize = 4_000_000;
@@ -1495,19 +1497,7 @@ struct RasterOutline<'a> {
 enum PreviewPaint<'a> {
     Outline(RasterOutline<'a>),
     Image(&'a Image<'a>),
-    Note,
-}
-
-impl PreviewPaint<'_> {
-    fn mixed_background(&self, bounds: Rect, pixel: Rect) -> bool {
-        if matches!(self, Self::Note) {
-            let [l, b, r, t] = bounds;
-            let inset = ((r - l).min(t - b) / 8).min(POINT);
-            let interior = [l + inset, b + inset, r - inset, t - inset];
-            return !contains(interior, pixel) && intersects(interior, pixel);
-        }
-        false
-    }
+    Note(Rect),
 }
 
 impl RasterOutline<'_> {
@@ -1638,22 +1628,28 @@ impl Grid {
                     work,
                     |p| image.at(p),
                 )?,
-                PaintKind::Note(_) => self.paint(
-                    &mut raster,
-                    paint.bounds,
-                    PreviewPaint::Note,
-                    1,
-                    work,
-                    |p| {
-                        let [l, b, r, t] = paint.bounds;
-                        let inset = ((r - l).min(t - b) / 8).min(POINT);
-                        Some(if inside([l + inset, b + inset, r - inset, t - inset], p) {
-                            [255, 220, 64]
-                        } else {
-                            [40; 3]
-                        })
-                    },
-                )?,
+                PaintKind::Note(_) => {
+                    let [l, b, r, t] = paint.bounds;
+                    let inset = ((r - l).min(t - b) / 8).min(POINT);
+                    if inset == 0 && !raster.coverage.is_empty() {
+                        return Err(UnsupportedProfile);
+                    }
+                    let interior = [l + inset, b + inset, r - inset, t - inset];
+                    self.paint(
+                        &mut raster,
+                        paint.bounds,
+                        PreviewPaint::Note(interior),
+                        1,
+                        work,
+                        |p| {
+                            Some(if inside(interior, p) {
+                                NOTE_INTERIOR
+                            } else {
+                                NOTE_BORDER
+                            })
+                        },
+                    )?;
+                }
             }
         }
         spend(work, raster.coverage.len())?;
@@ -1776,6 +1772,10 @@ impl Grid {
                     }
                     continue;
                 }
+                if let PreviewPaint::Note(interior) = paint {
+                    coverage.paint_note(pixel, bounds, interior, rect);
+                    continue;
+                }
                 if let Some(color) = color {
                     let full = if let Some(outline) = outline {
                         outline.covers_pixel(rect, work)?
@@ -1784,11 +1784,7 @@ impl Grid {
                     };
                     if full {
                         *pixel = color;
-                        *coverage = if paint.mixed_background(bounds, rect) {
-                            PreviewCoverage::MixedBackground
-                        } else {
-                            PreviewCoverage::Clear
-                        };
+                        *coverage = PreviewCoverage::Clear;
                         continue;
                     }
                 }
@@ -1829,6 +1825,57 @@ impl PreviewCoverage {
             *pixel = blended;
             *self = Self::MixedBackground;
         }
+    }
+
+    fn paint_note(&mut self, pixel: &mut Pixel, bounds: Rect, interior: Rect, rect: Rect) {
+        let [l, b, r, t] = rect;
+        let overlap = |[x, y, u, v]: Rect| {
+            (r.min(u) - l.max(x)).max(0) * (t.min(v) - b.max(y)).max(0)
+        };
+        let area = (r - l) * (t - b);
+        let covered = overlap(bounds);
+        let background = area - covered;
+        if background > 0 && !matches!(self, Self::Clear) {
+            *self = Self::Unresolved;
+            return;
+        }
+
+        let interior_area = overlap(interior);
+        let layers = [
+            (covered - interior_area, NOTE_BORDER),
+            (interior_area, NOTE_INTERIOR),
+            (background, *pixel),
+        ];
+        if let Some((_, color)) = layers.iter().find(|(weight, _)| *weight == area) {
+            *pixel = *color;
+            *self = Self::Clear;
+            return;
+        }
+
+        let sums: [i64; 3] = std::array::from_fn(|channel| {
+            layers
+                .iter()
+                .map(|(weight, color)| weight * i64::from(color[channel]))
+                .sum()
+        });
+        let round = |sum, weight| ((sum + weight / 2) / weight) as u8;
+        let blended = sums.map(|sum| round(sum, area));
+        for (weight, color) in layers {
+            if weight > 0
+                && (0..3).all(|channel| {
+                    blended[channel]
+                        == round(
+                            sums[channel] - weight * i64::from(color[channel]),
+                            area - weight,
+                        )
+                })
+            {
+                *self = Self::Unresolved;
+                return;
+            }
+        }
+        *pixel = blended;
+        *self = Self::MixedBackground;
     }
 
     fn paint_partial(&mut self, pixel: &mut Pixel, color: Option<Pixel>, ink: Option<Pixel>) {
@@ -1943,6 +1990,48 @@ mod tests {
             Grid::new(geometry, &mut MAX_TOTAL_PIXELS.clone()).err(),
             Some(Budget)
         );
+    }
+
+    #[test]
+    fn note_preview_covers_a_center_miss_or_declines_unrepresentable_ink() {
+        let crop_box = [0, 0, PITCH, PITCH];
+        let grid = Grid::new(
+            NativeRedactionGeometry {
+                media_box: crop_box,
+                crop_box,
+                rotation: 0,
+            },
+            &mut 1,
+        )
+        .unwrap();
+        let mut note = Paint {
+            bounds: [25, 25, 225, 225],
+            source: None,
+            kind: PaintKind::Note(Note {
+                id: PdfObjectRef {
+                    object_number: 1,
+                    generation: 0,
+                },
+                contents: b"Review note",
+            }),
+        };
+        assert_eq!(
+            grid.draw(std::slice::from_ref(&note), None, &mut 32),
+            Ok(vec![[240, 237, 223]])
+        );
+        for (sample, expected) in SAMPLE_OFFSETS.into_iter().zip([
+            NOTE_INTERIOR,
+            [255; 3],
+            [255; 3],
+            [255; 3],
+        ]) {
+            assert_eq!(
+                grid.draw(std::slice::from_ref(&note), Some(sample), &mut 32),
+                Ok(vec![expected])
+            );
+        }
+        note.bounds = [25, 25, 33, 33];
+        assert_eq!(grid.draw(&[note], None, &mut 32), Err(UnsupportedProfile));
     }
 
     #[test]
