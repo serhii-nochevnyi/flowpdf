@@ -15,21 +15,27 @@ fn pdf(width: u32) -> String {
 }
 
 fn fixture_pdf(objects: &[&str]) -> String {
-    let mut pdf = "%PDF-1.7\n".to_owned();
+    String::from_utf8(fixture_pdf_bytes(objects)).unwrap()
+}
+
+fn fixture_pdf_bytes(objects: &[impl AsRef<[u8]>]) -> Vec<u8> {
+    let mut pdf = b"%PDF-1.7\n".to_vec();
     let mut offsets = vec![];
-    for (index, value) in objects.iter().enumerate() {
+    for (index, object) in objects.iter().enumerate() {
         offsets.push(pdf.len());
-        pdf.push_str(&format!("{} 0 obj\n{value}\nendobj\n", index + 1));
+        pdf.extend_from_slice(format!("{} 0 obj\n", index + 1).as_bytes());
+        pdf.extend_from_slice(object.as_ref());
+        pdf.extend_from_slice(b"\nendobj\n");
     }
     let xref = pdf.len();
     let size = objects.len() + 1;
-    pdf.push_str(&format!("xref\n0 {size}\n0000000000 65535 f \n"));
+    pdf.extend_from_slice(format!("xref\n0 {size}\n0000000000 65535 f \n").as_bytes());
     for offset in offsets {
-        pdf.push_str(&format!("{offset:010} 00000 n \n"));
+        pdf.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
     }
-    pdf.push_str(&format!(
-        "trailer\n<< /Size {size} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n"
-    ));
+    pdf.extend_from_slice(
+        format!("trailer\n<< /Size {size} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n").as_bytes(),
+    );
     pdf
 }
 
@@ -472,6 +478,59 @@ fn page_preview_refuses_unresolved_image_samples() {
             assert!(reply.get("preview").is_none());
             status_only(&reply);
         }
+        assert_eq!(
+            call(native_pdf_close, bound("close", 3, base))["status"],
+            "closed"
+        );
+    }
+}
+
+#[test]
+fn accepted_preview_renders_both_jpeg_filter_forms() {
+    const JPEG_HEX: &str = concat!(
+        "ffd8ffe000104a46494600010100000100010000ffdb00430001010101010101",
+        "0101010101010101010101010101010101010101010101010101010101010101",
+        "01010101010101010101010101010101010101010101010101ffc0000b080001",
+        "000201011100ffc40014000100000000000000000000000000000009ffc4001a",
+        "1000010501000000000000000000000000080006073878b7ffda000801010000",
+        "3f003fcb2b4e4be80997a2b8d7ffd9",
+    );
+    let jpeg: Vec<u8> = (0..JPEG_HEX.len())
+        .step_by(2)
+        .map(|offset| u8::from_str_radix(&JPEG_HEX[offset..offset + 2], 16).unwrap())
+        .collect();
+    let paint = "q 1 0 0 0.5 2 2 cm /Photo Do Q";
+    let content = format!("<< /Length {} >>\nstream\n{paint}\nendstream", paint.len());
+
+    for filter in ["/DCTDecode", "[/DCTDecode]"] {
+        let mut photo = format!(
+            "<< /Type /XObject /Subtype /Image /Width 2 /Height 1 /ColorSpace /DeviceGray /BitsPerComponent 8 /Filter {filter} /Length {} >>\nstream\n",
+            jpeg.len()
+        )
+        .into_bytes();
+        photo.extend_from_slice(&jpeg);
+        photo.extend_from_slice(b"\nendstream");
+        let source = fixture_pdf_bytes(&[
+            b"<< /Type /Catalog /Pages 2 0 R >>".as_slice(),
+            b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 8 8] /Contents 4 0 R /Resources << /XObject << /Photo 5 0 R >> >> >>",
+            content.as_bytes(),
+            &photo,
+        ]);
+        let opened = call(native_pdf_open, open_request(&source));
+        assert_eq!(opened["status"], "opened", "{filter}: {opened}");
+        let base = &opened["snapshot"];
+        assert_eq!(base["redactionAdmission"], "supported", "{filter}");
+        let reply = call(
+            native_pdf_preview,
+            preview_request(2, base, base["pageState"]["order"][0].clone()),
+        );
+        assert_eq!(reply["status"], "preview", "{filter}: {reply}");
+        let rgb = reply["preview"]["rgbHex"].as_str().unwrap();
+        let start = (11 * 16 + 4) * 6;
+        let sample = |offset| u8::from_str_radix(&rgb[offset..offset + 2], 16).unwrap();
+        assert!((198..=218).contains(&sample(start)), "{filter}");
+        assert!((70..=90).contains(&sample(start + 6)), "{filter}");
         assert_eq!(
             call(native_pdf_close, bound("close", 3, base))["status"],
             "closed"
