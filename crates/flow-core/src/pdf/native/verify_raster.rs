@@ -1773,7 +1773,7 @@ impl Grid {
                         *pixel = ink;
                         *coverage = PreviewCoverage::Clear;
                     } else {
-                        coverage.paint_partial(pixel, color, None, Some(ink));
+                        coverage.paint_image_edge(pixel, ink, bounds, rect);
                     }
                     continue;
                 }
@@ -1808,6 +1808,31 @@ impl Grid {
 }
 
 impl PreviewCoverage {
+    fn paint_image_edge(&mut self, pixel: &mut Pixel, ink: Pixel, bounds: Rect, rect: Rect) {
+        if !matches!(self, Self::Clear) {
+            *self = Self::Unresolved;
+            return;
+        }
+        if *pixel == ink {
+            return;
+        }
+        let [l, b, r, t] = rect;
+        let covered = (r.min(bounds[2]) - l.max(bounds[0])) * (t.min(bounds[3]) - b.max(bounds[1]));
+        let area = (r - l) * (t - b);
+        let blended = std::array::from_fn(|channel| {
+            ((i64::from(pixel[channel]) * (area - covered)
+                + i64::from(ink[channel]) * covered
+                + area / 2)
+                / area) as u8
+        });
+        if blended == *pixel || blended == ink {
+            *self = Self::Unresolved;
+        } else {
+            *pixel = blended;
+            *self = Self::MixedBackground;
+        }
+    }
+
     fn paint_partial(
         &mut self,
         pixel: &mut Pixel,

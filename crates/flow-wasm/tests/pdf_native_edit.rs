@@ -390,17 +390,24 @@ fn page_preview_refuses_unresolved_image_samples() {
     let uniform = "AzAAzA";
     let partial = "1 0 0 RG 0.04 w 2.05 2.08 m 2.2 2.08 l S";
     let opaque = "0 0 1 rg 2 2 0.5 0.5 re f";
-    for (matrix, samples, repaint, expected) in [
-        (aligned, distinct, "", Some("417a417a417a")),
-        (compressed, distinct, "", None),
-        (compressed, distinct, partial, None),
-        (compressed, distinct, opaque, Some("0000ff")),
-        (compressed, uniform, "", Some("417a41")),
-        (compressed, uniform, partial, Some("a03d21")),
-        (edge_only, distinct, "", None),
-        (edge_only, uniform, "", Some("a0bda0")),
+    for (matrix, samples, background, repaint, expected) in [
+        (aligned, distinct, "", "", Some("417a417a417a")),
+        (compressed, distinct, "", "", None),
+        (compressed, distinct, "", partial, None),
+        (compressed, distinct, "", opaque, Some("0000ff")),
+        (compressed, uniform, "", "", Some("417a41")),
+        (compressed, uniform, "", partial, Some("a03d21")),
+        (edge_only, distinct, "", "", None),
+        (edge_only, uniform, "", "", Some("e1eae1")),
+        (
+            "0.35 0 0 0.5 2 2",
+            uniform,
+            "1 0 0 rg 2 2 0.5 0.5 re f",
+            "",
+            Some("7a552e"),
+        ),
     ] {
-        let artwork = format!("q {matrix} cm /Photo Do Q\n{repaint}");
+        let artwork = format!("{background}\nq {matrix} cm /Photo Do Q\n{repaint}");
         let source = fixture_pdf(&[
             "<< /Type /Catalog /Pages 2 0 R >>",
             "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",

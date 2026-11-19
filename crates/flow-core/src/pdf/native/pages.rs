@@ -957,7 +957,12 @@ fn link_destinations_survive(
     for &annot in cleanup.values().flatten() {
         spend(work, 1)?;
         removed.insert(annot);
-        let mut value = dict(graph, annot)?.get("Dest").ok_or(Malformed)?;
+    }
+    for &owner in &removed {
+        spend(work, 1)?;
+        let Some(mut value) = dict(graph, owner)?.get("Dest") else {
+            continue;
+        };
         while let Some(reference) = value.as_reference() {
             spend(work, 1)?;
             if trailer_refs.contains(&reference) {
@@ -1051,7 +1056,14 @@ fn incoming_link_index(
             }
         }
     }
-    for (&target, cleanup) in &index.removable {
+    let mut targets = BTreeSet::new();
+    targets.extend(index.removable.keys().copied());
+    if let Some(outlines) = outlines {
+        targets.extend(outlines.removable.keys().copied());
+    }
+    let empty_cleanup = LinkCleanup::new();
+    for target in targets {
+        let cleanup = index.removable.get(&target).unwrap_or(&empty_cleanup);
         if !index.blocked.contains(&target)
             && link_destinations_survive(graph, target, cleanup, outlines, &trailer_refs, work)?
         {
