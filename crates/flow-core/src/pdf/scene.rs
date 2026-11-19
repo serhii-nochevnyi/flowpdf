@@ -699,8 +699,10 @@ impl<'a> SceneBuilder<'a> {
             }
             "cm" => {
                 if let Some(matrix) = six_numbers(operands) {
-                    self.state.path_ctm_changed |= !self.state.path.is_empty();
-                    self.state.ctm = self.state.ctm.multiply(matrix)?;
+                    let ctm = self.state.ctm.multiply(matrix)?;
+                    self.state.path_ctm_changed |=
+                        !self.state.path.is_empty() && self.state.ctm != ctm;
+                    self.state.ctm = ctm;
                 } else {
                     return Err(PdfReadError::Syntax);
                 }
@@ -761,7 +763,7 @@ impl<'a> SceneBuilder<'a> {
                         Some((self.state.path.clone(), operator == "W*", provenance));
                 }
             }
-            "S" | "s" | "f" | "F" | "f*" | "B" | "b" | "B*" | "n" => {
+            "S" | "s" | "f" | "F" | "f*" | "B" | "B*" | "b" | "b*" | "n" => {
                 self.finish_path(operator, provenance)?;
             }
             "BT" => {
@@ -875,15 +877,60 @@ impl<'a> SceneBuilder<'a> {
         operator: &str,
         provenance: PdfSourceProvenance,
     ) -> Result<(), PdfReadError> {
-        let mut next_clip = self.state.clip;
-        if let Some((commands, even_odd, clip_provenance)) = self.state.pending_clip.take() {
+        let pending_clip = self.state.pending_clip.take();
+        let path_ctm_changed = std::mem::take(&mut self.state.path_ctm_changed);
+        self.state.current_point = None;
+
+        if path_ctm_changed {
+            if pending_clip.is_some() {
+                self.state.clip.rectangular = false;
+            }
+            if pending_clip.is_some() || (!self.state.path.is_empty() && operator != "n") {
+                self.report_partial(provenance.object_ref);
+            }
+            self.state.path.clear();
+            return Ok(());
+        }
+
+        if !self.state.path.is_empty() && operator != "n" {
+            let mut commands = transform_path(&self.state.path, self.state.ctm)?;
+            if matches!(operator, "s" | "b" | "b*")
+                && !matches!(commands.last(), Some(PdfPathCommand::ClosePath))
+            {
+                commands.push(PdfPathCommand::ClosePath);
+            }
+            let rect = path_bounds(&commands)?;
+            let stroke = matches!(operator, "S" | "s" | "B" | "B*" | "b" | "b*");
+            let clip = self.state.clip;
+            let visible = if clip.rectangular && clip.bounds == self.page.media_box {
+                self.paint_visible(rect, !stroke, &provenance)?
+            } else {
+                self.paint_visible_in_clip(rect, !stroke, &provenance)?
+            };
+            if visible {
+                // @contract: Only provenance records the fill rule for painted paths.
+                if matches!(operator, "f*" | "B*" | "b*") {
+                    self.report_partial(provenance.object_ref);
+                }
+                self.push_element(PdfSceneElement::Path {
+                    value: PdfPathElement {
+                        commands,
+                        rect,
+                        stroke,
+                        fill: !matches!(operator, "S" | "s"),
+                        provenance,
+                    },
+                })?;
+            }
+        }
+        self.state.path.clear();
+        if let Some((commands, even_odd, clip_provenance)) = pending_clip {
             let commands = transform_path(&commands, self.state.ctm)?;
             let rect = path_bounds(&commands)?;
-            if self.state.path_ctm_changed {
-                next_clip.rectangular = false;
-            } else {
-                next_clip = next_clip.intersect(rect, is_rectangular_path(&commands))?;
-            }
+            self.state.clip = self
+                .state
+                .clip
+                .intersect(rect, is_rectangular_path(&commands))?;
             self.push_element(PdfSceneElement::Clip {
                 value: PdfClipElement {
                     rect,
@@ -893,26 +940,6 @@ impl<'a> SceneBuilder<'a> {
                 },
             })?;
         }
-        if !self.state.path.is_empty() && operator != "n" {
-            let commands = transform_path(&self.state.path, self.state.ctm)?;
-            let rect = path_bounds(&commands)?;
-            let stroke = matches!(operator, "S" | "s" | "B" | "b" | "B*");
-            if self.paint_visible(rect, !stroke && !self.state.path_ctm_changed, &provenance)? {
-                self.push_element(PdfSceneElement::Path {
-                    value: PdfPathElement {
-                        commands,
-                        rect,
-                        stroke,
-                        fill: matches!(operator, "f" | "F" | "f*" | "B" | "b" | "B*"),
-                        provenance,
-                    },
-                })?;
-            }
-        }
-        self.state.clip = next_clip;
-        self.state.path.clear();
-        self.state.current_point = None;
-        self.state.path_ctm_changed = false;
         Ok(())
     }
 
@@ -934,6 +961,15 @@ impl<'a> SceneBuilder<'a> {
         if self.invocation_path.len() <= 1 && self.page.crop_box.is_none() {
             return Ok(true);
         }
+        self.paint_visible_in_clip(rect, bounded, provenance)
+    }
+
+    fn paint_visible_in_clip(
+        &mut self,
+        rect: LayoutRect,
+        bounded: bool,
+        provenance: &PdfSourceProvenance,
+    ) -> Result<bool, PdfReadError> {
         let clip = self.state.clip;
         if clip.is_empty() {
             return Ok(false);
