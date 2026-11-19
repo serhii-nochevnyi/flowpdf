@@ -333,16 +333,45 @@ fn equivalent_default_crop_keeps_content_clip_visibility_and_diagnostics() {
 }
 
 #[test]
-fn widget_readback_requires_a_single_matching_child_for_split_fields() {
-    for (children, expected) in [
-        ("[4 0 R]", Some("Ї")),
-        ("[4 0 R 4 0 R]", None),
-        ("[]", None),
+fn wide_stroke_is_partial_with_or_without_materialized_default_crop() {
+    for crop in ["", "/CropBox [0 0 200 200]"] {
+        let bytes = pdf(vec![
+            (1, b"<< /Type /Catalog /Pages 2 0 R >>".to_vec()),
+            (2, b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec()),
+            (3, format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] {crop} /Contents [4 0 R 5 0 R] >>").into_bytes()),
+            stream(4, "", b"q 10 w 20 3 m 80 3 l S Q"),
+            stream(5, "", b"20 20 m 80 20 l S"),
+        ]);
+        let reader = open_pdf(&bytes, Default::default()).unwrap();
+        let scene = read_pdf_scene(&reader, &PdfSceneRequest::default()).unwrap();
+        let page = &scene.pages[0];
+        assert!(matches!(
+            page.elements.as_slice(),
+            [PdfSceneElement::Path { value: wide }, PdfSceneElement::Path { value: narrow }]
+                if wide.stroke && wide.rect.y.raw() == 3 * 64 && narrow.stroke
+        ));
+        assert!(page.partial && scene.report.partial);
+        assert!(matches!(
+            page.report.diagnostics.as_slice(),
+            [diagnostic] if diagnostic.code == PdfReadDiagnosticCode::PartialPage
+                && diagnostic.object_number == Some(4)
+        ));
+    }
+}
+
+#[test]
+fn widget_readback_requires_a_registered_split_field_with_a_single_matching_child() {
+    for (fields, children, expected) in [
+        ("[5 0 R]", "[4 0 R]", Some("Ї")),
+        ("[5 0 R]", "[4 0 R 4 0 R]", None),
+        ("[5 0 R]", "[]", None),
+        ("[]", "[4 0 R]", None),
+        ("[5 0 R 5 0 R]", "[4 0 R]", None),
     ] {
         let bytes = pdf(vec![
             (
                 1,
-                b"<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [5 0 R] >> >>".to_vec(),
+                b"<< /Type /Catalog /Pages 2 0 R /AcroForm 7 0 R >>".to_vec(),
             ),
             (2, b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec()),
             (
@@ -358,6 +387,8 @@ fn widget_readback_requires_a_single_matching_child_for_split_fields() {
                 b"<< /FT /Tx /T (recipient) /V <FEFF0407> /Kids 6 0 R >>".to_vec(),
             ),
             (6, children.as_bytes().to_vec()),
+            (7, b"<< /Fields 8 0 R >>".to_vec()),
+            (8, fields.as_bytes().to_vec()),
         ]);
         let reader = open_pdf(&bytes, Default::default()).unwrap();
         let scene = read_pdf_scene(&reader, &PdfSceneRequest::default()).unwrap();
@@ -365,6 +396,8 @@ fn widget_readback_requires_a_single_matching_child_for_split_fields() {
             panic!("expected a widget");
         };
         assert_eq!(value.value.as_deref(), expected);
+        assert_eq!(value.name.as_deref(), expected.map(|_| "recipient"));
+        assert_eq!(value.provenance.object_ref.object_number, 4);
     }
 }
 

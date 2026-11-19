@@ -477,6 +477,8 @@ struct GraphicsState {
     path: Vec<RawPathCommand>,
     current_point: Option<(LayoutUnit, LayoutUnit)>,
     clip: SceneClip,
+    line_width: Option<LayoutUnit>,
+    miter_limit: Option<LayoutUnit>,
     path_ctm_changed: bool,
     pending_clip: Option<(Vec<RawPathCommand>, bool, PdfSourceProvenance)>,
 }
@@ -502,6 +504,8 @@ impl GraphicsState {
                 bounds,
                 rectangular: true,
             },
+            line_width: Some(Matrix::IDENTITY.a),
+            miter_limit: Some(LayoutUnit::from_raw(10 * LayoutUnit::UNITS_PER_POINT)),
             path_ctm_changed: false,
             pending_clip: None,
         }
@@ -548,6 +552,7 @@ struct SceneBuilder<'a> {
     limits: &'a PdfReaderLimits,
     page_index: u32,
     page: &'a PdfPageRecord,
+    field_counts: &'a BTreeMap<PdfObjectRef, usize>,
     elements: Vec<PdfSceneElement>,
     report: PdfReadReport,
     fonts: BTreeMap<(PdfObjectRef, String), FontMap>,
@@ -563,12 +568,14 @@ impl<'a> SceneBuilder<'a> {
         pages: &'a [PdfPageRecord],
         page_index: u32,
         page: &'a PdfPageRecord,
+        field_counts: &'a BTreeMap<PdfObjectRef, usize>,
     ) -> Self {
         Self {
             reader,
             limits: reader.limits(),
             page_index,
             page,
+            field_counts,
             elements: Vec::new(),
             report: PdfReadReport::default(),
             fonts: BTreeMap::new(),
@@ -830,6 +837,12 @@ impl<'a> SceneBuilder<'a> {
                     }
                 }
             }
+            "w" => self.state.line_width = one_number(operands).ok(),
+            "M" => self.state.miter_limit = one_number(operands).ok(),
+            "gs" => {
+                self.state.line_width = None;
+                self.state.miter_limit = None;
+            }
             "Do" => self.paint_xobject(operands, object_ref, provenance, depth, resources)?,
             "BI" | "ID" | "EI" => self.report.push(
                 PdfReadDiagnostic::blocked(
@@ -901,7 +914,12 @@ impl<'a> SceneBuilder<'a> {
             }
             let rect = path_bounds(&commands)?;
             let stroke = matches!(operator, "S" | "s" | "B" | "B*" | "b" | "b*");
-            if self.paint_visible(rect, !stroke, &provenance)? {
+            let visible = if stroke {
+                self.stroke_visible(rect, &provenance)?
+            } else {
+                self.paint_visible(rect, true, &provenance)?
+            };
+            if visible {
                 // @contract: Only provenance records the fill rule for painted paths.
                 if matches!(operator, "f*" | "B*" | "b*") {
                     self.report_partial(provenance.object_ref);
@@ -944,6 +962,53 @@ impl<'a> SceneBuilder<'a> {
             Some(self.page_index),
             Some(object_ref.object_number),
         ));
+    }
+
+    fn stroke_visible(
+        &mut self,
+        rect: LayoutRect,
+        provenance: &PdfSourceProvenance,
+    ) -> Result<bool, PdfReadError> {
+        if self.state.clip.is_empty() {
+            return Ok(false);
+        }
+        if let Some(bounds) = self.stroke_bounds(rect) {
+            return self.paint_visible(bounds, false, provenance);
+        }
+        self.report_partial(provenance.object_ref);
+        Ok(true)
+    }
+
+    fn stroke_bounds(&self, rect: LayoutRect) -> Option<LayoutRect> {
+        let width = i128::from(self.state.line_width?.raw());
+        let miter = i128::from(self.state.miter_limit?.raw());
+        let unit = i128::from(LayoutUnit::UNITS_PER_POINT);
+        if width <= 0 || miter < unit {
+            return None;
+        }
+        let Matrix { a, b, c, d, .. } = self.state.ctm;
+        let scale = (i128::from(a.raw()).abs() + i128::from(c.raw()).abs())
+            .max(i128::from(b.raw()).abs() + i128::from(d.raw()).abs());
+        // @invariant: The margin covers miter joins and projecting square caps.
+        let divisor = 2 * unit * unit;
+        let numerator = width.checked_mul(miter.max(2 * unit))?.checked_mul(scale)?;
+        let margin = LayoutUnit::from_raw(i64::try_from(numerator / divisor + 1).ok()?);
+        Some(LayoutRect {
+            x: rect.x.checked_sub(margin).ok()?,
+            y: rect.y.checked_sub(margin).ok()?,
+            width: rect
+                .width
+                .checked_add(margin)
+                .ok()?
+                .checked_add(margin)
+                .ok()?,
+            height: rect
+                .height
+                .checked_add(margin)
+                .ok()?
+                .checked_add(margin)
+                .ok()?,
+        })
     }
 
     fn paint_visible(
@@ -1540,7 +1605,9 @@ impl<'a> SceneBuilder<'a> {
         dictionary: &BTreeMap<String, PdfValue>,
     ) -> Option<BTreeMap<String, PdfValue>> {
         let parent = dictionary.get("Parent")?;
-        if parent.as_reference()? == widget
+        let parent_ref = parent.as_reference()?;
+        if parent_ref == widget
+            || self.field_counts.get(&parent_ref) != Some(&1)
             || ["FT", "T", "V"]
                 .iter()
                 .any(|key| dictionary.contains_key(*key))
@@ -1594,6 +1661,7 @@ pub fn read_pdf_scene(
         .ok_or(PdfReadError::PageCountLimit)?
         .min(pages.len());
     let mut report = reader.preflight_report();
+    let mut field_counts = BTreeMap::new();
     if let Ok(catalog) = reader.object(reader.root_for_scene())
         && let Some(dictionary) = catalog.as_dictionary()
     {
@@ -1603,11 +1671,20 @@ pub fn read_pdf_scene(
             Some(reader.root_for_scene().object_number),
             &mut report,
         );
+        if let Some(form) = dictionary.get("AcroForm")
+            && let Ok(PdfValue::Dictionary(form)) = reader.resolve(form, 1)
+            && let Some(fields) = form.get("Fields")
+            && let Ok(PdfValue::Array(fields)) = reader.resolve(fields, 2)
+        {
+            for field in fields.iter().filter_map(PdfValue::as_reference) {
+                *field_counts.entry(field).or_insert(0) += 1;
+            }
+        }
     }
     let mut scene_pages = Vec::with_capacity(end.saturating_sub(first));
     for (index, page) in pages.iter().enumerate().take(end).skip(first) {
         let page_index = u32::try_from(index).map_err(|_| PdfReadError::PageCountLimit)?;
-        match SceneBuilder::new(reader, &pages, page_index, page).run() {
+        match SceneBuilder::new(reader, &pages, page_index, page, &field_counts).run() {
             Ok(page) => {
                 report.extend(&page.report);
                 scene_pages.push(page);
@@ -1639,13 +1716,10 @@ pub fn read_pdf_scene(
 fn is_known_noop(operator: &str) -> bool {
     matches!(
         operator,
-        "w" | "J"
-            | "j"
-            | "M"
+        "J" | "j"
             | "d"
             | "ri"
             | "i"
-            | "gs"
             | "CS"
             | "cs"
             | "SC"
