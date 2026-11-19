@@ -7,6 +7,7 @@ import {
   nativeDownloadName,
   nativeObjectBounds,
   nativeFieldBounds,
+  redactedDownloadFor,
   rebindNativeField,
   rebindNativeObject,
   rebindRecoveredObjectDraft,
@@ -93,6 +94,24 @@ describe('exact redacted output', () => {
     expect(accept(result, { ...next, consumedRequest: before.consumedRequest })).toBeNull()
     expect(accept(result, { ...next, scene: before.scene })).toBeNull()
     expect(accept(result, next, [10])).toBeNull()
+  })
+
+  it('keeps the download and its evidence through an equivalent accepted readback', () => {
+    const candidate = verifiedRedactionCandidate(previous, next, result, [10, 20])!
+    const verified = { snapshot: next, candidate }
+    const readback = structuredClone(next)
+    expect(redactedDownloadFor(verified, readback)).toBe(verified)
+    expect(redactedDownloadFor(verified, { ...readback, outputHex: '26' })).toBeNull()
+    expect(redactedDownloadFor(verified, { ...readback, outputHash: hash })).toBeNull()
+    expect(redactedDownloadFor(verified, { ...readback, originStoreHash: 'b'.repeat(64) })).toBeNull()
+    for (const binding of [
+      { ...readback.binding, revision: 4 },
+      { ...readback.binding, sessionId: 2 },
+      { ...readback.binding, epoch: Array<number>(16).fill(2) },
+      { ...readback.binding, originHash: outputHash },
+    ]) {
+      expect(redactedDownloadFor(verified, { ...readback, binding })).toBeNull()
+    }
   })
 
   for (const locale of ['en', 'uk'] as const) {

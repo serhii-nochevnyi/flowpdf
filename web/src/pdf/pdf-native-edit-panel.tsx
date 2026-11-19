@@ -18,7 +18,7 @@ import {
   type NativePdfPagePreview,
 } from './pdf-native-edit-protocol.js'
 import {
-  confirmedNativeReplacement, NativePdfWorkerError, type NativePdfEditCoordinator,
+  confirmedNativeReplacement, NativePdfWorkerError, sameNativeAcceptedOutput, type NativePdfEditCoordinator,
 } from './pdf-native-edit-worker.js'
 import './pdf-native-edit-panel.css'
 
@@ -45,6 +45,10 @@ type RedactionAttempt = {
   readonly controller: AbortController
 }
 type RedactionChecks = Readonly<Record<'internal' | 'structure' | 'text' | 'raster', CheckStatus>>
+type RedactedOutput = {
+  readonly snapshot: NativePdfSnapshot
+  readonly candidate: NativePdfRedactionCandidate
+}
 const redactionLanes = ['structure', 'text', 'raster'] as const
 
 export function verifiedRedactionCandidate(
@@ -65,6 +69,10 @@ export function verifiedRedactionCandidate(
     || !sameNativeBytes(accepted.binding.epoch, before.binding.epoch)
     || !sameNativeBytes(accepted.binding.originHash, before.binding.originHash)) return null
   return candidate
+}
+
+export function redactedDownloadFor(output: RedactedOutput | null, snapshot: NativePdfSnapshot | undefined): RedactedOutput | null {
+  return output && snapshot && sameNativeAcceptedOutput(output.snapshot, snapshot) ? output : null
 }
 
 function redactionChecks(verification: NativePdfRedactionVerification | null, fallback: CheckStatus): RedactionChecks {
@@ -765,10 +773,9 @@ export function PdfNativeEditPanel({
   const [marks, setMarks] = useState<readonly RedactionMark[]>([])
   const [redactionRefusal, setRedactionRefusal] = useState<{
     readonly before: NativePdfSnapshot; readonly reason: NativePdfMessage; readonly checks: RedactionChecks
+    readonly requiresReopen: boolean
   } | null>(null)
-  const [redactedOutput, setRedactedOutput] = useState<{
-    readonly snapshot: NativePdfSnapshot; readonly candidate: NativePdfRedactionCandidate
-  } | null>(null)
+  const [redactedOutput, setRedactedOutput] = useState<RedactedOutput | null>(null)
   const pendingRedaction = useRef<RedactionAttempt | null>(null)
   const savedFieldDrafts = useRef(new Map<string, SavedFieldDraft>())
   const [composing, setComposing] = useState(false)
@@ -805,13 +812,15 @@ export function PdfNativeEditPanel({
     idle,
   )
   const snapshot = accepted?.snapshot
+  const currentRefusal = redactionRefusal?.before === snapshot ? redactionRefusal : null
+  const invalidated = service?.phase === 'invalidated' || currentRefusal?.requiresReopen === true
   const pages = snapshot?.scene.pages ?? []
   const page = pages.find((entry) => entry.id === pageId)
   const pageIndex = page === undefined ? -1 : pages.indexOf(page)
   const geometry = page?.geometry ?? null
   const notes = notesOf(page)
   const selected = notes.find((note) => note.id === draft?.note)
-  const sessionReady = busy === null && service?.phase === 'ready' && snapshot === service.accepted
+  const sessionReady = !invalidated && busy === null && service?.phase === 'ready' && snapshot === service.accepted
   const canEdit = sessionReady && marks.length === 0
   const pageState = snapshot?.pageState
   const stableId = pageState?.order[pageIndex]
@@ -873,7 +882,6 @@ export function PdfNativeEditPanel({
   const replacementError = textDraft ? nativeReplacementError(textDraft.replacement, composing) : null
   const canReplace = canEdit && !!selectedIsland && replacementError === null
   const canAdd = canEdit && page?.canAddNote === true && geometry !== null
-  const invalidated = service?.phase === 'invalidated'
   const needsReconcile = service?.phase === 'reconciliationRequired'
   const revision = snapshot?.binding.revision ?? 0
   const outputHash = snapshot ? nativeBytesHex(Uint8Array.from(snapshot.outputHash)) : ''
@@ -899,9 +907,8 @@ export function PdfNativeEditPanel({
   const activeRedaction = attempt?.action.kind === 'stage' ? attempt : null
   const liveVerification = activeRedaction && service?.redaction !== activeRedaction.priorResult
     ? service?.redaction?.verification ?? null : null
-  const currentRefusal = redactionRefusal?.before === snapshot ? redactionRefusal : null
   const preRedactionOutput = marks.length > 0 || activeRedaction !== null || currentRefusal !== null
-  const currentRedacted = !preRedactionOutput && redactedOutput?.snapshot === snapshot ? redactedOutput : null
+  const currentRedacted = preRedactionOutput ? null : redactedDownloadFor(redactedOutput, snapshot)
   const checks = activeRedaction ? redactionChecks(liveVerification, needsReconcile ? 'inconclusive' : 'pending')
     : currentRefusal?.checks ?? (currentRedacted ? redactionChecks(null, 'passed') : null)
   const extracted = pageText?.find((entry) => entry.outputHash === outputHash && entry.pageId === page?.id)
@@ -1014,7 +1021,7 @@ export function PdfNativeEditPanel({
     setStatus(null)
   }
 
-  function refuseRedaction(attempt: RedactionAttempt, result: NativePdfRedactionResult | null, cause?: unknown) {
+  function refuseRedaction(attempt: RedactionAttempt, result: NativePdfRedactionResult | null, cause?: unknown, requiresReopen = false) {
     const code = cause instanceof NativePdfWorkerError ? cause.code : null
     const unsupported = code === 'FLOW_PDF_NATIVE_UNSUPPORTED' || code === 'FLOW_PDF_NATIVE_REDACTION_MARK_INVALID'
     const budgetExceeded = code === 'FLOW_PDF_NATIVE_BUDGET_EXHAUSTED'
@@ -1028,13 +1035,15 @@ export function PdfNativeEditPanel({
           : verification?.status === 'failed' ? 'redaction.failed'
             : fallback === 'unavailable' ? 'redaction.unavailable'
               : verification?.status === 'passed' ? 'redaction.unpublished' : 'redaction.inconclusive'
-    setRedactionRefusal({ before: attempt.before, reason, checks: {
+    setRedactionRefusal({ before: attempt.before, reason, requiresReopen, checks: {
       ...checks, internal: !verification && (unsupported || budgetExceeded
         || code === 'FLOW_PDF_NATIVE_POSTCONDITION_FAILED') ? 'failed' : checks.internal,
     } })
   }
 
-  function finishRedaction(attempt: RedactionAttempt, result: NativePdfRedactionResult | null, current: NativePdfSnapshot | null) {
+  function finishRedaction(
+    attempt: RedactionAttempt, result: NativePdfRedactionResult | null, current: NativePdfSnapshot | null,
+  ): boolean {
     if (attempt.action.kind !== 'stage') {
       if (!result || result.action !== attempt.action.kind || result.published || result.candidate !== null
         || result.verification !== null || result.markCount !== attempt.nextMarks.length || current !== attempt.before
@@ -1044,12 +1053,13 @@ export function PdfNativeEditPanel({
       setMarks(attempt.nextMarks)
       setRedactionRefusal(null)
       setStatus([attempt.nextMarks.length ? 'redaction.marked' : 'redaction.empty'])
-      return
+      return false
     }
     const candidate = current && verifiedRedactionCandidate(attempt.before, current, result, attempt.pages)
     if (!current || !candidate) {
-      refuseRedaction(attempt, result)
-      return
+      const requiresReopen = result?.published === true || (current !== null && !sameNativeAcceptedOutput(attempt.before, current))
+      refuseRedaction(attempt, requiresReopen ? null : result, undefined, requiresReopen)
+      return requiresReopen
     }
     setAccepted((document) => document && { ...document, snapshot: current })
     setRedactedOutput({ snapshot: current, candidate })
@@ -1067,6 +1077,7 @@ export function PdfNativeEditPanel({
     setFieldSelection(null)
     setFieldDraft(null)
     setFieldFeedback(null)
+    return false
   }
 
   async function runRedaction(action: RedactionAction, invoker: HTMLElement | null) {
@@ -1092,9 +1103,10 @@ export function PdfNativeEditPanel({
       focusAfterRender.current = `${id}-redaction-cancel`
     }
     setBusy(applying ? 'redacting' : 'marking')
+    let requiresReopen = false
     try {
-      const result = applying ? await coordinator.applyRedaction(attempt.controller.signal) : await coordinator.markRedaction(action)
-      if (mounted.current) finishRedaction(attempt, result, coordinator.snapshot().accepted)
+      const result = applying ? await coordinator.applyRedaction(attempt.pages, attempt.controller.signal) : await coordinator.markRedaction(action)
+      if (mounted.current) requiresReopen = finishRedaction(attempt, result, coordinator.snapshot().accepted)
     } catch (cause) {
       if (!mounted.current) return
       const current = coordinator.snapshot()
@@ -1108,7 +1120,7 @@ export function PdfNativeEditPanel({
       locked.current = false
       if (mounted.current) {
         if (pageActionOwnsFocus(invoker) || document.activeElement?.id === `${id}-redaction-cancel`) {
-          focusAfterRender.current = reconcile ? reconcileId
+          focusAfterRender.current = reconcile ? reconcileId : requiresReopen ? `${id}-reopen`
             : invoker?.id || `${id}-redaction-${applying ? 'stage' : 'add'}`
         }
         setBusy(null)
@@ -1121,11 +1133,12 @@ export function PdfNativeEditPanel({
     locked.current = true
     clearFeedback()
     setBusy('reconciling')
+    let requiresReopen = false
     try {
       const result = await coordinator.reconcile()
       if (!mounted.current) return
       const readback = coordinator.snapshot().redaction
-      finishRedaction(attempt, readback, result.snapshot)
+      requiresReopen = finishRedaction(attempt, readback, result.snapshot)
     } catch (cause) {
       if (!mounted.current) return
       if (attempt.action.kind === 'stage') refuseRedaction(attempt, coordinator.snapshot().redaction, cause)
@@ -1135,7 +1148,8 @@ export function PdfNativeEditPanel({
       if (!reconcile) pendingRedaction.current = null
       locked.current = false
       if (mounted.current) {
-        if (pageActionOwnsFocus(invoker)) focusAfterRender.current = reconcile ? reconcileId : `${id}-redaction-add`
+        if (pageActionOwnsFocus(invoker)) focusAfterRender.current = reconcile ? reconcileId
+          : requiresReopen ? `${id}-reopen` : `${id}-redaction-add`
         setBusy(null)
       }
     }
@@ -1885,7 +1899,7 @@ export function PdfNativeEditPanel({
           {currentRedacted ? <button type="button" disabled={busy !== null}
             data-output-hash={outputHash} data-validator-version={currentRedacted.candidate.validatorVersion}
             aria-describedby={`${id}-redacted-output`} onClick={() => {
-              if (!accepted || locked.current || accepted.snapshot !== currentRedacted.snapshot) return
+              if (!accepted || locked.current) return
               clearFeedback()
               try {
                 const filename = nativeDownloadName(accepted.filename, false).replace(/\.pdf$/u, '-redacted.pdf')
@@ -1908,7 +1922,7 @@ export function PdfNativeEditPanel({
                 setError(['error.download'])
               }
             }}>{t(preRedactionOutput && revision > 0 ? 'redaction.downloadPrior' : 'download.edited')}</button>}
-          {invalidated && accepted && <button type="button" ref={reopenOriginal} disabled={busy !== null} onClick={() => {
+          {invalidated && accepted && <button type="button" id={`${id}-reopen`} ref={reopenOriginal} disabled={busy !== null} onClick={() => {
             const origin = accepted.snapshot.originStoreHash
             void open(accepted.filename, async () => {
               const original = await sourceStore.get(origin)
