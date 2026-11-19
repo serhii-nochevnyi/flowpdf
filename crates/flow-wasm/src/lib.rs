@@ -1904,6 +1904,23 @@ impl NativeWirePreview {
             && self.rgb_hex.len() == self.width * self.height * 6
             && native_lower_hex(&self.rgb_hex)
     }
+
+    fn matches_live_session(&self, binding: NativeBinding, origin_store_hash: &str) -> bool {
+        NATIVE_REGISTRY.with(|registry| {
+            registry.borrow().sessions.iter().any(|entry| {
+                let current = entry.session.snapshot();
+                current.binding == binding
+                    && entry.origin_store_hash == origin_store_hash
+                    && current.output_hash == self.output_hash
+                    && entry
+                        .session
+                        .redaction_mark_geometry(self.page_id)
+                        .is_ok_and(|geometry| {
+                            geometry.crop_box == self.crop_box && geometry.rotation == self.rotation
+                        })
+            })
+        })
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -2002,7 +2019,14 @@ struct NativeRegistryEntry {
     session: NativePdfSession,
     origin_store_hash: String,
     base_outputs: VecDeque<(u64, [u8; 32])>,
-    last_mark: Option<(u64, NativeWireRedactionAction)>,
+    last_mark: Option<NativeRedactionMarkReceipt>,
+}
+
+struct NativeRedactionMarkReceipt {
+    request_id: u64,
+    binding: NativeBinding,
+    accepted_hash: [u8; 32],
+    action: NativeWireRedactionAction,
 }
 
 #[derive(Default)]
@@ -2191,7 +2215,7 @@ impl NativeRegistry {
                 if entry
                     .last_mark
                     .as_ref()
-                    .is_some_and(|(id, _)| request_id <= *id)
+                    .is_some_and(|last| request_id <= last.request_id)
                 {
                     return Err(NativeSessionError::InvalidRequest.code());
                 }
@@ -2336,13 +2360,14 @@ impl NativeRegistryEntry {
             || self
                 .last_mark
                 .as_ref()
-                .is_some_and(|(id, _)| *id >= request_id)
+                .is_some_and(|last| request_id <= last.request_id)
         {
-            if self
-                .last_mark
-                .as_ref()
-                .is_some_and(|(id, last)| *id == request_id && last == &action)
-            {
+            if self.last_mark.as_ref().is_some_and(|last| {
+                last.request_id == request_id
+                    && last.binding == binding
+                    && last.accepted_hash == accepted_hash
+                    && last.action == action
+            }) {
                 return Ok(result);
             }
             return Err(NativeSessionError::InvalidRequest.code());
@@ -2391,7 +2416,12 @@ impl NativeRegistryEntry {
                     .clear_redaction_marks(binding)
                     .map_err(map_error)?,
             }
-            self.last_mark = Some((request_id, action));
+            self.last_mark = Some(NativeRedactionMarkReceipt {
+                request_id,
+                binding,
+                accepted_hash,
+                action,
+            });
             result.mark_count = self.session.redaction_marks().len();
             return Ok(result);
         }
@@ -2535,7 +2565,7 @@ impl NativeRegistryEntry {
                 if self
                     .last_mark
                     .as_ref()
-                    .is_some_and(|(id, _)| request_id <= *id) =>
+                    .is_some_and(|last| request_id <= last.request_id) =>
             {
                 return Err(NATIVE_RECONCILE);
             }
@@ -3074,13 +3104,17 @@ fn verify_native_pdf_response_inner(response_json: &str, require_live_session: b
         }
         (NativeOperation::Preview, NativeStatus::Preview) => {
             response.request_id > 0
-                && store_present
                 && response.snapshot.is_none()
                 && response.code.is_none()
                 && response
                     .binding
+                    .zip(response.origin_store_hash.as_deref())
                     .zip(response.preview.as_ref())
-                    .is_some_and(|(binding, preview)| preview.valid(binding))
+                    .is_some_and(|((binding, store_hash), preview)| {
+                        preview.valid(binding)
+                            && (!require_live_session
+                                || preview.matches_live_session(binding, store_hash))
+                    })
         }
         _ => {
             response.request_id > 0

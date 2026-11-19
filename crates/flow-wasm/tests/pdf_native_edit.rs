@@ -278,7 +278,9 @@ fn page_preview_binds_the_rotated_crop_and_current_accepted_revision() {
     let first = &base["pageState"]["order"][0];
     let second = &base["pageState"]["order"][1];
     let original_request = preview_request(2, base, first.clone());
-    let preview = call(native_pdf_preview, original_request.clone());
+    let original_reply = native_pdf_preview(original_request.to_string());
+    assert!(verify_native_pdf_worker_response(original_reply.clone()));
+    let preview: Value = serde_json::from_str(&original_reply).unwrap();
     assert_eq!(preview["status"], "preview");
     assert_eq!(preview["binding"], base["binding"]);
     assert!(preview["snapshot"].is_null());
@@ -310,6 +312,8 @@ fn page_preview_binds_the_rotated_crop_and_current_accepted_revision() {
     edit["command"] = json!({"kind":"add","page":0,"rect":[8,6,12,10],"contents":"Review note"});
     let applied = call(native_pdf_command, edit);
     assert_eq!(applied["status"], "applied");
+    assert!(!verify_native_pdf_worker_response(original_reply.clone()));
+    assert!(verify_native_pdf_response(original_reply.clone()));
     let current = &applied["snapshot"];
     assert_eq!(
         call(native_pdf_preview, original_request)["code"],
@@ -321,17 +325,44 @@ fn page_preview_binds_the_rotated_crop_and_current_accepted_revision() {
         call(native_pdf_preview, wrong_hash)["code"],
         "FLOW_PDF_NATIVE_REVISION_MISMATCH"
     );
-    let updated = call(
-        native_pdf_preview,
-        preview_request(6, current, first.clone()),
-    );
+    let updated_reply = native_pdf_preview(preview_request(6, current, first.clone()).to_string());
+    assert!(verify_native_pdf_worker_response(updated_reply.clone()));
+    let updated: Value = serde_json::from_str(&updated_reply).unwrap();
     assert_eq!(updated["status"], "preview");
     assert_eq!(updated["preview"]["outputHash"], current["outputHash"]);
     assert_ne!(updated["preview"]["rgbHex"], raster["rgbHex"]);
+    for (field, accepted, other) in [
+        ("pageId", first.clone(), json!(1)),
+        (
+            "cropBox",
+            raster["cropBox"].clone(),
+            json!([2500, 4000, 14500, 12000]),
+        ),
+        ("rotation", raster["rotation"].clone(), json!(270)),
+        ("outputHash", current["outputHash"].clone(), json!(vec![0; 32])),
+        (
+            "originStoreHash",
+            current["originStoreHash"].clone(),
+            json!("00".repeat(32)),
+        ),
+    ] {
+        let different = rehash_with_replacement(
+            &updated_reply,
+            &format!(r#""{field}":{accepted}"#),
+            &format!(r#""{field}":{other}"#),
+        );
+        assert!(verify_native_pdf_response(different.clone()), "{field}");
+        assert!(!verify_native_pdf_worker_response(different), "{field}");
+    }
     assert_eq!(
         call(native_pdf_close, bound("close", 7, current))["status"],
         "closed"
     );
+    assert!(!verify_native_pdf_worker_response(original_reply.clone()));
+    assert!(!verify_native_pdf_worker_response(updated_reply));
+    std::thread::spawn(move || assert!(verify_native_pdf_response(original_reply)))
+        .join()
+        .unwrap();
 }
 
 #[test]
@@ -654,6 +685,13 @@ fn redaction_wire_releases_only_the_verified_exact_output() {
     let mut stale = request(7, json!({"kind":"publish","candidate":candidate}));
     stale["acceptedHash"] = json!(vec![0; 32]);
     assert_eq!(call(native_pdf_redaction, stale)["status"], "failed");
+
+    let mut consumed = add(6);
+    consumed["binding"] = published["snapshot"]["binding"].clone();
+    consumed["acceptedHash"] = published["snapshot"]["outputHash"].clone();
+    let refused = call(native_pdf_redaction, consumed);
+    assert_eq!(refused["code"], "FLOW_PDF_NATIVE_REQUEST_INVALID");
+    status_only(&refused);
 }
 
 #[test]
