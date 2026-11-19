@@ -525,9 +525,14 @@ fn display_p3_png_refuses_without_mutating_the_accepted_snapshot() {
         .collect();
     let mut decoder = image::codecs::png::PngDecoder::new(Cursor::new(&encoded)).unwrap();
     let profile = decoder.icc_profile().unwrap().unwrap();
-    assert_eq!(profile.len(), 536);
+    let profile_size = u32::from_be_bytes(profile[..4].try_into().unwrap()) as usize;
+    assert_eq!(profile_size, profile.len());
     assert_eq!(&profile[16..24], b"RGB XYZ ");
     assert_eq!(&profile[36..40], b"acsp");
+    assert_eq!(
+        &profile[84..100],
+        b"\xec\xfd\xa3\x8e\x38\x85\x47\xc3\x6d\xb4\xbd\x4f\x7a\xda\x18\x2f"
+    );
     let decoded = image::DynamicImage::from_decoder(decoder).unwrap();
     assert_eq!(decoded.into_rgb8().into_raw(), [255, 0, 0]);
 
@@ -544,18 +549,11 @@ fn display_p3_png_refuses_without_mutating_the_accepted_snapshot() {
         json!({"kind":"replaceImage","target":selected,"assetHex":untagged}),
     )
     .unwrap();
-    let selected = target(&session, 0, 0);
-    let state = |session: &NativePdfSession| {
-        let snapshot = session.snapshot();
-        (
-            snapshot.binding,
-            snapshot.output_hash,
-            snapshot.scene.scene_hash,
-            snapshot.consumed_request,
-        )
-    };
-    let before = state(&session);
+    let before = session.snapshot().clone();
+    assert_eq!(before.binding.revision, 2);
+    assert_eq!(before.consumed_request, 2);
     let bytes = session.output_bytes().to_vec();
+    let selected = target(&session, 0, 0);
     let error = apply(
         &mut session,
         json!({"kind":"replaceImage","target":selected,"assetHex":tagged}),
@@ -565,7 +563,11 @@ fn display_p3_png_refuses_without_mutating_the_accepted_snapshot() {
         error,
         NativeSessionError::Object(NativeObjectRefusal::Asset)
     );
-    assert_eq!(state(&session), before);
+    let after = session.snapshot();
+    assert_eq!(after.binding, before.binding);
+    assert_eq!(after.output_hash, before.output_hash);
+    assert_eq!(after.scene.scene_hash, before.scene.scene_hash);
+    assert_eq!(after.consumed_request, before.consumed_request);
     assert_eq!(session.output_bytes(), bytes);
 }
 
