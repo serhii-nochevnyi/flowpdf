@@ -849,7 +849,7 @@ export function PdfNativeEditPanel({
   const outputHash = snapshot ? nativeBytesHex(Uint8Array.from(snapshot.outputHash)) : ''
   const previewCoordinator = snapshot && service?.accepted === snapshot && !invalidated
     && typeof coordinator?.previewPage === 'function' ? coordinator : null
-  const currentPreview = previewCoordinator && previewRead && previewRead.snapshot === snapshot
+  const currentPreview = previewRead && previewRead.snapshot === snapshot
     && previewRead.pageId === stableId ? previewRead : null
   const raster = currentPreview?.raster ?? null
   const previewVerified = raster !== null && raster === paintedPreview
@@ -1307,8 +1307,14 @@ export function PdfNativeEditPanel({
     if (geometry === null || locked.current || navigationRequest.current) return
     rememberNoteDraft()
     setComposition(false)
-    setDraft(recoveredDrafts.current.get(pageId, note.id) ?? draftFrom(note, geometry))
-    focusAfterRender.current = `${id}-contents`
+    const nextDraft = recoveredDrafts.current.get(pageId, note.id) ?? draftFrom(note, geometry)
+    const textarea = `${id}-contents`
+    if (nextDraft === draft) {
+      document.getElementById(textarea)?.focus()
+      return
+    }
+    focusAfterRender.current = textarea
+    setDraft(nextDraft)
   }
 
   function startNote() {
@@ -1975,12 +1981,13 @@ export function PdfNativeEditPanel({
               !invalidated && service?.accepted === snapshot && snapshot.redactionAdmission === 'unavailable'
                 ? 'redaction.documentUnavailable' : 'redaction.unavailable',
             )}</p>}
+            {marks.length > 0 && <>
+              <p>{t('redaction.marked')}</p>
+              <p>{t('redaction.markSummary', markSummary)}</p>
+              {redactionAvailable && <p className="native-help">{t('redaction.editLock')}</p>}
+            </>}
             {redactionAvailable && <>
-              {marks.length > 0 ? <>
-                <p>{t('redaction.marked')}</p>
-                <p>{t('redaction.markSummary', markSummary)}</p>
-                <p className="native-help">{t('redaction.editLock')}</p>
-              </> : !currentRedacted && <p>{t('redaction.empty')}</p>}
+              {marks.length === 0 && !currentRedacted && <p>{t('redaction.empty')}</p>}
               {geometry && stableId !== undefined && previewVerified && <form className="native-stack" onSubmit={(event) => {
                 event.preventDefault()
                 if (!markRect || duplicateMark) return

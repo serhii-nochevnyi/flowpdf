@@ -259,6 +259,7 @@ for (const locale of ['uk', 'en'] satisfies NativePdfLocale[]) {
       await x.fill('48')
       await y.fill('64')
       await activate(firstButton)
+      await expect.element(noteText).toHaveFocus()
       await expect.element(noteText).toHaveValue(draftText)
       await activate(notes().find((entry) => entry !== firstButton)!)
       await expect.element(noteText).toHaveValue('Confirm delivery date')
