@@ -98,6 +98,7 @@ export interface NativePdfVerifiedPageText {
   readonly pageId: number
   readonly text: readonly { readonly value: string; readonly lang?: string }[]
   readonly lang?: string
+  readonly partial?: boolean
 }
 
 export interface PdfNativeEditPanelProps {
@@ -106,7 +107,26 @@ export interface PdfNativeEditPanelProps {
   readonly locale?: NativePdfLocale
   readonly initialDocument?: NativePdfAcceptedDocument
   readonly pageText?: readonly NativePdfVerifiedPageText[]
+  readonly extractPageText?: (snapshot: NativePdfSnapshot, pageId: number, signal: AbortSignal) =>
+    Promise<NativePdfVerifiedPageText | null>
 }
+
+const pageTextLabels = {
+  en: {
+    pending: 'Reading page text…',
+    unavailable: 'Text extraction is unavailable for this page.',
+    empty: 'No recognized text is available on this page.',
+    limited: 'Text extraction was incomplete. Only recognized text is shown.',
+    incomplete: 'Text extraction was incomplete. No recognized text is available on this page.',
+  },
+  uk: {
+    pending: 'Вилучення тексту сторінки…',
+    unavailable: 'Вилучення тексту для цієї сторінки недоступне.',
+    empty: 'На цій сторінці немає доступного розпізнаного тексту.',
+    limited: 'Текст вилучено не повністю. Показано лише розпізнаний текст.',
+    incomplete: 'Текст вилучено не повністю. На цій сторінці немає доступного розпізнаного тексту.',
+  },
+} as const
 
 interface Draft {
   readonly note: number | null
@@ -752,7 +772,7 @@ const pageRefusalDetails = {
 } as const
 
 export function PdfNativeEditPanel({
-  createCoordinator, sourceStore, locale = 'uk', initialDocument, pageText,
+  createCoordinator, sourceStore, locale = 'uk', initialDocument, pageText, extractPageText,
 }: PdfNativeEditPanelProps) {
   const id = useId()
   const t = (key: NativePdfMessage, parameters?: Message[1]) => nativePdfText(locale, key, parameters)
@@ -777,6 +797,9 @@ export function PdfNativeEditPanel({
   const [draft, setDraft] = useState<Draft | null>(null)
   const [previewRead, setPreviewRead] = useState<{
     readonly snapshot: NativePdfSnapshot; readonly pageId: number; readonly raster: NativePdfPagePreview | null
+  } | null>(null)
+  const [textRead, setTextRead] = useState<{
+    readonly snapshot: NativePdfSnapshot; readonly pageId: number; readonly result: NativePdfVerifiedPageText | null
   } | null>(null)
   const [previewRetry, setPreviewRetry] = useState(0)
   const [paintedPreview, setPaintedPreview] = useState<NativePdfPagePreview | null>(null)
@@ -940,7 +963,18 @@ export function PdfNativeEditPanel({
   const currentRedacted = preRedactionOutput ? null : redactedDownloadFor(redactedOutput, snapshot)
   const checks = activeRedaction ? redactionChecks(liveVerification, needsReconcile ? 'inconclusive' : 'pending')
     : currentRefusal?.checks ?? (currentRedacted ? redactionChecks(null, 'passed') : null)
-  const extracted = pageText?.find((entry) => entry.outputHash === outputHash && entry.pageId === page?.id)
+  const textSnapshot = sessionReady && !navigationBlocked && page && extractPageText ? snapshot : undefined
+  const currentTextRead = textSnapshot && textRead?.snapshot === textSnapshot && textRead.pageId === pageId ? textRead : null
+  const extracted = extractPageText ? currentTextRead?.result
+    : !navigationBlocked && (sessionReady || (coordinator === null && accepted === initialDocument))
+      ? pageText?.find((entry) => entry.outputHash === outputHash && entry.pageId === page?.id)
+      : undefined
+  const textPending = textSnapshot !== undefined && currentTextRead === null
+  const textLabels = pageTextLabels[locale]
+  const textStatus = extracted
+    ? extracted.text.length ? (extracted.partial ? textLabels.limited : t('projection.partial'))
+      : extracted.partial ? textLabels.incomplete : textLabels.empty
+    : textPending ? textLabels.pending : textLabels.unavailable
   const geometrySize: Size = geometry === null ? [0, 0] :
     selected === undefined
       ? [Math.min(24, geometry.bounds[2] - geometry.bounds[0]), Math.min(24, geometry.bounds[3] - geometry.bounds[1])]
@@ -951,6 +985,21 @@ export function PdfNativeEditPanel({
   const noteLimit = t('limit.bytes', { count: NATIVE_PDF_LIMITS.noteBytes })
   const pdfLimit = t('limit.bytes', { count: NATIVE_PDF_LIMITS.pdfBytes })
   const position = page === undefined ? '' : t('navigation.position', { page: pageIndex + 1, total: pages.length })
+
+  useLayoutEffect(() => {
+    setTextRead(null)
+    if (!textSnapshot || !extractPageText || !coordinator) return
+    const controller = new AbortController()
+    const settle = (result: NativePdfVerifiedPageText | null) => {
+      const live = coordinator.snapshot()
+      if (controller.signal.aborted || locked.current || navigationRequest.current
+        || live.phase !== 'ready' || live.accepted !== textSnapshot) return
+      setTextRead({ snapshot: textSnapshot, pageId, result:
+        result?.outputHash === outputHash && result.pageId === pageId ? result : null })
+    }
+    void extractPageText(textSnapshot, pageId, controller.signal).then(settle, () => settle(null))
+    return () => controller.abort()
+  }, [coordinator, extractPageText, outputHash, pageId, textSnapshot])
 
   useEffect(() => {
     if (!previewCoordinator?.previewPage || !snapshot || stableId === undefined || !geometry || hasPreview) return
@@ -2168,12 +2217,14 @@ export function PdfNativeEditPanel({
             </dl>}
           </section>}
         </div>
-        {page && <section className="native-stack" aria-label={t('projection.label')}>
-          <div className="native-stack" lang={extracted?.lang ?? ''}>
-            {extracted?.text.map((fragment, index) =>
-              <p key={index} lang={fragment.lang} dir="auto">{fragment.value}</p>)}
-          </div>
-          <p>{extracted ? t(extracted.text.length ? 'projection.partial' : 'projection.empty') : t('projection.unavailable')}</p>
+        {page && <div className="native-stack">
+          <section className="native-stack" aria-label={t('projection.label')} aria-busy={textPending}>
+            {extracted && <div className="native-stack" lang={extracted.lang ?? ''}>
+              {extracted.text.map((fragment, index) =>
+                <p key={index} lang={fragment.lang} dir="auto">{fragment.value}</p>)}
+            </div>}
+            <p aria-live="polite">{textStatus}</p>
+          </section>
           {objectPage && <section className="native-stack native-object-tools" aria-labelledby={`${id}-objects`}
             aria-describedby={objectPageReason ? `${id}-object-page-reason` : undefined}>
             <h3 id={`${id}-objects`} tabIndex={-1}>{t('object.title')}</h3>
@@ -2541,7 +2592,7 @@ export function PdfNativeEditPanel({
               }}>{t('note.remove')}</button>}
             </div>
           </fieldset>}
-        </section>}
+        </div>}
       </div>
       <dialog ref={dialog} onCancel={(event) => { event.preventDefault(); setConfirm(null) }}
         aria-labelledby={`${id}-remove-title`} aria-describedby={`${id}-remove-body ${id}-remove-target`}>
