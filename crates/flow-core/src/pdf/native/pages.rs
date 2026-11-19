@@ -960,9 +960,15 @@ fn link_destinations_survive(
     }
     for &owner in &removed {
         spend(work, 1)?;
-        let Some(mut value) = dict(graph, owner)?.get("Dest") else {
+        let values = dict(graph, owner)?;
+        if explicit_destination(graph, values, work)?
+            .and_then(|destination| destination.first())
+            .and_then(PdfValue::as_reference)
+            != Some(target)
+        {
             continue;
-        };
+        }
+        let mut value = values.get("Dest").ok_or(Malformed)?;
         while let Some(reference) = value.as_reference() {
             spend(work, 1)?;
             if trailer_refs.contains(&reference) {

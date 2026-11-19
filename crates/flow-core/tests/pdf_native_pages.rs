@@ -520,16 +520,31 @@ fn retained_bookmark_destination_blocks_only_its_target() {
                     "<< /Type /Pages /Kids [3 0 R 4 0 R 5 0 R] /Count 3 /MediaBox [0 0 300 500] /Resources <<>> >>",
                 ),
                 (0, "<< /Type /Page /Parent 2 0 R >>"),
-                (0, "<< /Type /Page /Parent 2 0 R >>"),
+                (0, "<< /Type /Page /Parent 2 0 R /Annots [12 0 R] >>"),
                 (0, &format!("<< /Type /Page /Parent 2 0 R {annotations} >>")),
                 (
                     0,
                     "<< /Type /Annot /Subtype /Link /P 5 0 R /Rect [20 30 50 60] /Dest 7 0 R >>",
                 ),
                 (0, "[3 0 R /Fit]"),
-                (0, "<< /Type /Outlines /First 9 0 R /Last 9 0 R /Count 1 >>"),
-                (0, "<< /Title (Chapter) /Parent 8 0 R /Dest 10 0 R >>"),
+                (
+                    0,
+                    "<< /Type /Outlines /First 9 0 R /Last 13 0 R /Count 2 >>",
+                ),
+                (
+                    0,
+                    "<< /Title (Chapter) /Parent 8 0 R /Next 13 0 R /Dest 10 0 R >>",
+                ),
                 (0, "[3 0 R /Fit]"),
+                (0, "[5 0 R /Fit]"),
+                (
+                    0,
+                    "<< /Type /Annot /Subtype /Link /P 4 0 R /Rect [20 30 50 60] /Dest 11 0 R >>",
+                ),
+                (
+                    0,
+                    "<< /Title (Surviving) /Parent 8 0 R /Prev 9 0 R /Dest 11 0 R >>",
+                ),
             ],
             " /FlowPDFNavigation 10 0 R",
         );
@@ -548,6 +563,12 @@ fn retained_bookmark_destination_blocks_only_its_target() {
         session
             .apply_page(prior.binding, 2, &command("deletePage", 1, &prior))
             .unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(session.output_bytes())
+                .matches("/Title")
+                .count(),
+            2
+        );
         assert_eq!(
             session.snapshot().page_state.order,
             [prior.page_state.order[0], prior.page_state.order[2]]
