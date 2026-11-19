@@ -142,7 +142,7 @@ export function nativePageMoveRefusals(state: NativePdfPageState, index: number)
     for (let position = index + step; position >= 0 && position < pages.length; position += step) {
       const destination = pages[position]!
       const neighbor = pages[position - step]!
-      // The destination page shifts one slot toward the source. It can change parents too.
+      // @invariant: A page shifted toward the source can also change parents.
       if (destination.parent !== neighbor.parent) displacedRefusal ??= destination.reparent
       refusals[position] = positionsLocked ? 'structure'
         : (source.parent !== destination.parent ? source.reparent : undefined) ?? displacedRefusal

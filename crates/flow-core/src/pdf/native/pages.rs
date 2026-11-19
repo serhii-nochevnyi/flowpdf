@@ -183,7 +183,7 @@ pub(super) fn restrictions(
                 };
                 object.is_some_and(|annot| annotation_profile(graph, page.object, annot).is_ok())
             });
-            // A catalog reference outside the page tree cannot be removed by page deletion.
+            // @invariant: Page deletion preserves catalog references outside the page tree.
             let catalog_dependency = graph.reverse.get(&page.object).is_some_and(|owners| {
                 owners.contains(&catalog)
                     || ["Dests", "Names"].iter().any(|key| {
@@ -209,7 +209,7 @@ pub(super) fn restrictions(
             })
         })
         .collect::<Result<_, NativeEditError>>()?;
-    // For an unrestricted single-parent tree the existing page state is sufficient.
+    // @contract: Unrestricted single-parent trees omit the optional restrictions.
     Ok((positions_locked
         || pages.iter().any(|page| {
             page.parent != pages[0].parent
