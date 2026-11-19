@@ -329,6 +329,53 @@ fn page_preview_binds_the_rotated_crop_and_current_accepted_revision() {
 }
 
 #[test]
+fn page_preview_declines_ambiguous_partial_paint_overlaps() {
+    let fine = "1 0 0 RG 0.04 w 1 2.08 m 4 2.08 l S";
+    let partial = "0 0 1 rg 2.1 2.04 0.3 0.35 re f";
+    let opaque = "0 0 1 rg 2 2 1 1 re f";
+    for (artwork, expected) in [
+        (format!("{fine}\n{partial}"), None),
+        (format!("{partial}\n{fine}"), None),
+        (format!("{fine}\n{opaque}"), Some("0000ff")),
+        (format!("{fine}\n{partial}\n{opaque}"), Some("0000ff")),
+        (format!("{fine}\n{fine}"), Some("ff8080")),
+    ] {
+        let source = fixture_pdf(&[
+            "<< /Type /Catalog /Pages 2 0 R >>",
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 8 8] /Contents 4 0 R >>",
+            &format!(
+                "<< /Length {} >>\nstream\n{artwork}\nendstream",
+                artwork.len()
+            ),
+        ]);
+        let opened = call(native_pdf_open, open_request(source.as_bytes()));
+        assert_eq!(opened["status"], "opened", "{opened}");
+        let base = &opened["snapshot"];
+        let page = base["pageState"]["order"][0].clone();
+        let reply = call(native_pdf_preview, preview_request(2, base, page));
+        if let Some(expected) = expected {
+            assert_eq!(reply["status"], "preview", "{reply}");
+            let rgb = reply["preview"]["rgbHex"].as_str().unwrap();
+            let pixel = |x: usize, y: usize| &rgb[(y * 16 + x) * 6..][..6];
+            assert_eq!(pixel(2, 11), "ff8080");
+            assert_eq!(pixel(4, 11), expected);
+        } else {
+            assert_eq!(
+                reply["code"], "FLOW_PDF_NATIVE_TARGET_UNAVAILABLE",
+                "{reply}"
+            );
+            assert!(reply["snapshot"].is_null());
+            assert!(reply.get("preview").is_none());
+        }
+        assert_eq!(
+            call(native_pdf_close, bound("close", 3, base))["status"],
+            "closed"
+        );
+    }
+}
+
+#[test]
 fn redaction_admission_follows_the_accepted_pdf() {
     let paint = "q 0 0 80 80 re W n 10 10 10 10 re f Q";
     let clipped = fixture_pdf(&[
