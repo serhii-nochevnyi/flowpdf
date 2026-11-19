@@ -682,6 +682,9 @@ export class NativePdfEditCoordinator {
     if (this.state.phase !== 'ready' || previous === null || this.queue.length !== 0 || this.redactionJob !== null) {
       throw new NativePdfWorkerError('FLOW_PDF_NATIVE_SESSION_UNAVAILABLE')
     }
+    if ((action.kind === 'addMark' || action.kind === 'stage') && previous.redactionAdmission !== 'supported') {
+      throw new NativePdfWorkerError('FLOW_PDF_NATIVE_UNSUPPORTED')
+    }
     const request = {
       ...this.boundRequest('redaction', this.nextRequestId++, previous),
       acceptedHash: previous.outputHash, action,

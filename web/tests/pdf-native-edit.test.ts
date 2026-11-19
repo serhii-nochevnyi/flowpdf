@@ -65,6 +65,7 @@ function openReply(request: NativePdfRequest): Extract<NativePdfResponse, { oper
   const snapshot: NativePdfVerifiedSnapshot = {
     binding, originStoreHash: request.originStoreHash, outputHash: hash(1), consumedRequest: 0,
     outputHex: request.bytesHex,
+    redactionAdmission: 'supported',
     pageState: { order: [196608], selected: null, canDelete: false, maxPosition: 0 },
     scene: {
       outputHash: hash(1), sceneHash: hash(10), pages: [
@@ -729,6 +730,22 @@ function redactionAction(dispatch: NativePdfWorkerRequest): NativePdfRedactionAc
 
 describe('native redaction quarantine', () => {
   afterEach(() => { vi.useRealTimers() })
+
+  it('uses admission from the latest accepted revision before dispatching marks or apply', async () => {
+    const lane = fakePort()
+    const before = await opened(lane)
+    expect(before.redactionAdmission).toBe('supported')
+    const editing = lane.coordinator.command(note('ordinary edit'))
+    const dispatch = await lane.take()
+    const reply = addReply(dispatch.request, before)
+    lane.deliver(dispatch, { ...reply, snapshot: { ...reply.snapshot, redactionAdmission: 'unavailable' } })
+    const after = await editing
+    expect(after.binding.revision).toBe(before.binding.revision + 1)
+    await expect(lane.coordinator.markRedaction(mark)).rejects.toMatchObject({ code: 'FLOW_PDF_NATIVE_UNSUPPORTED' })
+    await expect(lane.coordinator.applyRedaction()).rejects.toMatchObject({ code: 'FLOW_PDF_NATIVE_UNSUPPORTED' })
+    expect(lane.sent).toHaveLength(0)
+    expect(lane.coordinator.snapshot()).toMatchObject({ phase: 'ready', accepted: after })
+  })
 
   it.each(['operation', 'response verifier'] as const)('stops processing after a WASM %s throws during verification', async (failure) => {
     const posted: NativePdfWorkerResponse[] = []

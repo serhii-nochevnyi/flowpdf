@@ -50,6 +50,7 @@ const font = pinnedAsset("NotoSans-Regular.ttf",
   "b85c38ecea8a7cfb39c24e395a4007474fa5a4fc864f6ee33309eb4948d232d5");
 pinnedAsset("NotoSans-OFL.txt",
   "12e55f73bf39d88d7f2e37e094ad30b8f6752b3d25391ac23978b1e5e35ca66b");
+const encodedFont = deflateSync(font, { level: 9 });
 const cmap = `/CIDInit /ProcSet findresource begin
 12 dict begin
 begincmap
@@ -76,7 +77,7 @@ const resources = [
   [0, "<< /Type /FontDescriptor /FontName /NotoSans-Regular /Flags 32 " +
     "/FontBBox [-621 -389 2800 1067] /ItalicAngle 0 /Ascent 1069 /Descent -293 " +
     "/CapHeight 714 /StemV 80 /FontFile2 8 0 R >>"],
-  [0, stream(`/Length ${font.length} /Length1 ${font.length}`, font)],
+  [0, stream(`/Filter /FlateDecode /Length ${encodedFont.length} /Length1 ${font.length}`, encodedFont)],
   [0, stream(`/Length ${Buffer.byteLength(cmap)}`, cmap)],
 ];
 

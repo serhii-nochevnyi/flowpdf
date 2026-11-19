@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { test } from "node:test";
 import { isDeepStrictEqual } from "node:util";
+import { inflateSync } from "node:zlib";
 
 const root = new URL("../../", import.meta.url);
 const corpus = "fixtures/pdf-native/";
@@ -25,14 +26,13 @@ const bind = (record, path) => {
 };
 
 function verifyEmbeddedFont(pdf, font, id) {
-  const streamHeader = Buffer.from(
-    `/Length ${font.length} /Length1 ${font.length} >>\nstream\n`,
-  );
-  const headerOffset = pdf.indexOf(streamHeader);
-  assert.ok(headerOffset >= 0, id + " font stream missing");
-  const start = headerOffset + streamHeader.length;
-  const end = start + font.length;
-  assert.ok(pdf.subarray(start, end).equals(font), id + " embedded font mismatch");
+  const headerPattern = new RegExp(`/Filter /FlateDecode /Length (\\d+) /Length1 ${font.length} >>\nstream\n`);
+  const header = headerPattern.exec(pdf.toString("latin1"));
+  assert.ok(header, id + " font stream missing");
+  const start = header.index + header[0].length;
+  const end = start + Number(header[1]);
+  const decoded = inflateSync(pdf.subarray(start, end), { maxOutputLength: font.length });
+  assert.ok(decoded.equals(font), id + " embedded font mismatch");
   const streamEnd = Buffer.from("\nendstream\nendobj\n");
   assert.ok(pdf.subarray(end, end + streamEnd.length).equals(streamEnd), id + " font stream boundary");
 }
@@ -317,4 +317,54 @@ test("redaction accounts for sensitive families and preserves control content", 
   ], "retained annotation");
   same(entry.fieldReadback, [], "forms excluded from positive scrub");
   same(entry.destinations, [], "redaction has no destinations");
+});
+
+const wasmModule = new URL("web/generated/flow_wasm.js", root);
+const wasmBinary = new URL("web/generated/flow_wasm_bg.wasm", root);
+const missingWasm = !existsSync(wasmModule) || !existsSync(wasmBinary);
+
+test("the preservation fixture completes its note lifecycle with built WASM", {
+  skip: missingWasm && "Build the production WASM module to run the fixture lifecycle",
+}, async () => {
+  const wasm = await import(wasmModule.href);
+  wasm.initSync({ module: readFileSync(wasmBinary) });
+  const input = bytes(corpus + "notes-preservation.pdf");
+  const originStoreHash = sha256(input);
+  let requestId = 0;
+  const exchange = (handler, operation, payload) => {
+    const response = handler(JSON.stringify({
+      protocolVersion: 1, requestId: ++requestId, originStoreHash, operation, ...payload,
+    }));
+    assert.ok(wasm.verify_native_pdf_response(response), operation + " verification");
+    return JSON.parse(response);
+  };
+  const opened = exchange(wasm.native_pdf_open, "open", {
+    epoch: Array(16).fill(1), bytesHex: input.toString("hex"),
+  });
+  assert.equal(opened.status, "opened");
+  assert.equal(opened.snapshot.outputHex, input.toString("hex"));
+  let snapshot = opened.snapshot;
+  let note;
+  const commands = {
+    addNote: ({ page, rectPt, contents }) => ({ kind: "add", page: page - 1, rect: rectPt, contents }),
+    editNote: ({ contents }) => ({ kind: "edit", note, contents }),
+    moveNote: ({ page, rectPt }) => ({ kind: "move", note, page: page - 1, rect: rectPt }),
+    removeNote: () => ({ kind: "remove", note }),
+  };
+  const expectations = json(corpus + "notes-preservation.expected.json");
+  for (const { operation, noteReadback } of expectations.operations.slice(1)) {
+    const { binding, outputHash } = snapshot;
+    const result = exchange(wasm.native_pdf_command, "command", {
+      binding, outputHash, command: commands[operation](noteReadback[0]),
+    });
+    assert.equal(result.status, "applied", operation + " " + result.code);
+    snapshot = result.snapshot;
+    assert.equal(snapshot.binding.revision, binding.revision + 1, operation);
+    const notes = snapshot.scene.pages.flatMap((page) => page.annotations
+      .filter(({ kind }) => kind === "plainNote")
+      .map(({ id, rect, contents }) => ({ id, page: page.id + 1, rectPt: rect, contents })));
+    assert.deepEqual(notes.map(({ page, rectPt, contents }) => ({ page, rectPt, contents })), noteReadback);
+    note = notes[0]?.id;
+  }
+  assert.equal(exchange(wasm.native_pdf_close, "close", { binding: snapshot.binding }).status, "closed");
 });

@@ -189,12 +189,14 @@ export interface NativePdfSnapshot {
   readonly outputHash: readonly number[]
   readonly consumedRequest: number
   readonly pageState?: NativePdfPageState
+  readonly redactionAdmission?: 'supported' | 'unavailable'
   readonly scene: NativePdfNoteScene
   readonly outputHex: string
   readonly fields?: readonly NativePdfFieldView[]
 }
 
 export interface NativePdfVerifiedSnapshot extends NativePdfSnapshot {
+  readonly redactionAdmission: NonNullable<NativePdfSnapshot['redactionAdmission']>
   readonly pageState: NativePdfPageState
 }
 
@@ -727,12 +729,13 @@ function fieldViews(value: unknown, count: number): boolean {
 
 function snapshot(value: unknown): value is NativePdfVerifiedSnapshot {
   if (typeof value !== 'object' || value === null) return false
-  const keys = ['binding', 'originStoreHash', 'outputHash', 'consumedRequest', 'scene', 'outputHex', 'pageState']
+  const keys = ['binding', 'originStoreHash', 'outputHash', 'consumedRequest', 'scene', 'outputHex', 'pageState', 'redactionAdmission']
   if (Object.hasOwn(value, 'fields')) keys.push('fields')
   return shape(value, ...keys)
     && binding(value.binding) && isNativeStoreHash(value.originStoreHash) && hash(value.outputHash)
     && integer(value.consumedRequest, value.binding.revision) && scene(value.scene) && bytesHex(value.outputHex)
     && pageState(value.pageState, value.scene.pages.length)
+    && (value.redactionAdmission === 'supported' || value.redactionAdmission === 'unavailable')
     && (!Object.hasOwn(value, 'fields') || fieldViews(value.fields, value.scene.pages.length))
     && sameNativeBytes(value.outputHash, value.scene.outputHash)
     && (value.binding.revision === 0) === (value.consumedRequest === 0)
