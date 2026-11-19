@@ -422,11 +422,30 @@ fn imported_notes_keep_identity_across_renumbering_and_aliases_remain_read_only(
     assert_eq!(session.output_bytes(), bytes);
 }
 
+fn pdf_with_objects(objects: &[&str]) -> String {
+    let mut source = "%PDF-1.7\n".to_owned();
+    let mut offsets = Vec::new();
+    for (index, object) in objects.iter().enumerate() {
+        offsets.push(source.len());
+        source.push_str(&format!("{} 0 obj\n{object}\nendobj\n", index + 1));
+    }
+    let xref = source.len();
+    let size = objects.len() + 1;
+    source.push_str(&format!("xref\n0 {size}\n0000000000 65535 f \n"));
+    for offset in offsets {
+        source.push_str(&format!("{offset:010} 00000 n \n"));
+    }
+    source.push_str(&format!(
+        "trailer\n<< /Root 1 0 R /Size {size} >>\nstartxref\n{xref}\n%%EOF\n"
+    ));
+    source
+}
+
 #[test]
 fn public_scene_preserves_indirect_arrays_after_note_edit() {
     use flow_core::pdf::{PdfSceneElement, PdfSceneRequest, open_pdf, read_pdf_scene};
 
-    let objects = [
+    let source = pdf_with_objects(&[
         "<< /Type /Catalog /Pages 2 0 R >>",
         "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
         "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Contents 4 0 R /Annots 7 0 R >>",
@@ -436,21 +455,7 @@ fn public_scene_preserves_indirect_arrays_after_note_edit() {
         "[9 0 R 8 0 R]",
         "<< /Type /Annot /Subtype /Text /Rect [60 60 70 70] /Contents (Original) /P 3 0 R >>",
         "<< /Type /Annot /Subtype /Link /Rect [80 80 90 90] /Dest [3 0 R /Fit] >>",
-    ];
-    let mut source = "%PDF-1.7\n".to_owned();
-    let mut offsets = Vec::new();
-    for (index, object) in objects.iter().enumerate() {
-        offsets.push(source.len());
-        source.push_str(&format!("{} 0 obj\n{object}\nendobj\n", index + 1));
-    }
-    let xref = source.len();
-    source.push_str("xref\n0 10\n0000000000 65535 f \n");
-    for offset in offsets {
-        source.push_str(&format!("{offset:010} 00000 n \n"));
-    }
-    source.push_str(&format!(
-        "trailer\n<< /Root 1 0 R /Size 10 >>\nstartxref\n{xref}\n%%EOF\n"
-    ));
+    ]);
     let mut session =
         NativePdfSession::open_scoped(source.as_bytes(), NativeEditLimits::default(), [1; 16])
             .unwrap();
@@ -487,6 +492,61 @@ fn public_scene_preserves_indirect_arrays_after_note_edit() {
         );
         assert!(
             matches!(second, PdfSceneElement::Path { value } if value.fill && value.rect.x.raw() == 30 * 64)
+        );
+    }
+}
+
+#[test]
+fn public_reader_keeps_null_contents_pages_blank_after_note_edit() {
+    use flow_core::pdf::{PdfSceneElement, PdfSceneRequest, open_pdf, read_pdf_scene};
+
+    for contents in ["null", "6 0 R"] {
+        let source = pdf_with_objects(&[
+            "<< /Type /Catalog /Pages 2 0 R >>",
+            "<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 /MediaBox [0 0 200 200] >>",
+            &format!("<< /Type /Page /Parent 2 0 R /Contents {contents} >>"),
+            "<< /Type /Page /Parent 2 0 R /Contents 5 0 R >>",
+            "<< /Length 17 >>\nstream\n10 20 10 10 re f\n\nendstream",
+            "null",
+        ]);
+        let mut session =
+            NativePdfSession::open_scoped(source.as_bytes(), NativeEditLimits::default(), [1; 16])
+                .unwrap();
+        session
+            .apply(
+                session.snapshot().binding,
+                1,
+                &NativeNoteCommand::Add {
+                    page: session.snapshot().scene.pages[1].id,
+                    rect: [60, 60, 70, 70],
+                    contents: "Review note".into(),
+                },
+            )
+            .unwrap();
+
+        let reader = open_pdf(session.output_bytes(), Default::default()).unwrap();
+        assert_eq!(reader.summary().unwrap().page_count, 2);
+        let scene = read_pdf_scene(
+            &reader,
+            &PdfSceneRequest {
+                first_page: 0,
+                page_count: 2,
+            },
+        )
+        .unwrap();
+        let [blank, populated] = scene.pages.as_slice() else {
+            panic!("expected both pages in the public scene");
+        };
+        assert!(blank.elements.is_empty());
+        assert!(!blank.partial);
+        let [note, path] = populated.elements.as_slice() else {
+            panic!("expected the added note and the original path");
+        };
+        assert!(
+            matches!(note, PdfSceneElement::Annotation { value } if value.subtype.as_deref() == Some("Text"))
+        );
+        assert!(
+            matches!(path, PdfSceneElement::Path { value } if value.fill && value.rect.x.raw() == 10 * 64)
         );
     }
 }
