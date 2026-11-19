@@ -173,7 +173,7 @@ impl NativePdfGraph {
         let mut initial = Vec::new();
         inspect_dict(
             trailer,
-            DictionaryRole::Object,
+            DictionaryRole::Trailer,
             0,
             &limits,
             &mut work,
@@ -772,6 +772,9 @@ pub(super) fn collect_refs(
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum DictionaryRole {
     Object,
+    Trailer,
+    Catalog,
+    AcroForm,
     Resources,
     Appearance,
     Names,
@@ -780,8 +783,15 @@ enum DictionaryRole {
 impl DictionaryRole {
     fn child(self, key: &str) -> Self {
         match (self, key) {
-            (Self::Object, "Resources") => Self::Resources,
-            (Self::Object, "AP") => Self::Appearance,
+            (Self::Trailer, "Root") => Self::Catalog,
+            (Self::Catalog, "AcroForm") => Self::AcroForm,
+            (Self::AcroForm, "DR") => Self::Resources,
+            (Self::Object | Self::Trailer | Self::Catalog | Self::AcroForm, "Resources") => {
+                Self::Resources
+            }
+            (Self::Object | Self::Trailer | Self::Catalog | Self::AcroForm, "AP") => {
+                Self::Appearance
+            }
             (Self::Appearance, "N" | "R" | "D")
             | (
                 Self::Resources,
