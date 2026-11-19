@@ -346,6 +346,59 @@ fn chapter_outline_blocks_delete_but_leaf_outline_can_be_removed() {
 }
 
 #[test]
+fn many_outline_entries_do_not_block_unreferenced_pages() {
+    const PAGE_COUNT: usize = 300;
+    const BOOKMARK_COUNT: usize = 3400;
+    let outline = PAGE_COUNT + 3;
+    let first = outline + 1;
+    let last = outline + BOOKMARK_COUNT;
+    let kids = (3..outline)
+        .map(|page| format!("{page} 0 R "))
+        .collect::<String>();
+    let mut objects = vec![
+        format!("<< /Type /Catalog /Pages 2 0 R /Outlines {outline} 0 R >>"),
+        format!(
+            "<< /Type /Pages /Kids [{kids}] /Count {PAGE_COUNT} /MediaBox [0 0 300 500] /Resources <<>> >>"
+        ),
+    ];
+    objects.extend((0..PAGE_COUNT).map(|_| "<< /Type /Page /Parent 2 0 R >>".to_owned()));
+    objects.push(format!(
+        "<< /Type /Outlines /First {first} 0 R /Last {last} 0 R /Count {BOOKMARK_COUNT} >>"
+    ));
+    for entry in first..=last {
+        let prev = if entry > first {
+            format!("/Prev {} 0 R ", entry - 1)
+        } else {
+            String::new()
+        };
+        let next = if entry < last {
+            format!("/Next {} 0 R ", entry + 1)
+        } else {
+            String::new()
+        };
+        objects.push(format!(
+            "<< /Title (Reference) /Parent {outline} 0 R {prev}{next}/Dest [3 0 R /Fit] >>"
+        ));
+    }
+    let refs: Vec<_> = objects.iter().map(|value| (0, value.as_str())).collect();
+    let bytes = build_pdf(&refs);
+    let mut session =
+        NativePdfSession::open_scoped(&bytes, NativeEditLimits::default(), [3; 16]).unwrap();
+    let prior = session.snapshot().clone();
+    if let Some(capabilities) = &prior.page_state.restrictions {
+        assert!(capabilities.pages[PAGE_COUNT - 1].delete.is_none());
+    }
+    session
+        .apply_page(
+            prior.binding,
+            1,
+            &command("deletePage", PAGE_COUNT - 1, &prior),
+        )
+        .unwrap();
+    assert_eq!(session.snapshot().page_state.order.len(), PAGE_COUNT - 1);
+}
+
+#[test]
 fn grouped_field_refuses_duplicate_without_blocking_unrelated_deletion() {
     let bytes = build_pdf(&[
         (0, "<< /Type /Catalog /Pages 2 0 R /AcroForm 6 0 R >>"),
