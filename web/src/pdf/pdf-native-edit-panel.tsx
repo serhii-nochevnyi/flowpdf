@@ -7,11 +7,11 @@ import {
 } from './pdf-native-edit-messages.js'
 import {
   NATIVE_PDF_LIMITS, fitsNativeJson, isNativeFieldCommand, isNativeNoteCommand, isNativePageCommand,
-  nativeBytesHex, nativeHexBytes, sameNativeBytes,
+  nativeBytesHex, nativeHexBytes, nativePageMoveRefusals, nativePageOperationRefusal, sameNativeBytes,
   type NativePdfAnnotation, type NativePdfNoteCommand, type NativePdfRect,
   type NativePdfSnapshot, type NativePdfTextCommand, type NativePdfTextIsland,
   type NativePdfTextRefusal, type NativePdfGraphic, type NativePdfObjectCommand, type NativePdfObjectPage,
-  type NativePdfObjectTarget, type NativePdfSessionCommand, type NativePdfPageCommand,
+  type NativePdfObjectTarget, type NativePdfSessionCommand, type NativePdfPageCommand, type NativePdfPageRefusal,
   type NativePdfFieldCommand, type NativePdfFieldView,
   type NativePdfRedactionCandidate, type NativePdfRedactionMarkAction,
   type NativePdfRedactionResult, type NativePdfRedactionVerification,
@@ -680,6 +680,7 @@ const refusalReasons = new Map<string, NativePdfMessage>([
   ['FLOW_PDF_NATIVE_BINDING_MISMATCH', 'error.stale'],
   ['FLOW_PDF_NATIVE_REVISION_MISMATCH', 'error.stale'],
   ['FLOW_PDF_NATIVE_TARGET_UNAVAILABLE', 'error.stale'],
+  ['FLOW_PDF_NATIVE_PAGE_GEOMETRY', 'page.geometry'],
   ['FLOW_PDF_NATIVE_REQUEST_CONFLICT', 'error.stale'],
   ['FLOW_PDF_NATIVE_FINAL_PAGE', 'page.final'],
   ['FLOW_PDF_NATIVE_NOTE_INVALID', 'error.retry'],
@@ -715,6 +716,11 @@ function refusal(cause: unknown, pageOperation = false): readonly [string | unde
 
 const unsubscribeIdle = () => undefined
 const idle = () => null
+const pageRefusalDetails = {
+  finalPage: ['final-page', 'page.final'],
+  geometry: ['page-geometry', 'page.geometry'],
+  structure: ['page-structure', 'page.structure'],
+} as const
 
 export function PdfNativeEditPanel({
   createCoordinator, sourceStore, locale = 'uk', initialDocument, pageText,
@@ -812,6 +818,18 @@ export function PdfNativeEditPanel({
   const pageTarget = stableId === undefined ? null : { page: pageId, stableId }
   const canManagePages = canEdit && !composing && pageTarget !== null
   const targetPosition = movePosition ?? pageIndex
+  const moveRefusals = canManagePages && pageState ? nativePageMoveRefusals(pageState, pageIndex) : []
+  const pageRefusal = (kind: Exclude<NativePdfPageCommand['kind'], 'reorderPage'>) =>
+    (pageState && nativePageOperationRefusal(pageState, pageIndex, kind))
+    ?? (kind !== 'deletePage' && geometry === null ? 'geometry' : undefined)
+  const deleteRefusal = pageRefusal('deletePage')
+  const insertRefusal = pageRefusal('insertBlankPage')
+  const rotateRefusal = pageRefusal('rotatePage')
+  const duplicateRefusal = pageRefusal('duplicatePage')
+  const pageRefusalId = (reason: NativePdfPageRefusal | undefined) =>
+    reason === undefined ? undefined : `${id}-${pageRefusalDetails[reason][0]}`
+  const hasMove = pages.some((_, index) => index !== pageIndex && !moveRefusals[index])
+  const refusedActions = new Set([deleteRefusal, insertRefusal, rotateRefusal, duplicateRefusal, ...moveRefusals])
   const navigationBlocked = busy !== null || navigation?.failed === false
   const pageSelectorId = `${id}-page-selector`
   const reconcileId = `${id}-reconcile`
@@ -1580,10 +1598,10 @@ export function PdfNativeEditPanel({
     if (!pageOperation && navigationRequest.current) return
     if (pageOperation) {
       if (!canManagePages || command.target.page !== pageTarget?.page || command.target.stableId !== pageTarget.stableId
-        || (command.kind === 'deletePage' && !pageState?.canDelete)
-        || (command.kind === 'reorderPage' && (command.position === pageIndex
-          || command.position < 0 || command.position > (pageState?.maxPosition ?? -1)))
-        || (geometry === null && command.kind !== 'reorderPage' && command.kind !== 'deletePage')) return
+        || (command.kind === 'reorderPage'
+          ? command.position === pageIndex || command.position < 0 || command.position > (pageState?.maxPosition ?? -1)
+            || moveRefusals[command.position] !== undefined
+          : pageRefusal(command.kind) !== undefined)) return
     } else if (isNativeFieldCommand(command)) {
       if ('field' in command && (!selectedField?.canEditAppearance
         || !sameNativeBytes(selectedField.id, command.field))) {
@@ -1947,44 +1965,49 @@ export function PdfNativeEditPanel({
             <legend>{t('page.title')}</legend>
             <div className="native-actions">
               <label>{t('page.placement')}
-                <select value={blankSide} onChange={(event) => setBlankSide(event.target.value === 'before' ? 'before' : 'after')}>
+                <select value={blankSide} disabled={!!insertRefusal} aria-describedby={pageRefusalId(insertRefusal)}
+                  onChange={(event) => setBlankSide(event.target.value === 'before' ? 'before' : 'after')}>
                   <option value="before">{t('page.before')}</option>
                   <option value="after">{t('page.after')}</option>
                 </select>
               </label>
-              <button type="button" disabled={!geometry} aria-describedby={!geometry ? `${id}-page-geometry` : undefined}
+              <button type="button" disabled={!!insertRefusal} aria-describedby={pageRefusalId(insertRefusal)}
                 onClick={(event) => managePage({ kind: 'insertBlankPage', side: blankSide }, event.currentTarget)}>{t('page.insert')}</button>
             </div>
             <div className="native-actions">
               <label>{t('page.position')}
-                <select value={targetPosition} disabled={pageState.maxPosition === 0}
+                <select value={targetPosition} disabled={!hasMove}
+                  aria-describedby={!hasMove ? pageRefusalId(moveRefusals.find((reason) => reason !== undefined)) : undefined}
                   onChange={(event) => setMovePosition(Number(event.target.value))}>
-                  {pages.map((_, index) => <option key={index} value={index}>{index + 1}</option>)}
+                  {pages.map((_, index) => <option key={index} value={index} disabled={!!moveRefusals[index]}>{index + 1}</option>)}
                 </select>
               </label>
-              <button type="button" disabled={targetPosition === pageIndex}
+              <button type="button" disabled={targetPosition === pageIndex || !!moveRefusals[targetPosition]}
+                aria-describedby={pageRefusalId(moveRefusals[targetPosition])}
                 onClick={(event) => managePage({ kind: 'reorderPage', position: targetPosition }, event.currentTarget)}>{t('page.reorder')}</button>
-              <button type="button" disabled={pageIndex === 0}
+              <button type="button" disabled={pageIndex === 0 || !!moveRefusals[pageIndex - 1]}
+                aria-describedby={pageRefusalId(moveRefusals[pageIndex - 1])}
                 onClick={(event) => managePage({ kind: 'reorderPage', position: pageIndex - 1 }, event.currentTarget)}>{t('page.earlier')}</button>
-              <button type="button" disabled={pageIndex >= pageState.maxPosition}
+              <button type="button" disabled={pageIndex >= pageState.maxPosition || !!moveRefusals[pageIndex + 1]}
+                aria-describedby={pageRefusalId(moveRefusals[pageIndex + 1])}
                 onClick={(event) => managePage({ kind: 'reorderPage', position: pageIndex + 1 }, event.currentTarget)}>{t('page.later')}</button>
             </div>
             <div className="native-actions">
-              <button type="button" disabled={!geometry} aria-describedby={!geometry ? `${id}-page-geometry` : undefined}
+              <button type="button" disabled={!!rotateRefusal} aria-describedby={pageRefusalId(rotateRefusal)}
                 onClick={(event) => managePage({ kind: 'rotatePage', degrees: -90 }, event.currentTarget)}>{t('page.left')}</button>
-              <button type="button" disabled={!geometry} aria-describedby={!geometry ? `${id}-page-geometry` : undefined}
+              <button type="button" disabled={!!rotateRefusal} aria-describedby={pageRefusalId(rotateRefusal)}
                 onClick={(event) => managePage({ kind: 'rotatePage', degrees: 90 }, event.currentTarget)}>{t('page.right')}</button>
-              <button type="button" disabled={!geometry} aria-describedby={!geometry ? `${id}-page-geometry` : undefined}
+              <button type="button" disabled={!!duplicateRefusal} aria-describedby={pageRefusalId(duplicateRefusal)}
                 onClick={(event) => managePage({ kind: 'duplicatePage' }, event.currentTarget)}>{t('page.duplicate')}</button>
-              <button type="button" className="native-destructive" disabled={!pageState.canDelete}
-                aria-describedby={!pageState.canDelete ? `${id}-final-page` : undefined} onClick={(event) => {
-                  if (!snapshot || !pageTarget || !pageState.canDelete || !canManagePages) return
+              <button type="button" className="native-destructive" disabled={!!deleteRefusal}
+                aria-describedby={pageRefusalId(deleteRefusal)} onClick={(event) => {
+                  if (!snapshot || !pageTarget || deleteRefusal || !canManagePages) return
                   removeTrigger.current = event.currentTarget
                   setConfirm({ snapshot, pageCommand: { kind: 'deletePage', target: pageTarget } })
                 }}>{t('page.delete')}</button>
             </div>
-            {!pageState.canDelete && <p id={`${id}-final-page`} className="native-help">{t('page.final')}</p>}
-            {!geometry && <p id={`${id}-page-geometry`} className="native-help">{t('page.geometry')}</p>}
+            {(['finalPage', 'geometry', 'structure'] as const).map((reason) => refusedActions.has(reason) &&
+              <p key={reason} id={pageRefusalId(reason)} className="native-help">{t(pageRefusalDetails[reason][1])}</p>)}
           </fieldset>}
           {page && <div className="native-stack">
             <p>{position}</p>
@@ -2481,7 +2504,7 @@ export function PdfNativeEditPanel({
                 return
               }
               if ('pageCommand' in confirm) {
-                if (pageTarget?.stableId !== confirm.pageCommand.target.stableId || !pageState?.canDelete) {
+                if (pageTarget?.stableId !== confirm.pageCommand.target.stableId || deleteRefusal) {
                   setError(['error.stale'])
                   return
                 }

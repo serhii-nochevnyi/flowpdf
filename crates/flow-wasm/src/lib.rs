@@ -2995,6 +2995,10 @@ fn verify_native_pdf_response_inner(response_json: &str, require_live_session: b
                         return response.operation == NativeOperation::Open
                             && response.request_id > 0;
                     }
+                    if code == NativeSessionError::PageGeometry.code() {
+                        return response.operation == NativeOperation::Command
+                            && response.request_id > 0;
+                    }
                     if [
                         NativeFieldRefusal::Profile,
                         NativeFieldRefusal::Reference,

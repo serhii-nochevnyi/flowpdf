@@ -13,6 +13,8 @@ import {
   nativeBytesHex,
   nativeDispatchId,
   nativeHexBytes,
+  nativePageMoveRefusals,
+  nativePageOperationRefusal,
   readNativeResponse,
   sameNativeBytes,
   type NativePdfSessionCommand,
@@ -272,6 +274,9 @@ function confirmsPageCommand(command: NativePdfPageCommand, previous: NativePdfV
   const before = previous.pageState.order
   const { page: index, stableId } = command.target
   if (before[index] !== stableId || selected === null) return false
+  if (command.kind === 'reorderPage'
+    ? nativePageMoveRefusals(previous.pageState, index)[command.position] !== undefined
+    : nativePageOperationRefusal(previous.pageState, index, command.kind) !== undefined) return false
   const expected = [...before]
   const geometry = previous.scene.pages[index]?.geometry
   let selectedExpected = stableId
@@ -289,7 +294,6 @@ function confirmsPageCommand(command: NativePdfPageCommand, previous: NativePdfV
       break
     }
     case 'deletePage':
-      if (!previous.pageState.canDelete) return false
       expected.splice(index, 1)
       selectedExpected = expected[Math.min(index, expected.length - 1)]!
       break
@@ -299,6 +303,7 @@ function confirmsPageCommand(command: NativePdfPageCommand, previous: NativePdfV
       expected.splice(command.position, 0, stableId)
       break
     case 'rotatePage':
+      if (!geometry || !current.scene.pages[index]?.geometry) return false
       break
   }
   if (selected !== selectedExpected || !sameNativeBytes(expected, order)) return false

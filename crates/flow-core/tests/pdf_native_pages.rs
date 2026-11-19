@@ -231,13 +231,28 @@ fn scaled_page_allows_safe_structural_edits_without_editable_geometry() {
             0,
             "<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 /MediaBox [0 0 300 500] /Resources <<>> >>",
         ),
-        (0, "<< /Type /Page /Parent 2 0 R /UserUnit 2 >>"),
+        (
+            0,
+            "<< /Type /Page /Parent 2 0 R /UserUnit 2 /Annots [5 0 R] >>",
+        ),
         (0, "<< /Type /Page /Parent 2 0 R >>"),
+        (
+            0,
+            "<< /Type /Annot /Subtype /Text /P 3 0 R /Rect [10 20 40 60] /Contents (Scaled note) >>",
+        ),
     ]);
     let mut session =
         NativePdfSession::open_scoped(&bytes, NativeEditLimits::default(), [3; 16]).unwrap();
     let prior = session.snapshot().clone();
     assert_eq!(prior.scene.pages[0].geometry, None);
+    assert!(matches!(
+        prior.scene.pages[0].annotations.as_slice(),
+        [flow_core::pdf::NativePdfAnnotation::ReadOnly { .. }]
+    ));
+    let capabilities = &prior.page_state.restrictions.as_ref().unwrap().pages;
+    assert_eq!(capabilities[0].parent, capabilities[1].parent);
+    assert!(capabilities[0].geometry.is_some());
+    assert!(capabilities[0].delete.is_none());
     let target = serde_json::json!({"page": 0, "stableId": prior.page_state.order[0]});
     for intent in [
         serde_json::json!({"kind": "rotatePage", "target": target, "degrees": 90}),
@@ -250,7 +265,7 @@ fn scaled_page_allows_safe_structural_edits_without_editable_geometry() {
                 .apply_page(prior.binding, 1, &edit)
                 .unwrap_err()
                 .code(),
-            "FLOW_PDF_NATIVE_TARGET_UNAVAILABLE"
+            "FLOW_PDF_NATIVE_PAGE_GEOMETRY"
         );
         assert_eq!(session.output_bytes(), bytes);
         assert_eq!(session.snapshot().binding, prior.binding);
@@ -292,34 +307,42 @@ fn scaled_page_cannot_move_across_parents_without_geometry_verification() {
         (0, "<< /Type /Catalog /Pages 2 0 R >>"),
         (
             0,
-            "<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 /MediaBox [0 0 300 500] /Resources <<>> >>",
+            "<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 3 /MediaBox [0 0 300 500] /Resources <<>> >>",
         ),
         (0, "<< /Type /Pages /Parent 2 0 R /Kids [5 0 R] /Count 1 >>"),
         (
             0,
-            "<< /Type /Pages /Parent 2 0 R /Kids [6 0 R] /Count 1 /Rotate 90 >>",
+            "<< /Type /Pages /Parent 2 0 R /Kids [6 0 R 7 0 R] /Count 2 /Rotate 90 >>",
         ),
         (0, "<< /Type /Page /Parent 3 0 R /UserUnit 2 >>"),
+        (0, "<< /Type /Page /Parent 4 0 R >>"),
         (0, "<< /Type /Page /Parent 4 0 R >>"),
     ]);
     let mut session =
         NativePdfSession::open_scoped(&bytes, NativeEditLimits::default(), [3; 16]).unwrap();
     let prior = session.snapshot().clone();
-    let reorder = serde_json::from_value(serde_json::json!({
-        "kind": "reorderPage",
-        "target": {"page": 1, "stableId": prior.page_state.order[1]},
-        "position": 0
-    }))
-    .unwrap();
-    assert_eq!(
-        session
-            .apply_page(prior.binding, 1, &reorder)
-            .unwrap_err()
-            .code(),
-        "FLOW_PDF_NATIVE_UNSUPPORTED"
-    );
-    assert_eq!(session.output_bytes(), bytes);
-    assert_eq!(session.snapshot().page_state, prior.page_state);
+    let capabilities = &prior.page_state.restrictions.as_ref().unwrap().pages;
+    assert_ne!(capabilities[0].parent, capabilities[1].parent);
+    assert_eq!(capabilities[1].parent, capabilities[2].parent);
+    assert!(capabilities[0].reparent.is_some());
+    assert!(capabilities[2].reparent.is_none());
+    for (page, position) in [(0, 2), (2, 0)] {
+        let reorder = serde_json::from_value(serde_json::json!({
+            "kind": "reorderPage",
+            "target": {"page": page, "stableId": prior.page_state.order[page]},
+            "position": position,
+        }))
+        .unwrap();
+        assert_eq!(
+            session
+                .apply_page(prior.binding, 1, &reorder)
+                .unwrap_err()
+                .code(),
+            "FLOW_PDF_NATIVE_PAGE_GEOMETRY"
+        );
+        assert_eq!(session.output_bytes(), bytes);
+        assert_eq!(session.snapshot().page_state, prior.page_state);
+    }
 }
 
 #[test]
@@ -340,6 +363,14 @@ fn print_page_ranges_refuse_structural_edits_but_allow_rotation() {
         let mut session =
             NativePdfSession::open_scoped(&bytes, NativeEditLimits::default(), [3; 16]).unwrap();
         let prior = session.snapshot().clone();
+        assert!(
+            prior
+                .page_state
+                .restrictions
+                .as_ref()
+                .unwrap()
+                .positions_locked
+        );
         let target = serde_json::json!({"page": 0, "stableId": prior.page_state.order[0]});
         for intent in [
             serde_json::json!({"kind": "reorderPage", "target": target, "position": 1}),
@@ -399,6 +430,7 @@ fn null_print_presets_allow_structural_edits() {
         let mut session =
             NativePdfSession::open_scoped(&bytes, NativeEditLimits::default(), [3; 16]).unwrap();
         let prior = session.snapshot().clone();
+        assert!(prior.page_state.restrictions.is_none());
         let reorder = serde_json::from_value(serde_json::json!({
             "kind": "reorderPage",
             "target": {"page": 0, "stableId": prior.page_state.order[0]},

@@ -94,6 +94,8 @@ pub enum NativeSessionError {
     ReconciliationRequired,
     #[error("native PDF edit target is unavailable")]
     TargetUnavailable,
+    #[error("native PDF page geometry cannot be verified for this operation")]
+    PageGeometry,
     #[error("native PDF must retain at least one page")]
     FinalPage,
     #[error("native PDF text replacement refused")]
@@ -154,6 +156,7 @@ impl NativeSessionError {
             Self::ReconciliationRequired => "FLOW_PDF_NATIVE_RECONCILIATION_REQUIRED",
             Self::FinalPage => "FLOW_PDF_NATIVE_FINAL_PAGE",
             Self::TargetUnavailable => "FLOW_PDF_NATIVE_TARGET_UNAVAILABLE",
+            Self::PageGeometry => "FLOW_PDF_NATIVE_PAGE_GEOMETRY",
             Self::Text(error) => error.code(),
             Self::Object(error) => error.code(),
             Self::Field(error) => error.code(),
@@ -237,6 +240,7 @@ impl NativePdfSession {
         let (scene, mut remaining_retained) =
             accepted_scene(&graph, &ids, origin_hash, binding, 0, 0)?;
         let fields = forms::project(&graph, &scene.pages, binding, &mut remaining_retained)?;
+        let page_state = page_state(&graph, &ids, None, &scene, &mut remaining_retained)?;
         let snapshot = NativeSnapshot {
             binding,
             output_hash: origin_hash,
@@ -245,7 +249,7 @@ impl NativePdfSession {
             request_history_limit: NATIVE_REQUEST_HISTORY,
             consumed_request: 0,
             scene,
-            page_state: page_state(&graph, &ids, None),
+            page_state,
             fields,
         };
         Ok(Self {
@@ -646,7 +650,9 @@ impl NativePdfSession {
             &reopened,
             candidate.ids(),
             self.snapshot.page_state.selected,
-        );
+            &scene,
+            &mut scene_remaining,
+        )?;
         if !state.valid_for_count(scene.pages.len())
             || state.order != self.snapshot.page_state.order
         {
@@ -865,10 +871,17 @@ impl NativePdfSession {
                 page == claimed_page && object == claimed_object && valid_id && seen.insert(id)
             })
             && projected_notes.next().is_none();
+        let page_state_matches = if let Some(session) = live {
+            *state == session.snapshot.page_state
+        } else {
+            let projected = page_state(&graph, ids, None, &scene, &mut remaining)?;
+            state.restrictions == projected.restrictions
+                && (binding.revision != 0 || *state == projected)
+        };
         Ok(scene.scene_hash == claimed_scene
             && notes_match
             && state.valid_for_count(scene.pages.len())
-            && (binding.revision != 0 || *state == page_state(&graph, ids, None))
+            && page_state_matches
             && forms::project(&graph, &scene.pages, binding, &mut remaining)? == claimed_fields
             && redaction::admitted(&graph, &state.order) == redaction_admitted)
     }
@@ -883,10 +896,12 @@ impl NativePdfSession {
         let graph = NativePdfGraph::open(bytes, limits)?;
         let ids = initial_ids(&graph);
         let hash = *blake3::hash(bytes).as_bytes();
-        let (scene, _) = accepted_scene(&graph, &ids, hash, binding, 0, 0)?;
+        let (scene, mut remaining) = accepted_scene(&graph, &ids, hash, binding, 0, 0)?;
+        let projected = page_state(&graph, &ids, None, &scene, &mut remaining)?;
         Ok(scene.scene_hash == claimed_scene
             && state.valid_for_count(scene.pages.len())
-            && (binding.revision != 0 || *state == page_state(&graph, &ids, None)))
+            && state.restrictions == projected.restrictions
+            && (binding.revision != 0 || *state == projected))
     }
 
     pub fn verify_edit_projection(
@@ -952,6 +967,20 @@ impl NativePdfSession {
                 && !self.snapshot.page_state.can_delete
             {
                 return Err(NativeSessionError::FinalPage);
+            }
+            if matches!(command, NativePageCommand::ReorderPage { position, .. }
+                if position > self.snapshot.page_state.max_position)
+            {
+                return Err(NativeSessionError::TargetUnavailable);
+            }
+            if let Some(refusal) = self
+                .snapshot
+                .page_state
+                .restrictions
+                .as_ref()
+                .and_then(|restrictions| restrictions.refusal(command))
+            {
+                return Err(refusal.into());
             }
         }
         let revision = binding
@@ -1202,7 +1231,9 @@ impl NativePdfSession {
             &reopened,
             &ids,
             selected_page.or(self.snapshot.page_state.selected),
-        );
+            &scene,
+            &mut scene_remaining,
+        )?;
         if !state.valid_for_count(scene.pages.len()) {
             return Err(NativeSessionError::Postcondition);
         }
@@ -1311,8 +1342,17 @@ fn page_state(
     graph: &NativePdfGraph,
     ids: &BTreeMap<PdfObjectRef, NativeNoteId>,
     selected: Option<u64>,
-) -> NativePageState {
-    NativePageState {
+    scene: &NativePdfNoteScene,
+    remaining: &mut usize,
+) -> Result<NativePageState, NativeSessionError> {
+    use pages::NativePageCapability;
+    let capability_bytes = graph.pages.len() * std::mem::size_of::<NativePageCapability>();
+    spend(remaining, capability_bytes)?;
+    let restrictions = pages::restrictions(graph, &scene.pages)?;
+    if restrictions.is_none() {
+        *remaining += capability_bytes;
+    }
+    Ok(NativePageState {
         order: graph
             .pages
             .iter()
@@ -1321,7 +1361,8 @@ fn page_state(
         selected,
         can_delete: graph.pages.len() > 1,
         max_position: (graph.pages.len() - 1) as u32,
-    }
+        restrictions,
+    })
 }
 
 fn initial_ids(graph: &NativePdfGraph) -> BTreeMap<PdfObjectRef, NativeNoteId> {

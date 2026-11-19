@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 
 use super::super::reader::{PdfObjectRef, PdfValue};
-use super::super::scene::NativePdfNotePage;
+use super::super::scene::{NativePdfAnnotation, NativePdfNotePage};
 use super::graph::{NativeEditError, NativePdfGraph, spend};
 use super::session::NativeSessionError;
 
@@ -67,17 +67,203 @@ pub struct NativePageState {
     pub selected: Option<u64>,
     pub can_delete: bool,
     pub max_position: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restrictions: Option<NativePageRestrictions>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum NativePageRefusal {
+    Geometry,
+    Structure,
+}
+
+impl From<NativePageRefusal> for NativeSessionError {
+    fn from(refusal: NativePageRefusal) -> Self {
+        match refusal {
+            NativePageRefusal::Geometry => Self::PageGeometry,
+            NativePageRefusal::Structure => Unsupported.into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct NativePageRestrictions {
+    pub positions_locked: bool,
+    pub pages: Vec<NativePageCapability>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct NativePageCapability {
+    pub parent: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub geometry: Option<NativePageRefusal>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reparent: Option<NativePageRefusal>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duplicate: Option<NativePageRefusal>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delete: Option<NativePageRefusal>,
 }
 
 impl NativePageState {
     pub fn valid_for_count(&self, count: usize) -> bool {
         count > 0
             && self.order.len() == count
+            && self
+                .restrictions
+                .as_ref()
+                .is_none_or(|r| r.pages.len() == count)
             && self.max_position as usize == count - 1
             && self.can_delete == (count > 1)
             && self.order.iter().all(|id| (1..(1 << 53)).contains(id))
             && self.order.iter().copied().collect::<BTreeSet<_>>().len() == count
             && self.selected.is_none_or(|id| self.order.contains(&id))
+    }
+}
+
+const DUPLICATE_KEYS: &[&str] = &[
+    "Type",
+    "Parent",
+    "MediaBox",
+    "CropBox",
+    "Rotate",
+    "Resources",
+    "Contents",
+    "Annots",
+    "BleedBox",
+    "TrimBox",
+    "ArtBox",
+    "Group",
+    "UserUnit",
+];
+
+fn positions_locked(graph: &NativePdfGraph) -> Result<bool, NativeEditError> {
+    let values = dict(graph, catalog(graph)?)?;
+    if values.contains_key("PageLabels") {
+        return Ok(true);
+    }
+    let Some(preferences) = values.get("ViewerPreferences") else {
+        return Ok(false);
+    };
+    let mut work = graph.remaining_work();
+    Ok(match graph.resolve_metered(preferences, &mut work) {
+        Ok(PdfValue::Null) => false,
+        Ok(PdfValue::Dictionary(preferences)) => {
+            preferences.get("PrintPageRange").is_some_and(|range| {
+                !matches!(graph.resolve_metered(range, &mut work), Ok(PdfValue::Null))
+            })
+        }
+        _ => true,
+    })
+}
+
+pub(super) fn restrictions(
+    graph: &NativePdfGraph,
+    projected: &[NativePdfNotePage],
+) -> Result<Option<NativePageRestrictions>, NativeEditError> {
+    use NativePageRefusal::{Geometry, Structure};
+
+    let positions_locked = positions_locked(graph)?;
+    let catalog = catalog(graph)?;
+    let catalog_values = dict(graph, catalog)?;
+    let pages: Vec<_> = projected
+        .iter()
+        .map(|page| {
+            let values = dict(graph, page.object)?;
+            let parent = reference(values, "Parent")?;
+            let geometry = page.geometry.is_none().then_some(Geometry);
+            let tagged = values.contains_key("StructParents");
+            let annotations_supported = page.annotations.iter().all(|annotation| {
+                let object = match annotation {
+                    NativePdfAnnotation::PlainNote(note) => Some(note.object),
+                    NativePdfAnnotation::ReadOnly { object, .. } => *object,
+                };
+                object.is_some_and(|annot| annotation_profile(graph, page.object, annot).is_ok())
+            });
+            // A catalog reference outside the page tree cannot be removed by page deletion.
+            let catalog_dependency = graph.reverse.get(&page.object).is_some_and(|owners| {
+                owners.contains(&catalog)
+                    || ["Dests", "Names"].iter().any(|key| {
+                        catalog_values
+                            .get(*key)
+                            .and_then(PdfValue::as_reference)
+                            .is_some_and(|entry| owners.contains(&entry))
+                    })
+            });
+            Ok(NativePageCapability {
+                parent: (u64::from(parent.object_number) << 16) | u64::from(parent.generation),
+                geometry,
+                reparent: geometry.or(tagged.then_some(Structure)),
+                duplicate: geometry.or_else(|| {
+                    (!annotations_supported
+                        || values
+                            .keys()
+                            .any(|key| !DUPLICATE_KEYS.contains(&key.as_str())))
+                    .then_some(Structure)
+                }),
+                delete: (tagged || catalog_dependency || !annotations_supported)
+                    .then_some(Structure),
+            })
+        })
+        .collect::<Result<_, NativeEditError>>()?;
+    // For an unrestricted single-parent tree the existing page state is sufficient.
+    Ok((positions_locked
+        || pages.iter().any(|page| {
+            page.parent != pages[0].parent
+                || page.geometry.is_some()
+                || page.reparent.is_some()
+                || page.duplicate.is_some()
+                || page.delete.is_some()
+        }))
+    .then_some(NativePageRestrictions {
+        positions_locked,
+        pages,
+    }))
+}
+
+impl NativePageRestrictions {
+    pub(super) fn refusal(&self, command: NativePageCommand) -> Option<NativePageRefusal> {
+        use NativePageCommand::*;
+        use NativePageRefusal::Structure;
+
+        let index = command.target().page as usize;
+        let source = &self.pages[index];
+        if self.positions_locked
+            && !matches!(command, RotatePage { .. })
+            && !matches!(command, ReorderPage { position, .. } if position as usize == index)
+        {
+            return Some(Structure);
+        }
+        match command {
+            RotatePage { .. } | InsertBlankPage { .. } => source.geometry,
+            DuplicatePage { .. } => source.duplicate,
+            DeletePage { .. } => source.delete,
+            ReorderPage { position, .. } => {
+                let position = position as usize;
+                let destination = self.pages.get(position)?;
+                if source.parent != destination.parent && source.reparent.is_some() {
+                    return source.reparent;
+                }
+                let start = index.min(position);
+                let end = index.max(position);
+                let mut crossings = self.pages[start..=end].windows(2);
+                let displaced_refusal = |pair: &[NativePageCapability]| {
+                    if pair[0].parent == pair[1].parent {
+                        None
+                    } else {
+                        pair[usize::from(position > index)].reparent
+                    }
+                };
+                if position > index {
+                    crossings.find_map(displaced_refusal)
+                } else {
+                    crossings.rev().find_map(displaced_refusal)
+                }
+            }
+        }
     }
 }
 
@@ -385,11 +571,10 @@ pub(super) fn annotation_ownership(
     annotation_membership(graph, page, annot, true)
 }
 
-pub(super) fn annotation_membership(
+fn annotation_profile(
     graph: &NativePdfGraph,
     page: Ref,
     annot: Ref,
-    for_page_operation: bool,
 ) -> Result<Option<Ref>, NativeEditError> {
     let values = dict(graph, annot)?;
     if values
@@ -429,11 +614,20 @@ pub(super) fn annotation_membership(
     {
         return Err(Unsupported);
     }
-    let field = match subtype {
-        Some("Text" | "Link") => None,
-        Some("Widget") => Some(widget_field(graph, annot)?),
-        _ => return Err(Unsupported),
-    };
+    match subtype {
+        Some("Text" | "Link") => Ok(None),
+        Some("Widget") => widget_field(graph, annot).map(Some),
+        _ => Err(Unsupported),
+    }
+}
+
+pub(super) fn annotation_membership(
+    graph: &NativePdfGraph,
+    page: Ref,
+    annot: Ref,
+    for_page_operation: bool,
+) -> Result<Option<Ref>, NativeEditError> {
+    let field = annotation_profile(graph, page, annot)?;
     let extra_owner = match field {
         Some(field) if field != annot => {
             let children = &dict(graph, field)?["Kids"];
@@ -692,19 +886,12 @@ fn page_tree_reorder(
     graph: &mut NativePdfGraph,
     old: &[Ref],
     desired: &[Ref],
-    projected: &[NativePdfNotePage],
 ) -> Result<(), NativeEditError> {
     let mut changes = BTreeMap::<Ref, BTreeMap<Ref, Ref>>::new();
-    let sources: BTreeMap<_, _> = old.iter().copied().zip(projected).collect();
     for (&before, &after) in old.iter().zip(desired) {
         if before != after {
             let parent = reference(dict(graph, before)?, "Parent")?;
             if reference(dict(graph, after)?, "Parent")? != parent {
-                if sources[&after].geometry.is_none()
-                    || dict(graph, after)?.contains_key("StructParents")
-                {
-                    return Err(Unsupported);
-                }
                 let attributes = effective_attributes(graph, after)?;
                 dict_mut(graph, after)?.extend(attributes);
             }
@@ -734,48 +921,17 @@ pub(super) fn stage(
     let mut order = graph.pages.clone();
     let page = order[index];
     let parent = reference(dict(graph, page)?, "Parent")?;
-    let geometry = projected[index].geometry;
-    if matches!(
-        command,
-        RotatePage { .. } | InsertBlankPage { .. } | DuplicatePage { .. }
-    ) && geometry.is_none()
-    {
-        return Err(NativeSessionError::TargetUnavailable);
-    }
     let mut removed = BTreeSet::new();
     if !matches!(command, RotatePage { .. })
         && dict(graph, catalog(graph)?)?.contains_key("PageLabels")
     {
         return Err(Unsupported.into());
     }
-    let changes_positions = match command {
-        RotatePage { .. } => false,
-        ReorderPage { position, .. } => {
-            (position as usize) < order.len() && position as usize != index
-        }
-        DeletePage { .. } => order.len() > 1,
-        InsertBlankPage { .. } | DuplicatePage { .. } => true,
-    };
-    if changes_positions
-        && let Some(preferences) = dict(graph, catalog(graph)?)?.get("ViewerPreferences")
-    {
-        let mut work = graph.remaining_work();
-        match graph.resolve_metered(preferences, &mut work)? {
-            PdfValue::Null => {}
-            preferences => {
-                let preferences = preferences.as_dictionary().ok_or(Unsupported)?;
-                if let Some(range) = preferences.get("PrintPageRange")
-                    && !matches!(graph.resolve_metered(range, &mut work)?, PdfValue::Null)
-                {
-                    return Err(Unsupported.into());
-                }
-            }
-        }
-    }
     let selected = match command {
         RotatePage { degrees, .. } if matches!(degrees, -90 | 90) => {
-            let rotation = geometry
-                .ok_or(NativeSessionError::TargetUnavailable)?
+            let rotation = projected[index]
+                .geometry
+                .ok_or(NativeSessionError::PageGeometry)?
                 .rotation();
             dict_mut(graph, page)?.insert(
                 "Rotate".into(),
@@ -792,7 +948,7 @@ pub(super) fn stage(
             let old = order.clone();
             order.remove(index);
             order.insert(position, page);
-            page_tree_reorder(graph, &old, &order, projected)?;
+            page_tree_reorder(graph, &old, &order)?;
             page
         }
         InsertBlankPage { .. } | DuplicatePage { .. } => {
@@ -802,27 +958,6 @@ pub(super) fn stage(
                 .position(|&child| child == page)
                 .ok_or(Malformed)?;
             let new = if matches!(command, DuplicatePage { .. }) {
-                let allowed = [
-                    "Type",
-                    "Parent",
-                    "MediaBox",
-                    "CropBox",
-                    "Rotate",
-                    "Resources",
-                    "Contents",
-                    "Annots",
-                    "BleedBox",
-                    "TrimBox",
-                    "ArtBox",
-                    "Group",
-                    "UserUnit",
-                ];
-                if dict(graph, page)?
-                    .keys()
-                    .any(|key| !allowed.contains(&key.as_str()))
-                {
-                    return Err(Unsupported.into());
-                }
                 graph.reserve_page_copy(page)?;
                 let mut copy = dict(graph, page)?.clone();
                 copy.remove("Annots");
@@ -855,9 +990,6 @@ pub(super) fn stage(
         DeletePage { .. } => {
             if order.len() == 1 {
                 return Err(NativeSessionError::FinalPage);
-            }
-            if dict(graph, page)?.contains_key("StructParents") {
-                return Err(Unsupported.into());
             }
             removed = remove_page_dependencies(graph, page, &order)?;
             let mut children = kids(graph, parent)?;
