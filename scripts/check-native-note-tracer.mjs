@@ -13,8 +13,6 @@ const approvedHarness = [
   ['Cargo.toml', '57b1628917c2d4d4fdb08ae2b842f06dfbd1769729f1955cd31fde802e09bd38'],
   ['crates/flow-core/Cargo.toml', '5b54d3ade52e260aa29e31a86aef7123042d594fb0af04a6ba765b1c099d6d3e'],
   ['crates/flow-wasm/Cargo.toml', '1a76efa99818f2f129f40af76b952942dbc1bf4abb983daae2d1616874e05373'],
-  ['.github/workflows/pdf-native-note-tracer.yml', '62f76deaa269fe69c7e44dcd54458f26ab4d65ea0b195fc1636a6c65788cd2d4'],
-  ['package.json', 'a5686497377219cf6c5279e057fa831e445547226a39dc5418a31d5a4be9ab74'],
   ['package-lock.json', 'f1e5575f8687ea0fbf7f5abffddaa640116c8f24d09a724009d1b5210bceb3fd'],
   ['Cargo.lock', 'c04f2deac969c598caf8bc3b8e8b0ef23248115d3cf5492d06ac3ff366188be2'],
   ['rust-toolchain.toml', '683619e182e9d4e060bf754a8385eed1a1220cbc3e5a09e8c2dd22520af25dc6'],
@@ -32,6 +30,24 @@ const approvedHarness = [
   ['web/tests/pdf-native-edit.browser.test.ts', 'e1b9dec38bbc3fe7dcc981c28c45576e22e419da4d8d230e5c739ccf6ff81410'],
   ['scripts/check-native-note-built.mjs', 'aa9ae9e33f53a1ea00a92163ad9f2951d30705ce6892abd8f055b2877faed105'],
   ['scripts/serve-inspector.mjs', '07e3f482d39f79c3e4e3423e2627c5971477e492fc26855583ce37c77fe98376'],
+]
+const historicalWorkflow = '62f76deaa269fe69c7e44dcd54458f26ab4d65ea0b195fc1636a6c65788cd2d4'
+const expandedWorkflow = '8d8e9d50c10fc6f3bed4803254abf99ac5955b445a81d699b785710268354a80'
+const historicalPackage = 'a5686497377219cf6c5279e057fa831e445547226a39dc5418a31d5a4be9ab74'
+const expandedPackage = 'a4496f8694df21f759c6bde4274ce4f849e057270871a85b84eb285c28bb4c04'
+const expandedHarness = [
+  ['web/tests/pdf-native-text.browser.test.ts', '46be62e7b0f31e30e877001aa714e6717eda4376585bd2fa5c340ec1140c533c'],
+  ['web/tests/pdf-native-objects.browser.test.ts', 'a9ede30d753528f7b2e507b5f1403e96c93fb1b7028ecd5e8eab778795c943c4'],
+  ['web/tests/pdf-native-pages.browser.test.ts', '251eba3f60794ee7d126d858f9377b752ceea1d152cbb5b4c9cfacaf53b51e3b'],
+  ['web/tests/pdf-native-forms.browser.test.ts', '3d7f96b9c219f2a6c133fa4653caac5a1080045e3dcad7bd2a55bd1ed4e3ef52'],
+  ['web/tests/pdf-native-redaction.browser.test.ts', '7c9ec2bb7fa67c6eee34969d7b4ef0e21352b886bad8a4d4a5cec1d95f5737e7'],
+]
+const expandedSteps = [
+  'Run bilingual Chromium text replacement tracer',
+  'Run bilingual Chromium object editing tracer',
+  'Run bilingual Chromium page management tracer',
+  'Run bilingual Chromium field editing tracer',
+  'Run bilingual Chromium redaction tracer',
 ]
 const requiredSteps = [
   'Verify exact checkout',
@@ -94,10 +110,20 @@ export function requirePassedCi(ref, command = execute) {
     }
   }
 
-  for (const [path, digest] of approvedHarness) {
+  function harnessDigest(path) {
     const contents = call(command, ['git', 'show', `${sha}:${path}`],
       'NATIVE_NOTE_TRACER_HARNESS_UNAVAILABLE', { raw: true })
-    requireEvidence(createHash('sha256').update(contents).digest('hex') === digest,
+    return createHash('sha256').update(contents).digest('hex')
+  }
+  const workflowDigest = harnessDigest(workflowPath)
+  const packageDigest = harnessDigest('package.json')
+  const expanded = workflowDigest === expandedWorkflow
+  requireEvidence((expanded || workflowDigest === historicalWorkflow) &&
+    (packageDigest === historicalPackage || (expanded && packageDigest === expandedPackage)),
+  'NATIVE_NOTE_TRACER_HARNESS_NOT_APPROVED')
+  const steps = expanded ? [...requiredSteps.slice(0, 3), ...expandedSteps, ...requiredSteps.slice(3)] : requiredSteps
+  for (const [path, digest] of expanded ? [...approvedHarness, ...expandedHarness] : approvedHarness) {
+    requireEvidence(harnessDigest(path) === digest,
       'NATIVE_NOTE_TRACER_HARNESS_NOT_APPROVED')
   }
   const { workflow_runs: runs, total_count: runCount } = get(`actions/workflows/${workflowFile}/runs?event=push&head_sha=${sha}&per_page=100`)
@@ -116,7 +142,7 @@ export function requirePassedCi(ref, command = execute) {
     ? jobs.filter((job) => job.name === jobName) : []
   const [job] = matchingJobs
   let stepNumber = 0
-  const stepsPassed = Array.isArray(job?.steps) && requiredSteps.every((name) => {
+  const stepsPassed = Array.isArray(job?.steps) && steps.every((name) => {
     const matches = job.steps.filter((step) => step.name === name)
     const [step] = matches
     if (matches.length !== 1 || step.status !== 'completed' || step.conclusion !== 'success'
