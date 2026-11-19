@@ -3,8 +3,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 
 use super::super::reader::{PdfObjectRef, PdfValue};
-use super::super::scene::{NativePdfAnnotation, NativePdfNotePage};
-use super::graph::{NativeEditError, NativePdfGraph, spend};
+use super::super::scene::NativePdfNotePage;
+use super::graph::{NativeEditError, NativePdfGraph, collect_refs, spend};
 use super::session::NativeSessionError;
 
 type Dict = BTreeMap<String, PdfValue>;
@@ -160,6 +160,53 @@ fn positions_locked(graph: &NativePdfGraph) -> Result<bool, NativeEditError> {
     })
 }
 
+fn named_destination_pages(
+    graph: &NativePdfGraph,
+    catalog: &Dict,
+    work: &mut usize,
+) -> Result<BTreeSet<Ref>, NativeEditError> {
+    let mut references = Vec::new();
+    let mut temporary = graph.limits.max_retained_bytes / 8;
+    if let Some(destinations) = catalog.get("Dests") {
+        collect_refs(destinations, &mut references, work, &mut temporary)?;
+    }
+    if let Some(names) = catalog.get("Names") {
+        if let Some(destinations) = graph
+            .resolve_metered(names, work)?
+            .as_dictionary()
+            .and_then(|names| names.get("Dests"))
+        {
+            collect_refs(destinations, &mut references, work, &mut temporary)?;
+        }
+    }
+    let page_refs: BTreeSet<_> = graph.pages.iter().copied().collect();
+    let mut visited = BTreeSet::new();
+    let mut targets = BTreeSet::new();
+    while let Some(reference) = references.pop() {
+        if !visited.insert(reference) {
+            continue;
+        }
+        if page_refs.contains(&reference) {
+            targets.insert(reference);
+        } else {
+            let value = graph.objects.get(&reference).ok_or(Malformed)?;
+            collect_refs(value, &mut references, work, &mut temporary)?;
+        }
+    }
+    Ok(targets)
+}
+
+fn supports_page_annotations(graph: &NativePdfGraph, page: Ref, work: &mut usize) -> bool {
+    let Ok(items) = annotations(graph, page) else {
+        return false;
+    };
+    let cost_per_annotation = items.len() + super::forms::MAX_FIELDS + graph.limits.max_nesting;
+    spend(work, items.len().saturating_mul(cost_per_annotation)).is_ok()
+        && items
+            .iter()
+            .all(|&annot| annotation_ownership(graph, page, annot).is_ok())
+}
+
 pub(super) fn restrictions(
     graph: &NativePdfGraph,
     projected: &[NativePdfNotePage],
@@ -169,6 +216,8 @@ pub(super) fn restrictions(
     let positions_locked = positions_locked(graph)?;
     let catalog = catalog(graph)?;
     let catalog_values = dict(graph, catalog)?;
+    let mut work = graph.remaining_work();
+    let named_targets = named_destination_pages(graph, catalog_values, &mut work);
     let pages: Vec<_> = projected
         .iter()
         .map(|page| {
@@ -176,22 +225,13 @@ pub(super) fn restrictions(
             let parent = reference(values, "Parent")?;
             let geometry = page.geometry.is_none().then_some(Geometry);
             let tagged = values.contains_key("StructParents");
-            let annotations_supported = page.annotations.iter().all(|annotation| {
-                let object = match annotation {
-                    NativePdfAnnotation::PlainNote(note) => Some(note.object),
-                    NativePdfAnnotation::ReadOnly { object, .. } => *object,
-                };
-                object.is_some_and(|annot| annotation_profile(graph, page.object, annot).is_ok())
-            });
-            // @invariant: Page deletion preserves catalog references outside the page tree.
-            let catalog_dependency = graph.reverse.get(&page.object).is_some_and(|owners| {
-                owners.contains(&catalog)
-                    || ["Dests", "Names"].iter().any(|key| {
-                        catalog_values
-                            .get(*key)
-                            .and_then(PdfValue::as_reference)
-                            .is_some_and(|entry| owners.contains(&entry))
-                    })
+            let annotations_supported = supports_page_annotations(graph, page.object, &mut work);
+            let catalog_dependency = named_targets.as_ref().map_or(true, |pages| {
+                pages.contains(&page.object)
+                    || graph
+                        .reverse
+                        .get(&page.object)
+                        .is_some_and(|owners| owners.contains(&catalog))
             });
             Ok(NativePageCapability {
                 parent: (u64::from(parent.object_number) << 16) | u64::from(parent.generation),
@@ -662,8 +702,18 @@ pub(super) fn annotation_membership(
             return Err(Unsupported);
         }
         let values = form_dict(graph, form)?;
-        if for_page_operation && ["XFA", "CO"].iter().any(|key| values.contains_key(*key)) {
-            return Err(Unsupported);
+        if for_page_operation {
+            if values.contains_key("XFA") {
+                return Err(Unsupported);
+            }
+            if let Some(order) = values.get("CO") {
+                let resolved = graph.resolve_metered(order, &mut graph.remaining_work())?;
+                if !matches!(resolved, PdfValue::Null)
+                    && !resolved.as_array().is_some_and(<[_]>::is_empty)
+                {
+                    return Err(Unsupported);
+                }
+            }
         }
         let page_container = annots.as_reference().unwrap_or(page);
         exclusive_array_member(
