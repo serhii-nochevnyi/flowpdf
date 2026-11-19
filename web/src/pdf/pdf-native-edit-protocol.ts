@@ -256,12 +256,30 @@ export type NativePdfRedactionRequest = BoundRequest & {
   readonly action: NativePdfRedactionAction
 }
 
+export type NativePdfPreviewRequest = BoundRequest & {
+  readonly operation: 'preview'
+  readonly outputHash: readonly number[]
+  readonly pageId: number
+}
+
+export interface NativePdfPagePreview {
+  readonly outputHash: readonly number[]
+  readonly pageId: number
+  // @contract: Crop coordinates are in thousandths of a point. RGB rows start at the top left.
+  readonly cropBox: NativePdfRect
+  readonly rotation: number
+  readonly width: number
+  readonly height: number
+  readonly rgbHex: string
+}
+
 export type NativePdfRequest =
   | (RequestIdentity & { readonly operation: 'open'; readonly epoch: readonly number[]; readonly bytesHex: string })
   | (BoundRequest & { readonly operation: 'command'; readonly outputHash: readonly number[]; readonly command: NativePdfSessionCommand })
   | (BoundRequest & { readonly operation: 'snapshot' })
   | (BoundRequest & { readonly operation: 'close' })
   | NativePdfRedactionRequest
+  | NativePdfPreviewRequest
 
 interface ResponseIdentity {
   readonly protocolVersion: typeof NATIVE_PDF_PROTOCOL_VERSION
@@ -283,6 +301,7 @@ export type NativePdfResponse =
   | (BoundResponse & { readonly operation: 'close'; readonly status: 'closed'; readonly snapshot: null })
   | (BoundResponse & { readonly operation: 'redaction'; readonly status: 'redaction'; readonly snapshot: null; readonly redaction: NativePdfRedactionResult })
   | (BoundResponse & { readonly operation: 'redaction'; readonly status: 'published'; readonly snapshot: NativePdfVerifiedSnapshot; readonly redaction: NativePdfRedactionResult })
+  | (BoundResponse & { readonly operation: 'preview'; readonly status: 'preview'; readonly snapshot: null; readonly preview: NativePdfPagePreview })
   | (ResponseIdentity & {
     readonly operation: NativePdfRequest['operation']
     readonly status: 'failed'
@@ -298,6 +317,7 @@ export interface NativePdfWasmBoundary {
   native_pdf_snapshot(json: string): string
   native_pdf_close(json: string): string
   native_pdf_redaction(json: string): string
+  native_pdf_preview?(json: string): string
   verify_native_pdf_response(json: string): boolean
 }
 
@@ -594,6 +614,10 @@ export function isNativeWorkerRequest(value: unknown): value is NativePdfWorkerR
       if (!shape(request, ...bound, 'acceptedHash', 'action') || !binding(request.binding)
         || !hash(request.acceptedHash) || !redactionAction(request.action)) return false
       break
+    case 'preview':
+      if (!shape(request, ...bound, 'outputHash', 'pageId') || !binding(request.binding)
+        || !hash(request.outputHash) || !isNativeRequestId(request.pageId)) return false
+      break
     case 'snapshot':
     case 'close':
       if (!shape(request, ...bound) || !binding(request.binding)) return false
@@ -794,18 +818,35 @@ function redactionResult(value: unknown, snapshotStatus: unknown): value is Nati
   }
 }
 
+function pagePreview(value: unknown): value is NativePdfPagePreview {
+  if (!shape(value, 'outputHash', 'pageId', 'cropBox', 'rotation', 'width', 'height', 'rgbHex')
+    || !hash(value.outputHash) || !isNativeRequestId(value.pageId)
+    || !tuple(value.cropBox, 4, -1_000_000_000, 1_000_000_000)
+    || (value.rotation !== 0 && value.rotation !== 90 && value.rotation !== 180 && value.rotation !== 270)
+    || !integer(value.width, 1, 8192) || !integer(value.height, 1, 8192)
+    || value.width * value.height > 4_000_000 || typeof value.rgbHex !== 'string'
+    || value.rgbHex.length !== value.width * value.height * 6 || /[^0-9a-f]/u.test(value.rgbHex)) return false
+  const [l, b, r, t] = value.cropBox
+  const sideways = value.rotation === 90 || value.rotation === 270
+  return value.width === Math.ceil((sideways ? t! - b! : r! - l!) / 500)
+    && value.height === Math.ceil((sideways ? r! - l! : t! - b!) / 500)
+}
+
 function isNativeResponse(value: unknown): value is NativePdfResponse {
   if (typeof value !== 'object' || value === null) return false
   const keys = ['protocolVersion', 'requestId', 'operation', 'binding', 'originStoreHash',
     'status', 'snapshot', 'code', 'limits', 'resultHash']
   const hasRedaction = Object.hasOwn(value, 'redaction')
   if (hasRedaction) keys.push('redaction')
+  const hasPreview = Object.hasOwn(value, 'preview')
+  if (hasPreview) keys.push('preview')
   if (!shape(value, ...keys)
     || value.protocolVersion !== NATIVE_PDF_PROTOCOL_VERSION || !integer(value.requestId, 0)
     || !isNativeStoreHash(value.resultHash)
     || (value.operation !== 'open' && value.operation !== 'command' && value.operation !== 'snapshot'
-      && value.operation !== 'close' && value.operation !== 'redaction')
-    || hasRedaction !== (value.operation === 'redaction' && value.status !== 'failed')) return false
+      && value.operation !== 'close' && value.operation !== 'redaction' && value.operation !== 'preview')
+    || hasRedaction !== (value.operation === 'redaction' && value.status !== 'failed')
+    || hasPreview !== (value.operation === 'preview' && value.status === 'preview')) return false
   const limits = value.limits
   const knownLimits = Object.entries(NATIVE_PDF_LIMITS)
   if (!shape(limits, ...knownLimits.map(([key]) => key))
@@ -828,6 +869,10 @@ function isNativeResponse(value: unknown): value is NativePdfResponse {
   if (value.requestId === 0 || value.code !== null || !binding(value.binding)
     || !isNativeStoreHash(value.originStoreHash)) return false
   if (value.operation === 'close') return value.status === 'closed' && value.snapshot === null
+  if (value.operation === 'preview') {
+    return value.status === 'preview' && value.snapshot === null && pagePreview(value.preview)
+      && (value.binding.revision !== 0 || sameNativeBytes(value.binding.originHash, value.preview.outputHash))
+  }
   if (value.operation === 'redaction') {
     if ((value.status !== 'redaction' && value.status !== 'published') || !redactionResult(value.redaction, value.status)
       || value.binding.revision === 0 && !sameNativeBytes(value.binding.originHash, value.redaction.acceptedHash)) return false
@@ -878,6 +923,10 @@ export function matchesNativeResponse(request: NativePdfRequest, response: Nativ
   }
   if (response.binding === null || !sameNativeSession(request.binding, response.binding)
     || request.binding.revision !== response.binding.revision) return false
+  if (request.operation === 'preview' && response.status !== 'failed') {
+    return response.status === 'preview' && response.preview.pageId === request.pageId
+      && sameNativeBytes(response.preview.outputHash, request.outputHash)
+  }
   if (request.operation !== 'redaction' || response.status === 'failed') return true
   if (response.operation !== 'redaction' || response.redaction.action !== request.action.kind
     || !sameNativeBytes(request.acceptedHash, response.redaction.acceptedHash)) return false

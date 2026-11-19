@@ -145,6 +145,9 @@ pub use verifier::{
     NativeVerificationLane, NativeVerificationStatus, VersionedNativeRedactionEvidence,
     verify_native_redaction,
 };
+pub use verify_raster::{
+    NATIVE_PREVIEW_MAX_DIMENSION, NATIVE_PREVIEW_MAX_PIXELS, NativePageRaster,
+};
 
 #[cfg(test)]
 use graph::{NativePdfGraph, PlainTextNote};

@@ -140,9 +140,13 @@
 .pdf-native-edit-panel .native-coordinates { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 
 .pdf-native-edit-panel .native-viewport {
+  --native-page-gutter: 22px;
+  --native-viewport-height: min(70vh, 880px);
+  --native-fit-height: max(0px, calc(var(--native-viewport-height) - 2 * (var(--native-page-gutter) + 1px)));
+  box-sizing: border-box;
   min-width: 0;
-  max-height: min(70vh, 880px);
-  padding: 8px;
+  max-height: var(--native-viewport-height);
+  padding: var(--native-page-gutter);
   overflow: auto;
   overscroll-behavior: contain;
   border: 1px solid var(--border-default);
@@ -151,11 +155,22 @@
 
 .pdf-native-edit-panel .native-paper {
   position: relative;
-  min-width: 44px;
-  min-height: 44px;
   margin-inline: auto;
   background: var(--surface-card);
   box-shadow: 0 0 0 1px var(--border-control);
+}
+
+.pdf-native-edit-panel .native-page-raster {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.pdf-native-edit-panel .native-page-raster canvas {
+  position: absolute;
+  bottom: 0;
+  left: 0;
 }
 
 .pdf-native-edit-panel .native-marker {
@@ -238,7 +253,7 @@
 
 @media (width < 480px) {
   .pdf-native-edit-panel { padding: 16px; }
-  .pdf-native-edit-panel .native-viewport { max-height: 60vh; }
+  .pdf-native-edit-panel .native-viewport { --native-viewport-height: 60vh; }
   .pdf-native-edit-panel :is(.native-coordinates, dialog .native-actions) {
     display: grid;
     grid-template-columns: minmax(0, 1fr);

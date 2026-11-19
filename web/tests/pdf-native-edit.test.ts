@@ -123,6 +123,75 @@ async function opened(lane: ReturnType<typeof fakePort>, withText = false) {
   return opening
 }
 
+function previewReply(request: NativePdfRequest): Extract<NativePdfResponse, { status: 'preview' }> {
+  if (request.operation !== 'preview') throw new Error('expected preview request')
+  return {
+    protocolVersion: 1, requestId: request.requestId, operation: 'preview', status: 'preview',
+    binding: request.binding, originStoreHash: request.originStoreHash,
+    snapshot: null, code: null, limits: NATIVE_PDF_LIMITS, resultHash: 'cc'.repeat(32),
+    preview: {
+      pageId: request.pageId, outputHash: request.outputHash,
+      cropBox: [0, 0, 100_000, 100_000], rotation: 0, width: 200, height: 200, rgbHex: 'ffffff'.repeat(40_000),
+    },
+  }
+}
+
+describe('accepted page preview', () => {
+  it('drops aborted selections and accepted-revision changes without replacing the accepted snapshot', async () => {
+    const lane = fakePort()
+    const original = await opened(lane)
+    const pageId = original.pageState.order[0]!
+    const selection = new AbortController()
+    const first = lane.coordinator.previewPage(pageId, selection.signal)
+    const cancelled = await lane.take()
+    selection.abort()
+    lane.deliver(cancelled, previewReply(cancelled.request))
+    await expect(first).resolves.toBeNull()
+    expect(lane.coordinator.snapshot().accepted).toBe(original)
+
+    const stale = lane.coordinator.previewPage(pageId, new AbortController().signal)
+    const pending = await lane.take()
+    const command = lane.coordinator.command(note('Review note'))
+    const edit = await lane.take()
+    lane.deliver(edit, addReply(edit.request, original))
+    const accepted = await command
+    lane.deliver(pending, previewReply(pending.request))
+    await expect(stale).resolves.toBeNull()
+    expect(lane.coordinator.snapshot().accepted).toBe(accepted)
+
+    const current = lane.coordinator.previewPage(pageId, new AbortController().signal)
+    const dispatch = await lane.take()
+    expect(dispatch.request).toMatchObject({ binding: accepted.binding, outputHash: accepted.outputHash, pageId })
+    const reply = previewReply(dispatch.request)
+    lane.deliver(dispatch, reply)
+    await expect(current).resolves.toEqual(reply.preview)
+  })
+
+  it.each(['page', 'hash', 'crop', 'refusal'] as const)('fails closed on a preview %s mismatch', async (fault) => {
+    const lane = fakePort()
+    const original = await opened(lane)
+    const pending = lane.coordinator.previewPage(original.pageState.order[0]!, new AbortController().signal)
+    const dispatch = await lane.take()
+    const reply = previewReply(dispatch.request)
+    const { preview, ...envelope } = reply
+    if (fault === 'refusal') {
+      lane.deliver(dispatch, { ...envelope, status: 'failed', code: 'FLOW_PDF_NATIVE_TARGET_UNAVAILABLE' })
+    } else {
+      lane.deliver(dispatch, { ...reply, preview: {
+        ...preview,
+        ...(fault === 'page' ? { pageId: preview.pageId + 1 }
+          : fault === 'hash' ? { outputHash: hash(2) } : { cropBox: [1000, 0, 101_000, 100_000] }),
+      } })
+    }
+    await expect(pending).resolves.toBeNull()
+    expect(lane.coordinator.snapshot()).toMatchObject({ phase: 'ready', accepted: original })
+    const saving = lane.coordinator.command(note('Still editable'))
+    const edit = await lane.take()
+    lane.deliver(edit, addReply(edit.request, original))
+    await expect(saving).resolves.toMatchObject({ binding: { revision: 1 } })
+  })
+})
+
 describe('native PDF edit coordinator', () => {
   afterEach(() => { vi.useRealTimers() })
 
@@ -869,12 +938,14 @@ describe('native redaction quarantine', () => {
       { action: { kind: 'status', candidate: redactionCandidate }, candidate: redactionCandidate, status: 'failed' },
       { action: { kind: 'cancel', candidate: redactionCandidate }, status: 'pending' },
       { action: { kind: 'status', candidate: null }, status: 'pending', leak: true },
+      { action: { kind: 'status', candidate: null }, status: 'pending', unexpectedPreview: true },
     ] as const
     const run = vi.fn((json: string) => {
       const request = JSON.parse(json) as Extract<NativePdfRequest, { operation: 'redaction' }>
       const value = cases[request.requestId - 2]!
       const reply = redactionReply(request, 'candidate' in value ? value.candidate : null, value.status)
-      return JSON.stringify('leak' in value ? { ...reply, snapshot: { outputHex: 'feedface', scene: {} } } : reply)
+      return JSON.stringify('leak' in value ? { ...reply, snapshot: { outputHex: 'feedface', scene: {} } }
+        : 'unexpectedPreview' in value ? { ...reply, preview: null } : reply)
     })
     const verify = vi.fn((_json: string) => true)
     installNativePdfWorker(scope, Promise.resolve({
@@ -896,11 +967,17 @@ describe('native redaction quarantine', () => {
     expect(run.mock.calls.map(([json]) => JSON.parse(json))).toEqual(intents.map(({ request }) => request))
     for (const [index, message] of posted.entries()) {
       expect(message.dispatchId).toBe(index + 2)
-      if (index === intents.length - 1) {
+      if (index >= intents.length - 2) {
         expect(message).toEqual({ dispatchId: index + 2, type: 'failed', code: 'FLOW_PDF_NATIVE_RESPONSE_INVALID' })
       } else {
         if (message.type !== 'response') throw new Error('expected status')
-        expect(JSON.parse(message.json)).toMatchObject({ operation: 'redaction', snapshot: null })
+        const payload = JSON.parse(message.json)
+        expect(Object.keys(message).sort()).toEqual(['dispatchId', 'json', 'type'])
+        expect(Object.keys(payload).sort()).toEqual([
+          'binding', 'code', 'limits', 'operation', 'originStoreHash', 'protocolVersion',
+          'redaction', 'requestId', 'resultHash', 'snapshot', 'status',
+        ])
+        expect(payload).toMatchObject({ operation: 'redaction', snapshot: null })
         expect(message.json).not.toMatch(/outputHex|bytesHex|scene|feedface|contents|evidence/u)
       }
     }

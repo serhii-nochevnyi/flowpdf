@@ -5,7 +5,8 @@
 use flow_core::pdf::native::{
     NATIVE_MAX_FIELD_NAME_BYTES, NATIVE_MAX_FIELD_TEXT_BYTES, NATIVE_MAX_GRAPHIC_POINTS,
     NATIVE_MAX_IMAGE_BYTES, NATIVE_MAX_IMAGE_DIMENSION, NATIVE_MAX_IMAGE_PIXELS,
-    NATIVE_MAX_STROKE_WIDTH, NATIVE_REDACTION_VALIDATOR_PROFILE,
+    NATIVE_MAX_STROKE_WIDTH, NATIVE_PREVIEW_MAX_DIMENSION, NATIVE_PREVIEW_MAX_PIXELS,
+    NATIVE_REDACTION_VALIDATOR_PROFILE,
     NATIVE_REDACTION_VALIDATOR_VERSION, NativeFieldCommand, NativeFieldRefusal, NativeFieldView,
     NativeObjectCommand, NativeObjectPage, NativeObjectRefusal, NativePageCommand, NativePageState,
     NativeRedactionCandidateStatus, NativeRedactionMark, NativeRedactionPageEvidence,
@@ -1346,6 +1347,7 @@ enum NativeOperation {
     Snapshot,
     Close,
     Redaction,
+    Preview,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1359,6 +1361,7 @@ enum NativeStatus {
     Closed,
     Redaction,
     Published,
+    Preview,
     Failed,
 }
 
@@ -1404,6 +1407,14 @@ enum NativeRequest {
         origin_store_hash: String,
         accepted_hash: [u8; 32],
         action: NativeWireRedactionAction,
+    },
+    Preview {
+        protocol_version: u32,
+        request_id: u64,
+        binding: NativeBinding,
+        origin_store_hash: String,
+        output_hash: [u8; 32],
+        page_id: u64,
     },
 }
 
@@ -1758,6 +1769,19 @@ impl NativeRequest {
                 Some(*binding),
                 origin_store_hash,
             ),
+            Self::Preview {
+                protocol_version,
+                request_id,
+                binding,
+                origin_store_hash,
+                ..
+            } => (
+                NativeOperation::Preview,
+                *protocol_version,
+                *request_id,
+                Some(*binding),
+                origin_store_hash,
+            ),
         }
     }
 }
@@ -1840,6 +1864,49 @@ struct NativeWireSnapshot<S> {
 }
 
 #[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct NativeWirePreview {
+    output_hash: [u8; 32],
+    page_id: u64,
+    crop_box: [i64; 4],
+    rotation: u16,
+    width: usize,
+    height: usize,
+    rgb_hex: String,
+}
+
+impl NativeWirePreview {
+    fn valid(&self, binding: NativeBinding) -> bool {
+        let [l, b, r, t] = self.crop_box;
+        if !(1..=MAX_WIRE_ID).contains(&self.page_id)
+            || (binding.revision == 0 && binding.origin_hash != self.output_hash)
+            || !self
+                .crop_box
+                .iter()
+                .all(|v| (-1_000_000_000..=1_000_000_000).contains(v))
+            || l >= r
+            || b >= t
+            || !matches!(self.rotation, 0 | 90 | 180 | 270)
+        {
+            return false;
+        }
+        let (w, h) = if matches!(self.rotation, 90 | 270) {
+            (t - b, r - l)
+        } else {
+            (r - l, t - b)
+        };
+        // @contract: One RGB pixel per half point, rounded up at the crop edges.
+        self.width == ((w + 499) / 500) as usize
+            && self.height == ((h + 499) / 500) as usize
+            && self.width <= NATIVE_PREVIEW_MAX_DIMENSION
+            && self.height <= NATIVE_PREVIEW_MAX_DIMENSION
+            && self.width * self.height <= NATIVE_PREVIEW_MAX_PIXELS
+            && self.rgb_hex.len() == self.width * self.height * 6
+            && native_lower_hex(&self.rgb_hex)
+    }
+}
+
+#[derive(Serialize, Deserialize)]
 #[serde(
     rename_all = "camelCase",
     deny_unknown_fields,
@@ -1863,6 +1930,12 @@ struct NativeResponse<S> {
         deserialize_with = "native_present_option"
     )]
     redaction: Option<NativeWireRedaction>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "native_present_option"
+    )]
+    preview: Option<NativeWirePreview>,
     #[serde(deserialize_with = "native_required_option")]
     code: Option<String>,
     result_hash: String,
@@ -2155,6 +2228,27 @@ impl NativeRegistry {
         let entry = &mut self.sessions[index.ok_or(NATIVE_BINDING)?];
         let current = entry.session.snapshot();
         response.status = match request {
+            NativeRequest::Preview {
+                output_hash,
+                page_id,
+                ..
+            } => {
+                let raster = entry
+                    .session
+                    .accepted_page_raster(binding, output_hash, page_id)
+                    .map_err(|error| error.code())?;
+                response.preview = Some(NativeWirePreview {
+                    output_hash,
+                    page_id,
+                    crop_box: raster.crop_box,
+                    rotation: raster.rotation,
+                    width: raster.width,
+                    height: raster.height,
+                    rgb_hex: encode_hex(&raster.rgb),
+                });
+                response.status = NativeStatus::Preview;
+                return Ok(());
+            }
             NativeRequest::Redaction {
                 accepted_hash,
                 action,
@@ -2516,6 +2610,7 @@ fn native_response<S>(operation: NativeOperation) -> NativeResponse<S> {
         limits: native_wire_limits(),
         snapshot: None,
         redaction: None,
+        preview: None,
         code: Some(NATIVE_DECODE.to_owned()),
         result_hash: String::new(),
     }
@@ -2533,6 +2628,7 @@ fn serialize_native_response<S: Serialize>(mut response: NativeResponse<S>) -> S
         response.status = NativeStatus::Failed;
         response.snapshot = None;
         response.redaction = None;
+        response.preview = None;
         response.code = Some(NATIVE_BUDGET.to_owned());
         response.result_hash.clear();
         encode(&mut response).expect("bounded native error")
@@ -2607,6 +2703,11 @@ pub fn native_pdf_close(request_json: String) -> String {
 #[wasm_bindgen]
 pub fn native_pdf_redaction(request_json: String) -> String {
     native_dispatch(NativeOperation::Redaction, &request_json)
+}
+
+#[wasm_bindgen]
+pub fn native_pdf_preview(request_json: String) -> String {
+    native_dispatch(NativeOperation::Preview, &request_json)
 }
 
 impl NativeVerifiedScene {
@@ -2855,6 +2956,9 @@ pub fn verify_native_pdf_response(response_json: String) -> bool {
     if response.redaction.is_some()
         != (response.operation == NativeOperation::Redaction
             && response.status != NativeStatus::Failed)
+        || response.preview.is_some()
+            != (response.operation == NativeOperation::Preview
+                && response.status == NativeStatus::Preview)
     {
         return false;
     }
@@ -2950,6 +3054,16 @@ pub fn verify_native_pdf_response(response_json: String) -> bool {
         }
         (NativeOperation::Redaction, NativeStatus::Redaction | NativeStatus::Published) => {
             verify_native_redaction_response(&response).is_some()
+        }
+        (NativeOperation::Preview, NativeStatus::Preview) => {
+            response.request_id > 0
+                && store_present
+                && response.snapshot.is_none()
+                && response.code.is_none()
+                && response
+                    .binding
+                    .zip(response.preview.as_ref())
+                    .is_some_and(|(binding, preview)| preview.valid(binding))
         }
         _ => {
             response.request_id > 0

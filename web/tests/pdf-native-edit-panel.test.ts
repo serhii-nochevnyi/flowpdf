@@ -90,6 +90,10 @@ describe('exact redacted output', () => {
         ...dependencies, locale, initialDocument: documentWith([]),
       }))
       expect(markup).toContain(nativePdfText(locale, 'redaction.unavailable'))
+      expect(markup).toContain(nativePdfText(locale, 'viewport.unavailable'))
+      expect(markup).not.toContain(nativePdfText(locale, 'redaction.add'))
+      expect(markup).not.toContain(nativePdfText(locale, 'redaction.apply'))
+      expect(markup).not.toContain('<canvas')
       expect(markup).not.toContain(nativePdfText(locale, 'redaction.download'))
       expect(markup).not.toContain(nativePdfText(locale, 'redaction.success'))
     })

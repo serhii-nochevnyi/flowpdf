@@ -8,7 +8,7 @@ const ready = Promise.resolve().then(async () => {
   const wasm = generated as Readonly<Partial<NativePdfWasmBoundary>>
   const {
     native_pdf_open, native_pdf_command, native_pdf_snapshot, native_pdf_close, native_pdf_redaction,
-    verify_native_pdf_response,
+    native_pdf_preview, verify_native_pdf_response,
   } = wasm
   if (typeof native_pdf_open !== 'function' || typeof native_pdf_command !== 'function'
     || typeof native_pdf_snapshot !== 'function' || typeof native_pdf_close !== 'function'
@@ -18,6 +18,7 @@ const ready = Promise.resolve().then(async () => {
   }
   return {
     native_pdf_open, native_pdf_command, native_pdf_snapshot, native_pdf_close, native_pdf_redaction,
+    ...(typeof native_pdf_preview === 'function' ? { native_pdf_preview } : {}),
     verify_native_pdf_response,
   }
 })

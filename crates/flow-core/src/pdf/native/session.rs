@@ -281,6 +281,29 @@ impl NativePdfSession {
         self.graph.original_bytes()
     }
 
+    pub fn accepted_page_raster(
+        &self,
+        binding: NativeBinding,
+        output_hash: [u8; 32],
+        page_id: u64,
+    ) -> Result<super::NativePageRaster, NativeSessionError> {
+        self.check_current_binding(binding)?;
+        if self.snapshot.output_hash != output_hash {
+            return Err(NativeSessionError::RevisionMismatch);
+        }
+        let index = self
+            .snapshot
+            .page_state
+            .order
+            .iter()
+            .position(|&id| id == page_id)
+            .ok_or(NativeSessionError::TargetUnavailable)?;
+        let geometry = redaction::geometry(&self.graph, index)
+            .map_err(|_| NativeSessionError::TargetUnavailable)?;
+        super::verify_raster::accepted_page(self.output_bytes(), index, geometry)
+            .map_err(|_| NativeSessionError::TargetUnavailable)
+    }
+
     pub fn redaction_admitted(&self) -> bool {
         *self.redaction_admission.get_or_init(|| {
             NativePdfGraph::open(self.output_bytes(), self.snapshot.limits)
