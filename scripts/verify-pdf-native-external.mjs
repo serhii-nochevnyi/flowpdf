@@ -451,7 +451,9 @@ export function pdfStructure(json) {
           defaultValue: pdfString(annot['/DV']), ...(state ? { appearanceState: pdfString(state) } : {}) })
       } else if (subtype === '/Link') {
         const destination = resolveObject(annot['/Dest'])
-        links.push({ kind: 'link', page, target: Array.isArray(destination) ? pageNumber(destination[0]) : null })
+        links.push({ kind: 'link', page, rectPt,
+          target: Array.isArray(destination) ? pageNumber(destination[0]) : null,
+          view: Array.isArray(destination) ? destination.slice(1) : null })
       } else {
         requireMatch(false, 'unexpected-annotation')
       }
@@ -470,7 +472,8 @@ export function pdfStructure(json) {
     const outline = resolveObject(ref)
     const destination = resolveObject(outline['/Dest'])
     requireMatch(Array.isArray(destination), 'outline-destination')
-    outlines.push({ kind: 'outline', title: pdfString(outline['/Title']), target: pageNumber(destination[0]) })
+    outlines.push({ kind: 'outline', title: pdfString(outline['/Title']),
+      target: pageNumber(destination[0]), view: destination.slice(1) })
     readOutlines(outline['/First'], depth + 1)
     readOutlines(outline['/Next'], depth + 1)
   }
