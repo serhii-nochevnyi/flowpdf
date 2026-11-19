@@ -55,7 +55,7 @@ pub(super) fn accepted_page(
     }
     let paints = Interpreter::new().page(&document, &page)?;
     let mut work = MAX_RASTER_WORK;
-    let mut pixels = grid.draw(&paints, [PITCH / 2; 2], &mut work)?;
+    let mut pixels = grid.draw(&paints, None, &mut work)?;
     // @contract: Preview RGB starts at the top left of the rotated crop.
     pixels.reverse();
     for row in pixels.chunks_exact_mut(grid.width) {
@@ -207,10 +207,7 @@ pub(super) fn verify(
             } else {
                 let mut removed = false;
                 for &mark in &marks {
-                    if paint.intersects_mark(mark, &mut work)? {
-                        removed = true;
-                        break;
-                    }
+                    removed |= paint.intersects_mark(mark, &mut work)?;
                 }
                 if let PaintKind::Note(note) = &paint.kind {
                     if removed {
@@ -260,8 +257,8 @@ pub(super) fn verify(
             }
         }
         for sample in SAMPLE_OFFSETS {
-            let expected_pixels = grid.draw(&source_paint, sample, &mut work)?;
-            let candidate_pixels = grid.draw(&candidate_paint, sample, &mut work)?;
+            let expected_pixels = grid.draw(&source_paint, Some(sample), &mut work)?;
+            let candidate_pixels = grid.draw(&candidate_paint, Some(sample), &mut work)?;
             if expected_pixels != candidate_pixels {
                 return Err(RasterMismatch);
             }
@@ -597,18 +594,16 @@ impl Paint<'_> {
         let PaintKind::Vector(vector) = &self.kind else {
             return Ok(true);
         };
-        if let (Some((_, evenodd)), Some(fill)) = (vector.fill, &vector.fill_path)
-            && fill.fill_intersects_rect(mark, evenodd, work)?
-        {
-            return Ok(true);
+        let mut hit = false;
+        if let (Some((_, evenodd)), Some(fill)) = (vector.fill, &vector.fill_path) {
+            hit |= fill.fill_intersects_rect(mark, evenodd, work)?;
         }
+        // @invariant: Ambiguous contact in any stroke component overrides a definite hit.
         for stencil in &vector.stroke_paths {
             spend(work, stencil.edges * 5 + 1)?;
-            if stencil.intersects_rect(mark) {
-                return Ok(true);
-            }
+            hit |= stencil.stroke_intersects_rect(mark)?;
         }
-        Ok(false)
+        Ok(hit)
     }
 
     fn same_paint(&self, other: &Self, work: &mut usize) -> VerifyResult<bool> {
@@ -753,17 +748,18 @@ fn stroke_stencils(
         let b = points[(index + 1) % points.len()];
         let (normal, uncertainty) = normal_enclosure(sub(b, a), width);
         normals.push((normal, uncertainty));
-        stencils.push(Stencil::stroke(
-            &[
-                add(a, normal),
-                add(b, normal),
-                sub(b, normal),
-                sub(a, normal),
-            ],
-            uncertainty,
-            matrix,
-            memory,
-        )?);
+        let outline = [
+            add(a, normal),
+            add(b, normal),
+            sub(b, normal),
+            sub(a, normal),
+        ];
+        let contour = if normal == [0; 2] {
+            &outline[..2]
+        } else {
+            &outline[..]
+        };
+        stencils.push(Stencil::stroke(contour, uncertainty, matrix, memory)?);
     }
     for index in if closed {
         0..points.len()
@@ -888,7 +884,7 @@ struct Stencil {
     edges: usize,
     scale: i64,
     margin: Point,
-    bounds_only: bool,
+    uncertain_join: bool,
 }
 
 impl Stencil {
@@ -931,15 +927,15 @@ impl Stencil {
         stencil.scale = POINT;
         let [a, b, c, d, _, _] = matrix.0;
         stencil.margin = [a.abs() * dx + c.abs() * dy, b.abs() * dx + d.abs() * dy];
-        if stroke {
+        if stroke && path.len() > 2 {
             let vertices = &stencil.contours[0];
-            let turns = (0..vertices.len()).map(|i| {
+            let mut turns = (0..vertices.len()).map(|i| {
                 let a = vertices[i];
                 let b = vertices[(i + 1) % vertices.len()];
                 let c = vertices[(i + 2) % vertices.len()];
                 cross(sub(b, a), sub(c, b)).signum()
             });
-            stencil.bounds_only = !turns.clone().all(|t| t > 0) && !turns.clone().all(|t| t < 0);
+            stencil.uncertain_join = !turns.clone().all(|t| t > 0) && !turns.all(|t| t < 0);
         }
         Ok(stencil)
     }
@@ -961,42 +957,55 @@ impl Stencil {
             edges,
             scale: 1,
             margin: [0; 2],
-            bounds_only: false,
+            uncertain_join: false,
         })
     }
 
-    fn intersects_rect(&self, rect: Rect) -> bool {
+    fn stroke_intersects_rect(&self, rect: Rect) -> VerifyResult<bool> {
         if !intersects(self.bounds, rect) {
-            return false;
+            return Ok(false);
         }
-        let [x, y, u, v] = rect.map(|coordinate| coordinate * self.scale);
+        let rect = rect.map(|coordinate| coordinate * self.scale);
+        let envelope = self.expand(rect);
+        if self.uncertain_join {
+            let [l, b, r, t] = bounds_of(&self.contours[0]).ok_or(UnsupportedProfile)?;
+            let [left, bottom, right, top] = envelope;
+            if l <= right && left <= r && b <= top && bottom <= t {
+                return Err(UnsupportedProfile);
+            }
+            return Ok(false);
+        }
+        let overlaps = self.contour_intersects(envelope);
+        if overlaps && self.edges == 2 {
+            let segment = &self.contours[0];
+            if !crosses_interior(segment[0], segment[1], rect) {
+                return Err(UnsupportedProfile);
+            }
+        }
+        Ok(overlaps)
+    }
+
+    fn expand(&self, [x, y, u, v]: Rect) -> Rect {
         let [dx, dy] = self.margin;
-        let [left, bottom, right, top] = [x - dx, y - dy, u + dx, v + dy];
-        if self.bounds_only {
-            let [l, b, r, t] = bounds_of(&self.contours[0]).expect("nonempty stroke contour");
-            return l <= right && left <= r && b <= top && bottom <= t;
-        }
+        [x - dx, y - dy, u + dx, v + dy]
+    }
+
+    fn contour_intersects(&self, [left, bottom, right, top]: Rect) -> bool {
         let corners = [[left, bottom], [right, bottom], [right, top], [left, top]];
         corners
             .iter()
             .any(|&point| self.hits_scaled(point, 1, false))
-            || self.contours.iter().any(|contour| {
-                contour
-                    .iter()
-                    .zip(contour.iter().cycle().skip(1))
-                    .take(contour.len())
-                    .any(|(&a, &b)| {
-                        if a[0].max(b[0]) < left
-                            || a[0].min(b[0]) > right
-                            || a[1].max(b[1]) < bottom
-                            || a[1].min(b[1]) > top
-                        {
-                            return false;
-                        }
-                        let direction = sub(b, a);
-                        let sides = corners.map(|corner| cross(direction, sub(corner, a)));
-                        sides.iter().any(|&side| side >= 0) && sides.iter().any(|&side| side <= 0)
-                    })
+            || self.segments().any(|(a, b)| {
+                if a[0].max(b[0]) < left
+                    || a[0].min(b[0]) > right
+                    || a[1].max(b[1]) < bottom
+                    || a[1].min(b[1]) > top
+                {
+                    return false;
+                }
+                let direction = sub(b, a);
+                let sides = corners.map(|corner| cross(direction, sub(corner, a)));
+                sides.iter().any(|&side| side >= 0) && sides.iter().any(|&side| side <= 0)
             })
     }
 
@@ -1437,6 +1446,16 @@ struct Grid {
     height: usize,
 }
 
+#[derive(Clone, Copy)]
+enum RasterSample<'a> {
+    Point(Point),
+    Coverage {
+        stencil: &'a Stencil,
+        fill_rule: Option<bool>,
+        color: Pixel,
+    },
+}
+
 impl Grid {
     fn new(geometry: NativeRedactionGeometry, cumulative: &mut usize) -> VerifyResult<Self> {
         let [l, b, r, t] = geometry.crop_box;
@@ -1482,7 +1501,7 @@ impl Grid {
     fn draw(
         &self,
         paints: &[Paint<'_>],
-        sample: Point,
+        sample: Option<Point>,
         work: &mut usize,
     ) -> VerifyResult<Vec<Pixel>> {
         let count = self.width * self.height;
@@ -1490,6 +1509,7 @@ impl Grid {
         let mut pixels = Vec::new();
         pixels.try_reserve_exact(count).map_err(|_| Budget)?;
         pixels.resize(count, [255; 3]);
+        let point_sample = RasterSample::Point(sample.unwrap_or([PITCH / 2; 2]));
         for paint in paints {
             match &paint.kind {
                 PaintKind::Text(text) => {
@@ -1498,7 +1518,7 @@ impl Grid {
                         self.paint(
                             &mut pixels,
                             glyph.bounds,
-                            sample,
+                            point_sample,
                             glyph.edges + 1,
                             work,
                             |p| glyph.hits(p, false).then_some(color),
@@ -1509,40 +1529,30 @@ impl Grid {
                     if let (Some((color, evenodd)), Some(stencil)) =
                         (vector.fill, &vector.fill_path)
                     {
-                        let color = color.rgb();
-                        self.paint(
+                        self.paint_vector(
                             &mut pixels,
-                            stencil.bounds,
+                            stencil,
+                            (color, Some(evenodd)),
                             sample,
-                            stencil.edges + 1,
                             work,
-                            |p| stencil.hits(p, evenodd).then_some(color),
                         )?;
                     }
                     if let Some((color, _)) = vector.stroke {
-                        let color = color.rgb();
                         for stencil in &vector.stroke_paths {
-                            self.paint(
-                                &mut pixels,
-                                stencil.bounds,
-                                sample,
-                                stencil.edges + 1,
-                                work,
-                                |p| stencil.hits(p, false).then_some(color),
-                            )?;
+                            self.paint_vector(&mut pixels, stencil, (color, None), sample, work)?;
                         }
                     }
                 }
                 PaintKind::Image(image) => self.paint(
                     &mut pixels,
                     paint.bounds,
-                    sample,
+                    point_sample,
                     image.masks.len() + 1,
                     work,
                     |p| image.at(p),
                 )?,
                 PaintKind::Note(_) => {
-                    self.paint(&mut pixels, paint.bounds, sample, 1, work, |p| {
+                    self.paint(&mut pixels, paint.bounds, point_sample, 1, work, |p| {
                         let [l, b, r, t] = paint.bounds;
                         let inset = ((r - l).min(t - b) / 8).min(POINT);
                         Some(if inside([l + inset, b + inset, r - inset, t - inset], p) {
@@ -1557,11 +1567,48 @@ impl Grid {
         Ok(pixels)
     }
 
+    fn paint_vector(
+        &self,
+        pixels: &mut [Pixel],
+        stencil: &Stencil,
+        (color, fill_rule): (Color, Option<bool>),
+        sample: Option<Point>,
+        work: &mut usize,
+    ) -> VerifyResult<()> {
+        let color = color.rgb();
+        let sample = if let Some(point) = sample {
+            RasterSample::Point(point)
+        } else {
+            // @contract: Preview can place a rounded stroke within half a pixel of its outline.
+            if stencil.uncertain_join
+                || stencil
+                    .margin
+                    .iter()
+                    .any(|&error| error >= PITCH / 2 * stencil.scale)
+            {
+                return Err(UnsupportedProfile);
+            }
+            RasterSample::Coverage {
+                stencil,
+                fill_rule,
+                color,
+            }
+        };
+        self.paint(
+            pixels,
+            stencil.bounds,
+            sample,
+            stencil.edges + 1,
+            work,
+            |p| stencil.hits(p, fill_rule.unwrap_or(false)).then_some(color),
+        )
+    }
+
     fn paint(
         &self,
         pixels: &mut [Pixel],
         bounds: Rect,
-        sample: Point,
+        sample: RasterSample<'_>,
         cost: usize,
         work: &mut usize,
         mut value: impl FnMut(Point) -> Option<Pixel>,
@@ -1580,18 +1627,52 @@ impl Grid {
                 .and_then(|cost| cost.checked_add(1))
                 .ok_or(Budget)?,
         )?;
+        let offset = match sample {
+            RasterSample::Point(offset) => offset,
+            RasterSample::Coverage { .. } => [PITCH / 2; 2],
+        };
         for row in bottom..top {
             for col in left..right {
                 let logical = [
-                    col as i64 * PITCH + sample[0],
-                    row as i64 * PITCH + sample[1],
+                    col as i64 * PITCH + offset[0],
+                    row as i64 * PITCH + offset[1],
                 ];
                 let point = self.unrotate(logical);
+                let pixel = &mut pixels[row * self.width + col];
                 if inside(bounds, point)
                     && inside(self.geometry.crop_box, point)
                     && let Some(color) = value(point)
                 {
-                    pixels[row * self.width + col] = color;
+                    *pixel = color;
+                } else if let RasterSample::Coverage {
+                    stencil,
+                    fill_rule,
+                    color,
+                } = sample
+                {
+                    let [x, y] = point;
+                    let [l, b, r, t] = self.geometry.crop_box;
+                    let half = PITCH / 2;
+                    let rect = [
+                        l.max(x - half),
+                        b.max(y - half),
+                        r.min(x + half),
+                        t.min(y + half),
+                    ];
+                    let covered = if let Some(evenodd) = fill_rule {
+                        stencil.fill_intersects_rect(rect, evenodd, work)?
+                    } else {
+                        spend(work, stencil.edges * 5 + 1)?;
+                        let rect = rect.map(|coordinate| coordinate * stencil.scale);
+                        stencil.contour_intersects(stencil.expand(rect))
+                    };
+                    // @contract: Edge-only coverage remains visible when center sampling misses it.
+                    if covered {
+                        for (channel, ink) in pixel.iter_mut().zip(color) {
+                            let blended = (u16::from(*channel) + u16::from(ink)).div_ceil(2) as u8;
+                            *channel = if blended == *channel { ink } else { blended };
+                        }
+                    }
                 }
             }
         }
@@ -1629,9 +1710,9 @@ mod tests {
             stroke_stencils(&vertices, false, 2_000, Matrix::IDENTITY, &mut 4096).unwrap();
         let corner = [20_200, 9_200, 20_800, 9_800];
         assert_eq!(stencils.len(), 3);
-        assert!(!stencils[0].intersects_rect(corner));
-        assert!(!stencils[1].intersects_rect(corner));
-        assert!(stencils[2].intersects_rect(corner));
+        assert!(!stencils[0].stroke_intersects_rect(corner).unwrap());
+        assert!(!stencils[1].stroke_intersects_rect(corner).unwrap());
+        assert!(stencils[2].stroke_intersects_rect(corner).unwrap());
         assert!(stencils[2].hits([20_500, 9_500], false));
     }
 
@@ -1717,7 +1798,7 @@ mod tests {
         assert_eq!(
             grid.draw(
                 std::slice::from_ref(&paint),
-                SAMPLE_OFFSETS[0],
+                Some(SAMPLE_OFFSETS[0]),
                 &mut MAX_RASTER_WORK.clone()
             )
             .unwrap(),
@@ -1725,7 +1806,10 @@ mod tests {
                 [255; 3], [255; 3], [255; 3], [255; 3], [0; 3], [0; 3], [0; 3], [0; 3]
             ],
         );
-        assert_eq!(grid.draw(&[paint], SAMPLE_OFFSETS[0], &mut 8), Err(Budget));
+        assert_eq!(
+            grid.draw(&[paint], Some(SAMPLE_OFFSETS[0]), &mut 8),
+            Err(Budget)
+        );
     }
 
     #[test]
