@@ -2,6 +2,7 @@ use flow_core::pdf::native::{
     NativeEditLimits, NativeFieldCommand, NativeFieldRefusal, NativePageCommand, NativePdfSession,
     NativeRequestLookup, NativeSessionError,
 };
+use flow_core::pdf::{PdfSceneElement, PdfSceneRequest, open_pdf, read_pdf_scene};
 use serde_json::json;
 
 fn build_pdf(objects: &[Vec<u8>]) -> Vec<u8> {
@@ -45,6 +46,21 @@ fn apply(session: &mut NativePdfSession, command: serde_json::Value) -> Result<(
         .map_err(|error| error.code())
 }
 
+fn assert_saved_value(bytes: &[u8], name: &str, kind: &str, expected: &str) {
+    let reader = open_pdf(bytes, Default::default()).unwrap();
+    let scene = read_pdf_scene(&reader, &PdfSceneRequest::default()).unwrap();
+    let field = scene.pages[0]
+        .elements
+        .iter()
+        .find_map(|element| match element {
+            PdfSceneElement::Form { value } if value.name.as_deref() == Some(name) => Some(value),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("missing field {name}"));
+    assert_eq!(field.field_type.as_deref(), Some(kind));
+    assert_eq!(field.value.as_deref(), Some(expected));
+}
+
 fn imported_checkbox(geometry: &str, extra_page_entries: &str, state: &str) -> Vec<u8> {
     imported_field(geometry, extra_page_entries, state, "Btn", "", "")
 }
@@ -83,6 +99,7 @@ fn imported_checkbox_uses_parent_value_and_keeps_its_on_state_and_default() {
     let original = imported_checkbox("[10 10 30 30]", "", "Off");
     let mut pdf = session(&original);
     assert_eq!(pdf.snapshot().fields[0].checked, Some(false));
+    assert_saved_value(&original, "agreement", "Btn", "Off");
     let field = pdf.snapshot().fields[0].id;
     apply(
         &mut pdf,
@@ -99,6 +116,7 @@ fn imported_checkbox_uses_parent_value_and_keeps_its_on_state_and_default() {
     assert!(serialized.contains("/Parent 6 0 R"));
     let reopened = session(bytes);
     assert_eq!(reopened.snapshot().fields[0].checked, Some(true));
+    assert_saved_value(bytes, "agreement", "Btn", "Agreed");
 
     let id = pdf.snapshot().fields[0].id;
     apply(
@@ -139,6 +157,8 @@ fn checkbox_toggle_and_create_accept_inactive_acroform_settings() {
         let reopened = session(pdf.output_bytes());
         let fields = &reopened.snapshot().fields;
         assert_eq!(fields.len(), 2);
+        assert_saved_value(pdf.output_bytes(), "agreement", "Btn", "Agreed");
+        assert_saved_value(pdf.output_bytes(), "approval", "Btn", "Off");
         for (name, checked) in [("agreement", true), ("approval", false)] {
             let field = fields
                 .iter()
@@ -487,6 +507,7 @@ fn embedded_appearance_round_trips_ukrainian_and_refuses_unmapped_glyphs() {
     )
     .unwrap();
     assert_eq!(pdf.snapshot().fields[0].value.as_deref(), Some("Ї"));
+    assert_saved_value(pdf.output_bytes(), "recipient", "Tx", "Ї");
     assert!(
         pdf.output_bytes()
             .windows(b"<0001> Tj".len())
@@ -503,6 +524,30 @@ fn embedded_appearance_round_trips_ukrainian_and_refuses_unmapped_glyphs() {
     );
     assert_eq!(pdf.output_bytes(), accepted);
     assert_eq!(pdf.snapshot().binding.revision, 1);
+}
+
+#[test]
+fn ordinary_text_field_edit_round_trips_in_the_public_scene() {
+    let mut pdf = session(&imported_checkbox("[10 10 30 30]", "", "Off"));
+    apply(
+        &mut pdf,
+        json!({"kind":"addTextField","page":0,"rect":[40,40,160,60],"name":"recipient","value":"Original"}),
+    )
+    .unwrap();
+    assert_saved_value(pdf.output_bytes(), "recipient", "Tx", "Original");
+    let id = pdf
+        .snapshot()
+        .fields
+        .iter()
+        .find(|field| field.name.as_deref() == Some("recipient"))
+        .unwrap()
+        .id;
+    apply(
+        &mut pdf,
+        json!({"kind":"setFieldText","field":id,"value":"Updated"}),
+    )
+    .unwrap();
+    assert_saved_value(pdf.output_bytes(), "recipient", "Tx", "Updated");
 }
 
 #[test]

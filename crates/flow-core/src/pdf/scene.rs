@@ -901,13 +901,7 @@ impl<'a> SceneBuilder<'a> {
             }
             let rect = path_bounds(&commands)?;
             let stroke = matches!(operator, "S" | "s" | "B" | "B*" | "b" | "b*");
-            let clip = self.state.clip;
-            let visible = if clip.rectangular && clip.bounds == self.page.media_box {
-                self.paint_visible(rect, !stroke, &provenance)?
-            } else {
-                self.paint_visible_in_clip(rect, !stroke, &provenance)?
-            };
-            if visible {
+            if self.paint_visible(rect, !stroke, &provenance)? {
                 // @contract: Only provenance records the fill rule for painted paths.
                 if matches!(operator, "f*" | "B*" | "b*") {
                     self.report_partial(provenance.object_ref);
@@ -958,18 +952,6 @@ impl<'a> SceneBuilder<'a> {
         bounded: bool,
         provenance: &PdfSourceProvenance,
     ) -> Result<bool, PdfReadError> {
-        if self.invocation_path.len() <= 1 && self.page.crop_box.is_none() {
-            return Ok(true);
-        }
-        self.paint_visible_in_clip(rect, bounded, provenance)
-    }
-
-    fn paint_visible_in_clip(
-        &mut self,
-        rect: LayoutRect,
-        bounded: bool,
-        provenance: &PdfSourceProvenance,
-    ) -> Result<bool, PdfReadError> {
         let clip = self.state.clip;
         if clip.is_empty() {
             return Ok(false);
@@ -982,7 +964,16 @@ impl<'a> SceneBuilder<'a> {
             if intersection.rectangular && intersection.bounds == rect {
                 return Ok(true);
             }
+        } else if clip.rectangular
+            && clip.bounds == self.page.media_box
+            && rect.x > clip.bounds.x
+            && rect.y > clip.bounds.y
+            && rect.x.checked_add(rect.width)? < clip.bounds.x.checked_add(clip.bounds.width)?
+            && rect.y.checked_add(rect.height)? < clip.bounds.y.checked_add(clip.bounds.height)?
+        {
+            return Ok(true);
         }
+        // @contract: Glyph and stroke geometry can extend beyond the scene rectangle.
         self.report_partial(provenance.object_ref);
         Ok(true)
     }
@@ -1488,15 +1479,23 @@ impl<'a> SceneBuilder<'a> {
                     },
                 })?;
             } else if subtype.as_deref() == Some("Widget") {
-                let field_type = dictionary
-                    .get("FT")
-                    .and_then(PdfValue::as_name)
-                    .map(str::to_owned);
-                let name = string_value(dictionary.get("T"));
-                let value = string_value(dictionary.get("V"));
+                let owner = self.widget_field_owner(*annotation_ref, dictionary);
+                let field = owner.as_ref().unwrap_or(dictionary);
+                let field_type = field.get("FT").and_then(PdfValue::as_name);
+                let name = string_value(field.get("T"), self.limits.max_string_bytes);
+                let saved = field.get("V");
+                let value = if field_type == Some("Btn")
+                    && field
+                        .get("Ff")
+                        .is_none_or(|flags| matches!(flags.as_integer(), Some(0..=7)))
+                {
+                    saved.and_then(PdfValue::as_name).map(str::to_owned)
+                } else {
+                    string_value(saved, self.limits.max_string_bytes)
+                };
                 self.push_element(PdfSceneElement::Form {
                     value: PdfFormElement {
-                        field_type,
+                        field_type: field_type.map(str::to_owned),
                         name,
                         value,
                         rect,
@@ -1533,6 +1532,35 @@ impl<'a> SceneBuilder<'a> {
             }
         }
         Ok(())
+    }
+
+    fn widget_field_owner(
+        &self,
+        widget: PdfObjectRef,
+        dictionary: &BTreeMap<String, PdfValue>,
+    ) -> Option<BTreeMap<String, PdfValue>> {
+        let parent = dictionary.get("Parent")?;
+        if parent.as_reference()? == widget
+            || ["FT", "T", "V"]
+                .iter()
+                .any(|key| dictionary.contains_key(*key))
+        {
+            return None;
+        }
+        let PdfValue::Dictionary(field) = self.reader.resolve(parent, 0).ok()? else {
+            return None;
+        };
+        if field.contains_key("Parent")
+            || !matches!(
+                field.get("FT").and_then(PdfValue::as_name),
+                Some("Tx" | "Btn")
+            )
+        {
+            return None;
+        }
+        let children = self.reader.resolve(field.get("Kids")?, 1).ok()?;
+        matches!(children.as_array(), Some([PdfValue::Reference(child)]) if *child == widget)
+            .then_some(field)
     }
 
     fn push_element(&mut self, element: PdfSceneElement) -> Result<(), PdfReadError> {
@@ -1887,10 +1915,15 @@ fn parse_bbox(value: &PdfValue) -> Result<LayoutRect, PdfReadError> {
     })
 }
 
-fn string_value(value: Option<&PdfValue>) -> Option<String> {
-    value
-        .and_then(PdfValue::as_bytes)
-        .and_then(|value| String::from_utf8(value.to_vec()).ok())
+fn string_value(value: Option<&PdfValue>, limit: usize) -> Option<String> {
+    let bytes = value?.as_bytes()?;
+    let text = if let Some(utf16) = bytes.strip_prefix(&[0xfe, 0xff]) {
+        decode_utf16_be(utf16).ok()?
+    } else {
+        let utf8 = bytes.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(bytes);
+        std::str::from_utf8(utf8).ok()?.to_owned()
+    };
+    (text.len() <= limit).then_some(text)
 }
 
 fn next_code(bytes: &[u8], index: usize, mapping: &BTreeMap<Vec<u8>, String>) -> (Vec<u8>, u8) {
@@ -1993,7 +2026,10 @@ fn parse_hex_token(token: &str) -> Result<Vec<u8>, PdfReadError> {
 }
 
 fn parse_utf16_hex(token: &str) -> Result<String, PdfReadError> {
-    let bytes = parse_hex_token(token)?;
+    decode_utf16_be(&parse_hex_token(token)?)
+}
+
+fn decode_utf16_be(bytes: &[u8]) -> Result<String, PdfReadError> {
     if bytes.len() % 2 != 0 {
         return Err(PdfReadError::Syntax);
     }
