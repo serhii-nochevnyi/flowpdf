@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use super::super::reader::{PdfObjectRef, PdfValue};
 use super::super::scene::NativePdfNotePage;
+use super::forms::field_names;
 use super::graph::{NativeEditError, NativePdfGraph, PageTreeEdges, collect_refs, spend};
 use super::session::NativeSessionError;
 
@@ -783,48 +784,6 @@ pub(super) fn annotation_membership(
     Ok(field)
 }
 
-fn field_names(
-    graph: &NativePdfGraph,
-    fields: &[Ref],
-    work: &mut usize,
-) -> Result<BTreeSet<Vec<u8>>, NativeEditError> {
-    spend(work, fields.len())?;
-    let mut used = BTreeSet::new();
-    for &entry in fields {
-        let values = dict(graph, entry)?;
-        if values.contains_key("Kids") && values.get("FT").is_none() {
-            return Err(Unsupported);
-        }
-        let Some(PdfValue::String(name)) = values.get("T") else {
-            return Err(Unsupported);
-        };
-        spend(work, name.len())?;
-        // @contract: Reserve the generated namespace across ASCII and Unicode PDF strings.
-        if let Some(units) = name.strip_prefix(&[0xfe, 0xff]) {
-            if units.len() % 2 != 0 {
-                return Err(Unsupported);
-            }
-            used.insert(
-                String::from_utf16(
-                    &units
-                        .chunks_exact(2)
-                        .map(|pair| u16::from_be_bytes([pair[0], pair[1]]))
-                        .collect::<Vec<_>>(),
-                )
-                .map_err(|_| Unsupported)?
-                .into_bytes(),
-            );
-        } else {
-            used.insert(
-                name.strip_prefix(&[0xef, 0xbb, 0xbf])
-                    .unwrap_or(name)
-                    .to_vec(),
-            );
-        }
-    }
-    Ok(used)
-}
-
 fn unique_field_name(
     graph: &mut NativePdfGraph,
     field: Ref,
@@ -835,9 +794,9 @@ fn unique_field_name(
     let used = field_names(graph, fields, &mut work)?;
     graph.charge_page_work(budget - work)?;
     for suffix in 0..=fields.len() {
-        let name = format!("FlowPDFCopy{}_{}", field.object_number, suffix).into_bytes();
-        if !used.contains(&name) {
-            return Ok(PdfValue::String(name));
+        let name = format!("FlowPDFCopy{}_{}", field.object_number, suffix);
+        if !used.contains_key(&name) {
+            return Ok(PdfValue::String(name.into_bytes()));
         }
     }
     Err(Budget)
