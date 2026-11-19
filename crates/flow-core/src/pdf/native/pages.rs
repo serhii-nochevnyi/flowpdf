@@ -3,6 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 
 use super::super::reader::{PdfObjectRef, PdfValue};
+use super::super::scene::NativePdfNotePage;
 use super::graph::{NativeEditError, NativePdfGraph, spend};
 use super::session::NativeSessionError;
 
@@ -691,13 +692,17 @@ fn page_tree_reorder(
     graph: &mut NativePdfGraph,
     old: &[Ref],
     desired: &[Ref],
+    projected: &[NativePdfNotePage],
 ) -> Result<(), NativeEditError> {
     let mut changes = BTreeMap::<Ref, BTreeMap<Ref, Ref>>::new();
+    let sources: BTreeMap<_, _> = old.iter().copied().zip(projected).collect();
     for (&before, &after) in old.iter().zip(desired) {
         if before != after {
             let parent = reference(dict(graph, before)?, "Parent")?;
             if reference(dict(graph, after)?, "Parent")? != parent {
-                if dict(graph, after)?.contains_key("StructParents") {
+                if sources[&after].geometry.is_none()
+                    || dict(graph, after)?.contains_key("StructParents")
+                {
                     return Err(Unsupported);
                 }
                 let attributes = effective_attributes(graph, after)?;
@@ -723,12 +728,20 @@ pub(super) fn stage(
     graph: &mut NativePdfGraph,
     command: NativePageCommand,
     index: usize,
-    rotation: i64,
+    projected: &[NativePdfNotePage],
 ) -> Result<Ref, NativeSessionError> {
     use NativePageCommand::*;
     let mut order = graph.pages.clone();
     let page = order[index];
     let parent = reference(dict(graph, page)?, "Parent")?;
+    let geometry = projected[index].geometry;
+    if matches!(
+        command,
+        RotatePage { .. } | InsertBlankPage { .. } | DuplicatePage { .. }
+    ) && geometry.is_none()
+    {
+        return Err(NativeSessionError::TargetUnavailable);
+    }
     let mut removed = BTreeSet::new();
     if !matches!(command, RotatePage { .. })
         && dict(graph, catalog(graph)?)?.contains_key("PageLabels")
@@ -761,6 +774,9 @@ pub(super) fn stage(
     }
     let selected = match command {
         RotatePage { degrees, .. } if matches!(degrees, -90 | 90) => {
+            let rotation = geometry
+                .ok_or(NativeSessionError::TargetUnavailable)?
+                .rotation();
             dict_mut(graph, page)?.insert(
                 "Rotate".into(),
                 PdfValue::Integer((rotation + i64::from(degrees)).rem_euclid(360)),
@@ -776,7 +792,7 @@ pub(super) fn stage(
             let old = order.clone();
             order.remove(index);
             order.insert(position, page);
-            page_tree_reorder(graph, &old, &order)?;
+            page_tree_reorder(graph, &old, &order, projected)?;
             page
         }
         InsertBlankPage { .. } | DuplicatePage { .. } => {
