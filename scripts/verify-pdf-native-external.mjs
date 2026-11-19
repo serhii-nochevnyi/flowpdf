@@ -145,7 +145,7 @@ function widgetReference(input, page, fields, policy) {
       const normal = stream(`BT /F1 ${sizePt} Tf ${inkGray} g ${offsetPt.join(' ')} Td <${hexByValue[value]}> Tj ET\n`,
         `<< /Font << /F1 ${fixtureFontObject} 0 R >> >>`)
       const unicode = Buffer.from(value, 'utf16le').swap16().toString('hex')
-      field = `/FT /Tx /V <FEFF${unicode}> /AP << /N ${normal} >>`
+      field = `/FT /Tx /V <FEFF${unicode}> /DA (/F1 ${sizePt} Tf ${inkGray} g) /AP << /N ${normal} >>`
     }
     objects.push(`<< /Type /Annot /Subtype /Widget /P 30 0 R /Rect [${rectPt.join(' ')}] ` +
       `/T (Reference${objects.length}) ${field} >>`)
