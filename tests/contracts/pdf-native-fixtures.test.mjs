@@ -405,8 +405,10 @@ const wasmBinary = new URL("web/generated/flow_wasm_bg.wasm", root);
 const missingWasm = !existsSync(wasmModule) || !existsSync(wasmBinary);
 
 test("the preservation fixture completes its note lifecycle with built WASM", {
-  skip: missingWasm && "Build the production WASM module to run the fixture lifecycle",
+  skip: missingWasm && process.env.PHASE9_REQUIRE_WASM !== "1"
+    && "Build the production WASM module to run the fixture lifecycle",
 }, async () => {
+  assert.ok(!missingWasm, "Generated WASM is required. Run npm run build:wasm.");
   const wasm = await import(wasmModule.href);
   wasm.initSync({ module: readFileSync(wasmBinary) });
   const input = bytes(corpus + "notes-preservation.pdf");

@@ -13,6 +13,7 @@ function task(id, lane, argv, requirementIds, aliases = [], timeout = 300_000) {
 }
 
 export const tasks = Object.freeze([
+  task('09-60-01', 'local', ['npm', 'run', 'build:wasm'], requirements(1, 5), [], 1_200_000),
   task('09-01-01', 'local', cargo('flow-core', '--lib', 'pdf::native'), requirements(1), ['09-01-02']),
   task('09-18-01', 'local', core('pdf_native_graph', 'pdf_native_session', 'pdf_reader', 'pdf_scene', 'pdf_cos'),
     requirements(1), ['09-18-02']),

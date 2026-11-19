@@ -59,20 +59,30 @@ export function safeDiagnostic(diagnostic) {
   return diagnostic
 }
 
-export function runTasks(lane, run = runBounded) {
+const generatedWasm = ['flow_wasm.js', 'flow_wasm.d.ts', 'flow_wasm_bg.wasm']
+
+export function runTasks(lane, run = runBounded, cwd = root) {
   if (!['local', 'smoke', 'browser', 'release'].includes(lane)) throw new Error('PHASE9_INVALID_LANE')
   assertManifest()
   const diagnostics = []
   for (const task of tasks.filter((task) => task.lane === lane || (lane === 'local' && task.lane === 'smoke'))) {
     const start = Date.now()
-    const result = run(task.argv, { timeout: task.timeout })
-    const exitCode = result.status ?? 1
+    const options = { cwd, timeout: task.timeout }
+    if (task.id === '09-16-02') options.env = { ...pinnedEnvironment(), PHASE9_REQUIRE_WASM: '1' }
+    const result = run(task.argv, options)
+    const wasmUnavailable = task.id === '09-60-01' && (result.status !== 0 ||
+      generatedWasm.some((name) => {
+        const file = lstatSync(resolve(cwd, 'web/generated', name), { throwIfNoEntry: false })
+        return !file?.isFile() || file.size === 0
+      }))
+    const exitCode = wasmUnavailable ? 2 : result.status ?? 1
     const status = exitCode === 0 ? 'pass' :
-      (result.error?.code === 'ENOENT' || (lane === 'release' && exitCode === 2) ||
+      (wasmUnavailable || result.error?.code === 'ENOENT' || (lane === 'release' && exitCode === 2) ||
         (task.id === '09-03-02' && /^NATIVE_NOTE_TRACER_[A-Z_]+_UNAVAILABLE\s*$/.test(result.stderr ?? '')))
         ? 'unavailable' : 'fail'
     diagnostics.push(safeDiagnostic({ id: task.id, status, exitCode, elapsedMilliseconds: Math.max(0, Date.now() - start) }))
-    if (status !== 'pass') return { lane, status, exitCode, tasks: diagnostics }
+    if (status !== 'pass') return { lane, status, exitCode, tasks: diagnostics,
+      ...(wasmUnavailable ? { missing: 'generated-wasm' } : {}) }
   }
   return { lane, status: 'pass', exitCode: 0, tasks: diagnostics }
 }
