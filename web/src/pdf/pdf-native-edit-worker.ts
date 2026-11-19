@@ -143,6 +143,7 @@ interface RedactionJob {
   readonly request: NativePdfRedactionRequest
   readonly previous: NativePdfVerifiedSnapshot
   readonly expectedPages: readonly number[]
+  readonly expectedMarkCount: number | null
   candidate: NativePdfRedactionCandidate | null
   publishing: boolean
   publishedCandidate: NativePdfRedactionCandidate | null
@@ -156,7 +157,7 @@ interface Pending {
 
 interface QueuedCommand {
   readonly command: NativePdfSessionCommand
-  readonly indexedPage: { readonly index: number; readonly stableId: number } | null
+  readonly indexedPages: readonly { readonly index: number; readonly stableId: number }[]
   readonly resolve: (snapshot: NativePdfVerifiedSnapshot) => void
   readonly reject: (error: NativePdfWorkerError) => void
 }
@@ -557,19 +558,26 @@ export class NativePdfEditCoordinator {
       return Promise.reject(new NativePdfWorkerError('FLOW_PDF_NATIVE_TARGET_UNAVAILABLE'))
     }
     const index = 'page' in owned ? owned.page : 'target' in owned ? owned.target.page : undefined
-    const stableId = index === undefined ? undefined : current.pageState.order[index]
-    const indexedPage = index === undefined || stableId === undefined ? null : { index, stableId }
+    const indices = index === undefined ? [] : [index]
+    if (owned.kind === 'reorderPage') indices.push(owned.position)
+    const indexedPages: QueuedCommand['indexedPages'][number][] = []
+    for (const index of indices) {
+      const stableId = current.pageState.order[index]
+      if (stableId === undefined) return Promise.reject(new NativePdfWorkerError('FLOW_PDF_NATIVE_TARGET_UNAVAILABLE'))
+      indexedPages.push({ index, stableId })
+    }
     return new Promise((resolve, reject) => {
-      this.queue.push({ command: owned, indexedPage, resolve, reject })
+      this.queue.push({ command: owned, indexedPages, resolve, reject })
       this.pump()
     })
   }
 
-  async markRedaction(action: NativePdfRedactionMarkAction): Promise<NativePdfRedactionResult> {
-    if (action?.kind !== 'addMark' && action?.kind !== 'removeMark' && action?.kind !== 'clearMarks') {
+  async markRedaction(action: NativePdfRedactionMarkAction, expectedMarkCount: number): Promise<NativePdfRedactionResult> {
+    if ((action?.kind !== 'addMark' && action?.kind !== 'removeMark' && action?.kind !== 'clearMarks')
+      || !Number.isSafeInteger(expectedMarkCount) || expectedMarkCount < 0) {
       throw new NativePdfWorkerError(REQUEST_INVALID)
     }
-    const job = this.startRedaction(action, 'marking')
+    const job = this.startRedaction(action, 'marking', [], expectedMarkCount)
     try {
       const { redaction } = await this.redactionStep(job, job.request.action)
       this.finishRedaction(job, redaction)
@@ -748,6 +756,7 @@ export class NativePdfEditCoordinator {
 
   private startRedaction(
     action: NativePdfRedactionAction, phase: 'marking' | 'validating', expectedPages: readonly number[] = [],
+    expectedMarkCount: number | null = null,
   ): RedactionJob {
     const previous = this.state.accepted
     if (this.state.phase !== 'ready' || previous === null || this.queue.length !== 0 || this.redactionJob !== null) {
@@ -767,7 +776,7 @@ export class NativePdfEditCoordinator {
     if (!isNativeWorkerRequest({ dispatchId: 1, request })) throw new NativePdfWorkerError(REQUEST_INVALID)
     const job = {
       request: freezeNativeDto(structuredClone(request)), previous, expectedPages: Object.freeze([...expectedPages]),
-      candidate: null, publishing: false, publishedCandidate: null,
+      expectedMarkCount, candidate: null, publishing: false, publishedCandidate: null,
     }
     this.redactionJob = job
     this.update(phase, request.requestId)
@@ -830,7 +839,7 @@ export class NativePdfEditCoordinator {
     } catch (cause: unknown) {
       const error = errorFor(cause, requestId)
       if (this.redactionJob === job) {
-        if (job.publishedCandidate !== null && error.code !== REPLY_LOST) this.invalidate(error.code)
+        if ((job.publishing || job.expectedMarkCount !== null) && error.code !== REPLY_LOST) this.invalidate(error.code)
         else this.update('reconciliationRequired', requestId, error.code)
       }
       throw error
@@ -844,6 +853,10 @@ export class NativePdfEditCoordinator {
     code: string | null = null,
   ): void {
     this.requireLive(job.request.requestId)
+    if (job.expectedMarkCount !== null && redaction.markCount !== job.expectedMarkCount) {
+      this.invalidate(RESPONSE_INVALID)
+      throw new NativePdfWorkerError(RESPONSE_INVALID, job.request.requestId)
+    }
     this.redactionJob = null
     this.update('ready', null, code, accepted, freezeNativeDto(redaction))
   }
@@ -874,8 +887,7 @@ export class NativePdfEditCoordinator {
         && !hasFieldTarget(queued.command.field, current))
       || (isNativePageCommand(queued.command)
         && current.pageState.order[queued.command.target.page] !== queued.command.target.stableId)
-      || (queued.indexedPage !== null
-        && current.pageState.order[queued.indexedPage.index] !== queued.indexedPage.stableId))) {
+      || queued.indexedPages.some(({ index, stableId }) => current.pageState.order[index] !== stableId))) {
       queued.reject(new NativePdfWorkerError('FLOW_PDF_NATIVE_TARGET_UNAVAILABLE'))
       queued = this.queue.shift()
     }
