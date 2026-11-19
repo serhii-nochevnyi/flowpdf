@@ -8,8 +8,8 @@ import { mountEditorApp } from '../src/editor/editor-app.js'
 import { hashPdfSourceBytes, PdfSourceStore } from '../persistence/pdf-source-store.js'
 import { nativePdfText, type NativePdfMessage } from '../src/pdf/pdf-native-edit-messages.js'
 import {
-  nativeBytesHex, nativeHexBytes, readNativeResponse,
-  type NativePdfRedactionResult, type NativePdfWorkerRequest, type NativePdfWorkerResponse,
+  isNativeWorkerResponse, matchesNativeResponse, nativeBytesHex, nativeHexBytes, readNativeResponse,
+  type NativePdfRedactionResult, type NativePdfRequest, type NativePdfWorkerRequest, type NativePdfWorkerResponse,
 } from '../src/pdf/pdf-native-edit-protocol.js'
 import { NativePdfEditCoordinator, type NativePdfWorkerPort } from '../src/pdf/pdf-native-edit-worker.js'
 import { PDF_READER_PROTOCOL_VERSION, type PdfReaderResultDto } from '../src/pdf/pdf-protocol.js'
@@ -96,18 +96,16 @@ function controlledWorker() {
   const worker = new Worker(new URL('../src/pdf/pdf-native-edit-worker-entry.ts', import.meta.url), { type: 'module' })
   const requests: Action[] = []
   const previewPages: number[] = []
-  const statuses: NativePdfRedactionResult[] = []
-  const unpublished: Extract<NativePdfWorkerResponse, { type: 'response' }>[] = []
+  const dispatched = new Map<number, NativePdfRequest>()
+  const rawReplies: unknown[] = []
   const syntheticRefusals = new Set<string>()
-  let publishedOutput: string | undefined
   const control = {
     fault: null as Fault,
     refusePreview: false,
     dropMarkReplies: 0,
     hold: null as Action | null,
     resume: undefined as (() => void) | undefined,
-    requests, previewPages, statuses, unpublished,
-    output: () => publishedOutput,
+    requests, previewPages, dispatched, rawReplies,
     die: () => port.onerror?.(new ErrorEvent('error')),
   }
   const port: NativePdfWorkerPort = {
@@ -116,16 +114,21 @@ function controlledWorker() {
       if (message.request.operation === 'preview') previewPages.push(message.request.pageId)
       const action = message.request.operation === 'redaction' ? message.request.action.kind : null
       if (action) requests.push(action)
+      const dispatch = () => {
+        dispatched.set(message.dispatchId, message.request)
+        worker.postMessage(message)
+      }
       if (action !== null && action === control.hold) {
         control.hold = null
-        control.resume = () => worker.postMessage(message)
-      } else worker.postMessage(message)
+        control.resume = dispatch
+      } else dispatch()
     },
     terminate: () => worker.terminate(),
   }
   worker.onerror = (event) => port.onerror?.(event)
   worker.onmessageerror = (event) => port.onmessageerror?.(event)
   worker.onmessage = ({ data }: MessageEvent<NativePdfWorkerResponse>) => {
+    rawReplies.push(data)
     if (data.type !== 'response') {
       port.onmessage?.(new MessageEvent('message', { data }))
       return
@@ -140,9 +143,6 @@ function controlledWorker() {
     }
     if (reply?.operation === 'redaction' && reply.status !== 'failed') {
       const result = reply.redaction
-      statuses.push(result)
-      if (reply.status === 'redaction') unpublished.push(data)
-      if (reply.status === 'published') publishedOutput = reply.snapshot.outputHex
       if (result.action === 'addMark' && control.dropMarkReplies > 0) {
         control.dropMarkReplies -= 1
         return
@@ -177,6 +177,53 @@ function controlledWorker() {
   }
   const coordinator = new NativePdfEditCoordinator(port, (json) => syntheticRefusals.delete(json) || verify_native_pdf_response(json), 3_500)
   return { coordinator, control }
+}
+
+function rawRedactionReplies({ dispatched, rawReplies }: ReturnType<typeof controlledWorker>['control']) {
+  const seen = new Set<number>()
+  const redactionReplies = rawReplies.flatMap((message) => {
+    if (!isNativeWorkerResponse(message)) throw Error('Invalid raw worker envelope')
+    const { dispatchId } = message
+    const request = dispatched.get(dispatchId)
+    if (!request || seen.has(dispatchId)) throw Error(`Unexpected worker reply for dispatch ${dispatchId}`)
+    seen.add(dispatchId)
+    if (request.operation !== 'redaction') return []
+    const reply = message.type === 'response' ? readNativeResponse(message.json) : null
+    if ((reply === null && message.type === 'response') || (reply !== null && reply.operation !== 'redaction')) {
+      throw Error(`Invalid redaction reply for dispatch ${dispatchId}`)
+    }
+    if (reply !== null) expect(matchesNativeResponse(request, reply)).toBe(true)
+    return [{ message, request, reply }]
+  })
+  for (const [dispatchId, request] of dispatched) {
+    if (request.operation === 'redaction') expect(seen.has(dispatchId), `Missing redaction reply for dispatch ${dispatchId}`).toBe(true)
+  }
+  return redactionReplies
+}
+
+function assertUnpublishedReplies(replies: ReturnType<typeof rawRedactionReplies>) {
+  for (const { message } of replies) {
+    if (message.type === 'failed') {
+      expect(Object.keys(message).sort()).toEqual(['code', 'dispatchId', 'type'])
+      continue
+    }
+    expect(Object.keys(message).sort()).toEqual(['dispatchId', 'json', 'type'])
+    const payload = JSON.parse(message.json)
+    expect(payload).toMatchObject({ operation: 'redaction', snapshot: null })
+    const keys = [
+      'binding', 'code', 'limits', 'operation', 'originStoreHash', 'protocolVersion',
+      'requestId', 'resultHash', 'snapshot', 'status',
+    ]
+    if (payload.status !== 'failed') {
+      expect(payload.status).toBe('redaction')
+      expect(payload.redaction.published).toBe(false)
+      expect(Object.keys(payload.redaction).sort()).toEqual([
+        'acceptedHash', 'action', 'candidate', 'markCount', 'published', 'verification',
+      ])
+      keys.push('redaction')
+    }
+    expect(Object.keys(payload).sort()).toEqual(keys.sort())
+  }
 }
 
 async function activate(element: Element, key = '{Enter}') {
@@ -514,6 +561,11 @@ for (const locale of ['en', 'uk'] as const) {
       await assertQuarantine(beforePublish)
       for (const key of ['internal', 'structure', 'text', 'raster'] as const) await assertCheck(key, 'evidence.passed')
       await expect.element(redactionButton('redaction.cancel')).toBeDisabled()
+      const unpublished = rawRedactionReplies(lane.control)
+      assertUnpublishedReplies(unpublished)
+      const verified = unpublished.at(-1)!
+      expect(verified.request.action.kind).toBe('verify')
+      expect(verified.reply).toMatchObject({ status: 'redaction', redaction: { verification: { status: 'passed' } } })
       lane.control.resume!()
       if (locale === 'uk') {
         await expect.element(button('session.reconcile'), { timeout: 6_000 }).toBeVisible()
@@ -522,12 +574,27 @@ for (const locale of ['en', 'uk'] as const) {
       }
       await expect.element(status).toHaveTextContent(t('redaction.success'))
       expect(status.element().hasAttribute('data-native-redaction-status')).toBe(false)
-      if (locale === 'uk') expect(lane.control.requests).toContain('readPublished')
-      const accepted = lane.control.statuses.findLast((result) => result.published && result.action !== 'status')
-      expect(accepted?.action).toBe(locale === 'uk' ? 'readPublished' : 'publish')
+      const publication = rawRedactionReplies(lane.control).slice(unpublished.length)
+      expect(publication.map(({ request }) => request.action.kind)).toEqual(
+        locale === 'uk' ? ['publish', 'status', 'readPublished'] : ['publish'],
+      )
+      const published = publication[0]?.reply
+      const accepted = publication.at(-1)?.reply
+      if (published?.status !== 'published' || accepted?.status !== 'published') throw Error('Missing published worker snapshot')
+      for (const { request } of publication) {
+        expect(request).toEqual({
+          ...verified.request, action: { kind: request.action.kind, candidate: published.redaction.candidate },
+        })
+      }
+      if (locale === 'uk') {
+        expect(publication[1]?.reply).toMatchObject({
+          status: 'redaction', snapshot: null, redaction: { action: 'status', published: true },
+        })
+      }
+      expect(accepted.snapshot).toEqual(published.snapshot)
       const affectedPages = ordinary.pageState.order
-      expect(accepted?.candidate?.affectedPages).toEqual(affectedPages)
-      expect(accepted?.verification).toEqual({
+      expect(accepted.redaction.candidate?.affectedPages).toEqual(affectedPages)
+      expect(accepted.redaction.verification).toEqual({
         status: 'passed', structure: { status: 'passed', coveredPages: 2 },
         text: { status: 'passed', coveredPages: 2 }, raster: { status: 'passed', coveredPages: 2 },
       })
@@ -540,29 +607,16 @@ for (const locale of ['en', 'uk'] as const) {
       expect(prior.query()).toBeNull()
       const result = await getDownload('redaction.download')
       expect(result.name).toBe('contract-redacted.pdf')
-      expect(nativeBytesHex(result.bytes)).toBe(lane.control.output())
+      expect(nativeBytesHex(result.bytes)).toBe(accepted.snapshot.outputHex)
       const reopened = await reopenOutput(result.bytes)
       const hash = nativeBytesHex(Uint8Array.from(reopened.outputHash))
-      expect(hash).toBe(nativeBytesHex(Uint8Array.from(accepted!.candidate!.hash)))
+      expect(hash).toBe(nativeBytesHex(Uint8Array.from(accepted.redaction.candidate!.hash)))
       expect(button('redaction.download').element().getAttribute('data-output-hash')).toBe(hash)
       expect(button('redaction.download').element().getAttribute('data-validator-version')).toBe('1')
       await expect.poll(() => visibleRaster()?.dataset.nativePreviewHash).toBe(hash)
       expect(visibleRaster()?.dataset.nativePreviewRevision).toBe('2')
       expect(paintAtMark()).toEqual([255, 255, 255, 255])
       expect(fineRuleAtMark()).toEqual([255, 255, 255, 255])
-      expect(lane.control.unpublished.length).toBeGreaterThan(0)
-      for (const message of lane.control.unpublished) {
-        expect(Object.keys(message).sort()).toEqual(['dispatchId', 'json', 'type'])
-        const payload = JSON.parse(message.json)
-        expect(Object.keys(payload).sort()).toEqual([
-          'binding', 'code', 'limits', 'operation', 'originStoreHash', 'protocolVersion',
-          'redaction', 'requestId', 'resultHash', 'snapshot', 'status',
-        ])
-        expect(payload).toMatchObject({ operation: 'redaction', status: 'redaction', snapshot: null })
-        expect(Object.keys(payload.redaction).sort()).toEqual([
-          'acceptedHash', 'action', 'candidate', 'markCount', 'published', 'verification',
-        ])
-      }
       await expect.element(panel.getByText(t('redaction.outputIdentity', { revision: 2, hash }), { exact: true })).toBeVisible()
       expect(reopened.scene.pages.flatMap((page) => page.annotations.flatMap((entry) =>
         entry.kind === 'plainNote' ? [entry.contents] : [],
@@ -619,6 +673,7 @@ for (const locale of ['en', 'uk'] as const) {
       expect(downloads).toHaveLength(refused.downloads)
       expect(urls).toHaveBeenCalledTimes(refused.urls)
       expect(put).toHaveBeenCalledTimes(sourceWrites)
+      assertUnpublishedReplies(rawRedactionReplies(lane.control))
 
       lane = controlledWorker()
       await putOriginal(source)
@@ -633,6 +688,7 @@ for (const locale of ['en', 'uk'] as const) {
       expect(marksOnPage()).toHaveLength(1)
       expect(visibleRaster()).not.toBeNull()
       expect(lane.control.requests).toEqual(['addMark'])
+      assertUnpublishedReplies(rawRedactionReplies(lane.control))
       lane = controlledWorker()
       await reopen.click()
       await expect.element(status).toHaveTextContent(t('status.reopened'))
