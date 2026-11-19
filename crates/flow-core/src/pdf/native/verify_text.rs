@@ -133,13 +133,12 @@ impl<'a> Extraction<'a> {
         let mut output = Vec::new();
         let mut matrix = Matrix::IDENTITY;
         let mut stack = Vec::new();
-        let mut spans_streams = false;
-        let mut separated = true;
         let mut previous = &[][..];
         for &stream in &page.contents {
             let data = &doc.stream(stream)?.data;
-            spans_streams |= !stack.is_empty();
-            separated &= separated_content_streams(previous, data);
+            if !separated_content_streams(previous, data) {
+                return Err(UnsupportedProfile);
+            }
             matrix = self.stream(
                 doc,
                 stream,
@@ -152,7 +151,7 @@ impl<'a> Extraction<'a> {
             )?;
             previous = data;
         }
-        if !stack.is_empty() || (spans_streams && !separated) {
+        if !stack.is_empty() {
             return Err(UnsupportedProfile);
         }
         Ok(output)

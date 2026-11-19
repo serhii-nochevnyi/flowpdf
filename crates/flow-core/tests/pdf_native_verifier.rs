@@ -139,7 +139,7 @@ fn independent_page_streams(
         format!("<< /Type /Page /Parent 2 0 R /Contents 4 0 R {resources} >>").into_bytes(),
         stream("", first.as_bytes()),
         format!("<< /Type /Page /Parent 2 0 R /Contents [6 0 R 7 0 R] {resources} >>").into_bytes(),
-        stream("", b"0 0 1 rg 1 0 0 1 45 45 cm"),
+        stream("", b"0 0 1 rg 1 0 0 1 45 45 cm\n"),
         stream("", second.as_bytes()),
     ];
     objects.extend(extra);

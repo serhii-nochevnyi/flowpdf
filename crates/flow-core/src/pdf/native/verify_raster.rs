@@ -312,13 +312,12 @@ impl<'a> Interpreter<'a> {
         let mut graphics = Graphics::default();
         let crop = page.geometry.crop_box;
         let mut saved = Vec::new();
-        let mut spans_streams = false;
-        let mut separated = true;
         let mut previous = &[][..];
         for &id in &page.contents {
             let data = &document.stream(id)?.data;
-            spans_streams |= !saved.is_empty();
-            separated &= separated_content_streams(previous, data);
+            if !separated_content_streams(previous, data) {
+                return Err(UnsupportedProfile);
+            }
             graphics = self.stream(
                 document,
                 id,
@@ -331,7 +330,7 @@ impl<'a> Interpreter<'a> {
             )?;
             previous = data;
         }
-        if !saved.is_empty() || (spans_streams && !separated) {
+        if !saved.is_empty() {
             return Err(UnsupportedProfile);
         }
         for &(id, bounds, contents) in &page.annotations {

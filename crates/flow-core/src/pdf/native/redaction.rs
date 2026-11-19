@@ -1375,8 +1375,6 @@ impl<'a> Scan<'a> {
             marks: &page_marks,
         };
         let mut saved = Vec::new();
-        let mut spans_streams = false;
-        let mut separated = true;
         if let Some(contents) = node.get("Contents") {
             let list = resolve(graph, contents)?
                 .as_array()
@@ -1385,13 +1383,14 @@ impl<'a> Scan<'a> {
             for item in list {
                 let id = reference(item)?;
                 let data = &stream(graph, id)?.data;
-                spans_streams |= !saved.is_empty();
-                separated &= separated_content_streams(previous, data);
+                if !separated_content_streams(previous, data) {
+                    return Err(Unsupported);
+                }
                 graphics = self.content(id, graphics, &mut saved, scope, &mut used)?;
                 previous = data;
             }
         }
-        if !saved.is_empty() || (spans_streams && !separated) {
+        if !saved.is_empty() {
             return Err(Unsupported);
         }
         if let Some(list) = node.get("Annots") {
@@ -1929,8 +1928,82 @@ fn apply(
 
 #[cfg(test)]
 mod tests {
-    use super::super::{NativeEditLimits, tests::redaction_fixture};
+    use super::super::{
+        NativeEditLimits, tests::redaction_fixture,
+        verifier::NativeVerificationFailure::UnsupportedProfile, verify_raster, verify_text,
+        writer,
+    };
     use super::*;
+
+    fn page_stream_pair(first: &str, second: &str) -> Vec<u8> {
+        let mut graph =
+            NativePdfGraph::open(&redaction_fixture(first), NativeEditLimits::default()).unwrap();
+        let Some(PdfValue::Dictionary(page)) = graph.objects.get_mut(&graph.pages[0]) else {
+            unreachable!()
+        };
+        let first = reference(get(page, "Contents").unwrap()).unwrap();
+        let next = Object {
+            object_number: first.object_number + 1,
+            generation: 0,
+        };
+        page.insert(
+            "Contents".into(),
+            PdfValue::Array(vec![PdfValue::Reference(first), PdfValue::Reference(next)]),
+        );
+        graph.objects.insert(
+            next,
+            PdfValue::Stream(PdfStream {
+                dict: BTreeMap::from([("Length".into(), PdfValue::Integer(second.len() as i64))]),
+                data: second.as_bytes().to_vec(),
+                encoded: second.as_bytes().to_vec(),
+                source_offset: 0,
+            }),
+        );
+        writer::rewrite(&graph).unwrap()
+    }
+
+    #[test]
+    fn page_stream_boundaries_require_separation_with_an_empty_graphics_stack() {
+        let order = [1];
+        let marks = [NativeRedactionMark {
+            page_id: 1,
+            geometry: NativeRedactionGeometry {
+                media_box: [0, 0, 100_000, 100_000],
+                crop_box: [0, 0, 100_000, 100_000],
+                rotation: 0,
+            },
+            rect: [9_000, 9_000, 12_000, 12_000],
+        }];
+        let retained = "55 55 10 10 re f";
+        let accepted = page_stream_pair("10 10 10 10 re f\n", retained);
+        let limits = NativeEditLimits::default();
+        let mut graph = NativePdfGraph::open(&accepted, limits).unwrap();
+        scrub(&mut graph, &order, &marks).unwrap();
+        let candidate = writer::rewrite(&graph).unwrap();
+        assert!(verify_text::verify(&accepted, &candidate, &order, &marks).is_ok());
+        assert!(verify_raster::verify(&accepted, &candidate, &order, &marks).is_ok());
+
+        let unproven_accepted = page_stream_pair("10 10 10 10 re f ", retained);
+        let unproven_candidate = page_stream_pair("0 g ", retained);
+        let mut graph = NativePdfGraph::open(&unproven_accepted, limits).unwrap();
+        assert!(matches!(
+            scrub(&mut graph, &order, &marks),
+            Err(Unsupported)
+        ));
+        for (before, after) in [
+            (&unproven_accepted, &candidate),
+            (&accepted, &unproven_candidate),
+        ] {
+            assert!(matches!(
+                verify_text::verify(before, after, &order, &marks),
+                Err(UnsupportedProfile)
+            ));
+            assert!(matches!(
+                verify_raster::verify(before, after, &order, &marks),
+                Err(UnsupportedProfile)
+            ));
+        }
+    }
 
     #[test]
     fn transform_rounds_paint_outward_and_clips_inward() {
