@@ -2608,9 +2608,9 @@ export function PdfNativeEditPanel({
           </div>
         </div>
       </dialog>
-      {snapshot && <details className="native-stack">
+      {snapshot && originalStoreHash !== undefined && <details className="native-stack">
         <summary>{t('identity.title')}</summary>
-        <p>{t('identity.origin', { hash: snapshot.originStoreHash })}</p>
+        <p>{t('identity.origin', { hash: originalStoreHash })}</p>
         <p>{t('identity.revision', { revision })}</p>
         <p>{t('identity.output', { hash: outputHash })}</p>
         <p>{t('identity.evidence')}</p>

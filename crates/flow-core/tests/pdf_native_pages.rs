@@ -1371,6 +1371,23 @@ fn copy_name_inventory_uses_the_live_projection_and_staging_budgets() {
         Ok(NativeRequestLookup::Unseen)
     );
     assert_eq!(pdf.output_bytes(), bytes);
+
+    let mut near_limit = NativePdfSession::open_scoped(
+        &bytes,
+        NativeEditLimits {
+            max_retained_bytes: 464 * 1024,
+            ..limits
+        },
+        [3; 16],
+    )
+    .unwrap();
+    let binding = near_limit.snapshot().binding;
+    let duplicate = command("duplicatePage", 0, near_limit.snapshot());
+    near_limit.apply_page(binding, 1, &duplicate).unwrap();
+    assert_eq!(near_limit.snapshot().scene.pages.len(), 3);
+    assert!(near_limit.snapshot().fields.iter().any(|field| {
+        field.name.as_deref() == Some("FlowPDFCopy5_0") && field.page == 1
+    }));
 }
 
 #[test]

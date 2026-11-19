@@ -12,15 +12,20 @@ const url = `https://api.github.com/repos/${repo}/check-runs/73`
 const root = new URL('../../', import.meta.url)
 const browserSuites = ['edit', 'text', 'objects', 'pages', 'forms', 'redaction']
   .map((suite) => `web/tests/pdf-native-${suite}.browser.test.ts`)
+const baselineRevision = '5683541fe572a4d88d36df15db37ff6cde85f828'
+const verifiedRasterRevision = 'b3340c7aa5919715320d65548463fdff68cb2e43'
+const olderPageRevision = '793ff4c687a71210205258e58003400c7738affa'
+const pagesSuite = 'web/tests/pdf-native-pages.browser.test.ts'
+const redactionSuite = 'web/tests/pdf-native-redaction.browser.test.ts'
 
-function fixture({ expanded = true, updatedPackage = true, historicalFiles = new Map() } = {}) {
+function fixture({ expanded = true, updatedPackage = true, historicalFiles = new Map(), revision = sha } = {}) {
   const run = {
-    id: 7, run_number: 2, run_attempt: 3, head_sha: sha, event: 'push',
+    id: 7, run_number: 2, run_attempt: 3, head_sha: revision, event: 'push',
     name: workflow, path: '.github/workflows/pdf-native-note-tracer.yml',
     repository: { full_name: repo }, status: 'completed', conclusion: 'success',
   }
   const job = {
-    id: 73, name, head_sha: sha, workflow_name: workflow, run_id: run.id, check_run_url: url,
+    id: 73, name, head_sha: revision, workflow_name: workflow, run_id: run.id, check_run_url: url,
     labels: ['ubuntu-24.04'], status: 'completed', conclusion: 'success',
     steps: [
       'Verify exact checkout', 'Build generated WASM and web output',
@@ -37,18 +42,18 @@ function fixture({ expanded = true, updatedPackage = true, historicalFiles = new
     ].map((name, index) => ({ name, number: index + 2, status: 'completed', conclusion: 'success' })),
   }
   const check = {
-    name, head_sha: sha, url, status: 'completed', conclusion: 'success',
+    name, head_sha: revision, url, status: 'completed', conclusion: 'success',
     app: { slug: 'github-actions', owner: { login: 'github' } },
   }
   const state = { runs: [run], jobs: [job], checks: [check], origin: `git@github.com:${repo}.git`, auth: true, changedPath: null }
   function command(argv) {
     if (argv[1] === 'rev-parse') {
       assert.deepEqual(argv, ['git', 'rev-parse', '--verify', '--end-of-options', 'HEAD^{commit}'])
-      return sha
+      return revision
     }
     if (argv[1] === 'show') {
-      assert.ok(argv[2].startsWith(`${sha}:`))
-      const path = argv[2].slice(sha.length + 1)
+      assert.ok(argv[2].startsWith(`${revision}:`))
+      const path = argv[2].slice(revision.length + 1)
       if (historicalFiles.has(path)) {
         const contents = historicalFiles.get(path)
         return path === state.changedPath ? contents + ' ' : contents
@@ -73,16 +78,32 @@ function fixture({ expanded = true, updatedPackage = true, historicalFiles = new
     assert.deepEqual(argv.slice(0, 8), ['gh', 'api', '--hostname', 'github.com', '--method', 'GET', '-H',
       'Accept: application/vnd.github+json'])
     const endpoint = argv.at(-1)
-    if (endpoint === `repos/${repo}/actions/workflows/pdf-native-note-tracer.yml/runs?event=push&head_sha=${sha}&per_page=100`) {
+    if (endpoint === `repos/${repo}/actions/workflows/pdf-native-note-tracer.yml/runs?event=push&head_sha=${revision}&per_page=100`) {
       return JSON.stringify({ workflow_runs: state.runs, total_count: state.runs.length })
     }
     if (endpoint === `repos/${repo}/actions/runs/7/attempts/3/jobs?per_page=100`) {
       return JSON.stringify({ jobs: state.jobs, total_count: state.jobs.length })
     }
-    assert.equal(endpoint, `repos/${repo}/commits/${sha}/check-runs?check_name=${name}&filter=all&per_page=100`)
+    assert.equal(endpoint, `repos/${repo}/commits/${revision}/check-runs?check_name=${name}&filter=all&per_page=100`)
     return JSON.stringify({ check_runs: state.checks, total_count: state.checks.length })
   }
   return { run, job, check, state, command }
+}
+
+function harnessFilesFrom(t, revision, paths) {
+  const options = { cwd: root, encoding: 'utf8' }
+  const files = new Map()
+  for (const path of paths) {
+    const blob = spawnSync('git', ['show', `${revision}:${path}`], options)
+    assert.ifError(blob.error)
+    if (blob.status !== 0 && execFileSync('git', ['rev-parse', '--is-shallow-repository'], options).trim() === 'true') {
+      t.skip(`Harness bytes for ${revision} are unavailable in this shallow checkout`)
+      return null
+    }
+    assert.equal(blob.status, 0, blob.stderr)
+    files.set(path, blob.stdout)
+  }
+  return files
 }
 
 test('requires the configured workflow, current attempt, and exact Actions check on the inherited SHA', () => {
@@ -101,31 +122,43 @@ for (const [profile, revision, expanded] of [
   ['historical note-only', '1e6cbafbcdbe1cd8d74fdcaca71dbcf24665a358', false],
   ['historical expanded', '09ae65788a803835395e07beaa9240ab78239426', true],
   ['previous reviewed page and redaction', '9a14e505d07f341beaa0af023da2c2ae4b095758', true],
-  ['previous reviewed page and stroke', '793ff4c687a71210205258e58003400c7738affa', true],
+  ['previous reviewed page and stroke', olderPageRevision, true],
   ['previous reviewed preview and redaction', '956ae26938bb952bba2339a18db3d8b46db7b88e', true],
-  ['previous reviewed verified-raster redaction', 'b3340c7aa5919715320d65548463fdff68cb2e43', true],
+  ['previous reviewed verified-raster redaction (b3340c7)', verifiedRasterRevision, true],
+  ['reviewed baseline (5683541)', baselineRevision, true],
 ]) {
   test(`accepts the exact ${profile} harness`, (t) => {
-    const options = { cwd: root, encoding: 'utf8' }
     const paths = ['.github/workflows/pdf-native-note-tracer.yml', 'package.json',
       ...browserSuites.slice(0, expanded ? browserSuites.length : 1)]
-    const historicalFiles = new Map()
-    for (const path of paths) {
-      const blob = spawnSync('git', ['show', `${revision}:${path}`], options)
-      assert.ifError(blob.error)
-      if (blob.status !== 0 && execFileSync('git', ['rev-parse', '--is-shallow-repository'], options).trim() === 'true') {
-        t.skip('Historical harness bytes are unavailable in this shallow checkout')
-        return
-      }
-      assert.equal(blob.status, 0, blob.stderr)
-      historicalFiles.set(path, blob.stdout)
+    const historicalFiles = harnessFilesFrom(t, revision, paths)
+    if (!historicalFiles) return
+    const { command, state } = fixture({ expanded, historicalFiles, revision })
+    assert.deepEqual(requirePassedCi('HEAD', command), { repository: repo, sha: revision, run: 7, attempt: 3, job: 73 })
+    for (const path of expanded ? [browserSuites[0], pagesSuite, redactionSuite] : [browserSuites[0]]) {
+      state.changedPath = path
+      assert.throws(() => requirePassedCi('HEAD', command), { message: 'NATIVE_NOTE_TRACER_HARNESS_NOT_APPROVED' })
     }
-    const { command, state } = fixture({ expanded, historicalFiles })
-    assert.deepEqual(requirePassedCi('HEAD', command), { repository: repo, sha, run: 7, attempt: 3, job: 73 })
-    state.changedPath = browserSuites[0]
-    assert.throws(() => requirePassedCi('HEAD', command), /HARNESS_NOT_APPROVED/)
   })
 }
+
+for (const [profile, revision] of [['5683541', baselineRevision], ['b3340c7', verifiedRasterRevision]]) {
+  test(`refuses the ${profile} redaction suite with the older reviewed page suite`, (t) => {
+    const historicalFiles = harnessFilesFrom(t, revision, ['.github/workflows/pdf-native-note-tracer.yml',
+      'package.json', ...browserSuites])
+    const olderPage = harnessFilesFrom(t, olderPageRevision, [pagesSuite])
+    if (!historicalFiles || !olderPage) return
+    historicalFiles.set(pagesSuite, olderPage.get(pagesSuite))
+    const { command } = fixture({ historicalFiles, revision })
+    assert.throws(() => requirePassedCi('HEAD', command), { message: 'NATIVE_NOTE_TRACER_HARNESS_NOT_APPROVED' })
+  })
+}
+
+test('refuses the recovery note suite with a different reviewed redaction suite', (t) => {
+  const historicalFiles = harnessFilesFrom(t, verifiedRasterRevision, [redactionSuite])
+  if (!historicalFiles) return
+  const { command } = fixture({ historicalFiles })
+  assert.throws(() => requirePassedCi('HEAD', command), { message: 'NATIVE_NOTE_TRACER_HARNESS_NOT_APPROVED' })
+})
 
 for (const step of ['text replacement', 'object editing', 'page management', 'field editing', 'redaction']) {
   test(`requires a successful expanded ${step} step`, () => {

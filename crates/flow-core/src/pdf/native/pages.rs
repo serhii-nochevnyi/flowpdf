@@ -822,6 +822,7 @@ fn copy_annotations(
     let original = annotations(graph, source)?;
     graph.charge_page_work(original.len().saturating_mul(original.len()))?;
     let mut fields_update = None;
+    let mut inventory_charge = 0;
     for annot in original {
         let field = annotation_ownership(graph, source, annot)?;
         graph.reserve_page_copy(annot)?;
@@ -837,14 +838,17 @@ fn copy_annotations(
                 let mut remaining = available;
                 let names = field_name_inventory(graph, &fields, &mut work, &mut remaining)?;
                 graph.charge_page_work(budget - work)?;
-                graph.charge_page_retained(available - remaining)?;
+                inventory_charge = available - remaining;
+                graph.charge_page_retained(inventory_charge)?;
                 fields_update = Some((form, fields, names));
             }
             let (_, fields, names) = fields_update.as_mut().ok_or(Malformed)?;
             if fields.len() >= MAX_FIELDS {
                 return Err(Budget);
             }
-            graph.charge_page_retained(FIELD_NAME_ENTRY_BYTES + 2 * NATIVE_MAX_FIELD_NAME_BYTES)?;
+            let name_entry_charge = FIELD_NAME_ENTRY_BYTES + NATIVE_MAX_FIELD_NAME_BYTES;
+            graph.charge_page_retained(name_entry_charge + NATIVE_MAX_FIELD_NAME_BYTES)?;
+            inventory_charge += name_entry_charge;
             let name = unique_field_name(field, names)?;
             let label = PdfValue::String(name.as_bytes().to_vec());
             let (widget, copied_field) = if field == annot {
@@ -870,7 +874,9 @@ fn copy_annotations(
             copies.push(allocate(graph, copy)?);
         }
     }
-    if let Some((form, fields, _)) = fields_update {
+    if let Some((form, fields, names)) = fields_update {
+        drop(names);
+        graph.release_page_retained(inventory_charge);
         replace_form_fields(graph, form, fields)?;
     }
     Ok(copies)
