@@ -27,7 +27,7 @@
       "admission": "admitted",
       "source": {
         "path": "fixtures/pdf-native/notes-preservation.pdf",
-        "sha256": "e7ebfd3ae85497c3479f40e7e249ba595b9bdf935197415a05dad8e23a78c499"
+        "sha256": "f0ec2e94fad516a9089f5db7c3ae17d4b91e7827cabc961f8906aaaf5ee11b3d"
       },
       "expected": {
         "path": "fixtures/pdf-native/notes-preservation.expected.json",
@@ -45,7 +45,7 @@
       "admission": "refused",
       "source": {
         "path": "fixtures/pdf-native/refused.pdf",
-        "sha256": "4b8e8bff26fd15c258c3096fecaba23217c527810d3028ad4f2041aed68ca489"
+        "sha256": "e8766298dc321a755d8d9eda5142a33536af61d7025828997eff92606ea8fff5"
       },
       "expected": {
         "inline": {

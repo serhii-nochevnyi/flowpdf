@@ -12,7 +12,7 @@ node scripts/generate-pdf-native-fixtures.mjs --check
 node --test tests/contracts/pdf-native-fixtures.test.mjs
 ```
 
-The generator uses literal PDF objects, explicit generations, byte offsets and classic xref entries. It reads only the pinned font and license as fixture inputs. It uses fixed-strategy Flate for the two short page streams. It has no application, WASM or production writer dependency. Generation writes the two PDFs. The manifest and expectation data are authored separately. The manifest binds source and sidecar files by exact byte digest. The inline refusal expectation is hashed as UTF-8 JSON serialized with `JSON.stringify`.
+The generator uses literal PDF objects, explicit generations, byte offsets and classic xref entries. It reads only the pinned font and license as fixture inputs. It uses Flate for the embedded font and fixed-strategy Flate for the two short page streams. It has no application, WASM or production writer dependency. Generation writes the two PDFs. The manifest and expectation data are authored separately. The manifest binds source and sidecar files by exact byte digest. The inline refusal expectation is hashed as UTF-8 JSON serialized with `JSON.stringify`.
 
 ## Profiles and expectations
 
@@ -26,4 +26,4 @@ Raster policy v1 compares opaque RGB8 page content at 144 dpi, starting from the
 
 ## Evidence limits
 
-The contracts verify fixture identity, the exact embedded font bytes, and completeness of designed expectations. A separate local verifier can share parsing and font code with the application, so its results are shared-code evidence. The corpus records no local verifier run, and external evidence remains unavailable until a real run records the tool, version, scoped inputs and outputs. The current coverage is preservation, notes and refusal. Later fixtures can extend the same schema with the remaining edit families. Each user candidate requires its own verification.
+The contracts verify fixture identity, the decoded font bytes, and completeness of designed expectations. With a built production WASM module, they also run the note lifecycle. A separate local verifier can share parsing and font code with the application, so its results are shared-code evidence. The corpus records no local verifier run, and external evidence remains unavailable until a real run records the tool, version, scoped inputs and outputs. The current coverage is preservation, notes and refusal. Later fixtures can extend the same schema with the remaining edit families. Each user candidate requires its own verification.
