@@ -1035,7 +1035,6 @@ fn accepted_preview_preserves_fine_text_and_declines_ambiguous_paint() {
             assert_eq!(raster["width"], 24);
             assert_eq!(raster["height"], 24);
             let rgb = raster["rgbHex"].as_str().unwrap();
-            // The subpixel A lies in this pixel and misses its center.
             let pixel = (19 * 24 + 4) * 6;
             assert_eq!(&rgb[pixel..pixel + 6], "808080");
             assert!(

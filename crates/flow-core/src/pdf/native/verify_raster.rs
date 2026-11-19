@@ -1796,7 +1796,6 @@ impl Grid {
                 coverage.paint_partial(pixel, color, outline.map(|outline| outline.ink));
             }
         }
-        // An ink-bearing glyph can collapse when its outline is rounded to the raster grid.
         if !raster.coverage.is_empty()
             && outline.is_some_and(|outline| outline.require_coverage)
             && !has_preview_coverage
