@@ -1048,6 +1048,7 @@ fn read_cmap(mut rest: &[u8], width: usize) -> VerifyResult<BTreeMap<u16, char>>
                     | b"/Adobe-Identity-UCS2"
                     | b"/Example"
                     | b"/FixtureMap"
+                    | b"/Fixture-Composite"
                     | b"/Fixture-Latin" => {}
                     _ => {
                         let suffix = name.strip_prefix(b"/FlowPDF-").ok_or(UnsupportedProfile)?;

@@ -717,6 +717,7 @@ fn check_cmap_metadata(data: &[u8], work: &mut usize) -> Result<()> {
                         | b"/Adobe-Identity-UCS"
                         | b"/Adobe-Identity-UCS2"
                         | b"/FixtureMap"
+                        | b"/Fixture-Composite"
                         | b"/Fixture-Latin"
                 ) {
                     let count = name.strip_prefix(b"/FlowPDF-").ok_or(Unsupported)?;

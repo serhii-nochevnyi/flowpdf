@@ -534,3 +534,30 @@ fn published_redaction_preserves_strokes_inside_a_fractional_form_clip() {
             .any(|bytes| bytes == retained)
     );
 }
+
+#[test]
+fn reference_redaction_pdf_keeps_its_supported_cid_mapping() {
+    let source = include_bytes!("../../../fixtures/pdf-native/redaction.pdf");
+    let mut session = open(source);
+    assert!(session.redaction_admitted());
+    let binding = session.snapshot().binding;
+    let page_id = session.snapshot().page_state.order[0];
+    let geometry = session.redaction_mark_geometry(page_id).unwrap();
+    let rect = [12_000, 70_000, 40_000, 92_000];
+    session
+        .add_redaction_mark(
+            binding,
+            NativeRedactionMark {
+                page_id,
+                geometry,
+                rect,
+            },
+        )
+        .unwrap();
+    session.stage_redaction(binding, 1).unwrap();
+    let evidence = session.verify_redaction(binding, 1).unwrap();
+    assert!(evidence.checks_passed(), "{evidence:?}");
+    session.publish_redaction(binding, 1).unwrap();
+    assert_eq!(session.origin_bytes(), source);
+    assert_ne!(session.output_bytes(), source);
+}
