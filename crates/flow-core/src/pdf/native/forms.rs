@@ -418,10 +418,7 @@ fn load_form(graph: &NativePdfGraph, work: &mut usize) -> FieldResult<Form> {
             return Err(Profile);
         }
     }
-    let names = field_names(graph, &fields, work).map_err(|_| Reference)?;
-    if names.keys().any(|name| name.len() > MAX_NAME) {
-        return Err(Reference);
-    }
+    let names = field_name_inventory(graph, &fields, work).map_err(|_| Reference)?;
     Ok(Form {
         owner: Some(owner),
         fields,
@@ -773,15 +770,19 @@ fn display_name(
         graph.resolve_metered(field.get("T")?, work).ok()?
     };
     decode_field_name(label.as_bytes()?, MAX_NAME)
+        .filter(|name| !name.is_empty() && !name.chars().any(char::is_control))
 }
 
-pub(super) fn field_names(
+pub(super) fn field_name_inventory(
     graph: &NativePdfGraph,
     fields: &[Ref],
     work: &mut usize,
 ) -> Result<BTreeMap<String, Ref>, NativeEditError> {
-    use NativeEditError::Unsupported;
+    use NativeEditError::{Budget, Unsupported};
 
+    if fields.len() > MAX_FIELDS {
+        return Err(Budget);
+    }
     spend(work, fields.len())?;
     let mut names = BTreeMap::new();
     for &field in fields {
@@ -793,6 +794,7 @@ pub(super) fn field_names(
         }
         let label = graph.resolve_metered(values.get("T").ok_or(Unsupported)?, work)?;
         let bytes = label.as_bytes().ok_or(Unsupported)?;
+        // @security: Meter the full encoded name before decoding it for collision checks.
         spend(work, bytes.len())?;
         let name = decode_field_name(bytes, usize::MAX).ok_or(Unsupported)?;
         if names.insert(name, field).is_some() {
@@ -811,7 +813,7 @@ fn decode_field_name(bytes: &[u8], limit: usize) -> Option<String> {
         }
         decode_pdf_doc_encoding(bytes).ok()?
     };
-    (!name.is_empty() && name.len() <= limit && !name.chars().any(char::is_control)).then_some(name)
+    (name.len() <= limit).then_some(name)
 }
 
 pub(super) fn project(

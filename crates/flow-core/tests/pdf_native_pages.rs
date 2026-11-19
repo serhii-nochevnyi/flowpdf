@@ -1244,7 +1244,7 @@ fn split_text_widget_and_direct_form_clone_as_independent_owners() {
 }
 
 #[test]
-fn duplicate_skips_copy_name_reserved_by_an_indirect_read_only_field() {
+fn duplicate_skips_copy_names_reserved_by_read_only_fields() {
     let bytes = build_pdf(&[
         (0, "<< /Type /Catalog /Pages 2 0 R /AcroForm 6 0 R >>"),
         (
@@ -1252,12 +1252,15 @@ fn duplicate_skips_copy_name_reserved_by_an_indirect_read_only_field() {
             "<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 /MediaBox [0 0 300 500] /Resources <<>> >>",
         ),
         (0, "<< /Type /Page /Parent 2 0 R /Annots [5 0 R] >>"),
-        (0, "<< /Type /Page /Parent 2 0 R /Annots [7 0 R 9 0 R] >>"),
+        (
+            0,
+            "<< /Type /Page /Parent 2 0 R /Annots [7 0 R 9 0 R 11 0 R] >>",
+        ),
         (
             0,
             "<< /Type /Annot /Subtype /Widget /P 3 0 R /Rect [40 60 80 90] /FT /Btn /T (approval) /V /Off /AS /Off >>",
         ),
-        (0, "<< /Fields [5 0 R 7 0 R 9 0 R] >>"),
+        (0, "<< /Fields [5 0 R 7 0 R 9 0 R 10 0 R] >>"),
         (
             0,
             "<< /Type /Annot /Subtype /Widget /P 4 0 R /Rect [40 60 80 90] /FT /Tx /Ff 1 /T 8 0 R /V (data) >>",
@@ -1270,6 +1273,14 @@ fn duplicate_skips_copy_name_reserved_by_an_indirect_read_only_field() {
             0,
             "<< /Type /Annot /Subtype /Widget /P 4 0 R /Rect [40 100 80 130] /FT /Tx /Ff 1 /T (aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa) /V (data) >>",
         ),
+        (
+            0,
+            "<< /FT /Tx /Ff 1 /T (FlowPDFCopy5_1) /V (data) /Kids [11 0 R] >>",
+        ),
+        (
+            0,
+            "<< /Type /Annot /Subtype /Widget /P 4 0 R /Rect [40 140 80 170] /Parent 10 0 R /T <FEFF0041000A0042> >>",
+        ),
     ]);
     let mut session =
         NativePdfSession::open_scoped(&bytes, NativeEditLimits::default(), [3; 16]).unwrap();
@@ -1280,13 +1291,20 @@ fn duplicate_skips_copy_name_reserved_by_an_indirect_read_only_field() {
     assert!(prior.fields.iter().any(|field| {
         field.name.as_deref() == Some("FlowPDFCopy5_0") && !field.can_edit_appearance
     }));
+    let hidden_name = prior
+        .fields
+        .iter()
+        .find(|field| field.object.object_number == 11)
+        .unwrap();
+    assert_eq!(hidden_name.name, None);
+    assert!(!hidden_name.can_edit_appearance);
 
     let duplicate = command("duplicatePage", 0, prior);
     session.apply_page(prior.binding, 1, &duplicate).unwrap();
     let fields = &session.snapshot().fields;
-    assert_eq!(fields.len(), 4);
+    assert_eq!(fields.len(), 5);
     let copy = fields.iter().find(|field| field.page == 1).unwrap();
-    assert_eq!(copy.name.as_deref(), Some("FlowPDFCopy5_1"));
+    assert_eq!(copy.name.as_deref(), Some("FlowPDFCopy5_2"));
     let read_only = fields
         .iter()
         .find(|field| field.page == 2 && field.name.as_deref() == Some("FlowPDFCopy5_0"))

@@ -2035,6 +2035,8 @@ enum NativeVerifiedProfile {
 struct NativeRegistryEntry {
     session: NativePdfSession,
     origin_store_hash: String,
+    // @contract: One receipt per live session. Replay expires on revision advance or close.
+    open_request_id: u64,
     base_outputs: VecDeque<(u64, [u8; 32])>,
     last_mark: Option<NativeRedactionMarkReceipt>,
     last_cancel: Option<blake3::Hash>,
@@ -2127,14 +2129,17 @@ impl Write for NativeHashWriter {
     }
 }
 
-struct NativeBoundedJson(Vec<u8>);
+struct NativeBoundedJson {
+    bytes: Vec<u8>,
+    limit: usize,
+}
 
 impl Write for NativeBoundedJson {
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        if bytes.len() > NATIVE_PDF_RESULT - self.0.len() {
+        if bytes.len() > self.limit - self.bytes.len() {
             return Err(std::io::Error::other("native result limit"));
         }
-        self.0.extend_from_slice(bytes);
+        self.bytes.extend_from_slice(bytes);
         Ok(bytes.len())
     }
 
@@ -2182,45 +2187,57 @@ fn native_edit_limits() -> NativeEditLimits {
 }
 
 impl NativeRegistry {
+    fn open(
+        &mut self,
+        request_id: u64,
+        epoch: [u8; 16],
+        origin_store_hash: String,
+        bytes_hex: &str,
+        result_limit: usize,
+    ) -> Result<String, &'static str> {
+        let receipt = self.sessions.iter().find(|entry| {
+            entry.open_request_id == request_id
+                && entry.session.snapshot().binding.epoch == epoch
+                && entry.origin_store_hash == origin_store_hash
+        });
+        if receipt.is_none() && self.sessions.len() == NATIVE_PDF_SESSIONS {
+            return Err(NATIVE_BUDGET);
+        }
+        let bytes = native_decode_pdf(bytes_hex).map_err(|()| NATIVE_DECODE)?;
+        if encode_hex(&Sha256::digest(&bytes)) != origin_store_hash {
+            return Err(NATIVE_BINDING);
+        }
+        if let Some(entry) = receipt {
+            if entry.session.snapshot().binding.revision != 0 {
+                return Err(NATIVE_RECONCILE);
+            }
+            return entry.encode_open_response(result_limit);
+        }
+        let session = NativePdfSession::open_scoped(&bytes, native_edit_limits(), epoch)
+            .map_err(|error| native_session_error_code(error, NATIVE_IMPORT_REFUSED))?;
+        if !native_binding_valid(session.snapshot().binding) {
+            return Err(NATIVE_BUDGET);
+        }
+        let entry = NativeRegistryEntry {
+            session,
+            origin_store_hash,
+            open_request_id: request_id,
+            base_outputs: VecDeque::with_capacity(NATIVE_REQUEST_HISTORY),
+            last_mark: None,
+            last_cancel: None,
+            last_empty_status: None,
+        };
+        let reply = entry.encode_open_response(result_limit)?;
+        self.sessions.push(entry);
+        Ok(reply)
+    }
+
     fn execute<'a>(
         &'a mut self,
         request: NativeRequest,
         response: &mut NativeResponse<&'a NativePdfNoteScene>,
     ) -> Result<(), &'static str> {
         let (_, _, request_id, binding, store_hash) = request.identity();
-        if let NativeRequest::Open {
-            epoch,
-            bytes_hex,
-            origin_store_hash,
-            ..
-        } = request
-        {
-            if self.sessions.len() == NATIVE_PDF_SESSIONS {
-                return Err(NATIVE_BUDGET);
-            }
-            let bytes = native_decode_pdf(&bytes_hex).map_err(|()| NATIVE_DECODE)?;
-            if encode_hex(&Sha256::digest(&bytes)) != origin_store_hash {
-                return Err(NATIVE_BINDING);
-            }
-            let session = NativePdfSession::open_scoped(&bytes, native_edit_limits(), epoch)
-                .map_err(|error| native_session_error_code(error, NATIVE_IMPORT_REFUSED))?;
-            if !native_binding_valid(session.snapshot().binding) {
-                return Err(NATIVE_BUDGET);
-            }
-            self.sessions.push(NativeRegistryEntry {
-                session,
-                origin_store_hash,
-                base_outputs: VecDeque::with_capacity(NATIVE_REQUEST_HISTORY),
-                last_mark: None,
-                last_cancel: None,
-                last_empty_status: None,
-            });
-            let entry = self.sessions.last().expect("session just inserted");
-            response.binding = Some(entry.session.snapshot().binding);
-            response.status = NativeStatus::Opened;
-            response.snapshot = Some(entry.wire_snapshot());
-            return Ok(());
-        }
         let binding = binding.ok_or(NATIVE_BINDING)?;
         let index = self.sessions.iter().position(|entry| {
             native_same_session(entry.session.snapshot().binding, binding)
@@ -2345,6 +2362,18 @@ impl NativeRegistry {
 }
 
 impl NativeRegistryEntry {
+    fn encode_open_response(&self, result_limit: usize) -> Result<String, &'static str> {
+        let snapshot = self.wire_snapshot();
+        let mut response = native_response(NativeOperation::Open);
+        response.request_id = self.open_request_id;
+        response.binding = Some(snapshot.binding);
+        response.origin_store_hash = Some(self.origin_store_hash.clone());
+        response.status = NativeStatus::Opened;
+        response.snapshot = Some(snapshot);
+        response.code = None;
+        encode_native_response(&mut response, result_limit).map_err(|_| NATIVE_BUDGET)
+    }
+
     fn redact(
         &mut self,
         binding: NativeBinding,
@@ -2729,26 +2758,40 @@ fn native_response<S>(operation: NativeOperation) -> NativeResponse<S> {
     }
 }
 
-fn serialize_native_response<S: Serialize>(mut response: NativeResponse<S>) -> String {
-    fn encode<S: Serialize>(response: &mut NativeResponse<S>) -> Result<String, serde_json::Error> {
-        response.result_hash = native_result_hash(response)?;
-        let mut output = NativeBoundedJson(Vec::new());
-        serde_json::to_writer(&mut output, response)?;
-        Ok(String::from_utf8(output.0).expect("JSON is UTF-8"))
-    }
+fn encode_native_response<S: Serialize>(
+    response: &mut NativeResponse<S>,
+    limit: usize,
+) -> Result<String, serde_json::Error> {
+    response.result_hash = native_result_hash(response)?;
+    let mut output = NativeBoundedJson {
+        bytes: Vec::new(),
+        limit,
+    };
+    serde_json::to_writer(&mut output, response)?;
+    Ok(String::from_utf8(output.bytes).expect("JSON is UTF-8"))
+}
 
-    encode(&mut response).unwrap_or_else(|_| {
+fn serialize_native_response<S: Serialize>(mut response: NativeResponse<S>) -> String {
+    encode_native_response(&mut response, NATIVE_PDF_RESULT).unwrap_or_else(|_| {
         response.status = NativeStatus::Failed;
         response.snapshot = None;
         response.redaction = None;
         response.preview = None;
         response.code = Some(NATIVE_BUDGET.to_owned());
         response.result_hash.clear();
-        encode(&mut response).expect("bounded native error")
+        encode_native_response(&mut response, NATIVE_PDF_RESULT).expect("bounded native error")
     })
 }
 
 fn native_dispatch(operation: NativeOperation, json: &str) -> String {
+    native_dispatch_with_result_limit(operation, json, NATIVE_PDF_RESULT)
+}
+
+fn native_dispatch_with_result_limit(
+    operation: NativeOperation,
+    json: &str,
+    open_result_limit: usize,
+) -> String {
     let mut response = native_response::<&NativePdfNoteScene>(operation);
     let limit = if operation == NativeOperation::Open {
         NATIVE_PDF_REQUEST
@@ -2785,10 +2828,27 @@ fn native_dispatch(operation: NativeOperation, json: &str) -> String {
         response.request_id = request_id;
         response.binding = binding;
         response.origin_store_hash = Some(origin_store_hash);
-        response.code = registry
-            .execute(request, &mut response)
-            .err()
-            .map(str::to_owned);
+        response.code = match request {
+            NativeRequest::Open {
+                epoch,
+                origin_store_hash,
+                bytes_hex,
+                ..
+            } => match registry.open(
+                request_id,
+                epoch,
+                origin_store_hash,
+                &bytes_hex,
+                open_result_limit,
+            ) {
+                Ok(reply) => return reply,
+                Err(code) => Some(code.to_owned()),
+            },
+            _ => registry
+                .execute(request, &mut response)
+                .err()
+                .map(str::to_owned),
+        };
         serialize_native_response(response)
     })
 }
@@ -2796,6 +2856,16 @@ fn native_dispatch(operation: NativeOperation, json: &str) -> String {
 #[wasm_bindgen]
 pub fn native_pdf_open(request_json: String) -> String {
     native_dispatch(NativeOperation::Open, &request_json)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[doc(hidden)]
+pub fn native_pdf_open_with_result_limit(request_json: String, limit: usize) -> String {
+    native_dispatch_with_result_limit(
+        NativeOperation::Open,
+        &request_json,
+        limit.min(NATIVE_PDF_RESULT),
+    )
 }
 
 #[wasm_bindgen]
@@ -2943,6 +3013,8 @@ fn verify_native_snapshot(
             || entry.is_some_and(|entry| {
                 entry.origin_store_hash != snapshot.origin_store_hash
                     || entry.session.snapshot().consumed_request != consumed
+                    || (response.operation == NativeOperation::Open
+                        && entry.open_request_id != request)
             })
         {
             return None;

@@ -233,7 +233,7 @@ fn named_read_only_widgets_keep_their_labels_after_a_page_rewrite() {
             oversized_label.as_str(),
             "",
             [Some(expected_max_label.as_str()), None],
-            NativeFieldRefusal::Reference,
+            NativeFieldRefusal::Profile,
         ),
     ] {
         let bytes = build_pdf(&[
@@ -289,10 +289,17 @@ fn named_read_only_widgets_keep_their_labels_after_a_page_rewrite() {
 #[test]
 fn supported_checkbox_stays_editable_alongside_read_only_field_names() {
     let form = "/Type /XObject /Subtype /Form /BBox [0 0 20 20] /Resources <<>>";
+    let long_name = format!("({})", "a".repeat(65));
     for (read_only_name, label, collision) in [
-        ("(Consent form)", "Consent form", false),
-        ("<436166E9>", "Café", false),
-        ("<FEFF0061007000700072006F00760061006C>", "approval", true),
+        ("(Consent form)", Some("Consent form"), false),
+        ("<436166E9>", Some("Café"), false),
+        (long_name.as_str(), None, false),
+        ("<FEFF0041000A0042>", None, false),
+        (
+            "<FEFF0061007000700072006F00760061006C>",
+            Some("approval"),
+            true,
+        ),
     ] {
         let bytes = build_pdf(&[
             b"<< /Type /Catalog /Pages 2 0 R /AcroForm 4 0 R >>".to_vec(),
@@ -307,7 +314,7 @@ fn supported_checkbox_stays_editable_alongside_read_only_field_names() {
         let mut pdf = session(&bytes);
         let fields = &pdf.snapshot().fields;
         assert_eq!(fields.len(), 2);
-        assert_eq!(fields[1].name.as_deref(), Some(label));
+        assert_eq!(fields[1].name.as_deref(), label);
         assert!(!fields[1].can_edit_appearance);
         let command = json!({"kind":"setFieldChecked","field":fields[0].id,"checked":true});
         if collision {
@@ -336,7 +343,7 @@ fn supported_checkbox_stays_editable_alongside_read_only_field_names() {
         let fields = &reopened.snapshot().fields;
         assert_eq!(fields.len(), 2);
         assert_eq!(fields[0].checked, Some(true));
-        assert_eq!(fields[1].name.as_deref(), Some(label));
+        assert_eq!(fields[1].name.as_deref(), label);
         assert_eq!(fields[1].refusal, Some(NativeFieldRefusal::Profile));
     }
 }
@@ -366,6 +373,14 @@ fn read_only_label_does_not_shadow_an_editable_field_name() {
     assert!(fields[0].can_edit_appearance);
     assert_eq!(fields[1].refusal, Some(NativeFieldRefusal::Profile));
     let field = fields[0].id;
+    assert_eq!(
+        apply(
+            &mut pdf,
+            json!({"kind":"addCheckboxField","page":0,"rect":[70,10,90,30],"name":"preferences","checked":false}),
+        ),
+        Err(NativeFieldRefusal::Reference.code())
+    );
+    assert_eq!(pdf.output_bytes(), bytes);
     apply(
         &mut pdf,
         json!({"kind":"setFieldChecked","field":field,"checked":true}),

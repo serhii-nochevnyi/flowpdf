@@ -2,7 +2,8 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { test } from 'node:test'
 import {
-  checkStructure, compareRaster, compareWidgetRegion, decodePpm, externalExitCode, matchesWidgetBounds,
+  alternateCheckboxPdf, checkStructure, compareCheckboxAppearances, compareRaster, compareWidgetRegion,
+  decodePpm, externalExitCode, matchesWidgetBounds,
   loadFixtures, nativeSession, operationOutput, pdfStructure, probeVersion,
 } from '../../scripts/verify-pdf-native-external.mjs'
 
@@ -154,6 +155,40 @@ test('widget comparison checks every pixel within the crop-relative rectangle', 
   assert.equal(compareWidgetRegion(page, 144, rect, actual.subarray(1), expected), false)
 })
 
+test('checkbox comparison requires the declared artwork in both states within the widget rectangle', () => {
+  const page = { widthPx: 2, heightPx: 1, cropBoxPt: [0, 0, 2, 1], rotation: 0 }
+  const rect = [0, 0, 1, 1]
+  const off = Buffer.alloc(6, 255)
+  const yes = Buffer.from([0, 0, 0, 255, 255, 255])
+  const wrong = Buffer.from([80, 80, 80, 255, 255, 255])
+  const outsideOnly = Buffer.from([255, 255, 255, 0, 0, 0])
+  const check = (actual, expected) => compareCheckboxAppearances(page, 72, rect, actual, expected)
+  for (const [saved, alternate] of [[off, yes], [yes, off]]) {
+    const expected = { saved, alternate }
+    assert.equal(check(expected, expected), true)
+    assert.equal(check({ saved, alternate: wrong }, expected), false)
+    assert.equal(check({ saved: wrong, alternate }, expected), false)
+    assert.equal(check({ saved, alternate: saved }, expected), false)
+  }
+  const sameRegion = { saved: off, alternate: outsideOnly }
+  assert.equal(check(sameRegion, sameRegion), false)
+})
+
+test('the alternate raster input changes only the saved checkbox state selectors', () => {
+  const saved = fixture('edit-families.pdf')
+  const checkboxes = [{ ref: '19 0 R', state: 'Off' }]
+  const alternate = alternateCheckboxPdf(saved, checkboxes)
+  const changes = Array.from(alternate.keys()).filter((index) => saved[index] !== alternate[index])
+  assert.equal(alternate.length, saved.length)
+  assert.equal(changes.length, 6)
+  for (const [index, selector] of [[changes[0], '/V /'], [changes[3], '/AS /']]) {
+    assert.equal(saved.toString('latin1', index - selector.length, index + 3), selector + 'Off')
+    assert.equal(alternate.toString('latin1', index - selector.length, index + 3), selector + 'Yes')
+  }
+  assert.deepEqual(alternateCheckboxPdf(alternate, [{ ref: '19 0 R', state: 'Yes' }]), saved)
+  assert.throws(() => alternateCheckboxPdf(saved, [{ ref: '19 0 R', state: 'Yes' }]), /checkbox-source-state/)
+})
+
 test('widget Forms need a finite full-size local box and an identity matrix', () => {
   const rect = [16, 12, 64, 32]
   assert.equal(matchesWidgetBounds(rect, [0, 0, 48, 20]), true)
@@ -178,7 +213,7 @@ function structuralReadback(pages) {
   return { json, objects }
 }
 
-test('widget readback compares PDF field types and requires the Off and Yes appearance keys', () => {
+test('widget readback compares PDF field types and requires distinct Off and Yes Forms', () => {
   const [source] = editFamilies.operations
   const operation = { pages: source.pages.slice(0, 1), fieldReadback: source.fieldReadback,
     noteReadback: [], removed: [] }
@@ -213,9 +248,69 @@ test('widget readback compares PDF field types and requires the Off and Yes appe
   appearance['/Yes'] = appearance['/On']
   assert.throws(() => check(), /widget-appearance-state/)
   delete appearance['/On']
+  appearance['/Yes'] = appearance['/Off']
+  assert.throws(() => check(), /checkbox-shared-appearance/)
+  appearance['/Yes'] = '14 0 R'
   checkbox['/AS'] = checkbox['/V'] = '/Yes'
   const [textField, checkboxField] = operation.fieldReadback
   check({ ...operation, fieldReadback: [textField, { ...checkboxField, value: 'Yes', appearanceState: 'Yes' }] })
+})
+
+test('redaction structure requires one complete revision of the saved bytes', () => {
+  const samples = Buffer.from([0, 83]).toString('latin1')
+  const bodies = [
+    '<< /Type /Catalog /Pages 2 0 R >>',
+    '<< /Type /Pages /Count 1 /Kids [3 0 R] >>',
+    '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 1 1] /Resources << /XObject << /Im 4 0 R >> >> >>',
+    '<< /Type /XObject /Subtype /Image /Width 2 /Height 1 /ColorSpace /DeviceGray /BitsPerComponent 8 /Length 2 >>' +
+      '\nstream\n' + samples + '\nendstream',
+  ]
+  let pdf = '%PDF-1.7\n%\xE2\xE3\xCF\xD3\n'
+  let entries = '0000000000 65535 f \n'
+  for (const [index, body] of bodies.entries()) {
+    entries += String(pdf.length).padStart(10, '0') + ' 00000 n \n'
+    pdf += `${index + 1} 0 obj\n${body}\nendobj\n`
+  }
+  const xref = pdf.length
+  const trailer = '<< /Size 5 /Root 1 0 R >>'
+  const table = `xref\n0 5\n${entries}trailer\n${trailer}\n`
+  const footer = (offset) => `startxref\n${offset}\n%%EOF\n`
+  const saved = pdf + table + footer(xref)
+  const operation = { operation: 'redact', pages: [{ page: 1, cropBoxPt: [0, 0, 1, 1], rotation: 0 }],
+    noteReadback: [], removed: [] }
+  const { json, objects } = structuralReadback(operation.pages)
+  json.pages[0].object = '3 0 R'
+  objects.trailer.value['/Size'] = 5
+  objects['obj:1 0 R'].value['/Pages'] = '2 0 R'
+  objects['obj:3 0 R'] = objects['obj:2 0 R']
+  objects['obj:2 0 R'] = { value: { '/Kids': ['3 0 R'], '/Count': 1 } }
+  objects['obj:4 0 R'] = { stream: { dict: { '/Subtype': '/Image' } } }
+  const check = (bytes) => {
+    const rawStream = (_path, ref) => {
+      assert.equal(ref, '4 0 R')
+      const sampleOffset = bytes.indexOf('\nstream\n') + '\nstream\n'.length
+      return bytes.subarray(sampleOffset, sampleOffset + samples.length)
+    }
+    return checkStructure(pdfStructure(json), null, operation, rawStream, null, null, 'saved.pdf', bytes)
+  }
+  assert.throws(() => check(), /redaction-revision/)
+  const laterXref = `xref\n0 1\n0000000000 65535 f \ntrailer\n<< /Size 5 /Root 1 0 R /Prev ${xref} >>\n`
+  for (const invalid of [
+    saved.replace(footer(xref), footer(xref + 1)),
+    saved + 'trailing bytes',
+    saved + laterXref + footer(saved.length),
+    saved + table + footer(saved.length),
+    saved.replace('/Length 2', '/Length 1'),
+  ]) {
+    assert.throws(() => check(Buffer.from(invalid, 'latin1')), /redaction-revision/)
+  }
+  const bytes = Buffer.from(saved, 'latin1')
+  for (const key of ['/Prev', '/XRefStm']) {
+    objects.trailer.value[key] = null
+    assert.throws(() => check(bytes), /redaction-revision/)
+    delete objects.trailer.value[key]
+  }
+  check(bytes)
 })
 
 test('preserved destinations compare link rectangles and complete views', () => {
