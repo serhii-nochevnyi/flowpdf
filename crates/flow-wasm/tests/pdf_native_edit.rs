@@ -382,12 +382,25 @@ fn page_preview_declines_ambiguous_partial_paint_overlaps() {
 }
 
 #[test]
-fn page_preview_refuses_partial_paint_over_mixed_image_samples() {
-    for (stroke, available) in [
-        ("", true),
-        ("1 0 0 RG 0.04 w 2.05 2.08 m 2.2 2.08 l S", false),
+fn page_preview_refuses_unresolved_image_samples() {
+    let aligned = "1 0 0 0.5 2 2";
+    let compressed = "0.5 0 0 0.5 2 2";
+    let edge_only = "0.2 0 0 0.2 2 2";
+    let distinct = "AzAzAz";
+    let uniform = "AzAAzA";
+    let partial = "1 0 0 RG 0.04 w 2.05 2.08 m 2.2 2.08 l S";
+    let opaque = "0 0 1 rg 2 2 0.5 0.5 re f";
+    for (matrix, samples, repaint, expected) in [
+        (aligned, distinct, "", Some("417a417a417a")),
+        (compressed, distinct, "", None),
+        (compressed, distinct, partial, None),
+        (compressed, distinct, opaque, Some("0000ff")),
+        (compressed, uniform, "", Some("417a41")),
+        (compressed, uniform, partial, Some("a03d21")),
+        (edge_only, distinct, "", None),
+        (edge_only, uniform, "", Some("a0bda0")),
     ] {
-        let artwork = format!("q 0.5 0 0 0.5 2 2 cm /Photo Do Q\n{stroke}");
+        let artwork = format!("q {matrix} cm /Photo Do Q\n{repaint}");
         let source = fixture_pdf(&[
             "<< /Type /Catalog /Pages 2 0 R >>",
             "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
@@ -396,7 +409,10 @@ fn page_preview_refuses_partial_paint_over_mixed_image_samples() {
                 "<< /Length {} >>\nstream\n{artwork}\nendstream",
                 artwork.len()
             ),
-            "<< /Type /XObject /Subtype /Image /Width 2 /Height 1 /ColorSpace /DeviceRGB /BitsPerComponent 8 /Length 6 >>\nstream\nAzAzAz\nendstream",
+            &format!(
+                "<< /Type /XObject /Subtype /Image /Width 2 /Height 1 /ColorSpace /DeviceRGB /BitsPerComponent 8 /Length {} >>\nstream\n{samples}\nendstream",
+                samples.len()
+            ),
         ]);
         let opened = call(native_pdf_open, open_request(source.as_bytes()));
         assert_eq!(opened["status"], "opened", "{opened}");
@@ -405,13 +421,18 @@ fn page_preview_refuses_partial_paint_over_mixed_image_samples() {
             native_pdf_preview,
             preview_request(2, base, base["pageState"]["order"][0].clone()),
         );
-        if available {
+        if let Some(expected) = expected {
             assert_eq!(reply["status"], "preview", "{reply}");
+            let rgb = reply["preview"]["rgbHex"].as_str().unwrap();
+            let start = (11 * 16 + 4) * 6;
+            assert_eq!(&rgb[start..start + expected.len()], expected);
         } else {
             assert_eq!(
                 reply["code"], "FLOW_PDF_NATIVE_TARGET_UNAVAILABLE",
                 "{reply}"
             );
+            assert!(reply.get("preview").is_none());
+            status_only(&reply);
         }
         assert_eq!(
             call(native_pdf_close, bound("close", 3, base))["status"],
