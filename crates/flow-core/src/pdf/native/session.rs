@@ -19,7 +19,8 @@ use super::pages::{self, NativePageCommand, NativePageState};
 use super::redaction;
 use super::text::{self, NativeTextCommand, NativeTextPage, NativeTextRefusal};
 use super::verifier::{
-    NativeRedactionContext, NativeRedactionMark, VersionedNativeRedactionEvidence,
+    NativeRedactionContext, NativeRedactionMark, NativeVerificationFailure,
+    VersionedNativeRedactionEvidence, Workspace,
 };
 use super::writer::rewrite_with_workspace;
 
@@ -312,8 +313,17 @@ impl NativePdfSession {
             .ok_or(NativeSessionError::TargetUnavailable)?;
         let geometry = redaction::geometry(&self.graph, index)
             .map_err(|_| NativeSessionError::TargetUnavailable)?;
-        super::verify_raster::accepted_page(self.output_bytes(), index, geometry)
-            .map_err(|_| NativeSessionError::TargetUnavailable)
+        let mut remaining = self.remaining_retained;
+        spend(
+            &mut remaining,
+            self.mark_bytes() + self.candidate.as_ref().map_or(0, Candidate::retained),
+        )?;
+        let workspace = Workspace::new(remaining);
+        super::verify_raster::accepted_page(self.output_bytes(), index, geometry, &workspace)
+            .map_err(|error| match error {
+                NativeVerificationFailure::Budget => NativeSessionError::Budget,
+                _ => NativeSessionError::TargetUnavailable,
+            })
     }
 
     pub fn redaction_admitted(&self) -> bool {

@@ -6,11 +6,12 @@ use ttf_parser::OutlineBuilder;
 
 use super::super::reader::{PdfObjectRef, PdfValue};
 use super::super::scene::{ContentToken, separated_content_streams};
+#[cfg(test)]
+use super::verifier::STANDALONE_WORKSPACE;
 use super::verifier::{
     MAX_COORD, NativeRedactionGeometry, NativeRedactionMark, NativeRedactionPageEvidence,
     NativeVerificationFailure::{Budget, RasterMismatch, Structure, UnsupportedProfile},
-    POINT, Rect, Reservation, STANDALONE_WORKSPACE, VerifyResult, Workspace, contains, intersects,
-    spend, valid_rect,
+    POINT, Rect, Reservation, VerifyResult, Workspace, contains, intersects, spend, valid_rect,
 };
 use super::verify_structure::{Dict, Document, Page, Side, coverage, get, name};
 use super::verify_text::{
@@ -46,10 +47,10 @@ pub(super) fn accepted_page(
     bytes: &[u8],
     index: usize,
     geometry: NativeRedactionGeometry,
+    workspace: &Workspace,
 ) -> VerifyResult<NativePageRaster> {
-    let workspace = Workspace::new(STANDALONE_WORKSPACE);
     let mut documents = workspace.scope();
-    let document = Document::open(bytes, Side::Accepted, &workspace, &mut documents)?;
+    let document = Document::open(bytes, Side::Accepted, workspace, &mut documents)?;
     let mut page_bytes = workspace.scope();
     let page = document.page(index, &mut page_bytes)?;
     if page.geometry != geometry {
@@ -60,10 +61,13 @@ pub(super) fn accepted_page(
     if grid.width > NATIVE_PREVIEW_MAX_DIMENSION || grid.height > NATIVE_PREVIEW_MAX_DIMENSION {
         return Err(Budget);
     }
-    let mut draw = DrawBudget::new(&workspace);
-    let paints = Interpreter::new(&workspace).page(&document, &page, &mut draw)?;
+    let mut interpreter = Interpreter::new(workspace);
+    let mut draw = DrawBudget::new(workspace);
+    let paints = interpreter.page(&document, &page, &mut draw)?;
+    let _buffers = workspace
+        .reserve(grid.width * grid.height * (size_of::<Pixel>() + size_of::<PreviewCoverage>()))?;
     let mut work = MAX_RASTER_WORK;
-    let mut pixels = grid.draw(&paints, None, &mut work)?;
+    let mut pixels = grid.draw(&paints, None, &mut work, workspace)?;
     // @contract: Preview RGB starts at the top left of the rotated crop.
     pixels.reverse();
     for row in pixels.chunks_exact_mut(grid.width) {
@@ -304,8 +308,9 @@ pub(super) fn verify_with_workspace(
         }
         let _samples = workspace.reserve(grid.width * grid.height * 2 * size_of::<Pixel>())?;
         for sample in SAMPLE_OFFSETS {
-            let expected_pixels = grid.draw(&source_paint, Some(sample), &mut work)?;
-            let candidate_pixels = grid.draw(&candidate_paint, Some(sample), &mut work)?;
+            let expected_pixels = grid.draw(&source_paint, Some(sample), &mut work, workspace)?;
+            let candidate_pixels =
+                grid.draw(&candidate_paint, Some(sample), &mut work, workspace)?;
             if expected_pixels != candidate_pixels {
                 return Err(RasterMismatch);
             }
@@ -710,9 +715,7 @@ impl Paint<'_> {
         };
         let mut hit = false;
         if let (Some((_, evenodd)), Some(fill)) = (vector.fill, &vector.fill_path) {
-            let _scratch = workspace
-                .reserve(fill.edges * (size_of::<bool>() + 6 * size_of::<(Point, i32)>()))?;
-            hit |= fill.fill_intersects_rect(mark, evenodd, work)?;
+            hit |= fill.fill_intersects_rect(mark, evenodd, work, workspace)?;
         }
         // @invariant: Ambiguous contact in any stroke component overrides a definite hit.
         for stencil in &vector.stroke_paths {
@@ -1130,6 +1133,7 @@ impl Stencil {
         rect: Rect,
         evenodd: bool,
         work: &mut usize,
+        workspace: &Workspace,
     ) -> VerifyResult<bool> {
         if !intersects(self.bounds, rect) {
             return Ok(false);
@@ -1140,6 +1144,8 @@ impl Stencil {
             return Ok(true);
         }
         let segments = self.segments();
+        let _scratch =
+            workspace.reserve(self.edges * (size_of::<bool>() + 6 * size_of::<(Point, i32)>()))?;
         let mut grouped = vec![false; self.edges];
         for (index, (start, end)) in segments.clone().enumerate() {
             if grouped[index] || !crosses_interior(start, end, rect) {
@@ -1587,10 +1593,11 @@ struct Grid {
     height: usize,
 }
 
-struct Raster {
+struct Raster<'a> {
     pixels: Vec<Pixel>,
     coverage: Vec<PreviewCoverage>,
     offset: Point,
+    workspace: &'a Workspace,
 }
 
 #[derive(Clone, Copy)]
@@ -1628,10 +1635,15 @@ impl RasterOutline<'_> {
             .any(|(a, b)| crosses_interior(a, b, rect)))
     }
 
-    fn intersects_pixel(self, rect: Rect, work: &mut usize) -> VerifyResult<bool> {
+    fn intersects_pixel(
+        self,
+        rect: Rect,
+        work: &mut usize,
+        workspace: &Workspace,
+    ) -> VerifyResult<bool> {
         let stencil = self.stencil;
         if let Some(evenodd) = self.fill_rule {
-            return stencil.fill_intersects_rect(rect, evenodd, work);
+            return stencil.fill_intersects_rect(rect, evenodd, work, workspace);
         }
         spend(work, stencil.edges * 5 + 1)?;
         let rect = rect.map(|coordinate| coordinate * stencil.scale);
@@ -1686,6 +1698,7 @@ impl Grid {
         paints: &[Paint<'_>],
         sample: Option<Point>,
         work: &mut usize,
+        workspace: &Workspace,
     ) -> VerifyResult<Vec<Pixel>> {
         let count = self.width * self.height;
         spend(work, count)?;
@@ -1702,6 +1715,7 @@ impl Grid {
             pixels,
             coverage,
             offset: sample.unwrap_or([PITCH / 2; 2]),
+            workspace,
         };
         for paint in paints {
             match &paint.kind {
@@ -1780,7 +1794,7 @@ impl Grid {
 
     fn paint_vector(
         &self,
-        raster: &mut Raster,
+        raster: &mut Raster<'_>,
         stencil: &Stencil,
         (color, fill_rule): (Color, Option<bool>),
         work: &mut usize,
@@ -1813,7 +1827,7 @@ impl Grid {
 
     fn paint(
         &self,
-        raster: &mut Raster,
+        raster: &mut Raster<'_>,
         bounds: Rect,
         paint: PreviewPaint<'_>,
         cost: usize,
@@ -1867,7 +1881,7 @@ impl Grid {
                     t.min(y + half),
                 ];
                 if let Some(outline) = outline {
-                    if color.is_none() && !outline.intersects_pixel(rect, work)? {
+                    if color.is_none() && !outline.intersects_pixel(rect, work, raster.workspace)? {
                         continue;
                     }
                 } else if !intersects(bounds, rect) {
@@ -2038,7 +2052,7 @@ mod tests {
         assert_eq!(stencil.bounds, [0, 0, 2, 2]);
         assert!(
             stencil
-                .fill_intersects_rect([0, 0, 1, 1], false, &mut 4096)
+                .fill_intersects_rect([0, 0, 1, 1], false, &mut 4096, &Workspace::new(4096))
                 .unwrap()
         );
         assert!(stencil.hits([1, 1], false));
@@ -2109,6 +2123,7 @@ mod tests {
 
     #[test]
     fn note_preview_covers_a_center_miss_or_declines_unrepresentable_ink() {
+        let workspace = Workspace::new(4096);
         let crop_box = [0, 0, PITCH, PITCH];
         let grid = Grid::new(
             NativeRedactionGeometry {
@@ -2131,26 +2146,34 @@ mod tests {
             }),
         };
         assert_eq!(
-            grid.draw(std::slice::from_ref(&note), None, &mut 32),
+            grid.draw(std::slice::from_ref(&note), None, &mut 32, &workspace),
             Ok(vec![[240, 237, 223]])
         );
-        for (sample, expected) in SAMPLE_OFFSETS.into_iter().zip([
-            NOTE_INTERIOR,
-            [255; 3],
-            [255; 3],
-            [255; 3],
-        ]) {
+        for (sample, expected) in
+            SAMPLE_OFFSETS
+                .into_iter()
+                .zip([NOTE_INTERIOR, [255; 3], [255; 3], [255; 3]])
+        {
             assert_eq!(
-                grid.draw(std::slice::from_ref(&note), Some(sample), &mut 32),
+                grid.draw(
+                    std::slice::from_ref(&note),
+                    Some(sample),
+                    &mut 32,
+                    &workspace
+                ),
                 Ok(vec![expected])
             );
         }
         note.bounds = [25, 25, 33, 33];
-        assert_eq!(grid.draw(&[note], None, &mut 32), Err(UnsupportedProfile));
+        assert_eq!(
+            grid.draw(&[note], None, &mut 32, &workspace),
+            Err(UnsupportedProfile)
+        );
     }
 
     #[test]
     fn grid_renders_full_rotated_page_and_charges_work() {
+        let workspace = Workspace::new(4096);
         let crop_box = [1_000, 2_000, 3_000, 3_000];
         let geometry = NativeRedactionGeometry {
             media_box: crop_box,
@@ -2183,7 +2206,8 @@ mod tests {
             grid.draw(
                 std::slice::from_ref(&paint),
                 Some(SAMPLE_OFFSETS[0]),
-                &mut MAX_RASTER_WORK.clone()
+                &mut MAX_RASTER_WORK.clone(),
+                &workspace,
             )
             .unwrap(),
             [
@@ -2191,7 +2215,7 @@ mod tests {
             ],
         );
         assert_eq!(
-            grid.draw(&[paint], Some(SAMPLE_OFFSETS[0]), &mut 8),
+            grid.draw(&[paint], Some(SAMPLE_OFFSETS[0]), &mut 8, &workspace),
             Err(Budget)
         );
     }
@@ -2229,22 +2253,27 @@ mod tests {
 
     #[test]
     fn fill_overlap_respects_coincident_edges_and_work_limits() {
+        let workspace = Workspace::new(4096);
         let rectangle = [[0, 0], [2_000, 0], [2_000, 2_000], [0, 2_000]];
         let outline = rectangle.repeat(2);
         let fill =
             Stencil::single(&outline, Matrix::IDENTITY, &mut MAX_DRAW_BYTES.clone()).unwrap();
         let crossing = [-1_000, 500, 100, 1_500];
         assert!(
-            fill.fill_intersects_rect(crossing, false, &mut 1_000)
+            fill.fill_intersects_rect(crossing, false, &mut 1_000, &workspace)
                 .unwrap()
         );
         assert!(
             !fill
-                .fill_intersects_rect(crossing, true, &mut 1_000)
+                .fill_intersects_rect(crossing, true, &mut 1_000, &workspace)
                 .unwrap()
         );
         assert_eq!(
-            fill.fill_intersects_rect(crossing, true, &mut 0),
+            fill.fill_intersects_rect(crossing, true, &mut 0, &workspace),
+            Err(Budget)
+        );
+        assert_eq!(
+            fill.fill_intersects_rect(crossing, true, &mut 1_000, &Workspace::new(0)),
             Err(Budget)
         );
     }
