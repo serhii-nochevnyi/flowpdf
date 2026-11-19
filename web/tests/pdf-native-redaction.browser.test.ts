@@ -95,6 +95,7 @@ const refusedLane = { failed: 'structure', unavailable: 'text', inconclusive: 'r
 function controlledWorker() {
   const worker = new Worker(new URL('../src/pdf/pdf-native-edit-worker-entry.ts', import.meta.url), { type: 'module' })
   const requests: Action[] = []
+  const previewPages: number[] = []
   const statuses: NativePdfRedactionResult[] = []
   const unpublished: Extract<NativePdfWorkerResponse, { type: 'response' }>[] = []
   const syntheticRefusals = new Set<string>()
@@ -102,15 +103,17 @@ function controlledWorker() {
   const control = {
     fault: null as Fault,
     refusePreview: false,
+    dropMarkReplies: 0,
     hold: null as Action | null,
     resume: undefined as (() => void) | undefined,
-    requests, statuses, unpublished,
+    requests, previewPages, statuses, unpublished,
     output: () => publishedOutput,
     die: () => port.onerror?.(new ErrorEvent('error')),
   }
   const port: NativePdfWorkerPort = {
     onmessage: null, onerror: null, onmessageerror: null,
     postMessage(message: NativePdfWorkerRequest) {
+      if (message.request.operation === 'preview') previewPages.push(message.request.pageId)
       const action = message.request.operation === 'redaction' ? message.request.action.kind : null
       if (action) requests.push(action)
       if (action !== null && action === control.hold) {
@@ -140,6 +143,10 @@ function controlledWorker() {
       statuses.push(result)
       if (reply.status === 'redaction') unpublished.push(data)
       if (reply.status === 'published') publishedOutput = reply.snapshot.outputHex
+      if (result.action === 'addMark' && control.dropMarkReplies > 0) {
+        control.dropMarkReplies -= 1
+        return
+      }
       if (result.action === 'verify' && control.fault && control.fault !== 'lostPublish') {
         const fault = control.fault
         control.fault = null
@@ -321,10 +328,9 @@ for (const locale of ['en', 'uk'] as const) {
       await expect.element(status).toHaveTextContent(t('status.accepted', { revision: 1 }))
       await assertPreviewRefusal()
       lane.control.refusePreview = false
-      await selectPage(1)
-      await expect.poll(() => visibleRaster()?.dataset.nativePreviewPage).toBe(String(acceptedScope()!.pageState.order[1]))
-      await selectPage(0)
+      await activate(button('viewport.retry').element())
       await expect.poll(() => visibleRaster()?.dataset.nativePreviewPage).toBe(String(acceptedScope()!.pageState.order[0]))
+      expect(button('viewport.retry').query()).toBeNull()
       await activate(button('note.add').element())
       await notes.fill(retainedDraft)
       const ordinary = acceptedScope()!
@@ -372,6 +378,9 @@ for (const locale of ['en', 'uk'] as const) {
       await expect.element(redactionButton('redaction.clear')).toBeEnabled()
       expect(lane.control.requests).toEqual(['addMark'])
       lane.control.refusePreview = false
+      await activate(button('viewport.retry').element())
+      await expect.poll(() => visibleRaster()?.dataset.nativePreviewPage).toBe(String(ordinary.pageState.order[1]))
+      await expect.element(redactionButton('redaction.apply')).toBeEnabled()
       await selectPage(0)
       await expect.poll(() => visibleRaster()?.dataset.nativePreviewHash).toBe(ordinaryHash)
       await expect.poll(() => visibleRaster()?.dataset.nativePreviewPage).toBe(String(ordinary.pageState.order[0]))
@@ -394,13 +403,32 @@ for (const locale of ['en', 'uk'] as const) {
       await activate(redactionButton('redaction.removeMark').element())
       await expect.poll(() => marksOnPage().length).toBe(0)
       await fillMark(20, 20, 59, 80)
-      await addMark(1)
+      lane.control.dropMarkReplies = 2
+      await activate(redactionButton('redaction.add').element())
+      const checkResult = button('session.reconcile')
+      await expect.element(checkResult, { timeout: 6_000 }).toBeVisible()
+      const previewCount = lane.control.previewPages.length
       const pageSelector = pageSelect.element()
       pageSelector.focus()
       expect(document.activeElement).toBe(pageSelector)
       await selectPage(1)
       await expect.element(panel.getByText(t('navigation.position', { page: 2, total: 2 }), { exact: true }).first()).toBeVisible()
+      await assertPreviewRefusal()
+      expect(lane.control.previewPages).toHaveLength(previewCount)
+      await activate(checkResult.element())
+      await expect.element(button('session.reopen'), { timeout: 6_000 }).toBeEnabled()
+      await expect.element(alert).toHaveTextContent(t('session.redactionRecovery'))
+      expect(acceptedScope()).toBe(ordinary)
+      expect(lane.coordinator.outputBytes()).toBeNull()
+      expect(newOutput()).toBeNull()
+      await assertPreviewRefusal()
+      await activate(checkResult.element())
       await expect.poll(() => visibleRaster()?.dataset.nativePreviewPage).toBe(String(ordinary.pageState.order[1]))
+      expect(visibleRaster()?.dataset.nativePreviewRevision).toBe('1')
+      expect(visibleRaster()?.dataset.nativePreviewHash).toBe(ordinaryHash)
+      expect(lane.control.previewPages.slice(previewCount)).toEqual([ordinary.pageState.order[1]])
+      expect(button('session.reopen').query()).toBeNull()
+      await expect.element(redactionButton('redaction.apply')).toBeEnabled()
       expect(paintAtMark()).toEqual([0, 0, 255, 255])
       await expect.element(status).toHaveAttribute('data-native-redaction-status', 'neutral')
       await fillMark(20, 20, 20, 20)

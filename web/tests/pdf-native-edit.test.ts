@@ -190,6 +190,22 @@ describe('accepted page preview', () => {
     await expect(current).resolves.toEqual(reply.preview)
   })
 
+  it('discards preview replies while the accepted revision is busy with a mark', async () => {
+    const lane = fakePort()
+    const original = await opened(lane)
+    const pending = lane.coordinator.previewPage(mark.pageId, new AbortController().signal)
+    const preview = await lane.take()
+    const marking = lane.coordinator.markRedaction(mark, 1)
+    const dispatch = await lane.take()
+
+    lane.deliver(preview, previewReply(preview.request))
+    await expect(pending).resolves.toBeNull()
+    lane.deliver(dispatch, redactionReply(dispatch.request))
+    await marking
+    expect(lane.coordinator.snapshot()).toMatchObject({ phase: 'ready', accepted: original })
+    lane.coordinator.dispose()
+  })
+
   it.each(['page', 'hash', 'crop', 'refusal'] as const)('fails closed on a preview %s mismatch', async (fault) => {
     const lane = fakePort()
     const original = await opened(lane)
@@ -1236,6 +1252,36 @@ describe('native redaction quarantine', () => {
     lane.coordinator.dispose()
   })
 
+  it('offers original-file recovery when status definitively refuses a prepublication check', async () => {
+    const lane = fakePort(500)
+    const initial = await redactionMarked(lane)
+    vi.useFakeTimers()
+    const applying = lane.coordinator.applyRedaction([mark.pageId])
+    const lost = expect(applying).rejects.toMatchObject({ code: 'FLOW_PDF_NATIVE_REPLY_LOST' })
+    const stage = await lane.take()
+    lane.deliver(stage, redactionReply(stage.request, redactionCandidate))
+    const verify = await lane.take()
+    expect(redactionAction(verify)).toEqual({ kind: 'verify', candidate: redactionCandidate })
+    await vi.advanceTimersByTimeAsync(500)
+    await lost
+
+    const code = 'FLOW_PDF_NATIVE_REDACTION_CANDIDATE_UNAVAILABLE'
+    const refused = expect(lane.coordinator.reconcile()).rejects.toMatchObject({ code })
+    const lookup = await lane.take()
+    expect(lookup.request.requestId).toBe(stage.request.requestId)
+    expect(redactionAction(lookup)).toEqual({ kind: 'status', candidate: redactionCandidate })
+    const { redaction: _redaction, ...base } = redactionReply(lookup.request)
+    lane.deliver(lookup, { ...base, status: 'failed', code })
+    await refused
+
+    expect(lane.coordinator.snapshot()).toMatchObject({ phase: 'invalidated', reopenOriginal: true, redaction: null })
+    expect(lane.coordinator.snapshot().accepted).toBe(initial)
+    expect(lane.coordinator.originalForReopen()).toEqual(original())
+    expect(lane.coordinator.outputBytes()).toBeNull()
+    expect(lane.sent).toEqual([])
+    expect(lane.worker.terminate).toHaveBeenCalledOnce()
+  })
+
   it.each(['status', 'readPublished'] as const)('offers original-file recovery when %s cannot verify a publication', async (step) => {
     const lane = fakePort(500)
     const initial = await redactionMarked(lane)
@@ -1263,7 +1309,17 @@ describe('native redaction quarantine', () => {
     expect(redactionAction(lostDispatch)).toEqual({ kind: step, candidate: redactionCandidate })
     await vi.advanceTimersByTimeAsync(500)
     await lookupLost
-    expect(lane.coordinator.snapshot()).toMatchObject({ phase: 'reconciliationRequired', accepted: initial })
+    expect(lane.coordinator.snapshot()).toMatchObject({ phase: 'reconciliationRequired', reopenOriginal: true })
+    const lostAgain = expect(lane.coordinator.reconcile()).rejects.toMatchObject({ code: 'FLOW_PDF_NATIVE_REPLY_LOST' })
+    const secondLookup = await lane.take()
+    expect(secondLookup.request).toEqual(lostDispatch.request)
+    expect(secondLookup.dispatchId).not.toBe(lostDispatch.dispatchId)
+    await vi.advanceTimersByTimeAsync(500)
+    await lostAgain
+    expect(lane.coordinator.snapshot()).toMatchObject({
+      phase: 'reconciliationRequired', accepted: initial, reopenOriginal: true, pendingRequestId: publish.request.requestId,
+    })
+    expect(lane.coordinator.originalForReopen()).toEqual(original())
     expect(lane.coordinator.outputBytes()).toBeNull()
 
     const code = step === 'status' ? 'FLOW_PDF_NATIVE_RESPONSE_INVALID' : 'FLOW_PDF_NATIVE_REDACTION_UNVERIFIED'

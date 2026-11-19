@@ -61,6 +61,8 @@ const reviewedBrowserProfiles = [
     ['web/tests/pdf-native-redaction.browser.test.ts', 'ba509b4cf12458746203d2b42d1cbaf955854226be3f0f5a27df91ee516abbd5']],
   [...reviewedPageBrowserSuites,
     ['web/tests/pdf-native-redaction.browser.test.ts', '8f51083c811286237e35d1437bbb369e5554e6ecea8a28938662ef278227dc95']],
+  [...reviewedPageBrowserSuites,
+    ['web/tests/pdf-native-redaction.browser.test.ts', '8adf4fa1bf071d7fa8c09b82faabfe98b30be7553aadae03d46f8af045aa99a1']],
 ]
 const expandedSteps = [
   'Run bilingual Chromium text replacement tracer',
