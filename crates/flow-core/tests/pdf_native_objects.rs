@@ -258,6 +258,120 @@ fn nested_shared_image_invocations_are_isolated() {
 }
 
 #[test]
+fn scene_reads_nested_image_replacement_and_unchanged_sibling() {
+    let outer = stream(
+        "/Type /XObject /Subtype /Form /BBox [0 0 40 40] /Matrix [2 0 0 1 0 0] /Resources 9 0 R",
+        b"/Inner Do 1 0 0 1 5 0 cm",
+    );
+    let inner = stream(
+        "/Type /XObject /Subtype /Form /BBox [0 0 40 40] /Matrix [1 0 0 1 4 3] /Resources << /XObject << /I 8 0 R >> >>",
+        b"q 10 0 0 10 10 10 cm /I Do Q",
+    );
+    let pixels = miniz_oxide::deflate::compress_to_vec_zlib(&[7], 6);
+    let image = stream(
+        "/Type /XObject /Subtype /Image /ColorSpace /DeviceGray /Width 1 /Height 1 /BitsPerComponent 8 /Filter /FlateDecode",
+        &pixels,
+    );
+    let source = fixture(
+        b"/Outer Do q 1 0 0 1 60 0 cm /Outer Do Q",
+        false,
+        "/Resources << /XObject << /Outer 6 0 R >> >>",
+        &[
+            outer,
+            inner,
+            image,
+            b"<< /XObject << /Inner 7 0 R >> >>".to_vec(),
+        ],
+    );
+    let mut jpeg = Vec::new();
+    image::codecs::jpeg::JpegEncoder::new(&mut jpeg)
+        .encode(&[30, 100, 200], 1, 1, image::ExtendedColorType::Rgb8)
+        .unwrap();
+    let hex: String = jpeg.iter().map(|byte| format!("{byte:02x}")).collect();
+    let mut session = open(&source);
+    let selected = target(&session, 0, 0);
+    apply(
+        &mut session,
+        json!({"kind":"replaceImage","target":selected,"assetHex":hex}),
+    )
+    .unwrap();
+
+    let reader = open_pdf(session.output_bytes(), Default::default()).unwrap();
+    let scene = read_pdf_scene(
+        &reader,
+        &PdfSceneRequest {
+            first_page: 0,
+            page_count: 1,
+        },
+    )
+    .unwrap();
+    let images: Vec<_> = scene.pages[0]
+        .elements
+        .iter()
+        .filter_map(|element| match element {
+            PdfSceneElement::Image { value } => Some(value),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(images.len(), 2);
+    assert_eq!(images[0].media_type, "image/jpeg");
+    assert_eq!(images[0].data_hex, hex);
+    assert_eq!(images[1].filter, "FlateDecode");
+    assert_eq!(images[1].data_hex, "07");
+    assert_eq!(images[0].rect.x.raw(), 1_792);
+    assert_eq!(images[0].rect.y.raw(), 832);
+    assert_eq!(images[0].rect.width.raw(), 1_280);
+    assert_eq!(images[0].rect.height.raw(), 640);
+    assert_eq!((images[1].width, images[1].height), (1, 1));
+    let sibling = images[1].rect;
+    assert_eq!(
+        (
+            sibling.x.raw(),
+            sibling.y.raw(),
+            sibling.width.raw(),
+            sibling.height.raw()
+        ),
+        (5_632, 832, 1_280, 640)
+    );
+}
+
+#[test]
+fn scene_inherits_form_resources_when_missing_or_null() {
+    let pixels = miniz_oxide::deflate::compress_to_vec_zlib(&[7], 6);
+    for resources in ["", "/Resources null", "/Resources 8 0 R"] {
+        let form = stream(
+            &format!("/Type /XObject /Subtype /Form /BBox [0 0 40 40] {resources}"),
+            b"/I Do",
+        );
+        let image = stream(
+            "/Type /XObject /Subtype /Image /ColorSpace /DeviceGray /Width 1 /Height 1 /BitsPerComponent 8 /Filter /FlateDecode",
+            &pixels,
+        );
+        let source = fixture(
+            b"/Form Do",
+            false,
+            "/Resources << /XObject << /Form 6 0 R /I 7 0 R >> >>",
+            &[form, image, b"null".to_vec()],
+        );
+        let reader = open_pdf(&source, Default::default()).unwrap();
+        let scene = read_pdf_scene(
+            &reader,
+            &PdfSceneRequest {
+                first_page: 0,
+                page_count: 1,
+            },
+        )
+        .unwrap();
+        assert!(
+            scene.pages[0].elements.iter().any(|element| {
+                matches!(element, PdfSceneElement::Image { value } if value.data_hex == "07")
+            }),
+            "{resources}"
+        );
+    }
+}
+
+#[test]
 fn invalid_targets_geometry_and_assets_are_atomic() {
     let source = fixture(b"10 20 30 40 re f", true, "", &[]);
     let mut session = open(&source);
