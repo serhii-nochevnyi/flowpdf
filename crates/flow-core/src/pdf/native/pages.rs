@@ -928,25 +928,42 @@ impl IncomingLinkIndex {
     }
 }
 
-fn owns_link_destination<'a>(
-    graph: &'a NativePdfGraph,
-    mut owner: Ref,
-    mut destination: &'a PdfValue,
+fn link_destinations_survive(
+    graph: &NativePdfGraph,
+    target: Ref,
+    cleanup: &LinkCleanup,
     trailer_refs: &BTreeSet<Ref>,
     work: &mut usize,
 ) -> Result<bool, NativeEditError> {
-    while let Some(reference) = destination.as_reference() {
+    let mut removed = BTreeSet::from([target]);
+    let mut destinations = BTreeSet::new();
+    for &annot in cleanup.values().flatten() {
         spend(work, 1)?;
-        if trailer_refs.contains(&reference) {
-            return Ok(false);
+        removed.insert(annot);
+        let mut value = dict(graph, annot)?.get("Dest").ok_or(Malformed)?;
+        while let Some(reference) = value.as_reference() {
+            spend(work, 1)?;
+            if trailer_refs.contains(&reference) {
+                return Ok(true);
+            }
+            if !destinations.insert(reference) {
+                break;
+            }
+            value = graph.objects.get(&reference).ok_or(Malformed)?;
         }
-        let Ok(value) = exclusive_container(graph, owner, destination) else {
-            return Ok(false);
-        };
-        owner = reference;
-        destination = value;
     }
-    Ok(true)
+    for reference in &destinations {
+        if let Some(owners) = graph.reverse.get(reference) {
+            spend(work, owners.len())?;
+            if owners
+                .iter()
+                .any(|owner| !removed.contains(owner) && !destinations.contains(owner))
+            {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
 }
 
 fn incoming_link_index(
@@ -1010,15 +1027,17 @@ fn incoming_link_index(
                 index.blocked.insert(target);
                 continue;
             };
-            let destination = values.get("Dest").ok_or(Malformed)?;
-            if !owns_link_destination(graph, annot, destination, &trailer_refs, work)? {
-                index.blocked.insert(target);
-                continue;
-            }
             let drops = index.removable.entry(target).or_default().entry(source);
             if !drops.or_default().insert(annot) {
                 index.blocked.insert(target);
             }
+        }
+    }
+    for (&target, cleanup) in &index.removable {
+        if !index.blocked.contains(&target)
+            && link_destinations_survive(graph, target, cleanup, &trailer_refs, work)?
+        {
+            index.blocked.insert(target);
         }
     }
     Ok(index)
