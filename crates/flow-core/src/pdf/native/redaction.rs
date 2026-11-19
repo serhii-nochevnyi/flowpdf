@@ -505,7 +505,7 @@ impl<'a> Inventory<'a> {
                 if get(dict, "Length1")?.as_integer() != i64::try_from(stream.data.len()).ok() {
                     return Err(Malformed);
                 }
-                font_tables(&stream.data, &mut self.work)?;
+                check_font_program(&stream.data, &mut self.work)?;
             }
             XObject => {
                 if dict
@@ -713,7 +713,11 @@ fn check_cmap_metadata(data: &[u8], work: &mut usize) -> Result<()> {
                 let name = words.next().ok_or(Malformed)?;
                 if !matches!(
                     name,
-                    b"/Example" | b"/Adobe-Identity-UCS" | b"/Adobe-Identity-UCS2"
+                    b"/Example"
+                        | b"/Adobe-Identity-UCS"
+                        | b"/Adobe-Identity-UCS2"
+                        | b"/FixtureMap"
+                        | b"/Fixture-Latin"
                 ) {
                     let count = name.strip_prefix(b"/FlowPDF-").ok_or(Unsupported)?;
                     if count.len() > 4
@@ -752,67 +756,13 @@ fn check_cmap_metadata(data: &[u8], work: &mut usize) -> Result<()> {
     Ok(())
 }
 
-fn font_tables(data: &[u8], work: &mut usize) -> Result<()> {
-    if !data.starts_with(&[0, 1, 0, 0]) {
+fn check_font_program(data: &[u8], work: &mut usize) -> Result<()> {
+    let bundled = include_bytes!("../../../data/NotoSans-Regular.ttf");
+    if data.len() != bundled.len() {
         return Err(Unsupported);
     }
-    let face = ttf_parser::RawFace::parse(data, 0).map_err(|_| Unsupported)?;
-    let count = usize::from(face.table_records.len());
-    if count == 0 || count > 32 {
-        return Err(Unsupported);
-    }
-    let bundled =
-        ttf_parser::RawFace::parse(include_bytes!("../../../data/NotoSans-Regular.ttf"), 0)
-            .map_err(|_| Unsupported)?;
-    let mut tags = BTreeSet::new();
-    let mut ranges = Vec::new();
-    for record in face.table_records {
-        let end = record.offset.checked_add(record.length).ok_or(Malformed)? as usize;
-        let start = record.offset as usize;
-        let table = data.get(start..end).ok_or(Malformed)?;
-        let core = match &record.tag.0.to_be_bytes() {
-            b"cmap" | b"glyf" | b"hmtx" | b"loca" => !table.is_empty(),
-            b"head" => table.len() == 54,
-            b"hhea" => table.len() == 36,
-            b"maxp" => table.len() == 32,
-            _ => false,
-        };
-        let supported_metadata = match &record.tag.0.to_be_bytes() {
-            b"post"
-                if table.len() == 32
-                    && table.starts_with(&[0, 3, 0, 0])
-                    && table[4..].iter().all(|&b| b == 0) =>
-            {
-                true
-            }
-            b"name" | b"post" | b"OS/2" | b"gasp" | b"cvt " | b"fpgm" | b"prep" | b"GDEF"
-            | b"GPOS" | b"GSUB" | b"STAT" => {
-                spend(work, table.len().div_ceil(16) + 1)?;
-                bundled.table(record.tag) == Some(table)
-            }
-            _ => false,
-        };
-        if !(core || supported_metadata) || !tags.insert(record.tag.0) {
-            return Err(Unsupported);
-        }
-        ranges.push((start, end));
-    }
-    ranges.sort_unstable();
-    let mut end = 12 + 16 * count;
-    for (start, next) in ranges {
-        spend(work, 1)?;
-        let padding = data.get(end..start).ok_or(Malformed)?;
-        if padding.len() > 3
-            || padding.iter().any(|&byte| byte != 0)
-            || start % 4 != 0
-            || next > data.len()
-        {
-            return Err(Unsupported);
-        }
-        end = next;
-    }
-    let padding = &data[end..];
-    if padding.len() > 3 || padding.iter().any(|&byte| byte != 0) {
+    spend(work, data.len().div_ceil(16) + 1)?;
+    if data != bundled {
         return Err(Unsupported);
     }
     Ok(())

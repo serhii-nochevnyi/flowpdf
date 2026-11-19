@@ -153,10 +153,11 @@ pub(super) fn verify(
             .map(|mark| mark.rect)
             .collect::<Vec<_>>();
         let grid = Grid::new(original.geometry, &mut pixels_left)?;
-        let source_paint = expected.page(&accepted, &original)?;
+        let mut source_paint = expected.page(&accepted, &original)?;
         let candidate_paint = actual.page(&candidate, &result)?;
-        let mut scrubbed = Vec::with_capacity(source_paint.len());
-        for mut paint in source_paint {
+        let mut retained_count = 0;
+        for index in 0..source_paint.len() {
+            let paint = &mut source_paint[index];
             spend(&mut work, marks.len() + 1)?;
             if let PaintKind::Image(image) = &mut paint.kind {
                 image.add_masks(&marks, &mut expected.draw_bytes, &mut work)?;
@@ -188,12 +189,14 @@ pub(super) fn verify(
                     continue;
                 }
             }
-            scrubbed.push(paint);
+            source_paint.swap(retained_count, index);
+            retained_count += 1;
         }
-        if scrubbed.len() != candidate_paint.len() {
+        source_paint.truncate(retained_count);
+        if source_paint.len() != candidate_paint.len() {
             return Err(RasterMismatch);
         }
-        for (left, right) in scrubbed.iter().zip(&candidate_paint) {
+        for (left, right) in source_paint.iter().zip(&candidate_paint) {
             if !left.same_paint(right, &mut work)? {
                 return Err(RasterMismatch);
             }
@@ -214,7 +217,7 @@ pub(super) fn verify(
             }
         }
         for sample in SAMPLE_OFFSETS {
-            let expected_pixels = grid.draw(&scrubbed, sample, &mut work)?;
+            let expected_pixels = grid.draw(&source_paint, sample, &mut work)?;
             let candidate_pixels = grid.draw(&candidate_paint, sample, &mut work)?;
             if expected_pixels != candidate_pixels {
                 return Err(RasterMismatch);

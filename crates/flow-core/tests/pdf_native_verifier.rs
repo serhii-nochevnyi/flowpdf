@@ -732,27 +732,31 @@ fn verifier_accepts_standard_cid_metadata_and_retained_font_paint() {
         .into_iter()
         .flat_map(u16::to_be_bytes)
         .collect::<Vec<_>>();
-    let fonts = vec![
-        b"<< /Type /Font /Subtype /Type0 /BaseFont /NotoSans-Regular /Encoding /Identity-H /DescendantFonts [6 0 R] /ToUnicode 9 0 R >>".to_vec(),
-        format!("<< /Type /Font /Subtype /CIDFontType2 /BaseFont /NotoSans-Regular /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> /W [1 [{} {}]] /FontDescriptor 7 0 R /CIDToGIDMap 10 0 R >>", widths[0], widths[1]).into_bytes(),
-        descriptor,
-        bundled_font,
-        stream("", cmap),
-        stream("", &glyph_map),
-    ];
-    let resources = "/Resources << /Font << /F1 5 0 R >> >>";
-    let retained = "BT /F1 12 Tf 55 55 Td <00010002> Tj ET";
-    let accepted = pdf(
-        &[(&format!("10 10 5 5 re f {retained}"), resources)],
-        fonts.clone(),
-        "",
-    );
-    let candidate = pdf(&[(retained, resources)], fonts, "");
-    let evidence = verify(
-        &accepted,
-        &candidate,
-        &[91],
-        &[mark(91, [11_000, 11_000, 14_000, 14_000])],
-    );
-    assert!(evidence.checks_passed(), "{evidence:?}");
+    let cmap = std::str::from_utf8(cmap).unwrap();
+    for name in ["Adobe-Identity-UCS", "FixtureMap", "Fixture-Latin"] {
+        let cmap = cmap.replace("Adobe-Identity-UCS", name);
+        let fonts = vec![
+            b"<< /Type /Font /Subtype /Type0 /BaseFont /NotoSans-Regular /Encoding /Identity-H /DescendantFonts [6 0 R] /ToUnicode 9 0 R >>".to_vec(),
+            format!("<< /Type /Font /Subtype /CIDFontType2 /BaseFont /NotoSans-Regular /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> /W [1 [{} {}]] /FontDescriptor 7 0 R /CIDToGIDMap 10 0 R >>", widths[0], widths[1]).into_bytes(),
+            descriptor.clone(),
+            bundled_font.clone(),
+            stream("", cmap.as_bytes()),
+            stream("", &glyph_map),
+        ];
+        let resources = "/Resources << /Font << /F1 5 0 R >> >>";
+        let retained = "BT /F1 12 Tf 55 55 Td <00010002> Tj ET";
+        let accepted = pdf(
+            &[(&format!("10 10 5 5 re f {retained}"), resources)],
+            fonts.clone(),
+            "",
+        );
+        let candidate = pdf(&[(retained, resources)], fonts, "");
+        let evidence = verify(
+            &accepted,
+            &candidate,
+            &[91],
+            &[mark(91, [11_000, 11_000, 14_000, 14_000])],
+        );
+        assert!(evidence.checks_passed(), "{evidence:?}");
+    }
 }
