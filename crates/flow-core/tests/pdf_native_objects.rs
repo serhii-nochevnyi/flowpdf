@@ -1,6 +1,8 @@
 use flow_core::pdf::native::{
-    NativeEditLimits, NativeObjectCommand, NativePdfSession, NativeSessionError,
+    NativeEditLimits, NativeObjectCommand, NativePdfSession, NativeRedactionMark,
+    NativeSessionError,
 };
+use flow_core::pdf::{PdfSceneElement, PdfSceneRequest, open_pdf, read_pdf_scene};
 use serde_json::{Value, json};
 
 fn fixture(contents: &[u8], shared: bool, resources: &str, extras: &[Vec<u8>]) -> Vec<u8> {
@@ -157,6 +159,41 @@ fn added_graphic_paints_after_shared_streams_in_initial_graphics_state() {
             1
         );
     }
+}
+
+#[test]
+fn topmost_insertion_keeps_redaction_admission_for_supported_paint() {
+    let source = fixture(b"1 0 0 1 12 0 cm 0 1 0 rg 10 10 10 10 re f", false, "", &[]);
+    let mut session = open(&source);
+    assert!(session.redaction_admitted());
+    let graphic = json!({
+        "shape":"rectangle", "points":[[50000,50000],[60000,60000]],
+        "stroke":null, "fill":[255,0,0], "strokeWidth":0
+    });
+    apply(
+        &mut session,
+        json!({"kind":"addGraphic","page":0,"graphic":graphic}),
+    )
+    .unwrap();
+    assert!(session.redaction_admitted());
+    let binding = session.snapshot().binding;
+    let page_id = session.snapshot().page_state.order[0];
+    let geometry = session.redaction_mark_geometry(page_id).unwrap();
+    session
+        .add_redaction_mark(
+            binding,
+            NativeRedactionMark {
+                page_id,
+                geometry,
+                rect: [50_000, 50_000, 60_000, 60_000],
+            },
+        )
+        .unwrap();
+    session.stage_redaction(binding, 2).unwrap();
+    let evidence = session.verify_redaction(binding, 2).unwrap();
+    assert!(evidence.checks_passed(), "{evidence:?}");
+    session.publish_redaction(binding, 2).unwrap();
+    assert_eq!(session.origin_bytes(), source);
 }
 
 #[test]
@@ -389,6 +426,20 @@ fn retained_jpeg_move_preserves_encoded_stream_and_rejects_invalid_profiles() {
     };
     for filter in ["/DCTDecode", "[/DCTDecode]"] {
         let source = make_pdf(2, "DeviceGray", filter, "", &jpeg);
+        let reader = open_pdf(&source, Default::default()).unwrap();
+        let scene = read_pdf_scene(
+            &reader,
+            &PdfSceneRequest {
+                first_page: 0,
+                page_count: 1,
+            },
+        )
+        .unwrap();
+        assert!(scene.pages[0].elements.iter().any(|element| matches!(
+            element,
+            PdfSceneElement::Image { value }
+                if value.filter == "DCTDecode" && value.media_type == "image/jpeg"
+        )));
         let mut session = open(&source);
         let before = objects(&session, 1)[0]["bounds"].clone();
         let selected = target(&session, 0, 0);

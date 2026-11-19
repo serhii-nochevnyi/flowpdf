@@ -13,6 +13,7 @@ use crate::layout::{LayoutRect, LayoutUnit};
 use super::reader::{
     PdfObjectRef, PdfPageRecord, PdfReadDiagnostic, PdfReadDiagnosticCode, PdfReadError,
     PdfReadReport, PdfReader, PdfReaderLimits, PdfStream, PdfValue, report_active_content,
+    single_filter,
 };
 
 use super::native::{NativeNoteId, NativePageGeometry, NativePageId, NativeTextPage};
@@ -1163,7 +1164,7 @@ impl<'a> SceneBuilder<'a> {
         let filter = stream
             .dict
             .get("Filter")
-            .and_then(PdfValue::as_name)
+            .and_then(single_filter)
             .unwrap_or("Identity")
             .to_owned();
         let (media_type, data) = if filter == "DCTDecode" || filter == "DCT" {

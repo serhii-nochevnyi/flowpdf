@@ -474,7 +474,6 @@ fn image_profile(image: &PdfStream) -> Result<NativeObjectProfile> {
 struct GraphicsState {
     matrix: Matrix,
     stroke_width: f64,
-    modified: bool,
 }
 
 #[derive(Default)]
@@ -764,7 +763,6 @@ impl<'a> Scan<'a> {
                     state.matrix = Matrix(operands(&args, &source.data)?)
                         .checked()?
                         .then(state.matrix)?;
-                    state.modified = true;
                 }
                 "w" => {
                     let [width] = operands(&args, &source.data)?;
@@ -772,19 +770,15 @@ impl<'a> Scan<'a> {
                         return Err(Geometry.into());
                     }
                     state.stroke_width = width;
-                    state.modified = true;
                 }
                 "g" | "G" => {
                     let _: [f64; 1] = operands(&args, &source.data)?;
-                    state.modified = true;
                 }
                 "rg" | "RG" => {
                     let _: [f64; 3] = operands(&args, &source.data)?;
-                    state.modified = true;
                 }
                 "k" | "K" => {
                     let _: [f64; 4] = operands(&args, &source.data)?;
-                    state.modified = true;
                 }
                 "BT" if args.is_empty() => in_text = true,
                 "Do" => {
@@ -915,7 +909,7 @@ fn scan(
     graph: &NativePdfGraph,
     page: &NativePdfNotePage,
     work: &mut usize,
-) -> Result<(Vec<Found>, bool)> {
+) -> Result<(Vec<Found>, Matrix)> {
     let rect = page.geometry.ok_or(Geometry)?.bounds().map(|n| n as f64);
     if !positive(rect) {
         return Err(Geometry.into());
@@ -935,7 +929,6 @@ fn scan(
     let mut state = GraphicsState {
         matrix: Matrix::IDENTITY,
         stroke_width: 1.,
-        modified: false,
     };
     let mut stack = Vec::new();
     let slots = contents(graph, page.object)?;
@@ -958,7 +951,7 @@ fn scan(
     if !stack.is_empty() {
         return Err(State.into());
     }
-    Ok((scan.found, state.modified))
+    Ok((scan.found, state.matrix))
 }
 
 pub(super) fn project(
@@ -972,19 +965,19 @@ pub(super) fn project(
     let mut result = Vec::with_capacity(pages.len());
     spend(remaining, pages.len() * 128)?;
     for page in pages {
-        let (found, modified, refusal) = match scan(graph, page, &mut work) {
-            Ok((found, modified)) => (found, modified, None),
-            Err(NativeSessionError::Object(reason)) => (Vec::new(), false, Some(reason)),
-            Err(NativeSessionError::Budget) => (Vec::new(), false, Some(State)),
+        let (found, page_matrix, refusal) = match scan(graph, page, &mut work) {
+            Ok((found, matrix)) => (found, matrix, None),
+            Err(NativeSessionError::Object(reason)) => (Vec::new(), Matrix::IDENTITY, Some(reason)),
+            Err(NativeSessionError::Budget) => (Vec::new(), Matrix::IDENTITY, Some(State)),
             Err(error) => return Err(error),
         };
         spend(remaining, found.len() * 256)?;
         result.push(NativeObjectPage {
             page: page.id,
             can_add: refusal.is_none()
+                && page_matrix.inverse().is_ok()
                 && found.len() < MAX_OBJECTS_PER_PAGE
-                && contents(graph, page.object)?.len() + usize::from(modified)
-                    < MAX_OBJECTS_PER_PAGE,
+                && contents(graph, page.object)?.len() < MAX_OBJECTS_PER_PAGE,
             objects: found
                 .iter()
                 .map(|item| item.view(page.id, binding, hash))
@@ -1393,7 +1386,7 @@ pub(super) fn stage(
     use NativeSessionError::{Postcondition, TargetUnavailable};
 
     let mut work = graph.remaining_work();
-    let (found, modified) = scan(graph, page, &mut work)?;
+    let (found, page_matrix) = scan(graph, page, &mut work)?;
     let index = command
         .target()
         .map(|target| -> Result<usize> {
@@ -1410,7 +1403,7 @@ pub(super) fn stage(
     let item = index.map(|i| &found[i]);
     let page_clip = page.geometry.ok_or(Geometry)?.bounds().map(|n| n as f64);
     let clip = item.map_or(page_clip, |item| item.clip);
-    let matrix = item.map_or(Matrix::IDENTITY, |item| item.matrix);
+    let matrix = item.map_or(page_matrix, |item| item.matrix);
     let mut remaining = graph.remaining_retained();
     spend(&mut remaining, command.validate_size()? + 8192)?;
 
@@ -1480,14 +1473,11 @@ pub(super) fn stage(
         replacement = match command {
             AddImage { bounds, .. } => {
                 let [l, b, r, t] = page_space(*bounds);
-                let placement = Matrix([r - l, 0., 0., t - b, l, b]).checked()?;
+                let placement = Matrix([r - l, 0., 0., t - b, l, b]).then(matrix.inverse()?)?;
                 format!("q\n{}\n/{name} Do\nQ", placement.operator()).into_bytes()
             }
             _ => format!("/{name} Do").into_bytes(),
         };
-    }
-    if item.is_none() && modified {
-        replacement.splice(..0, b"Q\n".iter().copied());
     }
     let root = if depth == 0 {
         edited_stream(
@@ -1543,11 +1533,6 @@ pub(super) fn stage(
     if let Some(item) = item {
         slots[item.slot] = root;
     } else {
-        if modified {
-            // @invariant: The saved state spans the original content slots.
-            let save = edited_stream(graph, None, b"q", None, &mut remaining)?;
-            slots.insert(0, allocate(graph, PdfValue::Stream(save))?);
-        }
         slots.push(root);
     }
     let Some(PdfValue::Dictionary(dict)) = graph.objects.get_mut(&page.object) else {

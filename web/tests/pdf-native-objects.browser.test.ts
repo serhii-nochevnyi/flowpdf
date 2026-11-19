@@ -254,7 +254,7 @@ for (const locale of ['uk', 'en'] as const) {
       chooseFile(asset(), new File([grayPng], 'gray.png', { type: 'image/png' }))
       await expect.element(objects.getByText(t('object.file.ready'), { exact: false })).toBeVisible()
       const addedImage = image([10000, 20000, 40000, 60000])
-      await accepted('object.add', [baseImage, baseGraphic, addedImage], undefined, selector)
+      await accepted('object.add', [baseImage, baseGraphic, addedImage], 2, selector)
 
       await selector.selectOptions((selector.element() as HTMLSelectElement).options[1]!.value)
       const originalTarget = (selector.element() as HTMLSelectElement).value
@@ -356,8 +356,7 @@ for (const locale of ['uk', 'en'] as const) {
       await userEvent.keyboard('2')
       expect(stroke.getAttribute('aria-invalid')).toBe('false')
       const line = graphic('line', [70000, 20000, 90000, 50000])
-      await accepted('object.add', [baseGraphic, addedImage, line])
-      await selector.selectOptions((selector.element() as HTMLSelectElement).options[3]!.value)
+      await accepted('object.add', [baseGraphic, addedImage, line], 2, selector)
       await profile.selectOptions('rectangle')
       const rectangle = graphic('rectangle', line.bounds)
       await accepted('object.replace', [baseGraphic, addedImage, rectangle], 2, button('object.replace'))

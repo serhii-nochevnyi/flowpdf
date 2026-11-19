@@ -311,7 +311,6 @@ export function rebindNativeObject(
   let expectedCount = previous.length
   if ((command.kind === 'addImage' || command.kind === 'addGraphic') && command.page === pageId) {
     expectedCount++
-    index++
   }
   if (command.kind === 'removeObject' && command.target.page === pageId) {
     const removed = previous.findIndex((entry) => sameNativeBytes(entry.id, command.target.id))
@@ -1431,7 +1430,7 @@ export function PdfNativeEditPanel({
       if (command.kind !== 'replaceText') {
         if (command.kind === 'addImage' || command.kind === 'addGraphic') {
           const next = pageObjects(result, pageId)
-          if (pageId === command.page && next.length === pageObjects(before, pageId).length + 1) resetObject(next[0])
+          if (pageId === command.page && next.length === pageObjects(before, pageId).length + 1) resetObject(next.at(-1))
         }
         if (changesSelection) {
           if (kind === 'moveObject') return `${id}-object-move`
