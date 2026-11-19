@@ -1,0 +1,118 @@
+{
+  "schemaVersion": 1,
+  "generator": {
+    "path": "scripts/generate-pdf-native-fixtures.mjs",
+    "version": 1
+  },
+  "font": {
+    "binary": {
+      "path": "crates/flow-core/data/NotoSans-Regular.ttf",
+      "sha256": "b85c38ecea8a7cfb39c24e395a4007474fa5a4fc864f6ee33309eb4948d232d5"
+    },
+    "license": {
+      "path": "crates/flow-core/data/NotoSans-OFL.txt",
+      "sha256": "12e55f73bf39d88d7f2e37e094ad30b8f6752b3d25391ac23978b1e5e35ca66b"
+    },
+    "spdx": "OFL-1.1"
+  },
+  "fixtures": [
+    {
+      "id": "notes-preservation",
+      "provenance": {
+        "origin": "original-synthetic",
+        "license": "CC0-1.0",
+        "generatorVersion": 1
+      },
+      "profile": "classic-xref-preservation",
+      "admission": "admitted",
+      "source": {
+        "path": "fixtures/pdf-native/notes-preservation.pdf",
+        "sha256": "f0ec2e94fad516a9089f5db7c3ae17d4b91e7827cabc961f8906aaaf5ee11b3d"
+      },
+      "expected": {
+        "path": "fixtures/pdf-native/notes-preservation.expected.json",
+        "sha256": "09d56673104b0c7ea12834b404119e21f65f52b342f95b7bea20566d81b7cdc2"
+      }
+    },
+    {
+      "id": "refused",
+      "provenance": {
+        "origin": "original-synthetic",
+        "license": "CC0-1.0",
+        "generatorVersion": 1
+      },
+      "profile": "catalog-open-destination",
+      "admission": "refused",
+      "source": {
+        "path": "fixtures/pdf-native/refused.pdf",
+        "sha256": "e8766298dc321a755d8d9eda5142a33536af61d7025828997eff92606ea8fff5"
+      },
+      "expected": {
+        "inline": {
+          "schemaVersion": 1,
+          "fixtureId": "refused",
+          "raster": {
+            "policy": "page-content-rgb8",
+            "version": 1,
+            "dpi": 144,
+            "origin": "top-left",
+            "annotationLayer": "excluded",
+            "evidence": "designed"
+          },
+          "operations": [
+            {
+              "operation": "addNote",
+              "outcome": "FLOW_PDF_NATIVE_UNSUPPORTED",
+              "affectedPages": [],
+              "noteReadback": [],
+              "retained": [
+                "original-source"
+              ],
+              "removed": [],
+              "pages": [
+                {
+                  "page": 1,
+                  "text": "A",
+                  "cropBoxPt": [
+                    0,
+                    0,
+                    160,
+                    100
+                  ],
+                  "rotation": 0,
+                  "widthPx": 320,
+                  "heightPx": 200,
+                  "comparison": "source-only",
+                  "maxDifferentPixels": null
+                }
+              ]
+            }
+          ]
+        },
+        "sha256": "b751d4e76757f73d3b08eef6a66898f6c11ea1ca899191c8abde37d0e133bd81"
+      }
+    }
+  ],
+  "unsupportedPolicy": [
+    "encryption",
+    "incremental-updates",
+    "hybrid-xref",
+    "object-and-xref-streams",
+    "signatures-and-permissions",
+    "active-actions",
+    "embedded-files-and-media",
+    "xfa"
+  ],
+  "evidence": {
+    "fixtureExpectations": "designed",
+    "localVerifier": {
+      "status": "not-run",
+      "independence": "shared-code"
+    },
+    "externalTools": {
+      "status": "unavailable",
+      "observations": []
+    },
+    "candidateAuthorization": "none"
+  }
+}
