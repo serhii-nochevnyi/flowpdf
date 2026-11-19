@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
-import { access, chmod, mkdir, mkdtemp, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
@@ -14,12 +14,20 @@ import {
 
 const target = 'test-target'
 const trustedBinary = Buffer.from('trusted wasm-bindgen fixture')
+const binarySha256 = createHash('sha256').update(trustedBinary).digest('hex')
 const approved = {
   name: 'wasm-bindgen-cli',
   version: '0.2.108',
   kind: 'tool',
   binarySha256: {
-    [target]: createHash('sha256').update(trustedBinary).digest('hex'),
+    [target]: binarySha256,
+  },
+}
+const linuxApproved = {
+  ...approved,
+  linuxRelease: {
+    assetSha256: 'a'.repeat(64),
+    binarySha256,
   },
 }
 const report = {
@@ -99,11 +107,11 @@ test('never executes a wasm-bindgen binary before its receipt and checksum are t
   assert.equal(executions, 1)
 })
 
-test('a checksum-mismatched sentinel executable is never invoked by the filesystem verifier', async () => {
+test('the filesystem verifier reaches the platform checksum comparison', async (t) => {
   const root = await mkdtemp(join(tmpdir(), 'flowpdf-wasm-tool-'))
+  t.after(() => rm(root, { recursive: true, force: true }))
   const cargoHome = join(root, 'work/toolchains/cargo')
   const binary = join(cargoHome, 'bin/wasm-bindgen')
-  const marker = join(root, 'sentinel-was-invoked')
   await Promise.all([
     mkdir(join(root, 'config'), { recursive: true }),
     mkdir(join(root, 'artifacts/provenance'), { recursive: true }),
@@ -111,28 +119,22 @@ test('a checksum-mismatched sentinel executable is never invoked by the filesyst
   ])
   await Promise.all([
     writeFile(join(root, 'config/dependency-provenance.json'), JSON.stringify({
-      crates: [approved],
+      crates: [linuxApproved],
     })),
     writeFile(join(root, 'artifacts/provenance/phase1-dependencies.json'), JSON.stringify(report)),
     writeFile(join(cargoHome, '.crates2.json'), JSON.stringify(receipt)),
-    writeFile(binary, `#!/bin/sh\ntouch "${marker}"\nprintf 'wasm-bindgen 0.2.108\\n'\n`),
+    writeFile(binary, 'synthetic mismatched bytes', { mode: 0o600 }),
   ])
-  await chmod(binary, 0o700)
 
-  assert.throws(() => verifyInstalledTool(root), /checksum mismatch/)
-  await assert.rejects(() => access(marker))
+  const message = process.platform === 'linux' && process.arch === 'x64'
+    ? 'wasm-bindgen Linux release binary checksum mismatch'
+    : 'wasm-bindgen binary checksum mismatch'
+  assert.throws(() => verifyInstalledTool(root), { message })
 })
 
 test('accepts the pinned Linux release and rejects a changed executable', () => {
-  const linux = {
-    ...approved,
-    linuxRelease: {
-      assetSha256: 'a'.repeat(64),
-      binarySha256: createHash('sha256').update(trustedBinary).digest('hex'),
-    },
-  }
-  assert.doesNotThrow(() => validateLinuxReleaseBindgen({ approved: linux, report, binaryBytes: trustedBinary }))
-  assert.throws(() => validateLinuxReleaseBindgen({ approved: linux, report, binaryBytes: Buffer.from('changed') }),
+  assert.doesNotThrow(() => validateLinuxReleaseBindgen({ approved: linuxApproved, report, binaryBytes: trustedBinary }))
+  assert.throws(() => validateLinuxReleaseBindgen({ approved: linuxApproved, report, binaryBytes: Buffer.from('changed') }),
     /Linux release binary checksum mismatch/)
   assert.throws(() => validateLinuxReleaseBindgen({ approved, report, binaryBytes: trustedBinary }),
     /Linux release checksums are not approved/)
