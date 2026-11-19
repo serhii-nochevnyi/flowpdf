@@ -630,6 +630,8 @@ describe('native field drafts', () => {
     expect(rebindNativeField(field, [next], 1, [field, { ...other, page: 0 }])).toBeUndefined()
     expect(rebindNativeField(field, [other], 1, [field])).toBeUndefined()
     expect(rebindNativeField(field, [next], 0, [field])).toBeUndefined()
+    const displayOnly = { ...readOnlyField, name: field.name }
+    expect(rebindNativeField(field, [next, { ...displayOnly, page: 1 }], 1, [field, displayOnly])).toBe(next)
   })
 
   it('rebinds a survivor after removing a sibling and rejects changed accepted state', () => {

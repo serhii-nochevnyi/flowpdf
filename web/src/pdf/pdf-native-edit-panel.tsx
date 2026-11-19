@@ -254,9 +254,10 @@ export function rebindNativeField(
   if (!previousFields || !prior.canEditAppearance || !prior.name || !prior.kind || !prior.rect) {
     return sameFieldObject(prior, match) ? match : undefined
   }
-  const previous = previousFields.filter((field) => field.page === prior.page && field.name === prior.name)
+  const sameEditableName = (field: NativePdfFieldView) => field.canEditAppearance && field.name === prior.name
+  const previous = previousFields.filter((field) => field.page === prior.page && sameEditableName(field))
   return previous.length === 1 && sameNativeBytes(previous[0]!.id, prior.id)
-    && fields.filter((field) => field.page === page && field.name === prior.name).length === 1
+    && fields.filter((field) => field.page === page && sameEditableName(field)).length === 1
     ? match : undefined
 }
 

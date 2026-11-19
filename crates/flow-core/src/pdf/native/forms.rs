@@ -9,7 +9,7 @@ use super::super::{
 };
 use super::{
     NativeBinding, NativeEditError, NativeSessionError,
-    graph::{NativePdfGraph, collect_refs, spend},
+    graph::{NativePdfGraph, collect_refs, decode_pdf_doc_encoding, spend},
     pages::{self, dict, dict_mut, refs},
     text::FieldFont,
 };
@@ -773,7 +773,16 @@ fn display_name(
         field.get("T")?
     };
     let bytes = graph.resolve_metered(label, work).ok()?.as_bytes()?;
-    decode(bytes, MAX_NAME).filter(|name| !name.is_empty() && !name.chars().any(char::is_control))
+    let name = if bytes.starts_with(&[0xfe, 0xff]) || bytes.starts_with(&[0xef, 0xbb, 0xbf]) {
+        decode(bytes, MAX_NAME)?
+    } else {
+        if bytes.len() > MAX_NAME {
+            return None;
+        }
+        decode_pdf_doc_encoding(bytes).ok()?
+    };
+    (!name.is_empty() && name.len() <= MAX_NAME && !name.chars().any(char::is_control))
+        .then_some(name)
 }
 
 pub(super) fn project(
@@ -863,18 +872,25 @@ pub(super) struct ExpectedField {
     pub page: u32,
     pub rect: [i64; 4],
     value: Option<FieldValue>,
+    read_only_name_count: usize,
+}
+
+fn read_only_name_count(fields: &[NativeFieldView], name: &str) -> usize {
+    fields
+        .iter()
+        .filter(|field| !field.can_edit_appearance && field.name.as_deref() == Some(name))
+        .count()
 }
 
 impl ExpectedField {
     pub(super) fn verify(&self, fields: &[NativeFieldView]) -> Result<(), NativeSessionError> {
         let mut matching = fields
             .iter()
-            .filter(|field| field.name.as_ref() == Some(&self.name));
+            .filter(|field| field.can_edit_appearance && field.name.as_ref() == Some(&self.name));
         let valid = match (&self.value, matching.next()) {
             (None, None) => true,
             (Some(value), Some(field)) => {
-                field.can_edit_appearance
-                    && field.page == self.page
+                field.page == self.page
                     && field.rect == Some(self.rect)
                     && field.kind == Some(value.kind())
                     && match value {
@@ -884,7 +900,10 @@ impl ExpectedField {
             }
             _ => false,
         };
-        if valid && matching.next().is_none() {
+        if valid
+            && matching.next().is_none()
+            && read_only_name_count(fields, &self.name) == self.read_only_name_count
+        {
             Ok(())
         } else {
             Err(NativeSessionError::Postcondition)
@@ -1105,6 +1124,7 @@ pub(super) fn stage(
                 pages::replace_form_fields(graph, form.owner.ok_or(Reference)?, form.fields)?;
                 graph.refresh_page_graph(&BTreeSet::from([admitted.field, view.object]))?;
                 return Ok(ExpectedField {
+                    read_only_name_count: read_only_name_count(current, &admitted.name),
                     name: admitted.name,
                     page: view.page,
                     rect: admitted.rect,
@@ -1225,6 +1245,7 @@ pub(super) fn stage(
     )?;
     graph.refresh_page_graph(&BTreeSet::new())?;
     Ok(ExpectedField {
+        read_only_name_count: read_only_name_count(current, &name),
         name,
         page,
         rect: bounds,
