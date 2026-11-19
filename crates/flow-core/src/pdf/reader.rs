@@ -1994,7 +1994,7 @@ mod retained_reader_tests {
             cursor.exact = true;
             cursor.remaining = Some(1024);
             cursor.limits.max_content_tokens = work;
-            assert_eq!(cursor.parse_value(0), Err(PdfReadError::TokenLimit));
+            assert_eq!(cursor.parse_value(0).unwrap_err(), PdfReadError::TokenLimit);
         }
 
         let mut cursor = Cursor::new(b"endobj", 0, PdfReaderLimits::default());

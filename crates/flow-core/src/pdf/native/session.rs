@@ -1611,8 +1611,7 @@ mod tests {
 
     #[test]
     fn rewrite_spare_capacity_stays_charged_during_reopen_and_remap() {
-        let encoded = miniz_oxide::deflate::compress_to_vec_zlib(b"q Q", 6);
-        let bytes = super::super::tests::fixture("", &encoded);
+        let bytes = super::super::tests::redaction_fixture("q Q");
         let defaults = NativeEditLimits::default();
         let mut staged = NativePdfGraph::open(&bytes, defaults).unwrap();
         staged.limits.max_output_bytes = 1024;
@@ -1625,7 +1624,7 @@ mod tests {
         let ids = initial_ids(&staged);
         let reopened = NativePdfGraph::open(&exact, defaults).unwrap();
         let open_cost = defaults.max_retained_bytes - reopened.remaining_retained();
-        let remap_cost = staged.objects.len() * 512 + 7 * 128;
+        let remap_cost = staged.objects.len() * 512 + 5 * 128;
         let output_budget = roomy.capacity();
         let spare = output_budget - exact.capacity();
         let limits = NativeEditLimits {
