@@ -1103,11 +1103,11 @@ impl PageParentReferences {
         }
     }
 
-    fn retains_page(
+    fn retains_reference(
         &mut self,
         parent: Ref,
         values: &Dict,
-        page: Ref,
+        target: Ref,
         work: &mut usize,
     ) -> Result<bool, NativeEditError> {
         use std::collections::btree_map::Entry;
@@ -1126,7 +1126,7 @@ impl PageParentReferences {
                 entry.insert(refs.into_iter().collect())
             }
         };
-        Ok(refs.contains(&page))
+        Ok(refs.contains(&target))
     }
 }
 
@@ -1170,10 +1170,10 @@ fn deletion_preflight(
         set_form_fields(plan.edit(graph, form, work)?, direct, keep)?;
     }
     plan_outline_cleanup(graph, outlines, page, &mut plan, work)?;
-    let removed_child_edge = if kids.as_array().is_some()
-        && !plan.replacements.contains_key(&parent)
-    {
-        (!parent_refs.retains_page(parent, parent_values, page, work)?).then_some((parent, page))
+    let removed_child_edge = if !plan.replacements.contains_key(&parent) {
+        let target = kids.as_reference().unwrap_or(page);
+        (!parent_refs.retains_reference(parent, parent_values, target, work)?)
+            .then_some((parent, target))
     } else {
         let mut children = array_refs(graph, kids, work)?;
         children.retain(|&child| child != page);

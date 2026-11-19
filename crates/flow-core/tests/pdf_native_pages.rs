@@ -1281,3 +1281,71 @@ fn owned_checkbox_copies_remain_independently_editable_after_page_deletion() {
     pdf.apply_field(pdf.snapshot().binding, 5, &toggle).unwrap();
     assert_eq!(pdf.snapshot().fields[0].checked, Some(false));
 }
+
+#[test]
+fn indirect_page_tree_children_fit_the_default_deletion_budget() {
+    const PAGE_COUNT: usize = 800;
+    let kids_ref = PAGE_COUNT + 3;
+    let kids = (3..kids_ref)
+        .map(|page| format!("{page} 0 R "))
+        .collect::<String>();
+    let mut objects = vec![
+        "<< /Type /Catalog /Pages 2 0 R >>".to_owned(),
+        format!(
+            "<< /Type /Pages /Kids {kids_ref} 0 R /Count {PAGE_COUNT} /MediaBox [0 0 300 500] >>"
+        ),
+    ];
+    objects.extend((0..PAGE_COUNT).map(|_| "<< /Type /Page /Parent 2 0 R >>".to_owned()));
+    objects.push(format!("[{kids}]"));
+    let refs: Vec<_> = objects.iter().map(|value| (0, value.as_str())).collect();
+
+    let bytes = build_pdf(&refs);
+    let mut session =
+        NativePdfSession::open_scoped(&bytes, NativeEditLimits::default(), [3; 16]).unwrap();
+    let prior = session.snapshot().clone();
+    session
+        .apply_page(prior.binding, 1, &command("deletePage", 399, &prior))
+        .unwrap();
+    let mut expected = prior.page_state.order;
+    expected.remove(399);
+    assert_eq!(session.snapshot().page_state.order, expected);
+}
+
+#[test]
+fn indirect_page_tree_child_array_retained_by_trailer_prevents_deletion() {
+    let bytes = build_pdf_with_trailer(
+        &[
+            (0, "<< /Type /Catalog /Pages 2 0 R >>"),
+            (
+                0,
+                "<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 /MediaBox [0 0 300 500] >>",
+            ),
+            (0, "<< /Type /Pages /Parent 2 0 R /Kids 6 0 R /Count 1 >>"),
+            (0, "<< /Type /Page /Parent 2 0 R >>"),
+            (0, "<< /Type /Page /Parent 3 0 R >>"),
+            (0, "[5 0 R]"),
+        ],
+        " /RetainedKids 6 0 R",
+    );
+    let mut session =
+        NativePdfSession::open_scoped(&bytes, NativeEditLimits::default(), [3; 16]).unwrap();
+    let prior = session.snapshot().clone();
+    assert!(
+        prior.page_state.restrictions.as_ref().unwrap().pages[0]
+            .delete
+            .is_some()
+    );
+    assert!(
+        session
+            .apply_page(prior.binding, 1, &command("deletePage", 0, &prior))
+            .is_err()
+    );
+    assert_eq!(session.output_bytes(), bytes);
+    session
+        .apply_page(prior.binding, 2, &command("deletePage", 1, &prior))
+        .unwrap();
+    assert_eq!(
+        session.snapshot().page_state.order,
+        prior.page_state.order[..1]
+    );
+}
