@@ -1219,11 +1219,20 @@ describe('native redaction quarantine', () => {
     await vi.advanceTimersByTimeAsync(500)
     await lost
     const reconciling = lane.coordinator.reconcile()
-    const refused = expect(reconciling).rejects.toMatchObject({ code: 'FLOW_PDF_NATIVE_REDACTION_UNVERIFIED' })
+    const readbackLost = expect(reconciling).rejects.toMatchObject({ code: 'FLOW_PDF_NATIVE_REPLY_LOST' })
     const lookup = await lane.take()
     const status = redactionReply(lookup.request, redactionCandidate, 'passed')
     lane.deliver(lookup, { ...status, redaction: { ...status.redaction, published: true, markCount: 0 } })
+    const firstReadback = await lane.take()
+    expect(redactionAction(firstReadback)).toEqual({ kind: 'readPublished', candidate: redactionCandidate })
+    await vi.advanceTimersByTimeAsync(500)
+    await readbackLost
+    expect(lane.coordinator.snapshot()).toMatchObject({ phase: 'reconciliationRequired', accepted: initial })
+    expect(lane.coordinator.outputBytes()).toBeNull()
+
+    const refused = expect(lane.coordinator.reconcile()).rejects.toMatchObject({ code: 'FLOW_PDF_NATIVE_REDACTION_UNVERIFIED' })
     const readback = await lane.take()
+    expect(readback.request).toEqual(firstReadback.request)
     expect(readback.request.requestId).toBe(publish.request.requestId)
     expect(redactionAction(readback)).toEqual({ kind: 'readPublished', candidate: redactionCandidate })
     const { redaction: _redaction, ...base } = redactionReply(readback.request)

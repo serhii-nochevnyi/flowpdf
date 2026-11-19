@@ -145,6 +145,7 @@ interface RedactionJob {
   readonly expectedPages: readonly number[]
   candidate: NativePdfRedactionCandidate | null
   publishing: boolean
+  publishedCandidate: NativePdfRedactionCandidate | null
 }
 
 interface Pending {
@@ -766,7 +767,7 @@ export class NativePdfEditCoordinator {
     if (!isNativeWorkerRequest({ dispatchId: 1, request })) throw new NativePdfWorkerError(REQUEST_INVALID)
     const job = {
       request: freezeNativeDto(structuredClone(request)), previous, expectedPages: Object.freeze([...expectedPages]),
-      candidate: null, publishing: false,
+      candidate: null, publishing: false, publishedCandidate: null,
     }
     this.redactionJob = job
     this.update(phase, request.requestId)
@@ -803,31 +804,33 @@ export class NativePdfEditCoordinator {
   }> {
     const requestId = job.request.requestId
     this.update('reconciling', requestId)
-    let publicationConfirmed = false
     try {
       if (job.request.action.kind !== 'stage') {
         const { redaction } = await this.redactionStep(job, job.request.action)
         this.finishRedaction(job, redaction)
         return Object.freeze({ status: 'unseen', snapshot: job.previous })
       }
-      const { redaction } = await this.redactionStep(job, { kind: 'status', candidate: job.candidate })
-      if (redaction.published && redaction.candidate !== null) {
-        publicationConfirmed = true
-        const reply = await this.redactionStep(job, { kind: 'readPublished', candidate: redaction.candidate })
-        if (reply.status !== 'published') throw new NativePdfWorkerError(RESPONSE_INVALID, requestId)
-        this.finishRedaction(job, reply.redaction, reply.snapshot)
-        return Object.freeze({ status: 'accepted', snapshot: reply.snapshot })
+      if (job.publishedCandidate === null) {
+        const { redaction } = await this.redactionStep(job, { kind: 'status', candidate: job.candidate })
+        if (!redaction.published) {
+          if (redaction.candidate !== null) {
+            job.candidate = redaction.candidate
+            await this.redactionStep(job, { kind: 'cancel', candidate: redaction.candidate })
+          }
+          this.finishRedaction(job, redaction)
+          return Object.freeze({ status: 'unseen', snapshot: job.previous })
+        }
+        if (redaction.candidate === null) throw new NativePdfWorkerError(RESPONSE_INVALID, requestId)
+        job.publishedCandidate = redaction.candidate
       }
-      if (redaction.candidate !== null) {
-        job.candidate = redaction.candidate
-        await this.redactionStep(job, { kind: 'cancel', candidate: redaction.candidate })
-      }
-      this.finishRedaction(job, redaction)
-      return Object.freeze({ status: 'unseen', snapshot: job.previous })
+      const reply = await this.redactionStep(job, { kind: 'readPublished', candidate: job.publishedCandidate })
+      if (reply.status !== 'published') throw new NativePdfWorkerError(RESPONSE_INVALID, requestId)
+      this.finishRedaction(job, reply.redaction, reply.snapshot)
+      return Object.freeze({ status: 'accepted', snapshot: reply.snapshot })
     } catch (cause: unknown) {
       const error = errorFor(cause, requestId)
       if (this.redactionJob === job) {
-        if (publicationConfirmed && error.code !== REPLY_LOST) this.invalidate(error.code)
+        if (job.publishedCandidate !== null && error.code !== REPLY_LOST) this.invalidate(error.code)
         else this.update('reconciliationRequired', requestId, error.code)
       }
       throw error
