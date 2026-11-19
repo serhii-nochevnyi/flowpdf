@@ -1,9 +1,11 @@
 use flow_core::pdf::native::{
-    NativeEditLimits, NativeObjectCommand, NativePdfSession, NativeRedactionMark,
-    NativeSessionError,
+    NativeEditLimits, NativeObjectCommand, NativeObjectRefusal, NativePdfSession,
+    NativeRedactionMark, NativeSessionError,
 };
 use flow_core::pdf::{PdfSceneElement, PdfSceneRequest, open_pdf, read_pdf_scene};
+use image::ImageDecoder;
 use serde_json::{Value, json};
+use std::io::Cursor;
 
 fn fixture(contents: &[u8], shared: bool, resources: &str, extras: &[Vec<u8>]) -> Vec<u8> {
     fixture_with_slots(contents, shared, resources, extras, "5 0 R")
@@ -500,43 +502,72 @@ fn jpeg_asset_replaces_only_one_use_of_a_shared_raster() {
 #[test]
 fn display_p3_png_refuses_without_mutating_the_accepted_snapshot() {
     let header = "89504e470d0a1a0a0000000d4948445200000001000000010802000000907753de";
-    let display_p3 = "00000004634943500c0d00016e03e3ef";
+    let display_p3 = concat!(
+        "0000016969434350446973706c61792050330000789c7590bd4bc35014c54fab52d03a88",
+        "0e1d1c328943d4d20a7671682b1445305405ab539a7e096d7c24295271135729f81f58c1",
+        "5970b0885470717010440711dd9c3a29b86878de9754da22dec7e5fd389c73b95cc01b50",
+        "192bf60228e996914cc4a4b5d4bae47b83879e53aa66b2a8a22c0afefdbbebf3d1f5de4f",
+        "88594dbb7610d94f5c97ce2e97769e02537ffd5dd59fc99a1afddfd4418d1916e0918995",
+        "6d8b09de251e316829e2aae0bccbc782d32e9f3b9e95649cf89658d20a6a86b8492ca73b",
+        "f47c07978a65adb583d8de9fd55797c51cea51cc611326188a5051810405e17ffcd38e3f",
+        "8e2d725760502e8f022cca44491113b2c4f3d0a1611232710841ea90b873eb7e0fadfbc9",
+        "6d6def15986d70ce2fdada4203389da193d5dbda7804181a006eea4c355447eaa1f6e672",
+        "c0fb0930980286ef28b361e6c221777b7f0ce87be1fc630cf01d027695f3af23ceed1a85",
+        "9f812bfd0717296abc31294f3e",
+    );
     let pixels = "0000000c49444154789c63f8cfc0000003010100c9fe92ef0000000049454e44ae426082";
+    let untagged = format!("{header}{pixels}");
     let tagged = format!("{header}{display_p3}{pixels}");
     let encoded: Vec<_> = tagged
         .as_bytes()
         .chunks_exact(2)
         .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
         .collect();
-    let decoded = image::load_from_memory_with_format(&encoded, image::ImageFormat::Png).unwrap();
+    let mut decoder = image::codecs::png::PngDecoder::new(Cursor::new(&encoded)).unwrap();
+    let profile = decoder.icc_profile().unwrap().unwrap();
+    let profile_size = u32::from_be_bytes(profile[..4].try_into().unwrap()) as usize;
+    assert_eq!(profile_size, profile.len());
+    assert_eq!(&profile[16..24], b"RGB XYZ ");
+    assert_eq!(&profile[36..40], b"acsp");
+    assert_eq!(
+        &profile[84..100],
+        b"\xec\xfd\xa3\x8e\x38\x85\x47\xc3\x6d\xb4\xbd\x4f\x7a\xda\x18\x2f"
+    );
+    let decoded = image::DynamicImage::from_decoder(decoder).unwrap();
     assert_eq!(decoded.into_rgb8().into_raw(), [255, 0, 0]);
 
     let source = fixture(b"", false, "", &[]);
     let mut session = open(&source);
     apply(
         &mut session,
-        json!({"kind":"addImage","page":0,"bounds":[1000,1000,5000,5000],"assetHex":format!("{header}{pixels}")}),
+        json!({"kind":"addImage","page":0,"bounds":[1000,1000,5000,5000],"assetHex":untagged}),
     )
     .unwrap();
     let selected = target(&session, 0, 0);
-    let state = |session: &NativePdfSession| {
-        let snapshot = session.snapshot();
-        (
-            snapshot.binding,
-            snapshot.output_hash,
-            snapshot.scene.scene_hash,
-            snapshot.consumed_request,
-        )
-    };
-    let before = state(&session);
+    apply(
+        &mut session,
+        json!({"kind":"replaceImage","target":selected,"assetHex":untagged}),
+    )
+    .unwrap();
+    let before = session.snapshot().clone();
+    assert_eq!(before.binding.revision, 2);
+    assert_eq!(before.consumed_request, 2);
     let bytes = session.output_bytes().to_vec();
+    let selected = target(&session, 0, 0);
     let error = apply(
         &mut session,
         json!({"kind":"replaceImage","target":selected,"assetHex":tagged}),
     )
     .unwrap_err();
-    assert_eq!(error.code(), "FLOW_PDF_NATIVE_OBJECT_ASSET");
-    assert_eq!(state(&session), before);
+    assert_eq!(
+        error,
+        NativeSessionError::Object(NativeObjectRefusal::Asset)
+    );
+    let after = session.snapshot();
+    assert_eq!(after.binding, before.binding);
+    assert_eq!(after.output_hash, before.output_hash);
+    assert_eq!(after.scene.scene_hash, before.scene.scene_hash);
+    assert_eq!(after.consumed_request, before.consumed_request);
     assert_eq!(session.output_bytes(), bytes);
 }
 
