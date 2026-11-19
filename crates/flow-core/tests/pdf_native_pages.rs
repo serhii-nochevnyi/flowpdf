@@ -511,7 +511,7 @@ fn deleting_page_removes_a_link_and_bookmark_with_a_shared_destination() {
 
 #[test]
 fn retained_bookmark_destination_blocks_only_its_target() {
-    for annotations in ["", "/Annots [6 0 R]"] {
+    for annotations in ["[14 0 R]", "[6 0 R 14 0 R]"] {
         let bytes = build_pdf_with_trailer(
             &[
                 (0, "<< /Type /Catalog /Pages 2 0 R /Outlines 8 0 R >>"),
@@ -521,7 +521,10 @@ fn retained_bookmark_destination_blocks_only_its_target() {
                 ),
                 (0, "<< /Type /Page /Parent 2 0 R >>"),
                 (0, "<< /Type /Page /Parent 2 0 R /Annots [12 0 R] >>"),
-                (0, &format!("<< /Type /Page /Parent 2 0 R {annotations} >>")),
+                (
+                    0,
+                    &format!("<< /Type /Page /Parent 2 0 R /Annots {annotations} >>"),
+                ),
                 (
                     0,
                     "<< /Type /Annot /Subtype /Link /P 5 0 R /Rect [20 30 50 60] /Dest 7 0 R >>",
@@ -544,6 +547,10 @@ fn retained_bookmark_destination_blocks_only_its_target() {
                 (
                     0,
                     "<< /Title (Surviving) /Parent 8 0 R /Prev 9 0 R /Dest 11 0 R >>",
+                ),
+                (
+                    0,
+                    "<< /Type /Annot /Subtype /Link /P 5 0 R /Rect [80 30 110 60] /Dest [4 0 R /Fit] >>",
                 ),
             ],
             " /FlowPDFNavigation 10 0 R",
