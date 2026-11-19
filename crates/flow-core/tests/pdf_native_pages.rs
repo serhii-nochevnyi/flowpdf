@@ -270,7 +270,7 @@ fn cross_parent_reorder_preserves_public_text_and_field_readback() {
         )
         .unwrap();
         let page = &scene.pages[0];
-        assert!(!page.partial && !scene.report.partial);
+        assert!(page.partial && scene.report.partial);
         assert!(matches!(
             page.elements.as_slice(),
             [PdfSceneElement::Form { value: field }, PdfSceneElement::Text { value: text }, PdfSceneElement::Path { value: path }]

@@ -1038,7 +1038,7 @@ impl<'a> SceneBuilder<'a> {
         {
             return Ok(true);
         }
-        // @contract: Glyph and stroke geometry can extend beyond the scene rectangle.
+        // @contract: Stroke geometry can extend beyond the scene rectangle.
         self.report_partial(provenance.object_ref);
         Ok(true)
     }
@@ -1246,10 +1246,12 @@ impl<'a> SceneBuilder<'a> {
             }
         }
         if !glyphs.is_empty() {
-            let rect = union_rect(glyphs.iter().map(|glyph| glyph.rect))?;
-            if !self.paint_visible(rect, false, &provenance)? {
+            if self.state.clip.is_empty() {
                 return Ok(());
             }
+            let rect = union_rect(glyphs.iter().map(|glyph| glyph.rect))?;
+            // @contract: Advance rectangles do not bound painted glyphs.
+            self.report_partial(provenance.object_ref);
             self.push_element(PdfSceneElement::Text {
                 value: PdfTextElement {
                     text,

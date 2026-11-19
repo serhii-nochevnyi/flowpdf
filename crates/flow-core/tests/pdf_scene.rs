@@ -360,6 +360,32 @@ fn wide_stroke_is_partial_with_or_without_materialized_default_crop() {
 }
 
 #[test]
+fn text_near_upper_edge_is_retained_as_partial_under_equivalent_crops() {
+    for crop in ["", "/CropBox [0 0 200 200]"] {
+        let bytes = pdf(vec![
+            (1, b"<< /Type /Catalog /Pages 2 0 R >>".to_vec()),
+            (2, b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec()),
+            (3, format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] {crop} /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>").into_bytes()),
+            stream(4, "", b"BT /F1 10 Tf 20 199 Td (A) Tj ET"),
+            (5, b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /MissingWidth 500 >>".to_vec()),
+        ]);
+        let reader = open_pdf(&bytes, Default::default()).unwrap();
+        let scene = read_pdf_scene(&reader, &PdfSceneRequest::default()).unwrap();
+        let page = &scene.pages[0];
+        assert!(matches!(
+            page.elements.as_slice(),
+            [PdfSceneElement::Text { value }] if value.text == "A"
+        ));
+        assert!(page.partial && scene.report.partial);
+        assert!(matches!(
+            page.report.diagnostics.as_slice(),
+            [diagnostic] if diagnostic.code == PdfReadDiagnosticCode::PartialPage
+                && diagnostic.object_number == Some(4)
+        ));
+    }
+}
+
+#[test]
 fn widget_readback_requires_a_registered_split_field_with_a_single_matching_child() {
     for (fields, children, expected) in [
         ("[5 0 R]", "[4 0 R]", Some("Ї")),
