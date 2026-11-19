@@ -803,6 +803,7 @@ export class NativePdfEditCoordinator {
   }> {
     const requestId = job.request.requestId
     this.update('reconciling', requestId)
+    let publicationConfirmed = false
     try {
       if (job.request.action.kind !== 'stage') {
         const { redaction } = await this.redactionStep(job, job.request.action)
@@ -811,6 +812,7 @@ export class NativePdfEditCoordinator {
       }
       const { redaction } = await this.redactionStep(job, { kind: 'status', candidate: job.candidate })
       if (redaction.published && redaction.candidate !== null) {
+        publicationConfirmed = true
         const reply = await this.redactionStep(job, { kind: 'readPublished', candidate: redaction.candidate })
         if (reply.status !== 'published') throw new NativePdfWorkerError(RESPONSE_INVALID, requestId)
         this.finishRedaction(job, reply.redaction, reply.snapshot)
@@ -824,7 +826,10 @@ export class NativePdfEditCoordinator {
       return Object.freeze({ status: 'unseen', snapshot: job.previous })
     } catch (cause: unknown) {
       const error = errorFor(cause, requestId)
-      if (this.redactionJob === job) this.update('reconciliationRequired', requestId, error.code)
+      if (this.redactionJob === job) {
+        if (publicationConfirmed && error.code !== REPLY_LOST) this.invalidate(error.code)
+        else this.update('reconciliationRequired', requestId, error.code)
+      }
       throw error
     }
   }

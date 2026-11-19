@@ -1144,12 +1144,13 @@ export function PdfNativeEditPanel({
       if (attempt.action.kind === 'stage') refuseRedaction(attempt, coordinator.snapshot().redaction, cause)
       else setFailure(cause, false)
     } finally {
-      const reconcile = coordinator.snapshot().phase === 'reconciliationRequired'
+      const current = coordinator.snapshot()
+      const reconcile = current.phase === 'reconciliationRequired'
       if (!reconcile) pendingRedaction.current = null
       locked.current = false
       if (mounted.current) {
         if (pageActionOwnsFocus(invoker)) focusAfterRender.current = reconcile ? reconcileId
-          : requiresReopen ? `${id}-reopen` : `${id}-redaction-add`
+          : requiresReopen || current.reopenOriginal ? `${id}-reopen` : `${id}-redaction-add`
         setBusy(null)
       }
     }

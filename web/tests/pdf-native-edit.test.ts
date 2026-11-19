@@ -1204,7 +1204,7 @@ describe('native redaction quarantine', () => {
     lane.coordinator.dispose()
   })
 
-  it('uses a read-only result request to reconcile an uncertain publication', async () => {
+  it('offers original-file recovery when the read-only result cannot present a confirmed publication', async () => {
     const lane = fakePort(500)
     const initial = await redactionMarked(lane)
     vi.useFakeTimers()
@@ -1221,15 +1221,17 @@ describe('native redaction quarantine', () => {
     const reconciling = lane.coordinator.reconcile()
     const refused = expect(reconciling).rejects.toMatchObject({ code: 'FLOW_PDF_NATIVE_REDACTION_UNVERIFIED' })
     const lookup = await lane.take()
-    const forged = redactionReply(lookup.request, redactionCandidate, 'passed')
-    lane.deliver(lookup, { ...forged, redaction: { ...forged.redaction, published: true, markCount: 0 } })
+    const status = redactionReply(lookup.request, redactionCandidate, 'passed')
+    lane.deliver(lookup, { ...status, redaction: { ...status.redaction, published: true, markCount: 0 } })
     const readback = await lane.take()
     expect(readback.request.requestId).toBe(publish.request.requestId)
     expect(redactionAction(readback)).toEqual({ kind: 'readPublished', candidate: redactionCandidate })
     const { redaction: _redaction, ...base } = redactionReply(readback.request)
     lane.deliver(readback, { ...base, status: 'failed', code: 'FLOW_PDF_NATIVE_REDACTION_UNVERIFIED' })
     await refused
+    expect(lane.coordinator.snapshot()).toMatchObject({ phase: 'invalidated', reopenOriginal: true })
     expect(lane.coordinator.snapshot().accepted).toBe(initial)
+    expect(lane.coordinator.originalForReopen()).toEqual(original())
     expect(lane.coordinator.outputBytes()).toBeNull()
     expect(lane.sent).toEqual([])
     lane.coordinator.dispose()
