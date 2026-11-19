@@ -31,7 +31,10 @@ function verifyEmbeddedFont(pdf, font, id) {
   assert.ok(header, id + " font stream missing");
   const start = header.index + header[0].length;
   const end = start + Number(header[1]);
-  const decoded = inflateSync(pdf.subarray(start, end), { maxOutputLength: font.length });
+  const encoded = pdf.subarray(start, end);
+  assert.ok(sha256(encoded) === "975ce6af69646e3d5e3c7f63c46ef42b110c5742d36ec702814cefa35a387f34",
+    id + " pinned Flate font encoding mismatch");
+  const decoded = inflateSync(encoded, { maxOutputLength: font.length });
   assert.ok(decoded.equals(font), id + " embedded font mismatch");
   const streamEnd = Buffer.from("\nendstream\nendobj\n");
   assert.ok(pdf.subarray(end, end + streamEnd.length).equals(streamEnd), id + " font stream boundary");
