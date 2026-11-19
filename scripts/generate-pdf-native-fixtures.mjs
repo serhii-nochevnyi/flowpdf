@@ -120,7 +120,6 @@ const fixedFlate = (bytes, dictionary) => literalStream(
 );
 
 function compositeFont(start) {
-  // CIDs 1–3 are A, B and Ї. Glyph IDs and widths come from the pinned font.
   const unicode = cmap.replace("Fixture-Latin", "Fixture-Composite")
     .replace("<00> <FF>", "<0000> <FFFF>")
     .replace("2 beginbfchar\n<41> <0041>\n<42> <0042>",

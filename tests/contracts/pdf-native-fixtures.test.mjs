@@ -290,7 +290,6 @@ function verifyAnalyticRaster(page, label, expectedFills) {
   const rgb = Buffer.alloc(page.widthPx * page.heightPx * 3, 255);
   for (const fill of page.raster.fills) {
     verifyPaint(fill, page.cropBoxPt, label, false);
-    // Full-page colored baselines are unrotated. The rotated inserted page is white.
     const [left, bottom, right, top] = fill.rectPt;
     for (let row = page.heightPx - 2 * top; row < page.heightPx - 2 * bottom; row++) {
       const start = (row * page.widthPx + 2 * left) * 3;
