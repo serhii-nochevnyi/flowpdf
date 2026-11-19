@@ -126,9 +126,10 @@ async function opened(lane: ReturnType<typeof fakePort>, withText = false) {
 describe('native PDF edit coordinator', () => {
   afterEach(() => { vi.useRealTimers() })
 
-  it.each(['applied', 'reconciled'] as const)('confirms a reopened field change through %s', async (mode) => {
-    const { readFileSync } = await vi.importActual<{ readFileSync(path: URL): Uint8Array<ArrayBuffer> }>('node:fs')
-    wasm.initSync({ module: readFileSync(new URL('../generated/flow_wasm_bg.wasm', import.meta.url)) })
+  it.each(['applied', 'reconciled'] as const)('confirms reopened note and field changes through %s', async (mode) => {
+    const { readFileSync } = await vi.importActual<{ readFileSync(path: URL): Uint8Array }>('node:fs')
+    const module = new Uint8Array(readFileSync(new URL('../generated/flow_wasm_bg.wasm', import.meta.url)))
+    wasm.initSync({ module })
     const objects = [
       '<< /Type /Catalog /Pages 2 0 R >>',
       '<< /Type /Pages /Kids [3 0 R] /Count 1 >>',
@@ -148,10 +149,39 @@ describe('native PDF edit coordinator', () => {
     const originStoreHash = nativeBytesHex(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes)))
     const lane = fakePort(30_000, wasm.verify_native_pdf_response)
     const opening = lane.coordinator.open({ bytes, originStoreHash })
+    bytes.fill(0)
     const openedRequest = await lane.take()
+    expect(openedRequest.request).toMatchObject({ bytesHex: nativeBytesHex(new TextEncoder().encode(pdf)) })
     const open = wasm.native_pdf_open(JSON.stringify(openedRequest.request))
     lane.deliver(openedRequest, JSON.parse(open) as NativePdfResponse)
     await opening
+
+    const addingNote = lane.coordinator.command(note('Original note'))
+    const addNote = await lane.take()
+    lane.deliver(addNote, JSON.parse(wasm.native_pdf_command(JSON.stringify(addNote.request))))
+    const withNote = await addingNote
+    const target = withNote.scene.pages[0]?.annotations[0]
+    if (target?.kind !== 'plainNote') throw new Error('expected a verified note')
+    const moving = lane.coordinator.command({ kind: 'move', note: target.id, page: 0, rect: [10, 20, 30, 40] })
+    const moveFailure = mode === 'reconciled'
+      ? expect(moving).rejects.toMatchObject({ code: 'FLOW_PDF_NATIVE_RESPONSE_INVALID' }) : null
+    const moveNote = await lane.take()
+    const moved = JSON.parse(wasm.native_pdf_command(JSON.stringify(moveNote.request))) as NativePdfResponse
+    if (moved.status !== 'applied') throw new Error('expected a verified note move')
+    if (moveFailure !== null) {
+      lane.deliver(moveNote, { ...moved, resultHash: '00'.repeat(32) })
+      await moveFailure
+      const reconciling = lane.coordinator.reconcile()
+      const lookup = await lane.take()
+      lane.deliver(lookup, JSON.parse(wasm.native_pdf_snapshot(JSON.stringify(lookup.request))))
+      await expect(reconciling).resolves.toEqual({ status: 'accepted', snapshot: moved.snapshot })
+    } else {
+      lane.deliver(moveNote, moved)
+      await expect(moving).resolves.toEqual(moved.snapshot)
+    }
+    expect(lane.coordinator.snapshot().accepted?.scene.pages[0]?.annotations[0]).toMatchObject({
+      id: target.id, contents: 'Original note', rect: [10, 20, 30, 40],
+    })
 
     const adding = lane.coordinator.command({
       kind: 'addTextField', page: 0, rect: [10, 10, 160, 40], name: 'recipient', value: 'Alice',
@@ -186,6 +216,49 @@ describe('native PDF edit coordinator', () => {
     const closeRequest = await lane.take()
     lane.deliver(closeRequest, JSON.parse(wasm.native_pdf_close(JSON.stringify(closeRequest.request))) as NativePdfResponse)
     await closing
+    lane.coordinator.dispose()
+  })
+
+  it('requires an accepted note target and rejects altered note identities on readback', async () => {
+    const lane = fakePort()
+    const initial = await opened(lane)
+    await expect(lane.coordinator.command({ kind: 'remove', note: 1 }))
+      .rejects.toMatchObject({ code: 'FLOW_PDF_NATIVE_TARGET_UNAVAILABLE' })
+    expect(lane.sent).toHaveLength(0)
+
+    const adding = lane.coordinator.command(note('Original'))
+    const addDispatch = await lane.take()
+    lane.deliver(addDispatch, addReply(addDispatch.request, initial))
+    const accepted = await adding
+    const page = accepted.scene.pages[0]!
+    const target = page.annotations[0]!
+    if (target.kind !== 'plainNote') throw new Error('expected a note')
+    const editing = lane.coordinator.command({ kind: 'edit', note: target.id, contents: 'Updated' })
+    const refused = expect(editing).rejects.toMatchObject({ code: 'FLOW_PDF_NATIVE_RESPONSE_INVALID' })
+    const dispatch = await lane.take()
+    const reply = {
+      ...addReply(addDispatch.request, initial),
+      requestId: dispatch.request.requestId,
+      binding: accepted.binding,
+    }
+    const snapshot = {
+      ...accepted,
+      binding: { ...accepted.binding, revision: 2 },
+      consumedRequest: dispatch.request.requestId,
+      scene: { ...accepted.scene, pages: [{
+        ...page, annotations: [{ ...target, id: target.id + 1, contents: 'Updated' }],
+      }] },
+    }
+    lane.deliver(dispatch, { ...reply, snapshot })
+    await refused
+    expect(lane.coordinator.snapshot().accepted).toBe(accepted)
+
+    const reconciling = lane.coordinator.reconcile()
+    const invalidReadback = expect(reconciling).rejects.toMatchObject({ code: 'FLOW_PDF_NATIVE_RESPONSE_INVALID' })
+    const lookup = await lane.take()
+    lane.deliver(lookup, { ...reply, operation: 'snapshot', status: 'accepted', snapshot })
+    await invalidReadback
+    expect(lane.coordinator.snapshot()).toMatchObject({ phase: 'reconciliationRequired', accepted })
     lane.coordinator.dispose()
   })
 
@@ -622,10 +695,16 @@ describe('native PDF edit coordinator', () => {
       resultHash: 'ff'.repeat(32), limits: NATIVE_PDF_LIMITS,
     }
     const late = lane.worker.onmessage
+    const reopening = vi.fn(() => lane.coordinator.open(original()))
+    const unsubscribeReopen = lane.coordinator.subscribe(() => {
+      if (lane.coordinator.snapshot().phase === 'idle') void reopening()
+    })
     lane.deliver(dispatch, reply)
     await close
-    await lane.coordinator.close()
-    const replacement = lane.coordinator.open(original())
+    unsubscribeReopen()
+    expect(reopening).toHaveBeenCalledOnce()
+    const replacement = reopening.mock.results[0]!.value
+    await expect(lane.coordinator.close()).rejects.toMatchObject({ code: 'FLOW_PDF_NATIVE_CLOSE_BUSY' })
     const opening = await lane.take()
     late?.(new MessageEvent('message', { data: { dispatchId: dispatch.dispatchId, type: 'response', json: JSON.stringify(reply) } }))
     expect(lane.coordinator.snapshot().accepted).toBeNull()
