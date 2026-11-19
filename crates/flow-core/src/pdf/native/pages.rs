@@ -1058,8 +1058,6 @@ fn incoming_link_index(
                 index.blocked.insert(target);
                 continue;
             };
-            // The reverse index deduplicates owners. Replacing Annots only
-            // removes references contributed by that entry.
             if retained_refs.is_none() {
                 let mut refs = Vec::new();
                 let mut remaining = graph.remaining_retained();
