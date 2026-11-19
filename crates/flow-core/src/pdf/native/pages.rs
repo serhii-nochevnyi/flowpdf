@@ -1012,7 +1012,8 @@ fn incoming_link_index(
         .blocked
         .extend(page_refs.intersection(&trailer_refs).copied());
     for &source in &graph.pages {
-        let Some(annots) = dict(graph, source)?.get("Annots") else {
+        let source_values = dict(graph, source)?;
+        let Some(annots) = source_values.get("Annots") else {
             continue;
         };
         let items = graph
@@ -1026,6 +1027,7 @@ fn incoming_link_index(
             && exclusive_container(graph, source, annots)
                 .is_ok_and(|value| value.as_array().is_some())
             && items.iter().all(|item| item.as_reference().is_some());
+        let mut retained_refs = None;
         for item in items {
             let values = graph
                 .resolve_metered(item, work)?
@@ -1056,6 +1058,25 @@ fn incoming_link_index(
                 index.blocked.insert(target);
                 continue;
             };
+            if retained_refs.is_none() {
+                let mut refs = Vec::new();
+                let mut remaining = graph.remaining_retained();
+                for (key, value) in source_values {
+                    if key != "Annots" {
+                        collect_refs(value, &mut refs, work, &mut remaining)?;
+                    }
+                }
+                retained_refs = Some(refs.into_iter().collect::<BTreeSet<_>>());
+            }
+            let retained_refs = retained_refs.as_ref().unwrap();
+            if retained_refs.contains(&annot)
+                || annots
+                    .as_reference()
+                    .is_some_and(|container| retained_refs.contains(&container))
+            {
+                index.blocked.insert(target);
+                continue;
+            }
             let drops = index.removable.entry(target).or_default().entry(source);
             if !drops.or_default().insert(annot) {
                 index.blocked.insert(target);
