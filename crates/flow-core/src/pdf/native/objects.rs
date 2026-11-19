@@ -1166,7 +1166,6 @@ fn image_source(hex: &str, graph: &NativePdfGraph, remaining: &mut usize) -> Res
         return Err(NativeSessionError::Budget);
     }
     if jpeg.is_some() {
-        // @invariant: JPEG scratch is temporary and the command covers the encoded asset.
         spend(remaining, samples)?;
     } else {
         spend(remaining, samples * 3 + 4096)?;
