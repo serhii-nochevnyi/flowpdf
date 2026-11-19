@@ -1674,7 +1674,8 @@ impl Grid {
                     // @contract: Edge-only coverage remains visible when center sampling misses it.
                     if covered {
                         for (channel, ink) in pixel.iter_mut().zip(color) {
-                            *channel = (u16::from(*channel) + u16::from(ink)).div_ceil(2) as u8;
+                            let blended = (u16::from(*channel) + u16::from(ink)).div_ceil(2) as u8;
+                            *channel = if blended == *channel { ink } else { blended };
                         }
                     }
                 }

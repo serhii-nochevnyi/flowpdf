@@ -214,6 +214,7 @@ fn preview_request(request_id: u64, snapshot: &Value, page_id: Value) -> Value {
 fn page_preview_binds_the_rotated_crop_and_current_accepted_revision() {
     let artwork = "1 0 0 rg 3 5 3 3 re f\n\
                    0 1 0 RG 0.04 w 3.5 9.06 m 5.5 9.06 l S\n\
+                   0.996 G 0.04 w 3.5 10.56 m 5.5 10.56 l S\n\
                    0 0 1 rg 6.03 9.03 0.04 0.04 re f";
     let clipped = "q 0 0 12 12 re W n 0 0 1 rg 2 2 4 4 re f Q";
     let source = fixture_pdf(&[
@@ -250,6 +251,7 @@ fn page_preview_binds_the_rotated_crop_and_current_accepted_revision() {
     assert_eq!(pixel(10, 4), "80ff80");
     assert_eq!(pixel(10, 8), "8080ff");
     assert_eq!(pixel(12, 4), "ffffff");
+    assert_eq!(pixel(13, 4), "fefefe");
     assert_eq!(pixel(4, 18), "ffffff");
 
     for page in [second.clone(), json!(1)] {
