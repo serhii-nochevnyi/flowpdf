@@ -27,7 +27,7 @@
       "admission": "admitted",
       "source": {
         "path": "fixtures/pdf-native/notes-preservation.pdf",
-        "sha256": "f0ec2e94fad516a9089f5db7c3ae17d4b91e7827cabc961f8906aaaf5ee11b3d"
+        "sha256": "0c78908a204808cde2762c73a5028f6cdeff085aa4ce57ee73da100b378150ad"
       },
       "expected": {
         "path": "fixtures/pdf-native/notes-preservation.expected.json",
@@ -45,7 +45,7 @@
       "admission": "refused",
       "source": {
         "path": "fixtures/pdf-native/refused.pdf",
-        "sha256": "e8766298dc321a755d8d9eda5142a33536af61d7025828997eff92606ea8fff5"
+        "sha256": "86d9c272b680611c575ca65528c6b7c2cdfaeda4a6a57397383cf8726aae1f85"
       },
       "expected": {
         "inline": {
@@ -90,6 +90,42 @@
           ]
         },
         "sha256": "b751d4e76757f73d3b08eef6a66898f6c11ea1ca899191c8abde37d0e133bd81"
+      }
+    },
+    {
+      "id": "edit-families",
+      "provenance": {
+        "origin": "original-synthetic",
+        "license": "CC0-1.0",
+        "generatorVersion": 1
+      },
+      "profile": "embedded-text-shared-graphics-pages-fields",
+      "admission": "admitted",
+      "source": {
+        "path": "fixtures/pdf-native/edit-families.pdf",
+        "sha256": "4b902660daea2c4720d8259f7094479512deb54f495457d3e7b0a73b000a523f"
+      },
+      "expected": {
+        "path": "fixtures/pdf-native/edit-families.expected.json",
+        "sha256": "56e76bdcc43f0ae5709f8f58d890fc26fdabff688053660cfeaccf2f76bc7c00"
+      }
+    },
+    {
+      "id": "redaction",
+      "provenance": {
+        "origin": "original-synthetic",
+        "license": "CC0-1.0",
+        "generatorVersion": 1
+      },
+      "profile": "scrub-text-path-image-note-metadata",
+      "admission": "admitted",
+      "source": {
+        "path": "fixtures/pdf-native/redaction.pdf",
+        "sha256": "4cc821c29d3c4fab2e828db64549628b9ee540f3f22c14217bee957d1a441b3d"
+      },
+      "expected": {
+        "path": "fixtures/pdf-native/redaction.expected.json",
+        "sha256": "5ebb01bc7a9ea8607fd3bb04198fc091b2f849bd95e7de909c2cac3b892d6bfd"
       }
     }
   ],
