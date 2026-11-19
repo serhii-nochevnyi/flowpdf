@@ -1121,15 +1121,22 @@ impl<'a> SceneBuilder<'a> {
                 let effective_resources = match dictionary.get("Resources") {
                     Some(PdfValue::Reference(reference)) => {
                         local_resources = self.reader.object(*reference)?;
-                        Some(&local_resources)
+                        match &local_resources {
+                            PdfValue::Null => resources,
+                            value => Some(value),
+                        }
                     }
+                    None | Some(PdfValue::Null) => resources,
                     Some(value) => Some(value),
-                    None => resources,
                 };
+                let caller_state = self.state.clone();
+                let caller_stack = std::mem::take(&mut self.state_stack);
                 self.invocation_path.push(provenance.stream_offset);
                 let result =
                     self.interpret_stream(&stream, xobject_ref, depth + 1, effective_resources);
                 self.invocation_path.pop();
+                self.state = caller_state;
+                self.state_stack = caller_stack;
                 result
             }
             _ => {

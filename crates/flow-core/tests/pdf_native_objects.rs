@@ -261,7 +261,7 @@ fn nested_shared_image_invocations_are_isolated() {
 fn scene_reads_nested_image_replacement_and_unchanged_sibling() {
     let outer = stream(
         "/Type /XObject /Subtype /Form /BBox [0 0 40 40] /Resources 9 0 R",
-        b"/Inner Do",
+        b"/Inner Do 1 0 0 1 5 0 cm",
     );
     let inner = stream(
         "/Type /XObject /Subtype /Form /BBox [0 0 40 40] /Resources << /XObject << /I 8 0 R >> >>",
@@ -318,7 +318,53 @@ fn scene_reads_nested_image_replacement_and_unchanged_sibling() {
     assert_eq!(images[0].data_hex, hex);
     assert_eq!(images[1].filter, "FlateDecode");
     assert_eq!(images[1].data_hex, "07");
-    assert!(images[0].rect.x < images[1].rect.x);
+    assert_eq!(images[0].rect.x.raw(), 640);
+    let sibling = images[1].rect;
+    assert_eq!(
+        (
+            sibling.x.raw(),
+            sibling.y.raw(),
+            sibling.width.raw(),
+            sibling.height.raw()
+        ),
+        (4_480, 640, 10, 10)
+    );
+}
+
+#[test]
+fn scene_inherits_form_resources_when_missing_or_null() {
+    let pixels = miniz_oxide::deflate::compress_to_vec_zlib(&[7], 6);
+    for resources in ["", "/Resources null", "/Resources 8 0 R"] {
+        let form = stream(
+            &format!("/Type /XObject /Subtype /Form /BBox [0 0 40 40] {resources}"),
+            b"/I Do",
+        );
+        let image = stream(
+            "/Type /XObject /Subtype /Image /ColorSpace /DeviceGray /Width 1 /Height 1 /BitsPerComponent 8 /Filter /FlateDecode",
+            &pixels,
+        );
+        let source = fixture(
+            b"/Form Do",
+            false,
+            "/Resources << /XObject << /Form 6 0 R /I 7 0 R >> >>",
+            &[form, image, b"null".to_vec()],
+        );
+        let reader = open_pdf(&source, Default::default()).unwrap();
+        let scene = read_pdf_scene(
+            &reader,
+            &PdfSceneRequest {
+                first_page: 0,
+                page_count: 1,
+            },
+        )
+        .unwrap();
+        assert!(
+            scene.pages[0].elements.iter().any(|element| {
+                matches!(element, PdfSceneElement::Image { value } if value.data_hex == "07")
+            }),
+            "{resources}"
+        );
+    }
 }
 
 #[test]
