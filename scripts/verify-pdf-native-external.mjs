@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
-import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { accessSync, constants, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join, resolve } from 'node:path'
+import { delimiter, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { isDeepStrictEqual } from 'node:util'
 import { pinnedEnvironment, root, runBounded } from './check-phase9.mjs'
@@ -74,12 +74,29 @@ export function loadFixtures() {
   })
 }
 
-export function probeVersion(tool, run = runBounded, options = {}) {
+function resolveExecutable(tool, cwd, path) {
+  for (const entry of path?.split(delimiter) ?? []) {
+    try {
+      const executable = realpathSync(resolve(cwd, entry, tool))
+      if (!statSync(executable).isFile()) continue
+      accessSync(executable, constants.X_OK)
+      return executable
+    } catch {
+      // @contract: Continue PATH lookup past missing or inaccessible candidates.
+    }
+  }
+  return null
+}
+
+export function probeTool(tool, run = runBounded, { cwd = root, env = pinnedEnvironment(process.env, cwd) } = {}) {
   if (!toolNames.includes(tool)) return null
-  const result = run([tool, tool === 'qpdf' ? '--version' : '-v'], options)
+  const executable = resolveExecutable(tool, cwd, env.PATH)
+  if (!executable) return null
+  const result = run([executable, tool === 'qpdf' ? '--version' : '-v'], { cwd, env })
   if (result.status !== 0 || result.error) return null
   const pattern = new RegExp(`^${tool} version (\\d{1,4}\\.\\d{1,4}\\.\\d{1,4})(?:\\r?\\n|$)`, 'm')
-  return pattern.exec(`${result.stdout ?? ''}\n${result.stderr ?? ''}`)?.[1] ?? null
+  const version = pattern.exec(`${result.stdout ?? ''}\n${result.stderr ?? ''}`)?.[1]
+  return version ? { executable, version } : null
 }
 
 export function externalExitCode(status, strict) {
@@ -604,6 +621,13 @@ export function checkStructure(actual, source, operation, rawStream, showObject,
   const hasDecoy = Object.values(actual.objects).some(({ value }) => Object.hasOwn(value ?? {}, '/UnreachableDecoy'))
   if (operation.retained?.includes('UnreachableDecoy')) requireMatch(hasDecoy, 'source-decoy')
   if (operation.removed.includes('UnreachableDecoy')) requireMatch(!hasDecoy, 'pruned-decoy')
+  if (['editNote', 'removeNote'].includes(operation.operation)) {
+    const retired = operation.removed.filter((entry) => entry !== 'UnreachableDecoy')
+    const hasRetiredNote = Object.values(actual.objects).some(({ value }) =>
+      actual.resolveObject(value?.['/Subtype']) === '/Text' &&
+      retired.includes(pdfString(actual.resolveObject(value['/Contents']))))
+    requireMatch(!hasRetiredNote, 'retired-note-contents')
+  }
   if (operation.retained?.includes('catalog-custom-scalars')) {
     requireMatch(same(actual.catalog['/FixtureValues'], source.catalog['/FixtureValues']) &&
       same(actual.trailer['/ID'], source.trailer['/ID']) &&
@@ -789,12 +813,41 @@ export function compareFixtures(fixtures, wasm, directory, invoke, evidence) {
   }
 }
 
+export function comparisonInvoker(executables, directory, env, commands, run = runBounded) {
+  const toolEnv = { ...env, TMPDIR: directory, XDG_CACHE_HOME: directory, LC_ALL: 'C' }
+  const deadline = Date.now() + 600_000
+  return (check, [tool, ...args]) => {
+    const remaining = deadline - Date.now()
+    requireMatch(remaining > 0, 'comparison-deadline')
+    const executable = executables.get(tool)
+    const stats = commands[check] ??= { pass: 0, fail: 0, unavailable: 0 }
+    const result = executable && run([executable, ...args], { cwd: directory, env: toolEnv, encoding: 'buffer',
+      maxBuffer: byteLimit, timeout: Math.min(remaining, 15_000) })
+    if (!result || result.error?.code === 'ENOENT') {
+      stats.unavailable++
+      throw new GateError('unavailable', 'tool-disappeared')
+    }
+    if (result.status !== 0 || result.error) {
+      stats.fail++
+      throw new GateError('fail', check)
+    }
+    stats.pass++
+    return result.stdout
+  }
+}
+
 export async function verifyExternal() {
   const evidence = { status: 'unavailable', observedAt: new Date().toISOString(), manifestHash,
     tools: {}, commands: {}, fixtures: [] }
   let directory
   try {
-    for (const tool of toolNames) evidence.tools[tool] = probeVersion(tool)
+    const env = pinnedEnvironment()
+    const executables = new Map()
+    for (const tool of toolNames) {
+      const probe = probeTool(tool, runBounded, { cwd: root, env })
+      evidence.tools[tool] = probe?.version ?? null
+      if (probe) executables.set(tool, probe.executable)
+    }
     const missing = toolNames.filter((tool) => !evidence.tools[tool])
     evidence.commands.probe = { pass: toolNames.length - missing.length, fail: 0, unavailable: missing.length }
     if (process.versions.node !== supportedNodeVersion) missing.push('node-24.10.0')
@@ -805,7 +858,6 @@ export async function verifyExternal() {
     requireInput(Number(evidence.tools.qpdf.split('.')[0]) >= 11, 'qpdf-json-v2')
     requireInput(evidence.tools.pdftotext === evidence.tools.pdftoppm, 'poppler-version-mismatch')
     const fixtures = loadFixtures()
-    const env = pinnedEnvironment()
     const npm = runBounded(['npm', '--version'], { env })
     requireInput(npm.status === 0 && npm.stdout.trim() === '11.9.0', 'npm-11.9.0')
     const rust = runBounded(['rustc', '--version'], { env })
@@ -819,26 +871,7 @@ export async function verifyExternal() {
     const { wasm, wasmHash } = await loadNative()
     evidence.runtime = { node: process.versions.node, npm: '11.9.0', rust: '1.97.1', wasmHash }
     directory = mkdtempSync(join(tmpdir(), 'flowpdf-phase9-'))
-    const toolEnv = { ...env, TMPDIR: directory, XDG_CACHE_HOME: directory, LC_ALL: 'C' }
-    const deadline = Date.now() + 600_000
-    function invoke(check, argv) {
-      const remaining = deadline - Date.now()
-      requireMatch(remaining > 0, 'comparison-deadline')
-      const result = runBounded(argv, { cwd: directory, env: toolEnv, encoding: 'buffer',
-        maxBuffer: byteLimit, timeout: Math.min(remaining, 15_000) })
-      const stats = evidence.commands[check] ??= { pass: 0, fail: 0, unavailable: 0 }
-      if (result.error?.code === 'ENOENT') {
-        stats.unavailable++
-        throw new GateError('unavailable', 'tool-disappeared')
-      }
-      if (result.status !== 0 || result.error) {
-        stats.fail++
-        throw new GateError('fail', check)
-      }
-      stats.pass++
-      return result.stdout
-    }
-    compareFixtures(fixtures, wasm, directory, invoke, evidence)
+    compareFixtures(fixtures, wasm, directory, comparisonInvoker(executables, directory, env, evidence.commands), evidence)
   } catch (error) {
     recordComparisonError(evidence, error)
   } finally {
