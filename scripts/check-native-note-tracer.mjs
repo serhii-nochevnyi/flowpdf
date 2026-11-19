@@ -52,6 +52,9 @@ const reviewedBrowserSuites = [
 const reviewedPageBrowserSuites = reviewedBrowserSuites.map(([path, digest]) => [path,
   path === 'web/tests/pdf-native-pages.browser.test.ts' ? '75a10c2322c03833e9bf26edb683623779137e0aaa599875187a1a90c56e62e0' : digest,
 ])
+const reviewedAccessibleTextBrowserSuites = reviewedPageBrowserSuites.map(([path, digest]) => [path,
+  path === 'web/tests/pdf-native-edit.browser.test.ts' ? '534496f46b33bef146bd7e0fdc02083571ee10892217a45e97599b5c41f88e4e' : digest,
+])
 const reviewedBrowserProfiles = [
   [...reviewedBrowserSuites,
     ['web/tests/pdf-native-redaction.browser.test.ts', 'f03b3854ae1f8b6459c400fc67dc5f43dc7185737eeb9eb3f7439ef104e0fb10']],
@@ -66,9 +69,10 @@ const reviewedBrowserProfiles = [
   [...reviewedPageBrowserSuites.map(([path, digest]) => [path,
     path === 'web/tests/pdf-native-edit.browser.test.ts' ? '4cfff786a4a1caec82ef0879b90463070ff3e03ab57611a195a13c9df45a50b5' : digest,
   ]), ['web/tests/pdf-native-redaction.browser.test.ts', '8adf4fa1bf071d7fa8c09b82faabfe98b30be7553aadae03d46f8af045aa99a1']],
-  [...reviewedPageBrowserSuites.map(([path, digest]) => [path,
-    path === 'web/tests/pdf-native-edit.browser.test.ts' ? '534496f46b33bef146bd7e0fdc02083571ee10892217a45e97599b5c41f88e4e' : digest,
-  ]), ['web/tests/pdf-native-redaction.browser.test.ts', '8adf4fa1bf071d7fa8c09b82faabfe98b30be7553aadae03d46f8af045aa99a1']],
+  [...reviewedAccessibleTextBrowserSuites,
+    ['web/tests/pdf-native-redaction.browser.test.ts', '8adf4fa1bf071d7fa8c09b82faabfe98b30be7553aadae03d46f8af045aa99a1']],
+  [...reviewedAccessibleTextBrowserSuites,
+    ['web/tests/pdf-native-redaction.browser.test.ts', '70e22c9ef756b303c0ff7d7adde2274a290de600862c658af1edf96f208c40c6']],
 ]
 const expandedSteps = [
   'Run bilingual Chromium text replacement tracer',

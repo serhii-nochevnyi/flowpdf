@@ -16,6 +16,7 @@ const baselineRevision = '5683541fe572a4d88d36df15db37ff6cde85f828'
 const verifiedRasterRevision = 'b3340c7aa5919715320d65548463fdff68cb2e43'
 const olderPageRevision = '793ff4c687a71210205258e58003400c7738affa'
 const recoveryNoteRevision = '6f4b7ea593f2efd3ac3237cf8c3f1660ad0d4263'
+const accessibleTextRevision = 'e6fb68578bc5d70358d0d4e9f20f78c61015ad6e'
 const pagesSuite = 'web/tests/pdf-native-pages.browser.test.ts'
 const redactionSuite = 'web/tests/pdf-native-redaction.browser.test.ts'
 
@@ -128,6 +129,7 @@ for (const [profile, revision, expanded] of [
   ['previous reviewed verified-raster redaction (b3340c7)', verifiedRasterRevision, true],
   ['reviewed baseline (5683541)', baselineRevision, true],
   ['reviewed recovery note', recoveryNoteRevision, true],
+  ['reviewed accessible page text', accessibleTextRevision, true],
 ]) {
   test(`accepts the exact ${profile} harness`, (t) => {
     const paths = ['.github/workflows/pdf-native-note-tracer.yml', 'package.json',
@@ -169,6 +171,13 @@ test('refuses the recovery note suite with a different reviewed redaction suite'
   const redaction = harnessFilesFrom(t, verifiedRasterRevision, [redactionSuite])
   if (!recovery || !redaction) return
   const { command } = fixture({ historicalFiles: new Map([...recovery, ...redaction]) })
+  assert.throws(() => requirePassedCi('HEAD', command), { message: 'NATIVE_NOTE_TRACER_HARNESS_NOT_APPROVED' })
+})
+
+test('refuses raw redaction assertions with the earlier recovery note suite', (t) => {
+  const historicalFiles = harnessFilesFrom(t, recoveryNoteRevision, [browserSuites[0]])
+  if (!historicalFiles) return
+  const { command } = fixture({ historicalFiles })
   assert.throws(() => requirePassedCi('HEAD', command), { message: 'NATIVE_NOTE_TRACER_HARNESS_NOT_APPROVED' })
 })
 
