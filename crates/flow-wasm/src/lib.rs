@@ -2110,14 +2110,19 @@ impl NativeRegistry {
         });
         if matches!(request, NativeRequest::Close { .. }) {
             if let Some(index) = index {
-                let current = self.sessions[index].session.snapshot();
-                if current.binding != binding {
-                    return Err(NATIVE_REVISION);
+                let entry = &self.sessions[index];
+                entry
+                    .session
+                    .check_close(binding, request_id)
+                    .map_err(|error| error.code())?;
+                if entry
+                    .last_mark
+                    .as_ref()
+                    .is_some_and(|(id, _)| request_id <= *id)
+                {
+                    return Err(NativeSessionError::InvalidRequest.code());
                 }
-                let consumed_request = current.consumed_request;
-                if request_id <= consumed_request {
-                    return Err("FLOW_PDF_NATIVE_REQUEST_INVALID");
-                }
+                let consumed_request = entry.session.snapshot().consumed_request;
                 let entry = self.sessions.swap_remove(index);
                 if self.closed.len() == NATIVE_PDF_SESSIONS {
                     self.closed.pop_front();
@@ -2690,10 +2695,45 @@ fn verify_native_snapshot(response: &NativeResponse<NativeVerifiedScene>) -> Opt
         return None;
     }
     let bytes = native_decode_pdf(&snapshot.output_hex).ok()?;
-    if blake3::hash(&bytes).as_bytes() != &snapshot.output_hash {
+    if blake3::hash(&bytes).as_bytes() != &snapshot.output_hash
+        || (revision == 0 && encode_hex(&Sha256::digest(&bytes)) != snapshot.origin_store_hash)
+    {
         return None;
     }
     snapshot.scene.verify()?;
+    let claimed_notes: Vec<_> = snapshot
+        .scene
+        .pages
+        .iter()
+        .flat_map(|page| {
+            page.annotations
+                .iter()
+                .filter_map(|annotation| match annotation {
+                    NativeVerifiedAnnotation::PlainNote { object, id, .. } => Some((*object, *id)),
+                    _ => None,
+                })
+        })
+        .collect();
+    let live_notes_match = NATIVE_REGISTRY.with(|registry| {
+        let registry = registry.borrow();
+        registry
+            .sessions
+            .iter()
+            .find(|entry| {
+                let live = entry.session.snapshot();
+                native_same_session(live.binding, snapshot.binding)
+            })
+            .is_none_or(|entry| {
+                let live = entry.session.snapshot();
+                entry.origin_store_hash == snapshot.origin_store_hash
+                    && live.binding == snapshot.binding
+                    && live.output_hash == snapshot.output_hash
+                    && entry.session.matches_note_identities(&claimed_notes)
+            })
+    });
+    if !live_notes_match {
+        return None;
+    }
     NativePdfSession::verify_page_and_field_projection(
         &bytes,
         native_edit_limits(),
@@ -2701,6 +2741,7 @@ fn verify_native_snapshot(response: &NativeResponse<NativeVerifiedScene>) -> Opt
         snapshot.scene.scene_hash,
         &snapshot.page_state,
         &snapshot.fields,
+        &claimed_notes,
         matches!(
             snapshot.redaction_admission,
             NativeRedactionAdmission::Supported
