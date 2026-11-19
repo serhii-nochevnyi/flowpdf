@@ -12,7 +12,7 @@ import { createNativePdfRuntime } from '../src/layout/layout-runtime.js'
 import { nativePdfText, type NativePdfLocale, type NativePdfMessage } from '../src/pdf/pdf-native-edit-messages.js'
 import {
   nativeBytesHex, readNativeResponse,
-  type NativePdfSnapshot, type NativePdfWorkerRequest,
+  type NativePdfSnapshot, type NativePdfWorkerRequest, type NativePdfWorkerResponse,
 } from '../src/pdf/pdf-native-edit-protocol.js'
 
 function classicPdf(): Uint8Array<ArrayBuffer> {
@@ -125,11 +125,23 @@ for (const locale of ['uk', 'en'] satisfies NativePdfLocale[]) {
     const postMessage = Worker.prototype.postMessage
     let pauseNextCommand = false
     let resumeCommand: (() => void) | undefined
+    let refuseNextCommand = false
+    let refuseReadbackFor: number | undefined
     const post = vi.spyOn(Worker.prototype, 'postMessage').mockImplementation(
       function (this: Worker, ...args: Parameters<Worker['postMessage']>) {
-        const [message] = args
-        if (pauseNextCommand &&
-          (message as Partial<NativePdfWorkerRequest> | undefined)?.request?.operation === 'command') {
+        const message = args[0] as NativePdfWorkerRequest | undefined
+        const request = message?.request
+        const refuseCommand = refuseNextCommand && request?.operation === 'command'
+        if (message && request && (refuseCommand || (request.operation === 'snapshot' && request.requestId === refuseReadbackFor))) {
+          refuseNextCommand = false
+          refuseReadbackFor = refuseCommand ? request.requestId : undefined
+          const data: NativePdfWorkerResponse = {
+            dispatchId: message.dispatchId, type: 'failed', code: 'FLOW_PDF_NATIVE_RESPONSE_INVALID',
+          }
+          queueMicrotask(() => this.dispatchEvent(new MessageEvent('message', { data })))
+          return
+        }
+        if (pauseNextCommand && request?.operation === 'command') {
           pauseNextCommand = false
           resumeCommand = () => Reflect.apply(postMessage, this, args)
           return
@@ -315,7 +327,7 @@ for (const locale of ['uk', 'en'] satisfies NativePdfLocale[]) {
       expect(remaining).toHaveLength(1)
       expect(remaining[0]).toMatchObject({ contents: 'Confirm delivery date' })
 
-      const lastAcceptedDownload = downloads.at(-1)!
+      const acceptedBytes = await downloads.at(-1)!.bytes
       const savedHash = edited.dataset.outputHash
       let finishRead!: () => void
       const wait = new Promise<void>((resolve) => { finishRead = resolve })
@@ -345,18 +357,78 @@ for (const locale of ['uk', 'en'] satisfies NativePdfLocale[]) {
 
       await activate(notes()[0]!)
       const draft = 'An unsaved draft must never be replayed.'
-      await panelLocator.getByRole('textbox', { name: t('note.contents') }).fill(draft)
-      const workerIndex = post.mock.calls.findIndex(([message]) =>
+      await noteText.fill(draft)
+      refuseNextCommand = true
+      await activate(button('note.save'))
+      await expect.element(control('session.reconcile')).not.toHaveAttribute('aria-disabled', 'true')
+      await activate(button('session.reconcile'))
+      await expect.element(control('session.reopenAccepted')).toBeEnabled()
+      expect(required(panel, '[role=alert]').textContent).toContain(t('session.commandRecovery'))
+      expect(edited.dataset.outputHash).toBe(savedHash)
+
+      const reopenedSourceHash = (await hashPdfSourceBytes(acceptedBytes)).slice('sha256:v1:'.length)
+      expect(reopenedSourceHash).not.toBe(sourceHash)
+      const beforeReopen = post.mock.calls.length
+      await activate(button('session.reopenAccepted'))
+      await expect.element(control('note.add')).toBeEnabled()
+      await expect.poll(() => status.textContent).toContain(t('status.reopenedAccepted'))
+      expect(edited.disabled).toBe(false)
+      expect(edited.dataset.outputHash).toBe(savedHash)
+      expect(notes()).toHaveLength(1)
+      expect(notes()[0]!.textContent).toContain('Confirm delivery date')
+      expect(panel.querySelector('textarea')).toBeNull()
+      const reopenRequests = post.mock.calls.slice(beforeReopen).map(([message]) => (message as NativePdfWorkerRequest).request)
+      expect(reopenRequests.find(({ operation }) => operation === 'open')).toMatchObject({
+        originStoreHash: reopenedSourceHash, bytesHex: nativeBytesHex(acceptedBytes),
+      })
+      expect(reopenRequests.some(({ operation }) => operation === 'command')).toBe(false)
+      expect(await store.get(reopenedSourceHash)).toEqual(acceptedBytes)
+
+      const identity = required<HTMLDetailsElement>(panel, 'details')
+      await activate(required(identity, 'summary'))
+      expect(identity.open).toBe(true)
+      const beforeOriginal = downloads.length
+      await activate(original)
+      await expect.poll(() => downloads.length).toBe(beforeOriginal + 1)
+      const originalBytes = await downloads[beforeOriginal]!.bytes
+      expect(originalBytes).toEqual(initial)
+      const originalDigest = (await hashPdfSourceBytes(originalBytes)).slice('sha256:v1:'.length)
+      await expect.element(panelLocator.getByText(t('identity.origin', { hash: originalDigest }), { exact: true })).toBeVisible()
+      expect(original.dataset.originHash).toBe(originalDigest)
+
+      await activate(button('note.add'))
+      const resumedText = 'Editing resumed / Редагування продовжено'
+      await noteText.fill(resumedText)
+      await activate(button('note.add'))
+      const resumedNotes = await readEdited(1)
+      expect(resumedNotes).toHaveLength(2)
+      expect(resumedNotes).toEqual(expect.arrayContaining([
+        expect.objectContaining({ contents: 'Confirm delivery date' }),
+        expect.objectContaining({ contents: resumedText }),
+      ]))
+      const resumedHash = edited.dataset.outputHash
+      const lastAcceptedDownload = downloads.at(-1)!
+
+      await activate(notes()[0]!)
+      await noteText.fill(draft)
+      const workerIndex = post.mock.calls.findLastIndex(([message]) =>
         (message as Partial<NativePdfWorkerRequest> | undefined)?.request?.operation === 'command')
       expect(workerIndex).toBeGreaterThanOrEqual(0)
+      const resumedRequest = (post.mock.calls[workerIndex]![0] as NativePdfWorkerRequest).request
+      expect(resumedRequest).toMatchObject({
+        operation: 'command', originStoreHash: reopenedSourceHash,
+        binding: { revision: 0 },
+      })
+      if (resumedRequest.operation !== 'command') throw new Error('Expected a resumed edit command')
+      expect(nativeBytesHex(Uint8Array.from(resumedRequest.binding.originHash))).toBe(savedHash)
       const worker = post.mock.contexts[workerIndex] as Worker
       const onMessageError = worker.onmessageerror
       expect(onMessageError).toBeTypeOf('function')
       onMessageError?.call(worker, new MessageEvent('messageerror'))
       await expect.element(control('session.reopen'), { timeout: 5_000 }).toBeEnabled()
       expect(edited.disabled).toBe(false)
-      expect(edited.dataset.outputHash).toBe(savedHash)
-      expect(panel.textContent).toContain(t('output.last', { revision: 5 }))
+      expect(edited.dataset.outputHash).toBe(resumedHash)
+      expect(panel.textContent).toContain(t('output.last', { revision: 1 }))
       expect(required<HTMLTextAreaElement>(panel, 'textarea').readOnly).toBe(true)
       expect(button('note.save').disabled).toBe(true)
       const beforeLastVerified = downloads.length
@@ -371,7 +443,7 @@ for (const locale of ['uk', 'en'] satisfies NativePdfLocale[]) {
       expect(notes()).toHaveLength(0)
       expect(panel.querySelector('textarea')).toBeNull()
       expect(post.mock.calls.filter(([message]) =>
-        (message as Partial<NativePdfWorkerRequest> | undefined)?.request?.operation === 'command')).toHaveLength(5)
+        (message as Partial<NativePdfWorkerRequest> | undefined)?.request?.operation === 'command')).toHaveLength(7)
       expect(controller.snapshot().accepted).toBe(semanticDocument)
     } finally {
       lifecycle.abort()

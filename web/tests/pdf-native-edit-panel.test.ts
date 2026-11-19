@@ -406,6 +406,17 @@ describe('native note workspace', () => {
   })
 
   for (const locale of ['uk', 'en'] as const) {
+    it(`shows the immutable original identity after reopening verified bytes in ${locale}`, () => {
+      const document = documentWith([])
+      const originalStoreHash = 'b'.repeat(64)
+      const markup = renderToStaticMarkup(createElement(PdfNativeEditPanel, {
+        ...dependencies, locale, initialDocument: { ...document, originalStoreHash },
+      }))
+      expect(markup).toContain(`data-origin-hash="${originalStoreHash}"`)
+      expect(markup).toContain(nativePdfText(locale, 'identity.origin', { hash: originalStoreHash }))
+      expect(markup).not.toContain(nativePdfText(locale, 'identity.origin', { hash: document.snapshot.originStoreHash }))
+    })
+
     it(`renders zero, one and many accepted notes as plain text in ${locale}`, () => {
       for (const count of [0, 1, 3]) {
         const annotations = Array.from({ length: count }, (_, index) => note(index + 2))
@@ -419,6 +430,7 @@ describe('native note workspace', () => {
         expect(markup).toContain('&lt;unsafe&gt;.pdf')
         expect(markup).toContain('class="native-file"')
         expect(markup).toContain(`data-origin-hash="${'a'.repeat(64)}"`)
+        expect(markup).toContain(nativePdfText(locale, 'identity.origin', { hash: 'a'.repeat(64) }))
         expect(markup).toContain(`data-output-hash="${'2a'.repeat(32)}"`)
         expect(markup).toContain('class="native-destructive"')
         expect(markup).not.toContain('<script>')
