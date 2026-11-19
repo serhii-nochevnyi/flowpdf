@@ -539,12 +539,12 @@ impl PdfReader {
             .map(|result| result.0)
     }
 
-    fn read_object(
+    fn object_cursor(
         &self,
         reference: PdfObjectRef,
         depth: usize,
         retention: Option<(usize, usize, usize)>,
-    ) -> Result<(PdfValue, usize, usize), PdfReadError> {
+    ) -> Result<(Cursor<'_>, usize), PdfReadError> {
         if depth > self.limits.max_nesting {
             return Err(PdfReadError::NestingLimit);
         }
@@ -575,6 +575,16 @@ impl PdfReader {
         {
             return Err(PdfReadError::XrefInvalid);
         }
+        Ok((cursor, entry.offset))
+    }
+
+    fn read_object(
+        &self,
+        reference: PdfObjectRef,
+        depth: usize,
+        retention: Option<(usize, usize, usize)>,
+    ) -> Result<(PdfValue, usize, usize), PdfReadError> {
+        let (mut cursor, source_offset) = self.object_cursor(reference, depth, retention)?;
         let mut value = cursor.parse_value(0)?;
         cursor.skip_space();
         if cursor.consume_keyword(b"stream") {
@@ -620,7 +630,7 @@ impl PdfReader {
                 dict: dictionary,
                 data,
                 encoded,
-                source_offset: entry.offset,
+                source_offset,
             });
         }
         if !cursor.consume_keyword(b"endobj") {
@@ -754,13 +764,26 @@ impl PdfReader {
                 let media_box = media_box.ok_or(PdfReadError::PageTreeInvalid)?;
                 let contents = match dictionary.get("Contents") {
                     None => Vec::new(),
-                    Some(PdfValue::Reference(reference)) => vec![*reference],
-                    Some(value) => refs_from_value(&self.resolve(value, depth + 1)?)?,
+                    Some(PdfValue::Reference(reference)) => {
+                        let (mut cursor, _) = self.object_cursor(*reference, depth + 2, None)?;
+                        match cursor.parse_value(0)? {
+                            array @ PdfValue::Array(_) => {
+                                if !cursor.consume_keyword(b"endobj") {
+                                    return Err(PdfReadError::Syntax);
+                                }
+                                refs_from_array(&array)?
+                            }
+                            PdfValue::Dictionary(_) if cursor.consume_keyword(b"stream") => {
+                                vec![*reference]
+                            }
+                            _ => return Err(PdfReadError::ReferenceInvalid),
+                        }
+                    }
+                    Some(value) => refs_from_array(value)?,
                 };
                 let annotations = match dictionary.get("Annots") {
                     None => Vec::new(),
-                    Some(PdfValue::Reference(reference)) => vec![*reference],
-                    Some(value) => refs_from_value(&self.resolve(value, depth + 1)?)?,
+                    Some(value) => refs_from_array(&self.resolve(value, depth + 1)?)?,
                 };
                 pages.push(PdfPageRecord {
                     object_ref: reference,
@@ -985,15 +1008,56 @@ fn parse_xref(
     Ok((xref, trailer, cost, cursor.tokens))
 }
 
-fn refs_from_value(value: &PdfValue) -> Result<Vec<PdfObjectRef>, PdfReadError> {
-    match value {
-        PdfValue::Reference(reference) => Ok(vec![*reference]),
-        PdfValue::Array(values) => values
-            .iter()
-            .map(|value| value.as_reference().ok_or(PdfReadError::ReferenceInvalid))
-            .collect(),
-        _ => Err(PdfReadError::ReferenceInvalid),
+fn take_pdf_name<'a>(bytes: &'a [u8], position: &mut usize) -> Result<&'a [u8], PdfReadError> {
+    let start = *position;
+    while *position < bytes.len() && !is_delimiter(bytes[*position]) {
+        if *position - start == MAX_PDF_IDENTITY_BYTES * 3 {
+            return Err(PdfReadError::Syntax);
+        }
+        *position += 1;
     }
+    Ok(&bytes[start..*position])
+}
+
+fn decode_pdf_name_bytes(bytes: &[u8]) -> Result<Vec<u8>, PdfReadError> {
+    let capacity = bytes.len().min(MAX_PDF_IDENTITY_BYTES);
+    let mut output = Vec::with_capacity(capacity);
+    let mut index = 0;
+    while index < bytes.len() {
+        if output.len() == MAX_PDF_IDENTITY_BYTES {
+            return Err(PdfReadError::Syntax);
+        }
+        if bytes[index] == b'#' {
+            if index + 2 >= bytes.len() {
+                return Err(PdfReadError::Syntax);
+            }
+            let high = hex_nibble(bytes[index + 1]).ok_or(PdfReadError::Syntax)?;
+            let low = hex_nibble(bytes[index + 2]).ok_or(PdfReadError::Syntax)?;
+            output.push((high << 4) | low);
+            index += 3;
+        } else {
+            output.push(bytes[index]);
+            index += 1;
+        }
+    }
+    if output.contains(&0) {
+        return Err(PdfReadError::Syntax);
+    }
+    Ok(output)
+}
+
+pub(super) fn read_scene_name(bytes: &[u8], position: &mut usize) -> Result<String, PdfReadError> {
+    let bytes = take_pdf_name(bytes, position)?;
+    String::from_utf8(decode_pdf_name_bytes(bytes)?).map_err(|_| PdfReadError::Syntax)
+}
+
+fn refs_from_array(value: &PdfValue) -> Result<Vec<PdfObjectRef>, PdfReadError> {
+    value
+        .as_array()
+        .ok_or(PdfReadError::ReferenceInvalid)?
+        .iter()
+        .map(|value| value.as_reference().ok_or(PdfReadError::ReferenceInvalid))
+        .collect()
 }
 
 fn parse_media_box(value: &PdfValue) -> Result<LayoutRect, PdfReadError> {
@@ -1617,39 +1681,9 @@ impl<'a> Cursor<'a> {
             return Err(PdfReadError::Syntax);
         }
         self.position += 1;
-        let start = self.position;
-        let max_encoded_len = MAX_PDF_IDENTITY_BYTES * 3;
-        while self.position < self.bytes.len() && !is_delimiter(self.bytes[self.position]) {
-            if self.position - start == max_encoded_len {
-                return Err(PdfReadError::Syntax);
-            }
-            self.position += 1;
-        }
-        let capacity = (self.position - start).min(MAX_PDF_IDENTITY_BYTES);
-        self.charge(capacity)?;
-        let mut output = Vec::with_capacity(capacity);
-        let bytes = &self.bytes[start..self.position];
-        let mut index = 0;
-        while index < bytes.len() {
-            if output.len() == MAX_PDF_IDENTITY_BYTES {
-                return Err(PdfReadError::Syntax);
-            }
-            if bytes[index] == b'#' {
-                if index + 2 >= bytes.len() {
-                    return Err(PdfReadError::Syntax);
-                }
-                let high = hex_nibble(bytes[index + 1]).ok_or(PdfReadError::Syntax)?;
-                let low = hex_nibble(bytes[index + 2]).ok_or(PdfReadError::Syntax)?;
-                output.push((high << 4) | low);
-                index += 3;
-            } else {
-                output.push(bytes[index]);
-                index += 1;
-            }
-        }
-        if output.contains(&0) {
-            return Err(PdfReadError::Syntax);
-        }
+        let bytes = take_pdf_name(self.bytes, &mut self.position)?;
+        self.charge(bytes.len().min(MAX_PDF_IDENTITY_BYTES))?;
+        let output = decode_pdf_name_bytes(bytes)?;
         if !self.exact {
             return String::from_utf8(output).map_err(|_| PdfReadError::Syntax);
         }

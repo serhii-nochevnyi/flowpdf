@@ -423,6 +423,75 @@ fn imported_notes_keep_identity_across_renumbering_and_aliases_remain_read_only(
 }
 
 #[test]
+fn public_scene_preserves_indirect_arrays_after_note_edit() {
+    use flow_core::pdf::{PdfSceneElement, PdfSceneRequest, open_pdf, read_pdf_scene};
+
+    let objects = [
+        "<< /Type /Catalog /Pages 2 0 R >>",
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Contents 4 0 R /Annots 7 0 R >>",
+        "[6 0 R 5 0 R]",
+        "<< /Length 17 >>\nstream\n30 40 10 10 re f\n\nendstream",
+        "<< /Length 17 >>\nstream\n10 20 10 10 re f\n\nendstream",
+        "[9 0 R 8 0 R]",
+        "<< /Type /Annot /Subtype /Text /Rect [60 60 70 70] /Contents (Original) /P 3 0 R >>",
+        "<< /Type /Annot /Subtype /Link /Rect [80 80 90 90] /Dest [3 0 R /Fit] >>",
+    ];
+    let mut source = "%PDF-1.7\n".to_owned();
+    let mut offsets = Vec::new();
+    for (index, object) in objects.iter().enumerate() {
+        offsets.push(source.len());
+        source.push_str(&format!("{} 0 obj\n{object}\nendobj\n", index + 1));
+    }
+    let xref = source.len();
+    source.push_str("xref\n0 10\n0000000000 65535 f \n");
+    for offset in offsets {
+        source.push_str(&format!("{offset:010} 00000 n \n"));
+    }
+    source.push_str(&format!(
+        "trailer\n<< /Root 1 0 R /Size 10 >>\nstartxref\n{xref}\n%%EOF\n"
+    ));
+    let mut session =
+        NativePdfSession::open_scoped(source.as_bytes(), NativeEditLimits::default(), [1; 16])
+            .unwrap();
+    let note = session.snapshot().scene.pages[0]
+        .annotations
+        .iter()
+        .find_map(|annotation| match annotation {
+            NativePdfAnnotation::PlainNote(note) => Some(note.id),
+            _ => None,
+        })
+        .unwrap();
+    session
+        .apply(
+            session.snapshot().binding,
+            1,
+            &NativeNoteCommand::Edit {
+                note,
+                contents: "Edited".into(),
+            },
+        )
+        .unwrap();
+    for bytes in [source.as_bytes(), session.output_bytes()] {
+        let reader = open_pdf(bytes, Default::default()).unwrap();
+        let scene = read_pdf_scene(&reader, &PdfSceneRequest::default()).unwrap();
+        let [link, note, first, second] = scene.pages[0].elements.as_slice() else {
+            panic!("expected two ordered annotations and two ordered paths");
+        };
+        assert!(matches!(link, PdfSceneElement::Link { value } if value.internal));
+        assert!(
+            matches!(note, PdfSceneElement::Annotation { value } if value.subtype.as_deref() == Some("Text") && value.rect.x.raw() == 60 * 64)
+        );
+        assert!(
+            matches!(first, PdfSceneElement::Path { value } if value.fill && value.rect.x.raw() == 10 * 64)
+        );
+        assert!(
+            matches!(second, PdfSceneElement::Path { value } if value.fill && value.rect.x.raw() == 30 * 64)
+        );
+    }
+}
+
+#[test]
 fn shared_annotation_array_preserves_geometry_but_disables_note_writes() {
     let bytes = graph::fixture("/Shared 33 0 R", "/Annots 33 0 R");
     let mut session =
