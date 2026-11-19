@@ -1,6 +1,7 @@
 use flow_core::pdf::native::{
-    NativeEditLimits, NativeNoteCommand, NativePdfSession, NativeRedactionGeometry,
-    NativeRedactionMark, NativeRedactionStage, NativeRequestLookup, NativeVerificationStatus,
+    NativeEditError, NativeEditLimits, NativeNoteCommand, NativePdfSession,
+    NativeRedactionGeometry, NativeRedactionMark, NativeRedactionStage, NativeRequestLookup,
+    NativeSessionError, NativeVerificationStatus,
 };
 use miniz_oxide::deflate::compress_to_vec_zlib;
 
@@ -464,7 +465,7 @@ fn redaction_keeps_disjoint_paint_inside_overlapping_path_bounds() {
     let triangle = b"10 10 m\n80 10 l\n80 80 l\nh\nf*";
     let square = b"18 63 6 6 re\nf";
     let content = [
-        b"0 0 1 RG ".as_slice(),
+        b"0 0 1 RG 0.001 w ".as_slice(),
         diagonal,
         b" 0 1 0 rg ",
         triangle,
@@ -499,6 +500,31 @@ fn redaction_keeps_disjoint_paint_inside_overlapping_path_bounds() {
         );
     }
     assert!(!output.windows(square.len()).any(|window| window == square));
+
+    let mut crossing = open(&source);
+    let binding = crossing.snapshot().binding;
+    add(&mut crossing, 0, [39_000, 39_000, 41_000, 41_000]);
+    crossing.stage_redaction(binding, 1).unwrap();
+    let evidence = crossing.verify_redaction(binding, 1).unwrap();
+    assert!(evidence.checks_passed(), "{evidence:?}");
+    crossing.publish_redaction(binding, 1).unwrap();
+    let output = crossing.output_bytes();
+    assert!(
+        !output
+            .windows(diagonal.len())
+            .any(|window| window == diagonal)
+    );
+    assert!(output.windows(square.len()).any(|window| window == square));
+
+    let mut grazing = open(&source);
+    let binding = grazing.snapshot().binding;
+    add(&mut grazing, 0, [30_000, 31_001, 31_000, 32_000]);
+    assert_eq!(
+        grazing.stage_redaction(binding, 1).unwrap_err(),
+        NativeSessionError::Graph(NativeEditError::Unsupported)
+    );
+    assert!(grazing.redaction_candidate_status().is_none());
+    assert_accepted(&grazing, &source, 0, &source);
 }
 
 #[test]

@@ -1089,34 +1089,67 @@ fn polygon_hits(
         .map(|&point| matrix.numerator(point))
         .collect::<Vec<_>>();
     spend(work, corners.len() * corners.len())?;
-    let convex = strictly_convex(&corners);
-    if !convex && !stroke {
+    let segment = corners.len() == 2;
+    let convex = !segment && strictly_convex(&corners);
+    if !stroke && !convex {
         return Err(Unsupported);
     }
     spend(work, scope.marks.len() * corners.len())?;
-    let orientation = side(corners[0], corners[1], corners[2]).signum();
     let [min_x, min_y, max_x, max_y] = point_bounds(&corners);
     let [dx, dy] = matrix.margin(error);
     // @invariant: Expanding the mark tests the outer envelope of the nominal stroke polygon.
-    Ok(scope.marks.iter().any(|mark| {
+    let mut hit = false;
+    for mark in scope.marks {
+        if !intersects(bounds, mark.rect) {
+            continue;
+        }
         let [left, bottom, right, top] = mark.rect.map(|coord| coord * POINT);
         let expanded = [left - dx, bottom - dy, right + dx, top + dy];
         let [l, b, r, t] = expanded;
+        if segment {
+            let [a, b] = [corners[0], corners[1]];
+            if segment_hits(a, b, [left, bottom, right, top], false) {
+                hit = true;
+            } else if segment_hits(a, b, expanded, true) {
+                return Err(Unsupported);
+            }
+            continue;
+        }
         let overlaps_axes = if stroke {
             min_x <= r && l <= max_x && min_y <= t && b <= max_y
         } else {
             intersects([min_x, min_y, max_x, max_y], expanded)
         };
-        intersects(bounds, mark.rect)
-            && overlaps_axes
-            && (!convex
-                || edge_pairs(&corners).all(|(start, end)| {
-                    [[l, b], [r, b], [r, t], [l, t]].into_iter().any(|point| {
-                        let signed = side(start, end, point) * orientation;
-                        signed > 0 || (stroke && signed == 0)
-                    })
-                }))
-    }))
+        if overlaps_axes {
+            if !convex {
+                return Err(Unsupported);
+            }
+            let orientation = side(corners[0], corners[1], corners[2]).signum();
+            hit |= edge_pairs(&corners).all(|(start, end)| {
+                [[l, b], [r, b], [r, t], [l, t]].into_iter().any(|point| {
+                    let signed = side(start, end, point) * orientation;
+                    signed > 0 || (stroke && signed == 0)
+                })
+            });
+        }
+    }
+    Ok(hit)
+}
+
+fn segment_hits([x, y]: Point, [u, v]: Point, [l, b, r, t]: Rect, inclusive: bool) -> bool {
+    let sides = [[l, b], [r, b], [r, t], [l, t]].map(|p| side([x, y], [u, v], p));
+    if inclusive {
+        l <= x.max(u)
+            && x.min(u) <= r
+            && b <= y.max(v)
+            && y.min(v) <= t
+            && sides.iter().any(|&s| s >= 0)
+            && sides.iter().any(|&s| s <= 0)
+    } else {
+        intersects([x.min(u), y.min(v), x.max(u), y.max(v)], [l, b, r, t])
+            && sides.iter().any(|&s| s > 0)
+            && sides.iter().any(|&s| s < 0)
+    }
 }
 
 fn point_bounds(points: &[Point]) -> Rect {
@@ -1213,19 +1246,19 @@ fn stroke_hits(
     for (a, b) in edge_pairs(points).take(count) {
         let (normal, error) = stroke_normal(difference(b, a), graphics.width);
         normals.push((normal, error));
-        remove |= polygon_hits(
-            &[
-                translated(a, normal),
-                translated(b, normal),
-                difference(b, normal),
-                difference(a, normal),
-            ],
-            error,
-            graphics.matrix,
-            scope,
-            work,
-            true,
-        )?;
+        let contour = [
+            translated(a, normal),
+            translated(b, normal),
+            difference(b, normal),
+            difference(a, normal),
+        ];
+        // @invariant: A collapsed contour keeps the exact centerline and its rounding envelope.
+        let outline = if normal == [0; 2] {
+            &contour[..2]
+        } else {
+            &contour[..]
+        };
+        remove |= polygon_hits(outline, error, graphics.matrix, scope, work, true)?;
     }
 
     let joins = if closed { 0..points.len() } else { 1..count };
