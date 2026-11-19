@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
@@ -48,12 +48,14 @@ test('local execution builds generated WASM in a clean checkout before requiring
     if (calls.length === 1) {
       assert.deepEqual(argv, ['npm', 'run', 'build:wasm'])
       const generated = join(cwd, 'web/generated')
+      assert.equal(existsSync(generated), false)
       mkdirSync(generated, { recursive: true })
       for (const name of ['flow_wasm.js', 'flow_wasm.d.ts', 'flow_wasm_bg.wasm']) {
         writeFileSync(join(generated, name), 'test binding')
       }
     }
     if (argv.includes('tests/contracts/pdf-native-fixtures.test.mjs')) {
+      assert.equal(options.cwd, cwd)
       assert.equal(options.env.PHASE9_REQUIRE_WASM, '1')
     }
     return { status: 0 }
@@ -67,9 +69,18 @@ test('local execution stops when the WASM build fails or a required output is mi
   t.after(() => rmSync(cwd, { recursive: true, force: true }))
   const generated = join(cwd, 'web/generated')
   mkdirSync(generated, { recursive: true })
-  writeFileSync(join(generated, 'flow_wasm.js'), 'test binding')
-  writeFileSync(join(generated, 'flow_wasm.d.ts'), 'test declarations')
-  for (const buildStatus of [1, 0]) {
+  const outputs = ['flow_wasm.js', 'flow_wasm.d.ts', 'flow_wasm_bg.wasm']
+  const cases = [
+    { buildStatus: 1 },
+    ...outputs.map((missing) => ({ buildStatus: 0, missing })),
+    { buildStatus: 0, empty: 'flow_wasm_bg.wasm' },
+  ]
+  for (const { buildStatus, missing, empty } of cases) {
+    for (const name of outputs) {
+      const path = join(generated, name)
+      if (name === missing) rmSync(path, { force: true })
+      else writeFileSync(path, name === empty ? '' : 'test binding')
+    }
     const calls = []
     const result = runTasks('local', (argv) => {
       calls.push(argv)
