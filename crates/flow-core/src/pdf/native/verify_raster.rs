@@ -6,11 +6,12 @@ use ttf_parser::OutlineBuilder;
 
 use super::super::reader::{PdfObjectRef, PdfValue};
 use super::super::scene::{ContentToken, separated_content_streams};
+#[cfg(test)]
+use super::verifier::STANDALONE_WORKSPACE;
 use super::verifier::{
     MAX_COORD, NativeRedactionGeometry, NativeRedactionMark, NativeRedactionPageEvidence,
     NativeVerificationFailure::{Budget, RasterMismatch, Structure, UnsupportedProfile},
-    POINT, Rect, Reservation, STANDALONE_WORKSPACE, VerifyResult, Workspace, contains, intersects,
-    spend, valid_rect,
+    POINT, Rect, Reservation, VerifyResult, Workspace, contains, intersects, spend, valid_rect,
 };
 use super::verify_structure::{Dict, Document, Page, Side, coverage, get, name};
 use super::verify_text::{
@@ -26,6 +27,7 @@ const MAX_PARSE_WORK: usize = 16_000_000;
 const MAX_DRAW_BYTES: usize = 16 * 1024 * 1024;
 const MAX_PATH_POINTS: usize = 64;
 const MAX_FORM_DEPTH: usize = 8;
+const PREVIEW_BAND_ROWS: usize = 16;
 const PITCH: i64 = POINT / 2;
 const NOTE_BORDER: Pixel = [40; 3];
 const NOTE_INTERIOR: Pixel = [255, 220, 64];
@@ -46,10 +48,10 @@ pub(super) fn accepted_page(
     bytes: &[u8],
     index: usize,
     geometry: NativeRedactionGeometry,
+    workspace: &Workspace,
 ) -> VerifyResult<NativePageRaster> {
-    let workspace = Workspace::new(STANDALONE_WORKSPACE);
     let mut documents = workspace.scope();
-    let document = Document::open(bytes, Side::Accepted, &workspace, &mut documents)?;
+    let document = Document::open(bytes, Side::Accepted, workspace, &mut documents)?;
     let mut page_bytes = workspace.scope();
     let page = document.page(index, &mut page_bytes)?;
     if page.geometry != geometry {
@@ -60,10 +62,12 @@ pub(super) fn accepted_page(
     if grid.width > NATIVE_PREVIEW_MAX_DIMENSION || grid.height > NATIVE_PREVIEW_MAX_DIMENSION {
         return Err(Budget);
     }
-    let mut draw = DrawBudget::new(&workspace);
-    let paints = Interpreter::new(&workspace).page(&document, &page, &mut draw)?;
+    let mut interpreter = Interpreter::new(workspace);
+    let mut draw = DrawBudget::new(workspace);
+    let paints = interpreter.page(&document, &page, &mut draw)?;
+    let _rgb = workspace.reserve(grid.width * grid.height * size_of::<Pixel>())?;
     let mut work = MAX_RASTER_WORK;
-    let mut pixels = grid.draw(&paints, None, &mut work)?;
+    let mut pixels = grid.draw(&paints, None, &mut work, workspace)?;
     // @contract: Preview RGB starts at the top left of the rotated crop.
     pixels.reverse();
     for row in pixels.chunks_exact_mut(grid.width) {
@@ -304,8 +308,9 @@ pub(super) fn verify_with_workspace(
         }
         let _samples = workspace.reserve(grid.width * grid.height * 2 * size_of::<Pixel>())?;
         for sample in SAMPLE_OFFSETS {
-            let expected_pixels = grid.draw(&source_paint, Some(sample), &mut work)?;
-            let candidate_pixels = grid.draw(&candidate_paint, Some(sample), &mut work)?;
+            let expected_pixels = grid.draw(&source_paint, Some(sample), &mut work, workspace)?;
+            let candidate_pixels =
+                grid.draw(&candidate_paint, Some(sample), &mut work, workspace)?;
             if expected_pixels != candidate_pixels {
                 return Err(RasterMismatch);
             }
@@ -710,9 +715,7 @@ impl Paint<'_> {
         };
         let mut hit = false;
         if let (Some((_, evenodd)), Some(fill)) = (vector.fill, &vector.fill_path) {
-            let _scratch = workspace
-                .reserve(fill.edges * (size_of::<bool>() + 6 * size_of::<(Point, i32)>()))?;
-            hit |= fill.fill_intersects_rect(mark, evenodd, work)?;
+            hit |= fill.fill_intersects_rect(mark, evenodd, work, workspace)?;
         }
         // @invariant: Ambiguous contact in any stroke component overrides a definite hit.
         for stencil in &vector.stroke_paths {
@@ -1130,6 +1133,7 @@ impl Stencil {
         rect: Rect,
         evenodd: bool,
         work: &mut usize,
+        workspace: &Workspace,
     ) -> VerifyResult<bool> {
         if !intersects(self.bounds, rect) {
             return Ok(false);
@@ -1140,6 +1144,8 @@ impl Stencil {
             return Ok(true);
         }
         let segments = self.segments();
+        let _scratch =
+            workspace.reserve(self.edges * (size_of::<bool>() + 6 * size_of::<(Point, i32)>()))?;
         let mut grouped = vec![false; self.edges];
         for (index, (start, end)) in segments.clone().enumerate() {
             if grouped[index] || !crosses_interior(start, end, rect) {
@@ -1587,10 +1593,12 @@ struct Grid {
     height: usize,
 }
 
-struct Raster {
-    pixels: Vec<Pixel>,
-    coverage: Vec<PreviewCoverage>,
+struct Raster<'a> {
+    pixels: &'a mut [Pixel],
+    coverage: &'a mut [PreviewCoverage],
+    first_row: usize,
     offset: Point,
+    workspace: &'a Workspace,
 }
 
 #[derive(Clone, Copy)]
@@ -1606,7 +1614,6 @@ struct RasterOutline<'a> {
     stencil: &'a Stencil,
     fill_rule: Option<bool>,
     ink: Pixel,
-    require_coverage: bool,
 }
 
 enum PreviewPaint<'a> {
@@ -1628,10 +1635,15 @@ impl RasterOutline<'_> {
             .any(|(a, b)| crosses_interior(a, b, rect)))
     }
 
-    fn intersects_pixel(self, rect: Rect, work: &mut usize) -> VerifyResult<bool> {
+    fn intersects_pixel(
+        self,
+        rect: Rect,
+        work: &mut usize,
+        workspace: &Workspace,
+    ) -> VerifyResult<bool> {
         let stencil = self.stencil;
         if let Some(evenodd) = self.fill_rule {
-            return stencil.fill_intersects_rect(rect, evenodd, work);
+            return stencil.fill_intersects_rect(rect, evenodd, work, workspace);
         }
         spend(work, stencil.edges * 5 + 1)?;
         let rect = rect.map(|coordinate| coordinate * stencil.scale);
@@ -1686,63 +1698,132 @@ impl Grid {
         paints: &[Paint<'_>],
         sample: Option<Point>,
         work: &mut usize,
+        workspace: &Workspace,
     ) -> VerifyResult<Vec<Pixel>> {
         let count = self.width * self.height;
         spend(work, count)?;
         let mut pixels = Vec::new();
         pixels.try_reserve_exact(count).map_err(|_| Budget)?;
         pixels.resize(count, [255; 3]);
-        let mut coverage = Vec::new();
-        if sample.is_none() {
-            spend(work, count)?;
-            coverage.try_reserve_exact(count).map_err(|_| Budget)?;
-            coverage.resize(count, PreviewCoverage::Clear);
+        if let Some(offset) = sample {
+            self.draw_paints(
+                paints,
+                &mut Raster {
+                    pixels: &mut pixels,
+                    coverage: &mut [],
+                    first_row: 0,
+                    offset,
+                    workspace,
+                },
+                &mut [],
+                work,
+            )?;
+            return Ok(pixels);
         }
-        let mut raster = Raster {
-            pixels,
-            coverage,
-            offset: sample.unwrap_or([PITCH / 2; 2]),
-        };
+
+        spend(work, count)?;
+        let band_size = self.width * self.height.min(PREVIEW_BAND_ROWS);
+        let glyph_count = paints
+            .iter()
+            .map(|paint| match &paint.kind {
+                PaintKind::Text(text) => text.glyphs.len(),
+                _ => 0,
+            })
+            .sum::<usize>();
+        let _scratch = workspace
+            .reserve(band_size * size_of::<PreviewCoverage>() + glyph_count * size_of::<bool>())?;
+        let mut coverage = Vec::new();
+        coverage.try_reserve_exact(band_size).map_err(|_| Budget)?;
+        coverage.resize(band_size, PreviewCoverage::Clear);
+        let mut covered_glyphs = Vec::new();
+        covered_glyphs
+            .try_reserve_exact(glyph_count)
+            .map_err(|_| Budget)?;
+        covered_glyphs.resize(glyph_count, false);
+        for (band, pixels) in pixels.chunks_mut(band_size).enumerate() {
+            let coverage = &mut coverage[..pixels.len()];
+            coverage.fill(PreviewCoverage::Clear);
+            if band != 0 {
+                spend(work, paints.len())?;
+            }
+            self.draw_paints(
+                paints,
+                &mut Raster {
+                    pixels,
+                    coverage,
+                    first_row: band * PREVIEW_BAND_ROWS,
+                    offset: [PITCH / 2; 2],
+                    workspace,
+                },
+                &mut covered_glyphs,
+                work,
+            )?;
+            spend(work, coverage.len())?;
+            if coverage
+                .iter()
+                .any(|coverage| matches!(coverage, PreviewCoverage::Unresolved))
+            {
+                return Err(UnsupportedProfile);
+            }
+        }
+        if covered_glyphs.contains(&false) {
+            return Err(UnsupportedProfile);
+        }
+        Ok(pixels)
+    }
+
+    fn draw_paints(
+        &self,
+        paints: &[Paint<'_>],
+        raster: &mut Raster<'_>,
+        covered_glyphs: &mut [bool],
+        work: &mut usize,
+    ) -> VerifyResult<()> {
+        let mut covered_glyphs = covered_glyphs.iter_mut();
         for paint in paints {
             match &paint.kind {
                 PaintKind::Text(text) => {
                     let color = text.color.rgb();
                     for glyph in &text.glyphs {
-                        self.paint(
-                            &mut raster,
+                        let covered = self.paint(
+                            raster,
                             glyph.bounds,
                             PreviewPaint::Outline(RasterOutline {
                                 stencil: glyph,
                                 fill_rule: Some(false),
                                 ink: color,
-                                require_coverage: true,
                             }),
                             glyph.edges + 1,
                             work,
                             |p| glyph.hits(p, false).then_some(color),
                         )?;
+                        if let Some(covered_glyph) = covered_glyphs.next() {
+                            *covered_glyph |= covered;
+                        }
                     }
                 }
                 PaintKind::Vector(vector) => {
                     if let (Some((color, evenodd)), Some(stencil)) =
                         (vector.fill, &vector.fill_path)
                     {
-                        self.paint_vector(&mut raster, stencil, (color, Some(evenodd)), work)?;
+                        self.paint_vector(raster, stencil, (color, Some(evenodd)), work)?;
                     }
                     if let Some((color, _)) = vector.stroke {
                         for stencil in &vector.stroke_paths {
-                            self.paint_vector(&mut raster, stencil, (color, None), work)?;
+                            self.paint_vector(raster, stencil, (color, None), work)?;
                         }
                     }
                 }
-                PaintKind::Image(image) => self.paint(
-                    &mut raster,
-                    paint.bounds,
-                    PreviewPaint::Image(image),
-                    image.masks.len() + 1,
-                    work,
-                    |p| image.at(p),
-                )?,
+                PaintKind::Image(image) => {
+                    self.paint(
+                        raster,
+                        paint.bounds,
+                        PreviewPaint::Image(image),
+                        image.masks.len() + 1,
+                        work,
+                        |p| image.at(p),
+                    )?;
+                }
                 PaintKind::Note(_) => {
                     let [l, b, r, t] = paint.bounds;
                     let inset = ((r - l).min(t - b) / 8).min(POINT);
@@ -1751,7 +1832,7 @@ impl Grid {
                     }
                     let interior = [l + inset, b + inset, r - inset, t - inset];
                     self.paint(
-                        &mut raster,
+                        raster,
                         paint.bounds,
                         PreviewPaint::Note(interior),
                         1,
@@ -1767,20 +1848,12 @@ impl Grid {
                 }
             }
         }
-        spend(work, raster.coverage.len())?;
-        if raster
-            .coverage
-            .iter()
-            .any(|coverage| matches!(coverage, PreviewCoverage::Unresolved))
-        {
-            return Err(UnsupportedProfile);
-        }
-        Ok(raster.pixels)
+        Ok(())
     }
 
     fn paint_vector(
         &self,
-        raster: &mut Raster,
+        raster: &mut Raster<'_>,
         stencil: &Stencil,
         (color, fill_rule): (Color, Option<bool>),
         work: &mut usize,
@@ -1803,23 +1876,23 @@ impl Grid {
                 stencil,
                 fill_rule,
                 ink: color,
-                require_coverage: false,
             }),
             stencil.edges + 1,
             work,
             |p| stencil.hits(p, fill_rule.unwrap_or(false)).then_some(color),
-        )
+        )?;
+        Ok(())
     }
 
     fn paint(
         &self,
-        raster: &mut Raster,
+        raster: &mut Raster<'_>,
         bounds: Rect,
         paint: PreviewPaint<'_>,
         cost: usize,
         work: &mut usize,
         mut value: impl FnMut(Point) -> Option<Pixel>,
-    ) -> VerifyResult<()> {
+    ) -> VerifyResult<bool> {
         let outline = match paint {
             PreviewPaint::Outline(outline) => Some(outline),
             _ => None,
@@ -1831,6 +1904,9 @@ impl Grid {
         let right = ((x.max(u) + PITCH - 1).div_euclid(PITCH)).clamp(0, self.width as i64) as usize;
         let bottom = (y.min(v).div_euclid(PITCH)).clamp(0, self.height as i64) as usize;
         let top = ((y.max(v) + PITCH - 1).div_euclid(PITCH)).clamp(0, self.height as i64) as usize;
+        let last_row = raster.first_row + raster.pixels.len() / self.width;
+        let bottom = bottom.clamp(raster.first_row, last_row);
+        let top = top.clamp(raster.first_row, last_row);
         spend(
             work,
             ((right - left) * (top - bottom))
@@ -1846,7 +1922,7 @@ impl Grid {
                     row as i64 * PITCH + raster.offset[1],
                 ];
                 let point @ [x, y] = self.unrotate(logical);
-                let index = row * self.width + col;
+                let index = (row - raster.first_row) * self.width + col;
                 let pixel = &mut raster.pixels[index];
                 let color = (inside(bounds, point) && inside(self.geometry.crop_box, point))
                     .then(|| value(point))
@@ -1867,7 +1943,7 @@ impl Grid {
                     t.min(y + half),
                 ];
                 if let Some(outline) = outline {
-                    if color.is_none() && !outline.intersects_pixel(rect, work)? {
+                    if color.is_none() && !outline.intersects_pixel(rect, work, raster.workspace)? {
                         continue;
                     }
                 } else if !intersects(bounds, rect) {
@@ -1906,13 +1982,7 @@ impl Grid {
                 coverage.paint_partial(pixel, color, outline.map(|outline| outline.ink));
             }
         }
-        if !raster.coverage.is_empty()
-            && outline.is_some_and(|outline| outline.require_coverage)
-            && !has_preview_coverage
-        {
-            return Err(UnsupportedProfile);
-        }
-        Ok(())
+        Ok(has_preview_coverage)
     }
 }
 
@@ -2038,7 +2108,7 @@ mod tests {
         assert_eq!(stencil.bounds, [0, 0, 2, 2]);
         assert!(
             stencil
-                .fill_intersects_rect([0, 0, 1, 1], false, &mut 4096)
+                .fill_intersects_rect([0, 0, 1, 1], false, &mut 4096, &Workspace::new(4096))
                 .unwrap()
         );
         assert!(stencil.hits([1, 1], false));
@@ -2109,6 +2179,7 @@ mod tests {
 
     #[test]
     fn note_preview_covers_a_center_miss_or_declines_unrepresentable_ink() {
+        let workspace = Workspace::new(4096);
         let crop_box = [0, 0, PITCH, PITCH];
         let grid = Grid::new(
             NativeRedactionGeometry {
@@ -2131,26 +2202,34 @@ mod tests {
             }),
         };
         assert_eq!(
-            grid.draw(std::slice::from_ref(&note), None, &mut 32),
+            grid.draw(std::slice::from_ref(&note), None, &mut 32, &workspace),
             Ok(vec![[240, 237, 223]])
         );
-        for (sample, expected) in SAMPLE_OFFSETS.into_iter().zip([
-            NOTE_INTERIOR,
-            [255; 3],
-            [255; 3],
-            [255; 3],
-        ]) {
+        for (sample, expected) in
+            SAMPLE_OFFSETS
+                .into_iter()
+                .zip([NOTE_INTERIOR, [255; 3], [255; 3], [255; 3]])
+        {
             assert_eq!(
-                grid.draw(std::slice::from_ref(&note), Some(sample), &mut 32),
+                grid.draw(
+                    std::slice::from_ref(&note),
+                    Some(sample),
+                    &mut 32,
+                    &workspace
+                ),
                 Ok(vec![expected])
             );
         }
         note.bounds = [25, 25, 33, 33];
-        assert_eq!(grid.draw(&[note], None, &mut 32), Err(UnsupportedProfile));
+        assert_eq!(
+            grid.draw(&[note], None, &mut 32, &workspace),
+            Err(UnsupportedProfile)
+        );
     }
 
     #[test]
     fn grid_renders_full_rotated_page_and_charges_work() {
+        let workspace = Workspace::new(4096);
         let crop_box = [1_000, 2_000, 3_000, 3_000];
         let geometry = NativeRedactionGeometry {
             media_box: crop_box,
@@ -2183,7 +2262,8 @@ mod tests {
             grid.draw(
                 std::slice::from_ref(&paint),
                 Some(SAMPLE_OFFSETS[0]),
-                &mut MAX_RASTER_WORK.clone()
+                &mut MAX_RASTER_WORK.clone(),
+                &workspace,
             )
             .unwrap(),
             [
@@ -2191,7 +2271,7 @@ mod tests {
             ],
         );
         assert_eq!(
-            grid.draw(&[paint], Some(SAMPLE_OFFSETS[0]), &mut 8),
+            grid.draw(&[paint], Some(SAMPLE_OFFSETS[0]), &mut 8, &workspace),
             Err(Budget)
         );
     }
@@ -2229,22 +2309,27 @@ mod tests {
 
     #[test]
     fn fill_overlap_respects_coincident_edges_and_work_limits() {
+        let workspace = Workspace::new(4096);
         let rectangle = [[0, 0], [2_000, 0], [2_000, 2_000], [0, 2_000]];
         let outline = rectangle.repeat(2);
         let fill =
             Stencil::single(&outline, Matrix::IDENTITY, &mut MAX_DRAW_BYTES.clone()).unwrap();
         let crossing = [-1_000, 500, 100, 1_500];
         assert!(
-            fill.fill_intersects_rect(crossing, false, &mut 1_000)
+            fill.fill_intersects_rect(crossing, false, &mut 1_000, &workspace)
                 .unwrap()
         );
         assert!(
             !fill
-                .fill_intersects_rect(crossing, true, &mut 1_000)
+                .fill_intersects_rect(crossing, true, &mut 1_000, &workspace)
                 .unwrap()
         );
         assert_eq!(
-            fill.fill_intersects_rect(crossing, true, &mut 0),
+            fill.fill_intersects_rect(crossing, true, &mut 0, &workspace),
+            Err(Budget)
+        );
+        assert_eq!(
+            fill.fill_intersects_rect(crossing, true, &mut 1_000, &Workspace::new(0)),
             Err(Budget)
         );
     }

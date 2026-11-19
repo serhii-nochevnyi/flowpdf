@@ -499,6 +499,63 @@ fn raster_fixture(size: u32, paint: &str) -> Vec<u8> {
 }
 
 #[test]
+fn accepted_page_preview_refuses_a_constrained_session_without_mutation() {
+    let source = raster_fixture(150, "10 10 10 10 re f 40 40 10 10 re f");
+    let default_session = open(&source);
+    let snapshot = default_session.snapshot();
+    let raster = default_session
+        .accepted_page_raster(
+            snapshot.binding,
+            snapshot.output_hash,
+            snapshot.page_state.order[0],
+        )
+        .unwrap();
+    assert_eq!((raster.width, raster.height), (300, 300));
+    assert_eq!(raster.crop_box, [0, 0, 150_000, 150_000]);
+    assert_eq!(raster.rotation, GEOMETRY.rotation);
+    assert_eq!(raster.rgb.len(), 300 * 300 * 3);
+
+    // @contract: The 300 × 300 RGB output alone exceeds the constrained session cap.
+    let mut session = NativePdfSession::open_scoped(
+        &source,
+        NativeEditLimits {
+            max_retained_bytes: 192 * 1024,
+            ..NativeEditLimits::default()
+        },
+        [5; 16],
+    )
+    .unwrap();
+    let binding = session.snapshot().binding;
+    let output_hash = session.snapshot().output_hash;
+    let scene_hash = session.snapshot().scene.scene_hash;
+    let page_id = session.snapshot().page_state.order[0];
+    let mark = NativeRedactionMark {
+        page_id,
+        geometry: session.redaction_mark_geometry(page_id).unwrap(),
+        rect: [12_000, 12_000, 13_000, 13_000],
+    };
+    session.add_redaction_mark(binding, mark).unwrap();
+    let staged = session.stage_redaction(binding, 1).unwrap();
+
+    assert_eq!(
+        session
+            .accepted_page_raster(binding, output_hash, mark.page_id)
+            .err(),
+        Some(NativeSessionError::Budget)
+    );
+    assert_accepted(&session, &source, binding.revision, &source);
+    assert_eq!(session.snapshot().binding, binding);
+    assert_eq!(session.snapshot().scene.scene_hash, scene_hash);
+    assert_eq!(session.redaction_marks(), &[mark]);
+    assert_eq!(session.redaction_marks_binding(), Some(binding));
+    assert_eq!(session.stage_redaction(binding, 1), Ok(staged));
+    assert_eq!(
+        session.redaction_candidate_status().unwrap().status(),
+        NativeVerificationStatus::Pending
+    );
+}
+
+#[test]
 fn raster_budget_refuses_native_marks_and_staging_without_mutation() {
     for (size, page_count) in [(3_000, 1), (2_000, 4)] {
         let source = raster_fixture(size, "10 10 10 10 re f");
