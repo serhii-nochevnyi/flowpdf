@@ -207,10 +207,7 @@ pub(super) fn verify(
             } else {
                 let mut removed = false;
                 for &mark in &marks {
-                    if paint.intersects_mark(mark, &mut work)? {
-                        removed = true;
-                        break;
-                    }
+                    removed |= paint.intersects_mark(mark, &mut work)?;
                 }
                 if let PaintKind::Note(note) = &paint.kind {
                     if removed {
@@ -597,18 +594,16 @@ impl Paint<'_> {
         let PaintKind::Vector(vector) = &self.kind else {
             return Ok(true);
         };
-        if let (Some((_, evenodd)), Some(fill)) = (vector.fill, &vector.fill_path)
-            && fill.fill_intersects_rect(mark, evenodd, work)?
-        {
-            return Ok(true);
+        let mut hit = false;
+        if let (Some((_, evenodd)), Some(fill)) = (vector.fill, &vector.fill_path) {
+            hit |= fill.fill_intersects_rect(mark, evenodd, work)?;
         }
+        // Check every stroke component so ambiguous contact propagates after a definite hit.
         for stencil in &vector.stroke_paths {
             spend(work, stencil.edges * 5 + 1)?;
-            if stencil.stroke_intersects_rect(mark)? {
-                return Ok(true);
-            }
+            hit |= stencil.stroke_intersects_rect(mark)?;
         }
-        Ok(false)
+        Ok(hit)
     }
 
     fn same_paint(&self, other: &Self, work: &mut usize) -> VerifyResult<bool> {

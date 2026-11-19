@@ -203,6 +203,31 @@ fn collapsed_diagonal_requires_retention_or_removal_by_segment_overlap() {
         evidence.raster().failure(),
         Some(NativeVerificationFailure::UnsupportedProfile)
     );
+
+    let crossing_then_grazing = [mark(91, [39_000, 39_000, 41_000, 41_000]), marks[0]];
+    let evidence = verify(&source, &square_only, &[91], &crossing_then_grazing);
+    assert_eq!(
+        evidence.raster().failure(),
+        Some(NativeVerificationFailure::UnsupportedProfile)
+    );
+}
+
+#[test]
+fn crossing_one_stroke_segment_does_not_hide_grazing_another() {
+    let stroke = "0 0 1 RG 0.001 w 10 10 m 80 80 l 80 81.001 l 10 11.001 l S";
+    let source = pdf(&[(stroke, "")], vec![], "");
+    let blank = pdf(&[("", "")], vec![], "");
+
+    let crossing = [mark(91, [30_000, 30_000, 31_000, 30_500])];
+    let evidence = verify(&source, &blank, &[91], &crossing);
+    assert!(evidence.checks_passed(), "{evidence:?}");
+
+    let crossing_and_grazing = [mark(91, [30_000, 30_000, 31_000, 31_000])];
+    let evidence = verify(&source, &blank, &[91], &crossing_and_grazing);
+    assert_eq!(
+        evidence.raster().failure(),
+        Some(NativeVerificationFailure::UnsupportedProfile)
+    );
 }
 
 #[test]
