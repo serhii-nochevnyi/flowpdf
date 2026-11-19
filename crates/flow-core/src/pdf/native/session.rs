@@ -918,10 +918,11 @@ impl NativePdfSession {
             return Ok(false);
         }
         let projected = page_state(&graph, &ids, None, &scene, &mut remaining)?;
+        // @contract: A byte-only verifier cannot reconstruct live workspace reservations.
         Ok(state.restrictions == projected.restrictions
             && (binding.revision != 0 || *state == projected)
-            && redaction::check_document(&graph, &state.order, None, remaining).is_ok()
-                == redaction_admitted)
+            && (!redaction_admitted
+                || redaction::check_document(&graph, &state.order, None, remaining).is_ok()))
     }
 
     pub fn verify_page_projection(

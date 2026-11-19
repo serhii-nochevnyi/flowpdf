@@ -563,6 +563,7 @@ fn admission_tracks_the_workspace_left_by_the_live_session() {
     assert!(!session.redaction_admitted());
     assert_eq!(verify_projection(&session, false, true), Ok(true));
     assert_eq!(verify_projection(&session, true, true), Ok(false));
+    assert_eq!(verify_projection(&session, false, false), Ok(true));
     assert_eq!(verify_projection(&session, true, false), Ok(true));
     assert_eq!(
         session.stage_redaction(binding, 1),
@@ -688,7 +689,7 @@ fn redaction_accepts_a_rewrite_larger_than_the_import_limit() {
                     admitted,
                     live,
                 ),
-                Ok(admitted)
+                Ok(admitted || live.is_none())
             );
         }
     }
