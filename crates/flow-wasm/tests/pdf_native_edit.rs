@@ -1,5 +1,7 @@
 use std::fmt::Write as _;
 
+#[cfg(not(target_arch = "wasm32"))]
+use flow_wasm::native_pdf_open_with_result_limit;
 use flow_wasm::{
     native_pdf_close, native_pdf_command, native_pdf_open, native_pdf_preview,
     native_pdf_redaction, native_pdf_snapshot, verify_native_pdf_response,
@@ -76,10 +78,11 @@ fn open_verifies_source_bytes_and_returns_verifiable_reader_refusals() {
     let replacement = pdf(600);
     let replacement_request = open_request(replacement.as_bytes());
     let mut stale = replacement_request.clone();
-    stale["originStoreHash"] = open_request(original.as_bytes())["originStoreHash"].clone();
+    let original_request = open_request(original.as_bytes());
+    stale["originStoreHash"] = original_request["originStoreHash"].clone();
 
     for (request, code) in [
-        (stale, "FLOW_PDF_NATIVE_BINDING_MISMATCH"),
+        (stale.clone(), "FLOW_PDF_NATIVE_BINDING_MISMATCH"),
         (
             open_request(b"ordinary text"),
             "FLOW_PDF_NATIVE_IMPORT_REFUSED",
@@ -104,9 +107,10 @@ fn open_verifies_source_bytes_and_returns_verifiable_reader_refusals() {
         response["binding"]["originHash"],
         json!(blake3::hash(replacement.as_bytes()).as_bytes())
     );
+    assert_eq!(call(native_pdf_open, original_request)["status"], "opened");
     assert_eq!(
-        call(native_pdf_open, open_request(original.as_bytes()))["status"],
-        "opened"
+        call(native_pdf_open, stale)["code"],
+        "FLOW_PDF_NATIVE_BINDING_MISMATCH",
     );
 }
 
@@ -1193,24 +1197,91 @@ fn enforces_wire_caps_before_decoding() {
 
 #[test]
 fn registry_reserves_two_sessions_and_releases_capacity_on_close() {
-    let (request, first) = open();
-    let (_, second) = open();
+    let request = open_request(pdf(612).as_bytes());
+    let dropped_reply = native_pdf_open(request.to_string());
+    let recovered = native_pdf_open(request.to_string());
+    assert_eq!(recovered, dropped_reply);
+    assert!(verify_native_pdf_worker_response(recovered.clone()));
+
+    let mut other_epoch = request.clone();
+    other_epoch["epoch"] = json!(vec![2; 16]);
+    let second = call(native_pdf_open, other_epoch.clone());
+    assert_eq!(second["status"], "opened", "{second}");
+    assert_eq!(second["binding"]["epoch"], other_epoch["epoch"]);
+    assert_eq!(native_pdf_open(request.to_string()), recovered);
+    assert!(!verify_native_pdf_worker_response(rehash_with_replacement(
+        &recovered,
+        r#""requestId":1,"#,
+        r#""requestId":3,"#,
+    )));
+    let first: Value = serde_json::from_str(&recovered).unwrap();
+    assert_eq!(first["status"], "opened", "{first}");
     assert_ne!(
         first["binding"]["sessionId"],
         second["binding"]["sessionId"]
     );
-    let refused = call(native_pdf_open, request.clone());
+    let mut other_request = request.clone();
+    other_request["requestId"] = json!(3);
+    let refused = call(native_pdf_open, other_request);
     assert_eq!(refused["code"], "FLOW_PDF_NATIVE_BUDGET_EXHAUSTED");
     assert!(refused["snapshot"].is_null());
-    assert_eq!(
-        call(native_pdf_close, bound("close", 2, &first))["status"],
-        "closed"
+    let close = bound("close", 2, &first["snapshot"]);
+    assert_eq!(call(native_pdf_close, close.clone())["status"], "closed");
+    assert_eq!(call(native_pdf_close, close)["status"], "closed");
+    assert!(!verify_native_pdf_worker_response(recovered));
+    let reopened = call(native_pdf_open, request);
+    assert_eq!(reopened["status"], "opened", "{reopened}");
+    assert_ne!(reopened["binding"], first["binding"]);
+    let unchanged = call(
+        native_pdf_snapshot,
+        bound("snapshot", 3, &second["snapshot"]),
     );
-    assert_eq!(call(native_pdf_open, request)["status"], "opened");
-    assert_eq!(
-        call(native_pdf_snapshot, bound("snapshot", 3, &second))["status"],
-        "unseen"
-    );
+    assert_eq!(unchanged["status"], "unseen");
+    assert_eq!(unchanged["snapshot"], second["snapshot"]);
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn open_result_encoding_refusal_preserves_both_existing_binding_and_free_slot() {
+    let (first_request, first) = open();
+    let mut second_request = first_request.clone();
+    second_request["requestId"] = json!(2);
+    for request in [&second_request, &first_request] {
+        let limit = request["bytesHex"].as_str().unwrap().len();
+        let response = native_pdf_open_with_result_limit(request.to_string(), limit);
+        assert!(verify_native_pdf_worker_response(response.clone()));
+        let failed: Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(failed["operation"], "open");
+        assert_eq!(failed["requestId"], request["requestId"]);
+        assert_eq!(failed["originStoreHash"], request["originStoreHash"]);
+        assert_eq!(failed["status"], "failed");
+        assert_eq!(failed["code"], "FLOW_PDF_NATIVE_BUDGET_EXHAUSTED");
+        assert!(failed["binding"].is_null());
+        assert!(failed["snapshot"].is_null());
+    }
+
+    let second = call(native_pdf_open, second_request);
+    assert_eq!(second["status"], "opened", "{second}");
+    assert_ne!(second["binding"], first["binding"]);
+    assert_eq!(call(native_pdf_open, first_request)["snapshot"], first);
+}
+
+#[test]
+fn open_retry_after_revision_advance_requires_reconciliation() {
+    let (request, initial) = open();
+    let mut edit = bound("command", 2, &initial);
+    edit["outputHash"] = initial["outputHash"].clone();
+    edit["command"] = json!({"kind":"add","page":0,"rect":[1,2,3,4],"contents":"Retained"});
+    let applied = call(native_pdf_command, edit);
+    assert_eq!(applied["status"], "applied", "{applied}");
+
+    let retry = call(native_pdf_open, request);
+    assert_eq!(retry["code"], "FLOW_PDF_NATIVE_RECONCILIATION_REQUIRED");
+    assert!(retry["binding"].is_null());
+    assert!(retry["snapshot"].is_null());
+    let lookup = call(native_pdf_snapshot, bound("snapshot", 2, &initial));
+    assert_eq!(lookup["status"], "accepted");
+    assert_eq!(lookup["snapshot"], applied["snapshot"]);
 }
 
 fn embedded_text_pdf(artwork: &[u8], page_size: &str) -> Vec<u8> {
