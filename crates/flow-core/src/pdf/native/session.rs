@@ -927,7 +927,7 @@ impl NativePdfSession {
         claimed_scene: [u8; 32],
         state: &NativePageState,
     ) -> Result<bool, NativeSessionError> {
-        let graph = NativePdfGraph::open(bytes, limits)?;
+        let graph = NativePdfGraph::open(bytes, accepted_input_limits(limits, binding))?;
         let ids = initial_ids(&graph);
         let hash = *blake3::hash(bytes).as_bytes();
         let (scene, mut remaining) = accepted_scene(
@@ -953,7 +953,7 @@ impl NativePdfSession {
         claimed_text: &[NativeTextPage],
         claimed_objects: &[NativeObjectPage],
     ) -> Result<bool, NativeSessionError> {
-        let graph = NativePdfGraph::open(bytes, limits)?;
+        let graph = NativePdfGraph::open(bytes, accepted_input_limits(limits, binding))?;
         let ids = initial_ids(&graph);
         let hash = *blake3::hash(bytes).as_bytes();
         let (scene, _) = accepted_scene(
@@ -974,7 +974,7 @@ impl NativePdfSession {
         binding: NativeBinding,
         claimed: &[NativeTextPage],
     ) -> Result<bool, NativeSessionError> {
-        let graph = NativePdfGraph::open(bytes, limits)?;
+        let graph = NativePdfGraph::open(bytes, accepted_input_limits(limits, binding))?;
         let ids = initial_ids(&graph);
         let hash = *blake3::hash(bytes).as_bytes();
         let (scene, _) = accepted_scene(

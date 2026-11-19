@@ -563,6 +563,35 @@ fn redaction_accepts_a_rewrite_larger_than_the_import_limit() {
     assert!(accepted.len() <= limits.max_output_bytes);
     assert_ne!(snapshot.output_hash, edited.binding.origin_hash);
     assert!(session.redaction_admitted());
+    assert_eq!(
+        NativePdfSession::verify_page_projection(
+            accepted,
+            limits,
+            edited.binding,
+            snapshot.scene.scene_hash,
+            &snapshot.page_state,
+        ),
+        Ok(true)
+    );
+    assert_eq!(
+        NativePdfSession::verify_text_projection(
+            accepted,
+            limits,
+            edited.binding,
+            &snapshot.scene.text_pages,
+        ),
+        Ok(true)
+    );
+    assert_eq!(
+        NativePdfSession::verify_edit_projection(
+            accepted,
+            limits,
+            edited.binding,
+            &snapshot.scene.text_pages,
+            &snapshot.scene.object_pages,
+        ),
+        Ok(true)
+    );
     for live in [Some(&session), None] {
         for admitted in [true, false] {
             assert_eq!(
