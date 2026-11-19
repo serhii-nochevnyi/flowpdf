@@ -12,7 +12,7 @@ node scripts/generate-pdf-native-fixtures.mjs --check
 node --test tests/contracts/pdf-native-fixtures.test.mjs
 ```
 
-The generator uses literal PDF objects, explicit generations, byte offsets and classic xref entries. It uses Flate for the pinned font and fixed-strategy Flate for the original preservation streams and grayscale image samples. If the runtime's zlib emits a different font encoding, the generator recovers the canonical encoded font from the checked-in preservation PDF, validates its encoded digest and verifies its decoded bytes against the pinned font. All PDF objects, stream headers and xref entries are still authored by the generator. Keep the preservation PDF available when regenerating on such a runtime. It has no application, WASM or production writer dependency. Generation writes the four PDFs. The manifest and expectation data are authored separately. The manifest binds source and sidecar files by exact byte digest. The inline refusal expectation is hashed as UTF-8 JSON serialized with `JSON.stringify`.
+The generator uses literal PDF objects, explicit generations, byte offsets and classic xref entries. It reads only the pinned font and license as fixture inputs. It uses run-length Flate for the font and fixed-strategy Flate for the preservation streams and grayscale samples. It can regenerate all four PDFs from those inputs. It has no application, WASM or production writer dependency. The manifest and expectation data are authored separately. The manifest binds source and sidecar files by exact byte digest. The inline refusal expectation is hashed as UTF-8 JSON serialized with `JSON.stringify`.
 
 ## Profiles and expectations
 

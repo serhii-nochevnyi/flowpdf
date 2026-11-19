@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { readFileSync, writeFileSync } from "node:fs";
-import { constants, deflateSync, inflateSync } from "node:zlib";
+import { constants, deflateSync } from "node:zlib";
 
 const output = new URL("../fixtures/pdf-native/", import.meta.url);
 const data = new URL("../crates/flow-core/data/", import.meta.url);
@@ -50,29 +50,7 @@ const font = pinnedAsset("NotoSans-Regular.ttf",
   "b85c38ecea8a7cfb39c24e395a4007474fa5a4fc864f6ee33309eb4948d232d5");
 pinnedAsset("NotoSans-OFL.txt",
   "12e55f73bf39d88d7f2e37e094ad30b8f6752b3d25391ac23978b1e5e35ca66b");
-function encodeFont() {
-  const encodingHash = "d646c6930abab2de1bf59340b1bfb57aa7a3b566fa2b089fb946e1ca9ddac9f9";
-  const matches = (bytes) => createHash("sha256").update(bytes).digest("hex") === encodingHash;
-  const generated = deflateSync(font, { level: 9 });
-  if (matches(generated)) return generated;
-
-  // Different zlib builds can emit distinct bytes for the same font. Recover only
-  // the pinned encoding from the legacy fixture to keep its PDF bytes reproducible.
-  const legacy = readFileSync(new URL("notes-preservation.pdf", output));
-  if (legacy.length > MAX_BYTES) throw new Error("Legacy fixture byte limit");
-  const encodedLength = 285958;
-  const header = Buffer.from(`/Filter /FlateDecode /Length ${encodedLength} /Length1 ${font.length} >>\nstream\n`);
-  const offset = legacy.indexOf(header);
-  const start = offset + header.length;
-  const encoded = legacy.subarray(start, start + encodedLength);
-  if (offset < 0 || !matches(encoded) ||
-      !inflateSync(encoded, { maxOutputLength: font.length }).equals(font)) {
-    throw new Error("Legacy fixture font encoding mismatch");
-  }
-  return encoded;
-}
-
-const encodedFont = encodeFont();
+const encodedFont = deflateSync(font, { level: 9, strategy: constants.Z_RLE });
 const cmap = `/CIDInit /ProcSet findresource begin
 12 dict begin
 begincmap
