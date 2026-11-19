@@ -776,7 +776,7 @@ impl PdfReader {
             "Page" => {
                 let media_box = media_box.ok_or(PdfReadError::PageTreeInvalid)?;
                 let contents = match dictionary.get("Contents") {
-                    None => Vec::new(),
+                    None | Some(PdfValue::Null) => Vec::new(),
                     Some(PdfValue::Reference(reference)) => {
                         let (mut cursor, _) = self.object_cursor(*reference, 0, None)?;
                         cursor.skip_space();
@@ -791,6 +791,12 @@ impl PdfReader {
                                     return Err(PdfReadError::Syntax);
                                 }
                                 refs_from_array(&array)?
+                            }
+                            PdfValue::Null => {
+                                if !cursor.consume_keyword(b"endobj")? {
+                                    return Err(PdfReadError::Syntax);
+                                }
+                                Vec::new()
                             }
                             PdfValue::Dictionary(_) if cursor.consume_keyword(b"stream")? => {
                                 vec![*reference]

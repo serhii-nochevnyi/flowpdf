@@ -1,8 +1,10 @@
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import { mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { test } from 'node:test'
 import {
-  alternateCheckboxPdf, checkStructure, compareCheckboxAppearances, compareRaster, compareWidgetRegion,
+  alternateCheckboxPdf, checkStructure, compareCheckboxAppearances, compareFixtures, compareRaster, compareWidgetRegion,
   decodePpm, externalExitCode, matchesWidgetBounds,
   loadFixtures, nativeSession, operationOutput, pdfStructure, probeVersion,
 } from '../../scripts/verify-pdf-native-external.mjs'
@@ -121,6 +123,83 @@ test('a refused open retains the source without requesting a session snapshot', 
     verify_native_pdf_response: () => true,
   }, input)
   assert.equal(operationOutput(session, { id: 'refused', input }, { outcome }), input)
+})
+
+test('an inconclusive redaction retains unavailable evidence through fixture cleanup', (t) => {
+  const redaction = loadFixtures().find(({ id }) => id === 'redaction')
+  const { input, sourceHash, spec } = redaction
+  const [operation] = spec.operations
+  const originHash = Array.from(Buffer.from(sourceHash, 'hex'))
+  const epoch = Array(16).fill(1)
+  const binding = { epoch, sessionId: 1, originHash, revision: 0 }
+  const outputHex = input.toString('hex')
+  const snapshot = { originStoreHash: sourceHash, binding, outputHash: originHash, outputHex,
+    pageState: { order: [42] } }
+  const candidate = { hash: Array(32).fill(7), validatorVersion: 1,
+    validatorProfile: 'classic-xref-owned-144dpi-v1', affectedPages: [42] }
+  const { json: sourceStructure } = structuralReadback(operation.pages)
+  const stageId = operation.request.marks.length + 2
+  const request = (operation, requestId) => ({ protocolVersion: 1, operation, requestId, originStoreHash: sourceHash })
+  const redactRequest = (requestId, action) => ({
+    ...request('redaction', requestId), binding, acceptedHash: originHash, action,
+  })
+
+  for (const cleanupFailure of ['none', 'close', 'cancel']) {
+    const directory = mkdtempSync(join(tmpdir(), 'flowpdf-redaction-contract-'))
+    t.after(() => rmSync(directory, { recursive: true, force: true }))
+    const requests = []
+    const invocations = []
+    let pending = false
+    const respond = (reply) => (json) => {
+      const submitted = JSON.parse(json)
+      requests.push(submitted)
+      const { operation, requestId, binding, originStoreHash } = submitted
+      return JSON.stringify({ operation, requestId, binding, originStoreHash, ...reply(submitted) })
+    }
+    const wasm = {
+      native_pdf_open: respond(() => ({ status: 'opened', snapshot })),
+      native_pdf_redaction: respond(({ action }) => {
+        switch (action.kind) {
+          case 'addMark': return { status: 'redaction' }
+          case 'stage':
+            pending = true
+            return { status: 'redaction', redaction: { candidate, verification: { status: 'pending' } } }
+          case 'verify':
+            return { status: 'redaction', redaction: { candidate, verification: { status: 'inconclusive' } } }
+          case 'cancel':
+            if (cleanupFailure === 'cancel') throw new Error('controlled cancellation failure')
+            pending = false
+            return { status: 'redaction', redaction: { candidate, verification: null } }
+          default: assert.fail(`unexpected redaction action: ${action.kind}`)
+        }
+      }),
+      native_pdf_close: respond(() => pending || cleanupFailure === 'close' ?
+        { status: 'failed', code: 'FLOW_PDF_NATIVE_RECONCILIATION_REQUIRED' } : { status: 'closed' }),
+      verify_native_pdf_response: () => true,
+    }
+    const evidence = { status: 'unavailable', fixtures: [] }
+    compareFixtures([redaction], wasm, directory, (check, argv) => {
+      invocations.push([check, argv.at(-1)])
+      return Buffer.from(JSON.stringify(sourceStructure))
+    }, evidence)
+
+    assert.deepEqual(requests, [
+      { ...request('open', 1), epoch, bytesHex: outputHex },
+      ...operation.request.marks.map(({ rectPt }, index) =>
+        redactRequest(index + 2, { kind: 'addMark', pageId: 42, rect: rectPt.map((point) => point * 1000) })),
+      redactRequest(stageId, { kind: 'stage' }),
+      redactRequest(stageId, { kind: 'verify', candidate }),
+      redactRequest(stageId, { kind: 'cancel', candidate }),
+      { ...request('close', stageId + 1), binding },
+    ], cleanupFailure)
+    assert.equal(evidence.status, 'unavailable', cleanupFailure)
+    assert.equal(evidence.reason, 'native-redaction-verification', cleanupFailure)
+    assert.deepEqual(evidence.fixtures[0].operations, [{
+      operation: 'redact', status: 'unavailable', affectedPages: operation.affectedPages, pageChecks: [], checks: {},
+    }], cleanupFailure)
+    assert.deepEqual(invocations, [['structure', join(directory, 'source.pdf')]], cleanupFailure)
+    assert.deepEqual(readdirSync(directory), ['source.pdf'], cleanupFailure)
+  }
 })
 
 
