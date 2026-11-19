@@ -4,24 +4,24 @@ import { lstatSync, readFileSync } from 'node:fs'
 import { delimiter, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { supportedNodeVersion } from './node-version.mjs'
-import { assertManifest, tasks } from './phase9-validation-manifest.mjs'
+import { assertManifest, hasGeneratedWasm, tasks, wasmPrerequisite } from './phase9-validation-manifest.mjs'
 
 export const root = fileURLToPath(new URL('../', import.meta.url))
 
-export function pinnedEnvironment(env = process.env) {
+export function pinnedEnvironment(env = process.env, cwd = root) {
   return {
     ...env,
-    RUSTUP_HOME: resolve(root, 'work/toolchains/rustup'),
-    CARGO_HOME: resolve(root, 'work/toolchains/cargo'),
-    PATH: `${resolve(root, 'work/toolchains/cargo/bin')}${delimiter}${env.PATH ?? ''}`,
+    RUSTUP_HOME: resolve(cwd, 'work/toolchains/rustup'),
+    CARGO_HOME: resolve(cwd, 'work/toolchains/cargo'),
+    PATH: `${resolve(cwd, 'work/toolchains/cargo/bin')}${delimiter}${env.PATH ?? ''}`,
     CARGO_NET_OFFLINE: 'true',
     RUSTUP_AUTO_INSTALL: '0',
     npm_config_offline: 'true',
-    PLAYWRIGHT_BROWSERS_PATH: resolve(root, 'work/playwright'),
+    PLAYWRIGHT_BROWSERS_PATH: resolve(cwd, 'work/playwright'),
   }
 }
 
-export function runBounded([command, ...args], { cwd = root, timeout = 15_000, env = pinnedEnvironment(),
+export function runBounded([command, ...args], { cwd = root, timeout = 15_000, env = pinnedEnvironment(process.env, cwd),
   maxBuffer = 4 * 1024 * 1024, encoding = 'utf8' } = {}) {
   return spawnSync(command === 'node' ? process.execPath : command, args, {
     cwd, timeout, env, encoding, maxBuffer, killSignal: 'SIGKILL', stdio: ['ignore', 'pipe', 'pipe'],
@@ -59,20 +59,27 @@ export function safeDiagnostic(diagnostic) {
   return diagnostic
 }
 
-export function runTasks(lane, run = runBounded) {
+export function runTasks(lane, run = runBounded, cwd = root) {
   if (!['local', 'smoke', 'browser', 'release'].includes(lane)) throw new Error('PHASE9_INVALID_LANE')
   assertManifest()
   const diagnostics = []
   for (const task of tasks.filter((task) => task.lane === lane || (lane === 'local' && task.lane === 'smoke'))) {
     const start = Date.now()
-    const result = run(task.argv, { timeout: task.timeout })
-    const exitCode = result.status ?? 1
+    const options = { cwd, timeout: task.timeout }
+    if (task.id === wasmPrerequisite.fixtureTaskId) {
+      options.env = { ...pinnedEnvironment(process.env, cwd), PHASE9_REQUIRE_WASM: '1' }
+    }
+    const result = run(task.argv, options)
+    const wasmUnavailable = task.id === wasmPrerequisite.buildTaskId &&
+      (result.status !== 0 || !hasGeneratedWasm(cwd))
+    const exitCode = wasmUnavailable ? 2 : result.status ?? 1
     const status = exitCode === 0 ? 'pass' :
-      (result.error?.code === 'ENOENT' || (lane === 'release' && exitCode === 2) ||
+      (wasmUnavailable || result.error?.code === 'ENOENT' || (lane === 'release' && exitCode === 2) ||
         (task.id === '09-03-02' && /^NATIVE_NOTE_TRACER_[A-Z_]+_UNAVAILABLE\s*$/.test(result.stderr ?? '')))
         ? 'unavailable' : 'fail'
     diagnostics.push(safeDiagnostic({ id: task.id, status, exitCode, elapsedMilliseconds: Math.max(0, Date.now() - start) }))
-    if (status !== 'pass') return { lane, status, exitCode, tasks: diagnostics }
+    if (status !== 'pass') return { lane, status, exitCode, tasks: diagnostics,
+      ...(wasmUnavailable ? { missing: 'generated-wasm' } : {}) }
   }
   return { lane, status: 'pass', exitCode: 0, tasks: diagnostics }
 }

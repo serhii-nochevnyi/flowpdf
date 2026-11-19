@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { isDeepStrictEqual } from "node:util";
 import { inflateSync } from "node:zlib";
+import { fileURLToPath } from "node:url";
+import { hasGeneratedWasm } from "../../scripts/phase9-validation-manifest.mjs";
 
 const root = new URL("../../", import.meta.url);
 const corpus = "fixtures/pdf-native/";
@@ -402,11 +404,13 @@ test("redaction accounts for sensitive families and preserves control content", 
 
 const wasmModule = new URL("web/generated/flow_wasm.js", root);
 const wasmBinary = new URL("web/generated/flow_wasm_bg.wasm", root);
-const missingWasm = !existsSync(wasmModule) || !existsSync(wasmBinary);
+const missingWasm = !hasGeneratedWasm(fileURLToPath(root));
 
 test("the preservation fixture completes its note lifecycle with built WASM", {
-  skip: missingWasm && "Build the production WASM module to run the fixture lifecycle",
+  skip: missingWasm && process.env.PHASE9_REQUIRE_WASM !== "1"
+    && "Build the production WASM module to run the fixture lifecycle",
 }, async () => {
+  assert.ok(hasGeneratedWasm(fileURLToPath(root)), "Generated WASM is required. Run npm run build:wasm.");
   const wasm = await import(wasmModule.href);
   wasm.initSync({ module: readFileSync(wasmBinary) });
   const input = bytes(corpus + "notes-preservation.pdf");
