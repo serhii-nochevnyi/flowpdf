@@ -3,11 +3,17 @@ import { readFileSync } from 'node:fs'
 import { test } from 'node:test'
 import {
   checkStructure, compareRaster, compareWidgetRegion, decodePpm, externalExitCode, matchesWidgetBounds,
-  nativeSession, operationOutput, pdfStructure, probeVersion,
+  loadFixtures, nativeSession, operationOutput, pdfStructure, probeVersion,
 } from '../../scripts/verify-pdf-native-external.mjs'
 
 const fixture = (name) => readFileSync(new URL(`../../fixtures/pdf-native/${name}`, import.meta.url))
 const editFamilies = JSON.parse(fixture('edit-families.expected.json'))
+
+test('the external verifier loads and validates the pinned fixture corpus', () => {
+  const fixtures = loadFixtures()
+  assert.deepEqual(fixtures.map(({ id }) => id), JSON.parse(fixture('manifest.json')).fixtures.map(({ id }) => id))
+  assert.ok(fixtures.some(({ spec }) => spec.operations.some(({ operation }) => operation === 'deletePage')))
+})
 
 test('strict external rejects unavailable or failed checks', () => {
   assert.equal(externalExitCode('unavailable', true), 2)

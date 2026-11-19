@@ -8,7 +8,7 @@ import { pinnedEnvironment, root, runBounded } from './check-phase9.mjs'
 import { supportedNodeVersion } from './node-version.mjs'
 
 const corpus = 'fixtures/pdf-native'
-const manifestHash = '285bb4e7b2ba4b5c23241af8cfff44b5d8de7b0bcb5391b022f28235ff84f4ba'
+const manifestHash = '4a752fdeef4bacb2a336b7dcb3a5c258916bba4bda0c1a8e91d49e7419a20fdc'
 const byteLimit = 4 * 1024 * 1024
 const wasmLimit = 32 * 1024 * 1024
 const toolNames = ['qpdf', 'pdftotext', 'pdftoppm']
@@ -42,7 +42,7 @@ function boundedRead(path, limit = byteLimit) {
   }
 }
 
-function loadFixtures() {
+export function loadFixtures() {
   const raw = boundedRead(resolve(root, corpus, 'manifest.json'))
   requireInput(digest(raw) === manifestHash, 'corpus-manifest')
   return JSON.parse(raw).fixtures.map(({ id, source, expected }) => {
