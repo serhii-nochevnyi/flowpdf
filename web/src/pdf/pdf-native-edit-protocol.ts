@@ -723,7 +723,8 @@ function fieldViews(value: unknown, count: number): boolean {
         && (field.kind === 'text' ? fieldText(field.value) && field.checked === null
           : field.kind === 'checkbox' && field.value === null && typeof field.checked === 'boolean')
       : field.canEditAppearance === false && (field.rect === null || fieldRect(field.rect))
-        && field.kind === null && field.name === null && field.value === null && field.checked === null
+        && field.kind === null && (field.name === null || fieldName(field.name))
+        && field.value === null && field.checked === null
         && typeof field.refusal === 'string' && fieldRefusalCodes.has(field.refusal)))
 }
 

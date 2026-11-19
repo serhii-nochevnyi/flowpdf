@@ -986,11 +986,8 @@ impl NativePdfSession {
             Command::Page(command) => {
                 let target = command.target();
                 let index = target.page as usize;
-                let rotation = self.snapshot.scene.pages[index]
-                    .geometry
-                    .ok_or(NativeSessionError::TargetUnavailable)?
-                    .rotation();
-                let selected = pages::stage(&mut staged, command, index, rotation)?;
+                let selected =
+                    pages::stage(&mut staged, command, index, &self.snapshot.scene.pages)?;
                 ids.retain(|reference, _| staged.objects.contains_key(reference));
                 for reference in staged.objects.keys() {
                     if let std::collections::btree_map::Entry::Vacant(entry) = ids.entry(*reference)

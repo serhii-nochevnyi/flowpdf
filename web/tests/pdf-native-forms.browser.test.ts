@@ -10,7 +10,7 @@ import { createNativePdfRuntime } from '../src/layout/layout-runtime.js'
 import { nativePdfText, type NativePdfMessage } from '../src/pdf/pdf-native-edit-messages.js'
 import { nativeHexBytes } from '../src/pdf/pdf-native-edit-protocol.js'
 
-function pdfFixture(profile: 'plain' | 'embedded' | 'unsupported' | 'unsupportedFont', font?: { bytes: Uint8Array<ArrayBuffer>; length: number }) {
+function pdfFixture(profile: 'plain' | 'embedded' | 'unsupported' | 'unsupportedFont' | 'readOnlyAppearance', font?: { bytes: Uint8Array<ArrayBuffer>; length: number }) {
   const encoder = new TextEncoder()
   const buffers: Uint8Array<ArrayBuffer>[] = []
   let length = 0
@@ -30,7 +30,7 @@ function pdfFixture(profile: 'plain' | 'embedded' | 'unsupported' | 'unsupported
   }
 
   const hasForm = profile !== 'plain'
-  const hasWidget = profile === 'embedded' || profile === 'unsupported'
+  const hasWidget = profile === 'embedded' || profile === 'unsupported' || profile === 'readOnlyAppearance'
   append('%PDF-1.7\n')
   object(`<< /Type /Catalog /Pages 2 0 R${hasForm ? ' /AcroForm 5 0 R' : ''} >>`)
   object('<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 /MediaBox [0 0 300 500] >>')
@@ -39,6 +39,11 @@ function pdfFixture(profile: 'plain' | 'embedded' | 'unsupported' | 'unsupported
   if (profile === 'unsupported') {
     object('<< /Fields [6 0 R] /NeedAppearances true >>')
     object('<< /Type /Annot /Subtype /Widget /FT /Ch /Ff 131072 /T (region) /Opt [(North) (South)] /V (North) /P 3 0 R /Rect [10 10 150 40] >>')
+  } else if (profile === 'readOnlyAppearance') {
+    object('<< /Fields [6 0 R] /DA (/Helv 10 Tf 0 g) /DR << /Font << /Helv 8 0 R >> >> >>')
+    object('<< /Type /Annot /Subtype /Widget /FT /Tx /T (recipient) /V (Alice) /P 3 0 R /Rect [10 10 150 40] /AP << /N 7 0 R >> >>')
+    object('q BT /Helv 10 Tf 2 10 Td (Alice) Tj ET Q', '/Type /XObject /Subtype /Form /BBox [0 0 140 30] /Resources << /Font << /Helv 8 0 R >> >>')
+    object('<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>')
   } else if (profile === 'unsupportedFont') {
     object('<< /Fields [] /DR << /Font << /FlowField 6 0 R >> >> >>')
     object('<< /Type /Font /Subtype /Type1 /BaseFont /Courier /Encoding /WinAnsiEncoding >>')
@@ -404,6 +409,15 @@ for (const locale of ['en', 'uk'] as const) {
       await expect.element(panel.getByRole('alert')).toHaveTextContent('FLOW_PDF_NATIVE_FIELD_APPEARANCE')
       await expect.element(fields.getByText(t('field.reason.appearance'), { exact: true })).toBeVisible()
       expect(await getDownload()).toEqual(beforeAppearanceRefusal)
+
+      await open(pdfFixture('readOnlyAppearance'), 'read-only-appearance.pdf')
+      await expect.element(select('field.select').getByRole('option', {
+        name: t('field.onPage', { name: 'recipient', page: 1 }), exact: true,
+      })).toBeInTheDocument()
+      await choose('field.select', '6:0:0')
+      await expect.element(fields.getByText(t('field.readOnly', { reason: t('field.reason.appearance') }), { exact: true })).toBeVisible()
+      expect(fields.getByRole('button', { name: t('field.save'), exact: true }).query()).toBeNull()
+      expect(fields.getByRole('button', { name: t('field.remove'), exact: true }).query()).toBeNull()
 
       const unsupported = pdfFixture('unsupported')
       await open(unsupported, 'read-only-widget.pdf')

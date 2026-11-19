@@ -181,6 +181,26 @@ fn forged_geometry_appearance_and_inherited_ownership_refuse_atomically() {
 }
 
 #[test]
+fn read_only_appearance_retains_verified_name_without_a_setter() {
+    let bytes = imported_field("[10 10 40 40]", "", "Off", "Btn", "", "");
+    let mut pdf = session(&bytes);
+    let view = &pdf.snapshot().fields[0];
+    assert_eq!(view.name.as_deref(), Some("agreement"));
+    assert_eq!(view.refusal, Some(NativeFieldRefusal::Appearance));
+    assert!(!view.can_edit_appearance);
+    assert_eq!(view.checked, None);
+    let id = view.id;
+    assert_eq!(
+        apply(
+            &mut pdf,
+            json!({"kind":"setFieldChecked","field":id,"checked":true})
+        ),
+        Err(NativeFieldRefusal::Appearance.code())
+    );
+    assert_eq!(pdf.output_bytes(), bytes);
+}
+
+#[test]
 fn embedded_appearance_round_trips_ukrainian_and_refuses_unmapped_glyphs() {
     let font = include_bytes!("../data/NotoSans-Regular.ttf");
     let face = ttf_parser::Face::parse(font, 0).unwrap();
@@ -239,6 +259,7 @@ fn unsupported_controls_and_same_owner_aliases_remain_read_only() {
         let mut pdf = session(&bytes);
         let field = &pdf.snapshot().fields[0];
         assert_eq!(field.refusal, Some(reason));
+        assert_eq!(field.name, None);
         let id = field.id;
         assert_eq!(
             apply(&mut pdf, json!({"kind":"removeField","field":id})),
