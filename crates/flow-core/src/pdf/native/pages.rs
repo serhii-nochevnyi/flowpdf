@@ -221,11 +221,11 @@ pub(super) fn restrictions(
     let catalog_values = dict(graph, catalog)?;
     let mut work = graph.remaining_work();
     let named_targets = named_destination_pages(graph, catalog_values, &mut work);
-    let incoming_links = incoming_link_index(graph, &mut work)?;
     let outlines = outline_index(graph, &mut work);
     if matches!(outlines, Err(Budget)) {
         return Err(Budget);
     }
+    let incoming_links = incoming_link_index(graph, outlines.as_ref().ok(), &mut work)?;
     let mut copyable_field_count = None;
     let pages: Vec<_> = projected
         .iter()
@@ -928,13 +928,78 @@ impl IncomingLinkIndex {
     }
 }
 
+fn link_destinations_survive(
+    graph: &NativePdfGraph,
+    target: Ref,
+    cleanup: &LinkCleanup,
+    outlines: Option<&OutlineIndex>,
+    trailer_refs: &BTreeSet<Ref>,
+    work: &mut usize,
+) -> Result<bool, NativeEditError> {
+    let mut removed = match page_owned_removals(graph, target, work) {
+        Ok(plan) => plan.removed,
+        Err(Budget) => return Err(Budget),
+        Err(_) => return Ok(true),
+    };
+    if let Some(groups) = outlines.and_then(|outlines| outlines.removable.get(&target)) {
+        for drops in groups.values() {
+            spend(work, drops.len())?;
+            removed.extend(drops);
+        }
+    }
+    if removed
+        .iter()
+        .any(|reference| trailer_refs.contains(reference))
+    {
+        return Ok(true);
+    }
+    let mut destinations = BTreeSet::new();
+    for &annot in cleanup.values().flatten() {
+        spend(work, 1)?;
+        removed.insert(annot);
+        let mut value = dict(graph, annot)?.get("Dest").ok_or(Malformed)?;
+        while let Some(reference) = value.as_reference() {
+            spend(work, 1)?;
+            if trailer_refs.contains(&reference) {
+                return Ok(true);
+            }
+            if !destinations.insert(reference) {
+                break;
+            }
+            value = graph.objects.get(&reference).ok_or(Malformed)?;
+        }
+    }
+    for reference in &destinations {
+        if let Some(owners) = graph.reverse.get(reference) {
+            spend(work, owners.len())?;
+            if owners
+                .iter()
+                .any(|owner| !removed.contains(owner) && !destinations.contains(owner))
+            {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+
 fn incoming_link_index(
     graph: &NativePdfGraph,
+    outlines: Option<&OutlineIndex>,
     work: &mut usize,
 ) -> Result<IncomingLinkIndex, NativeEditError> {
+    let mut trailer_refs = Vec::new();
+    let mut remaining = graph.remaining_retained();
+    for value in graph.trailer.values() {
+        collect_refs(value, &mut trailer_refs, work, &mut remaining)?;
+    }
+    let trailer_refs: BTreeSet<_> = trailer_refs.into_iter().collect();
     let mut index = IncomingLinkIndex::default();
     spend(work, graph.pages.len())?;
     let page_refs: BTreeSet<_> = graph.pages.iter().copied().collect();
+    index
+        .blocked
+        .extend(page_refs.intersection(&trailer_refs).copied());
     for &source in &graph.pages {
         let Some(annots) = dict(graph, source)?.get("Annots") else {
             continue;
@@ -944,8 +1009,11 @@ fn incoming_link_index(
             .as_array()
             .ok_or(Malformed)?;
         spend(work, items.len())?;
-        let array_editable = exclusive_container(graph, source, annots)
-            .is_ok_and(|value| value.as_array().is_some())
+        let array_editable = annots
+            .as_reference()
+            .is_none_or(|reference| !trailer_refs.contains(&reference))
+            && exclusive_container(graph, source, annots)
+                .is_ok_and(|value| value.as_array().is_some())
             && items.iter().all(|item| item.as_reference().is_some());
         for item in items {
             let values = graph
@@ -969,6 +1037,7 @@ fn incoming_link_index(
             }
             let Some(annot) = item.as_reference().filter(|&annot| {
                 array_editable
+                    && !trailer_refs.contains(&annot)
                     && navigation_target(dest).is_some()
                     && matches!(annotation_profile(graph, source, annot), Ok(None))
                     && exclusive_array_member(graph, source, annots, annot, None).is_ok()
@@ -982,17 +1051,31 @@ fn incoming_link_index(
             }
         }
     }
+    for (&target, cleanup) in &index.removable {
+        if !index.blocked.contains(&target)
+            && link_destinations_survive(graph, target, cleanup, outlines, &trailer_refs, work)?
+        {
+            index.blocked.insert(target);
+        }
+    }
     Ok(index)
 }
 
-fn remove_page_dependencies(
-    graph: &mut NativePdfGraph,
+struct PageOwnedRemovals {
+    removed: BTreeSet<Ref>,
+    fields: BTreeSet<Ref>,
+}
+
+fn page_owned_removals(
+    graph: &NativePdfGraph,
     page: Ref,
-) -> Result<BTreeSet<Ref>, NativeEditError> {
+    work: &mut usize,
+) -> Result<PageOwnedRemovals, NativeEditError> {
     let mut removed = BTreeSet::from([page]);
     let mut fields_to_remove = BTreeSet::new();
     let page_annotations = annotations(graph, page)?;
-    graph.charge_page_work(
+    spend(
+        work,
         page_annotations
             .len()
             .saturating_mul(page_annotations.len()),
@@ -1006,9 +1089,24 @@ fn remove_page_dependencies(
             removed.insert(field);
         }
     }
+    Ok(PageOwnedRemovals {
+        removed,
+        fields: fields_to_remove,
+    })
+}
+
+fn remove_page_dependencies(
+    graph: &mut NativePdfGraph,
+    page: Ref,
+) -> Result<BTreeSet<Ref>, NativeEditError> {
     let budget = graph.remaining_work();
     let mut work = budget;
-    let links = incoming_link_index(graph, &mut work)?;
+    let PageOwnedRemovals {
+        mut removed,
+        fields: fields_to_remove,
+    } = page_owned_removals(graph, page, &mut work)?;
+    let outlines = outline_index(graph, &mut work)?;
+    let links = incoming_link_index(graph, Some(&outlines), &mut work)?;
     let cleanup = links.cleanup_for(page)?;
     graph.charge_page_work(budget - work)?;
     if let Some(cleanup) = cleanup {
@@ -1026,7 +1124,7 @@ fn remove_page_dependencies(
         fields.retain(|field| !fields_to_remove.contains(field));
         replace_form_fields(graph, form, fields)?;
     }
-    remove_outline_destinations(graph, page, &mut removed)?;
+    remove_outline_destinations(graph, &outlines, page, &mut removed)?;
     Ok(removed)
 }
 
@@ -1295,12 +1393,12 @@ fn outline_index(
 
 fn remove_outline_destinations(
     graph: &mut NativePdfGraph,
+    index: &OutlineIndex,
     page: Ref,
     removed: &mut BTreeSet<Ref>,
 ) -> Result<(), NativeEditError> {
     let budget = graph.remaining_work();
     let mut work = budget;
-    let index = outline_index(graph, &mut work)?;
     let counts = index.count_changes(graph, page, &mut work)?;
     if let Some(groups) = index.removable.get(&page) {
         for (&parent, drops) in groups {
