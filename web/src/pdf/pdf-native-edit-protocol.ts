@@ -552,12 +552,12 @@ export function isNativePageCommand(value: unknown): value is NativePdfPageComma
   }
 }
 
-function fieldName(value: unknown): value is string {
+function editableFieldName(value: unknown): value is string {
   return typeof value === 'string' && value.length > 0 && value.length <= 64 && !/[^A-Za-z0-9_-]/u.test(value)
 }
 
-function fieldText(value: unknown): value is string {
-  return fitsNativeJson(value, 1024) && contents(value) && !/[\u0000-\u001f\u007f-\u009f]/u.test(value)
+function fieldText(value: unknown, limit = 1024): value is string {
+  return fitsNativeJson(value, limit) && !/[\u0000-\u001f\u007f-\u009f\uD800-\uDFFF]/u.test(value)
 }
 
 function fieldRect(value: unknown): value is NativePdfRect {
@@ -570,10 +570,10 @@ export function isNativeFieldCommand(value: unknown): value is NativePdfFieldCom
   switch (command.kind) {
     case 'addTextField':
       return shape(command, 'kind', 'page', 'rect', 'name', 'value') && pageId(command.page)
-        && fieldRect(command.rect) && fieldName(command.name) && fieldText(command.value)
+        && fieldRect(command.rect) && editableFieldName(command.name) && fieldText(command.value)
     case 'addCheckboxField':
       return shape(command, 'kind', 'page', 'rect', 'name', 'checked') && pageId(command.page)
-        && fieldRect(command.rect) && fieldName(command.name) && typeof command.checked === 'boolean'
+        && fieldRect(command.rect) && editableFieldName(command.name) && typeof command.checked === 'boolean'
     case 'setFieldText':
       return shape(command, 'kind', 'field', 'value') && hash(command.field) && fieldText(command.value)
     case 'setFieldChecked':
@@ -743,11 +743,11 @@ function fieldViews(value: unknown, count: number): boolean {
     shape(field, 'id', 'object', 'page', 'kind', 'name', 'rect', 'value', 'checked', 'canEditAppearance', 'refusal')
     && hash(field.id) && objectRef(field.object) && integer(field.page, 0, count - 1)
     && (field.canEditAppearance === true
-      ? field.refusal === null && fieldName(field.name) && fieldRect(field.rect)
+      ? field.refusal === null && editableFieldName(field.name) && fieldRect(field.rect)
         && (field.kind === 'text' ? fieldText(field.value) && field.checked === null
           : field.kind === 'checkbox' && field.value === null && typeof field.checked === 'boolean')
       : field.canEditAppearance === false && (field.rect === null || fieldRect(field.rect))
-        && field.kind === null && (field.name === null || fieldName(field.name))
+        && field.kind === null && (field.name === null || (fieldText(field.name, 64) && field.name.length > 0))
         && field.value === null && field.checked === null
         && typeof field.refusal === 'string' && fieldRefusalCodes.has(field.refusal)))
 }

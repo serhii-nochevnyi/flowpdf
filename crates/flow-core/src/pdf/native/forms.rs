@@ -745,6 +745,37 @@ fn id(binding: NativeBinding, widget: Ref) -> [u8; 32] {
     *hash.finalize().as_bytes()
 }
 
+fn display_name(
+    graph: &NativePdfGraph,
+    widget: Ref,
+    data: &Dict,
+    work: &mut usize,
+) -> Option<String> {
+    let label = if let Some(label) = data.get("T") {
+        label
+    } else {
+        let parent = data.get("Parent")?.as_reference()?;
+        let field = dict(graph, parent).ok()?;
+        let children = graph
+            .resolve_metered(field.get("Kids")?, work)
+            .ok()?
+            .as_array()?;
+        spend(work, children.len()).ok()?;
+        if children
+            .iter()
+            .filter(|child| child.as_reference() == Some(widget))
+            .take(2)
+            .count()
+            != 1
+        {
+            return None;
+        }
+        field.get("T")?
+    };
+    let bytes = graph.resolve_metered(label, work).ok()?.as_bytes()?;
+    decode(bytes, MAX_NAME).filter(|name| !name.is_empty() && !name.chars().any(char::is_control))
+}
+
 pub(super) fn project(
     graph: &NativePdfGraph,
     pages: &[NativePdfNotePage],
@@ -787,12 +818,15 @@ pub(super) fn project(
             spend(&mut work, form.fields.len() + page.annotations.len())?;
             spend(&mut work, data.get("AP").map_or(0, |_| MAX_TEXT))?;
         }
-        let mut readable_name = None;
         let admitted = form.as_ref().map_err(|&error| error).and_then(|form| {
             let identity = recognize_identity(graph, form, page, object, &mut work)?;
-            readable_name = Some(identity.1.clone());
             recognize_appearance(graph, form, page, object, identity)
         });
+        let readable_name = admitted
+            .as_ref()
+            .ok()
+            .map(|field| field.name.clone())
+            .or_else(|| display_name(graph, object, data, &mut work));
         if let Some(name) = &readable_name {
             spend(remaining, name.len())?;
         }
