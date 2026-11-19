@@ -499,6 +499,88 @@ fn raster_fixture(size: u32, paint: &str) -> Vec<u8> {
 }
 
 #[test]
+fn admission_tracks_the_workspace_left_by_the_live_session() {
+    // @contract: An uncompressed stream isolates the scan allowance from decoder scratch space.
+    let source = pdf(
+        vec![
+            b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+            b"<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 100 100] >>".to_vec(),
+            b"<< /Type /Page /Parent 2 0 R /Contents 4 0 R >>".to_vec(),
+            stream("", b"10 10 10 10 re f 40 40 10 10 re f"),
+        ],
+        "",
+    );
+    assert!(open(&source).redaction_admitted());
+
+    let open_with_budget = |max_retained_bytes| {
+        NativePdfSession::open_scoped(
+            &source,
+            NativeEditLimits {
+                max_retained_bytes,
+                ..NativeEditLimits::default()
+            },
+            [5; 16],
+        )
+    };
+    let (mut lower, mut upper) = (1, 64 * 1024);
+    while lower < upper {
+        let mid = lower + (upper - lower) / 2;
+        if open_with_budget(mid).is_ok_and(|session| session.redaction_admitted()) {
+            upper = mid;
+        } else {
+            lower = mid + 1;
+        }
+    }
+
+    let verify_projection = |session: &NativePdfSession, admitted, use_live: bool| {
+        let snapshot = session.snapshot();
+        NativePdfSession::verify_page_and_field_projection(
+            &source,
+            snapshot.limits,
+            snapshot.binding,
+            snapshot.scene.scene_hash,
+            &snapshot.page_state,
+            &snapshot.fields,
+            &[],
+            admitted,
+            use_live.then_some(session),
+        )
+    };
+    let below = open_with_budget(lower - 1).unwrap();
+    assert!(!below.redaction_admitted());
+    assert_eq!(verify_projection(&below, false, false), Ok(true));
+    assert_eq!(verify_projection(&below, true, false), Ok(false));
+    drop(below);
+
+    let mut session = open_with_budget(lower).unwrap();
+    let binding = session.snapshot().binding;
+    let mark = mark(&session, 0, [12_000, 12_000, 13_000, 13_000]);
+    assert!(session.redaction_admitted());
+    assert_eq!(verify_projection(&session, true, true), Ok(true));
+    assert_eq!(verify_projection(&session, true, false), Ok(true));
+
+    session.add_redaction_mark(binding, mark).unwrap();
+    assert!(!session.redaction_admitted());
+    assert_eq!(verify_projection(&session, false, true), Ok(true));
+    assert_eq!(verify_projection(&session, true, true), Ok(false));
+    assert_eq!(verify_projection(&session, true, false), Ok(true));
+    assert_eq!(
+        session.stage_redaction(binding, 1),
+        Err(NativeSessionError::Budget)
+    );
+    assert!(session.redaction_candidate_status().is_none());
+    assert_eq!(session.redaction_marks(), &[mark]);
+    assert_accepted(&session, &source, 0, &source);
+
+    session.remove_redaction_mark(binding, mark).unwrap();
+    assert!(session.redaction_admitted());
+    session.add_redaction_mark(binding, mark).unwrap();
+    assert!(!session.redaction_admitted());
+    session.clear_redaction_marks(binding).unwrap();
+    assert!(session.redaction_admitted());
+}
+
+#[test]
 fn origin_over_the_redaction_byte_ceiling_refuses_marks_and_staging() {
     let mut unused_object = b"null\n%".to_vec();
     unused_object.resize(32 * 1024 * 1024, b' ');
