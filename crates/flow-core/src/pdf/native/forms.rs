@@ -408,7 +408,6 @@ fn load_form(graph: &NativePdfGraph, work: &mut usize) -> FieldResult<Form> {
             Box::new(FieldFont::admit(graph, font).ok_or(Appearance)?),
         ))
     })();
-    let mut names = BTreeMap::new();
     for &field in &fields {
         let values = dict(graph, field).map_err(|_| Reference)?;
         if values.get("FT").is_some_and(|value| {
@@ -418,19 +417,8 @@ fn load_form(graph: &NativePdfGraph, work: &mut usize) -> FieldResult<Form> {
         }) {
             return Err(Profile);
         }
-        if values.contains_key("Parent")
-            || (values.contains_key("Kids") && !values.contains_key("FT"))
-        {
-            return Err(Reference);
-        }
-        let label = graph
-            .resolve_metered(values.get("T").ok_or(Reference)?, work)
-            .map_err(|_| Reference)?;
-        let field_name = decode_field_name(label).ok_or(Reference)?;
-        if names.insert(field_name, field).is_some() {
-            return Err(Reference);
-        }
     }
+    let names = field_names(graph, &fields, work).map_err(|_| Reference)?;
     Ok(Form {
         owner: Some(owner),
         fields,
@@ -782,6 +770,32 @@ fn display_name(
         graph.resolve_metered(field.get("T")?, work).ok()?
     };
     decode_field_name(label)
+}
+
+pub(super) fn field_names(
+    graph: &NativePdfGraph,
+    fields: &[Ref],
+    work: &mut usize,
+) -> Result<BTreeMap<String, Ref>, NativeEditError> {
+    use NativeEditError::Unsupported;
+
+    spend(work, fields.len())?;
+    let mut names = BTreeMap::new();
+    for &field in fields {
+        let values = dict(graph, field)?;
+        if values.contains_key("Parent")
+            || (values.contains_key("Kids") && !values.contains_key("FT"))
+        {
+            return Err(Unsupported);
+        }
+        let label = graph.resolve_metered(values.get("T").ok_or(Unsupported)?, work)?;
+        spend(work, label.as_bytes().ok_or(Unsupported)?.len())?;
+        let name = decode_field_name(label).ok_or(Unsupported)?;
+        if names.insert(name, field).is_some() {
+            return Err(Unsupported);
+        }
+    }
+    Ok(names)
 }
 
 fn decode_field_name(label: &Value) -> Option<String> {
