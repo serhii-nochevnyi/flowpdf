@@ -159,11 +159,7 @@ pub(super) fn verify(
         for mut paint in source_paint {
             spend(&mut work, marks.len() + 1)?;
             if let PaintKind::Image(image) = &mut paint.kind {
-                for mark in &marks {
-                    if let Some(mask) = image.mask(*mark) {
-                        image.masks.push(mask);
-                    }
-                }
+                image.add_masks(&marks, &mut expected.draw_bytes, &mut work)?;
             } else {
                 let mut removed = false;
                 for &mark in &marks {
@@ -483,17 +479,8 @@ impl<'a> Interpreter<'a> {
                             )?;
                         }
                         Some("Form") => {
-                            let (matrix, form_bounds, resources) =
-                                form(document, &stream.dict, resources, graphics.matrix)?;
-                            let nested_clip = [
-                                clip[0].max(form_bounds[0]),
-                                clip[1].max(form_bounds[1]),
-                                clip[2].min(form_bounds[2]),
-                                clip[3].min(form_bounds[3]),
-                            ];
-                            if !valid_rect(nested_clip) {
-                                return Err(UnsupportedProfile);
-                            }
+                            let (matrix, nested_clip, resources) =
+                                form(document, &stream.dict, resources, graphics.matrix, clip)?;
                             self.stream(
                                 document,
                                 object,
@@ -693,24 +680,16 @@ fn stroke_stencils(
     for index in 0..edges {
         let a = points[index];
         let b = points[(index + 1) % points.len()];
-        let [dx, dy] = sub(b, a);
-        let length = (dx as i128 * dx as i128 + dy as i128 * dy as i128).isqrt();
-        if length == 0 {
-            return Err(UnsupportedProfile);
-        }
-        let half = i128::from(width);
-        let normal = [
-            rounded(-i128::from(dy) * half, 2 * length)?,
-            rounded(i128::from(dx) * half, 2 * length)?,
-        ];
-        normals.push(normal);
-        stencils.push(Stencil::single(
+        let (normal, uncertainty) = normal_enclosure(sub(b, a), width);
+        normals.push((normal, uncertainty));
+        stencils.push(Stencil::stroke(
             &[
                 add(a, normal),
                 add(b, normal),
                 sub(b, normal),
                 sub(a, normal),
             ],
+            uncertainty,
             matrix,
             memory,
         )?);
@@ -725,49 +704,93 @@ fn stroke_stencils(
         let incoming = sub(center, points[previous]);
         let outgoing = sub(points[(index + 1) % points.len()], center);
         let turn = cross(incoming, outgoing);
+        let alignment = dot(incoming, outgoing);
         if turn == 0 {
-            if i128::from(incoming[0]) * i128::from(outgoing[0])
-                + i128::from(incoming[1]) * i128::from(outgoing[1])
-                <= 0
-            {
+            if alignment <= 0 {
                 return Err(UnsupportedProfile);
             }
             continue;
         }
+
+        let [(a, a_error), (b, b_error)] = [normals[previous], normals[index]];
         let outside = if turn > 0 { -1 } else { 1 };
-        let a = add(center, normals[previous].map(|v| outside * v));
-        let b = add(center, normals[index].map(|v| outside * v));
-        let numerator = cross(sub(b, a), outgoing);
-        let offset = [
-            rounded(i128::from(incoming[0]) * numerator, turn)?,
-            rounded(i128::from(incoming[1]) * numerator, turn)?,
-        ];
-        let tip = if offset
-            .into_iter()
-            .all(|axis| axis.unsigned_abs() <= (width * 6) as u64)
+        let a = a.map(|v| v * outside);
+        let b = b.map(|v| v * outside);
+        let mut error = [a_error[0].max(b_error[0]), a_error[1].max(b_error[1])];
+        let mut contour = vec![center, add(center, a)];
+        if let Some((tip, tip_error)) =
+            join_enclosure(turn, alignment, add(a, b), add(a_error, b_error))?
         {
-            let miter = add(a, offset);
-            let [mx, my] = sub(miter, center).map(i128::from);
-            let max = i128::from(width) * 5;
-            if mx * mx + my * my <= max * max {
-                miter
-            } else {
-                center
-            }
-        } else {
-            center
-        };
-        stencils.push(Stencil::single(&[center, a, tip, b], matrix, memory)?);
+            contour.push(add(center, tip));
+            error = [error[0].max(tip_error[0]), error[1].max(tip_error[1])];
+        }
+        contour.push(add(center, b));
+        stencils.push(Stencil::stroke(&contour, error, matrix, memory)?);
     }
     Ok(stencils)
 }
 
-fn rounded(mut num: i128, mut den: i128) -> VerifyResult<i64> {
-    if den < 0 {
-        num = -num;
-        den = -den;
+fn dot(a: Point, b: Point) -> i128 {
+    a.into_iter()
+        .zip(b)
+        .map(|(x, y)| i128::from(x) * i128::from(y))
+        .sum()
+}
+
+fn normal_enclosure([dx, dy]: Point, width: i64) -> (Point, Point) {
+    let length_squared = dot([dx, dy], [dx, dy]);
+    let mut normal = [0; 2];
+    let mut error = [0; 2];
+    for (axis, delta) in [-dy, dx].into_iter().enumerate() {
+        let scaled = i128::from(delta) * i128::from(width);
+        let doubled = (scaled * scaled / length_squared).isqrt();
+        normal[axis] = (((doubled + 1) / 2) * scaled.signum()) as i64;
+        error[axis] =
+            i64::from(doubled % 2 != 0 || doubled * doubled * length_squared != scaled * scaled);
     }
-    i64::try_from((num + den / 2).div_euclid(den)).map_err(|_| UnsupportedProfile)
+    (normal, error)
+}
+
+fn join_enclosure(
+    turn: i128,
+    alignment: i128,
+    normals: Point,
+    uncertainty: Point,
+) -> VerifyResult<Option<(Point, Point)>> {
+    let turn_squared = turn * turn;
+    let alignment_squared = alignment * alignment;
+    // @invariant: Beyond 90 degrees the default miter limit occurs at sin²(turn) / cos²(turn) = 99 / 2401.
+    if alignment < 0 {
+        let threshold =
+            (alignment_squared / 2401) * 99 + ((alignment_squared % 2401) * 99 + 2400) / 2401;
+        if turn_squared < threshold {
+            return Ok(None);
+        }
+    }
+    let product = turn_squared + alignment_squared;
+    let floor = product.isqrt();
+    let ceil = floor + i128::from(floor * floor != product);
+    if floor + alignment <= 0 {
+        return Err(UnsupportedProfile);
+    }
+    let mut tip = [0; 2];
+    let mut error = [0; 2];
+    let scales = [floor, ceil];
+    for axis in 0..2 {
+        let sum = i128::from(normals[axis]);
+        let margin = i128::from(uncertainty[axis]);
+        let denominator = floor + alignment;
+        let rounded = (sum * floor + denominator / 2).div_euclid(denominator);
+        tip[axis] = i64::try_from(rounded).map_err(|_| UnsupportedProfile)?;
+        for length in scales {
+            let denominator = length + alignment;
+            let lower = ((sum - margin) * length).div_euclid(denominator);
+            let upper = -(-(sum + margin) * length).div_euclid(denominator);
+            let distance = (rounded - lower).max(upper - rounded);
+            error[axis] = error[axis].max(i64::try_from(distance).map_err(|_| UnsupportedProfile)?);
+        }
+    }
+    Ok(Some((tip, error)))
 }
 
 fn add([x, y]: Point, [u, v]: Point) -> Point {
@@ -792,24 +815,60 @@ struct Stencil {
     contours: Vec<Vec<Point>>,
     bounds: Rect,
     edges: usize,
+    scale: i64,
+    margin: Point,
+    bounds_only: bool,
 }
 
 impl Stencil {
     fn single(path: &[Point], matrix: Matrix, memory: &mut usize) -> VerifyResult<Self> {
+        Self::vector(path, matrix, [0; 2], false, memory)
+    }
+
+    fn stroke(
+        path: &[Point],
+        uncertainty: Point,
+        matrix: Matrix,
+        memory: &mut usize,
+    ) -> VerifyResult<Self> {
+        Self::vector(path, matrix, uncertainty, true, memory)
+    }
+
+    fn vector(
+        path: &[Point],
+        matrix: Matrix,
+        [dx, dy]: Point,
+        stroke: bool,
+        memory: &mut usize,
+    ) -> VerifyResult<Self> {
         spend(
             memory,
             std::mem::size_of::<Self>()
                 + std::mem::size_of::<Vec<Point>>()
                 + std::mem::size_of_val(path),
         )?;
-        let points = path
+        let [l, b, r, t] = bounds_of(path).ok_or(UnsupportedProfile)?;
+        let envelope = [l - dx, b - dy, r + dx, t + dy];
+        if envelope
             .iter()
-            .map(|&p| transformed(matrix, p))
-            .collect::<VerifyResult<Vec<_>>>()?;
-        let mut stencil = Self::new(vec![points])?;
-        let bounds = bounds_of(path).ok_or(UnsupportedProfile)?;
-        if valid_rect(bounds) {
-            stencil.bounds = matrix.bounds(bounds)?;
+            .any(|n| !(-MAX_COORD..=MAX_COORD).contains(n))
+        {
+            return Err(UnsupportedProfile);
+        }
+        let mut stencil = Self::new(vec![path.iter().map(|&p| matrix.numerator(p)).collect()])?;
+        stencil.bounds = matrix.bounds(envelope)?;
+        stencil.scale = POINT;
+        let [a, b, c, d, _, _] = matrix.0;
+        stencil.margin = [a.abs() * dx + c.abs() * dy, b.abs() * dx + d.abs() * dy];
+        if stroke {
+            let vertices = &stencil.contours[0];
+            let turns = (0..vertices.len()).map(|i| {
+                let a = vertices[i];
+                let b = vertices[(i + 1) % vertices.len()];
+                let c = vertices[(i + 2) % vertices.len()];
+                cross(sub(b, a), sub(c, b)).signum()
+            });
+            stencil.bounds_only = !turns.clone().all(|t| t > 0) && !turns.clone().all(|t| t < 0);
         }
         Ok(stencil)
     }
@@ -829,15 +888,27 @@ impl Stencil {
             contours,
             bounds: combined.ok_or(UnsupportedProfile)?,
             edges,
+            scale: 1,
+            margin: [0; 2],
+            bounds_only: false,
         })
     }
 
-    fn intersects_rect(&self, rect @ [left, bottom, right, top]: Rect) -> bool {
+    fn intersects_rect(&self, rect: Rect) -> bool {
         if !intersects(self.bounds, rect) {
             return false;
         }
+        let [x, y, u, v] = rect.map(|coordinate| coordinate * self.scale);
+        let [dx, dy] = self.margin;
+        let [left, bottom, right, top] = [x - dx, y - dy, u + dx, v + dy];
+        if self.bounds_only {
+            let [l, b, r, t] = bounds_of(&self.contours[0]).expect("nonempty stroke contour");
+            return l <= right && left <= r && b <= top && bottom <= t;
+        }
         let corners = [[left, bottom], [right, bottom], [right, top], [left, top]];
-        corners.iter().any(|&point| self.hits(point, false))
+        corners
+            .iter()
+            .any(|&point| self.hits_scaled(point, 1, false))
             || self.contours.iter().any(|contour| {
                 contour
                     .iter()
@@ -860,7 +931,7 @@ impl Stencil {
 
     fn fill_intersects_rect(
         &self,
-        rect @ [left, bottom, right, top]: Rect,
+        rect: Rect,
         evenodd: bool,
         work: &mut usize,
     ) -> VerifyResult<bool> {
@@ -868,6 +939,7 @@ impl Stencil {
             return Ok(false);
         }
         spend(work, self.edges * 6 + 1)?;
+        let rect @ [left, bottom, right, top] = rect.map(|coordinate| coordinate * self.scale);
         if self.hits_scaled([left + right, bottom + top], 2, evenodd) {
             return Ok(true);
         }
@@ -916,7 +988,7 @@ impl Stencil {
     }
 
     fn hits(&self, p: Point, evenodd: bool) -> bool {
-        inside(self.bounds, p) && self.hits_scaled(p, 1, evenodd)
+        inside(self.bounds, p) && self.hits_scaled(p.map(|n| n * self.scale), 1, evenodd)
     }
 
     fn hits_scaled(&self, p: Point, scale: i64, evenodd: bool) -> bool {
@@ -1148,7 +1220,39 @@ struct Image<'a> {
     masks: Vec<[usize; 4]>,
 }
 
+fn charge_masks(count: usize, memory: &mut usize) -> VerifyResult<()> {
+    spend(
+        memory,
+        count
+            .checked_mul(std::mem::size_of::<[usize; 4]>())
+            .ok_or(Budget)?,
+    )
+}
+
 impl Image<'_> {
+    fn add_masks(
+        &mut self,
+        marks: &[Rect],
+        memory: &mut usize,
+        work: &mut usize,
+    ) -> VerifyResult<()> {
+        spend(work, marks.len())?;
+        let count = marks
+            .iter()
+            .filter(|&&mark| self.mask(mark).is_some())
+            .count();
+        charge_masks(count, memory)?;
+        if count != 0 {
+            self.masks.try_reserve_exact(count).map_err(|_| Budget)?;
+            for &mark in marks {
+                if let Some(mask) = self.mask(mark) {
+                    self.masks.push(mask);
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn mask(&self, mark: Rect) -> Option<[usize; 4]> {
         let [a, b, c, d, e, f] = self.matrix.0;
         let (u, v) = if a != 0 {
@@ -1431,6 +1535,64 @@ fn inside([l, b, r, t]: Rect, [x, y]: Point) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fractional_vector_stencil_keeps_exact_edge_coordinates() {
+        let path = [[1, 1], [3, 1], [3, 3], [1, 3]];
+        let matrix = Matrix::new([501, 0, 0, 501, 0, 0]).unwrap();
+        let stencil = Stencil::single(&path, matrix, &mut 4096).unwrap();
+        assert_eq!(stencil.bounds, [0, 0, 2, 2]);
+        assert!(
+            stencil
+                .fill_intersects_rect([0, 0, 1, 1], false, &mut 4096)
+                .unwrap()
+        );
+        assert!(stencil.hits([1, 1], false));
+        assert!(!stencil.hits([0, 0], false));
+    }
+
+    #[test]
+    fn stroke_coverage_includes_the_default_miter() {
+        let vertices = [[10_000, 10_000], [20_000, 10_000], [20_000, 20_000]];
+        let stencils =
+            stroke_stencils(&vertices, false, 2_000, Matrix::IDENTITY, &mut 4096).unwrap();
+        let corner = [20_200, 9_200, 20_800, 9_800];
+        assert_eq!(stencils.len(), 3);
+        assert!(!stencils[0].intersects_rect(corner));
+        assert!(!stencils[1].intersects_rect(corner));
+        assert!(stencils[2].intersects_rect(corner));
+        assert!(stencils[2].hits([20_500, 9_500], false));
+    }
+
+    #[test]
+    fn mask_storage_is_charged_before_reservation() {
+        let mut image = Image {
+            data: ImageData {
+                bytes: &[127],
+                width: 1,
+                height: 1,
+                channels: 1,
+                digest: [0; 32],
+            },
+            matrix: Matrix::IDENTITY,
+            masks: Vec::new(),
+        };
+        let bytes = std::mem::size_of::<[usize; 4]>();
+        let marks = [[0, 0, 500, 500], [1_000, 0, 2_000, 500]];
+        assert_eq!(
+            image.add_masks(&marks, &mut (bytes - 1), &mut 10),
+            Err(Budget)
+        );
+        assert_eq!(image.masks.capacity(), 0);
+        let mut memory = bytes;
+        image.add_masks(&marks, &mut memory, &mut 10).unwrap();
+        assert_eq!(image.masks, [[0, 0, 1, 1]]);
+        assert_eq!(memory, 0);
+        assert_eq!(
+            charge_masks(usize::MAX, &mut usize::MAX.clone()),
+            Err(Budget)
+        );
+    }
 
     #[test]
     fn pixel_caps_and_cumulative_budget_are_checked() {

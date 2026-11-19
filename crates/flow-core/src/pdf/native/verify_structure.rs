@@ -554,10 +554,11 @@ fn inspect(
                     }))
         {
             return Err(UnsupportedProfile);
-        } else if role == FontFile
-            && get(&stream.dict, "Length1")?.as_integer() != i64::try_from(stream.data.len()).ok()
-        {
-            return Err(Structure);
+        } else if role == FontFile {
+            if get(&stream.dict, "Length1")?.as_integer() != i64::try_from(stream.data.len()).ok() {
+                return Err(Structure);
+            }
+            inspect_font_program(&stream.data)?;
         }
         return Ok(());
     }
@@ -774,8 +775,29 @@ fn inspect(
                     "Widths" | "W" if matches!(value, PdfValue::Reference(_)) => {
                         enqueue(value, Widths)?
                     }
-                    "Widths" | "W" | "FontBBox" => only_numbers(value, 0)?,
-                    "Type" | "Subtype" | "BaseFont" | "FontName" | "Encoding" => {
+                    "Widths" | "W" => only_numbers(value, 0)?,
+                    "FontBBox" => {
+                        let [l, b, r, t] = value.as_array().ok_or(Structure)? else {
+                            return Err(Structure);
+                        };
+                        for boundary in [l, b, r, t] {
+                            number(boundary)?;
+                        }
+                    }
+                    "BaseFont" | "FontName" => {
+                        let name = value.as_name().ok_or(Structure)?;
+                        if !(1..=63).contains(&name.len())
+                            || name.bytes().any(|b| !matches!(b, b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'_' | b'.' | b'+' | b'-'))
+                        {
+                            return Err(UnsupportedProfile);
+                        }
+                    }
+                    "Encoding" => match (name(dict, "Subtype"), value.as_name()) {
+                        (Some("Type0"), Some("Identity-H"))
+                        | (Some("TrueType"), Some("WinAnsiEncoding")) => {}
+                        _ => return Err(UnsupportedProfile),
+                    },
+                    "Type" | "Subtype" => {
                         value.as_name().ok_or(Structure)?;
                     }
                     _ => {
@@ -816,6 +838,62 @@ fn inspect(
                 inspect_entry(value, role, side, queue)?;
             }
         }
+    }
+    Ok(())
+}
+
+fn inspect_font_program(bytes: &[u8]) -> VerifyResult<()> {
+    let [0, 1, 0, 0, hi, lo, ..] = bytes else {
+        return Err(UnsupportedProfile);
+    };
+    let count = usize::from(u16::from_be_bytes([*hi, *lo]));
+    if !(1..=32).contains(&count) {
+        return Err(UnsupportedProfile);
+    }
+    let directory_end = 12 + count * 16;
+    let entries = bytes.get(12..directory_end).ok_or(Structure)?;
+    let trusted =
+        ttf_parser::RawFace::parse(include_bytes!("../../../data/NotoSans-Regular.ttf"), 0)
+            .map_err(|_| UnsupportedProfile)?;
+    let mut spans = Vec::with_capacity(count);
+    let mut seen = BTreeSet::new();
+    for [a, b, c, d, _, _, _, _, o1, o2, o3, o4, l1, l2, l3, l4] in entries.as_chunks::<16>().0 {
+        let tag = [*a, *b, *c, *d];
+        let offset = u32::from_be_bytes([*o1, *o2, *o3, *o4]) as usize;
+        let len = u32::from_be_bytes([*l1, *l2, *l3, *l4]) as usize;
+        let end = offset.checked_add(len).ok_or(Structure)?;
+        let data = bytes.get(offset..end).ok_or(Structure)?;
+        let admitted = match &tag {
+            b"cmap" | b"glyf" | b"hmtx" | b"loca" => len != 0,
+            b"head" => len == 54,
+            b"hhea" => len == 36,
+            b"maxp" => len == 32,
+            b"post" if matches!(data, [0, 3, 0, 0, tail @ ..] if tail.len() == 28 && tail.iter().all(|&b| b == 0)) => {
+                true
+            }
+            b"OS/2" | b"name" | b"post" | b"gasp" | b"cvt " | b"fpgm" | b"prep" | b"GDEF"
+            | b"GPOS" | b"GSUB" | b"STAT" => {
+                trusted.table(ttf_parser::Tag::from_bytes(&tag)) == Some(data)
+            }
+            _ => false,
+        };
+        if !admitted || !seen.insert(tag) || offset % 4 != 0 {
+            return Err(UnsupportedProfile);
+        }
+        spans.push((offset, end));
+    }
+    spans.sort_unstable();
+    let mut previous = directory_end;
+    for (offset, end) in spans {
+        check_font_padding(bytes.get(previous..offset).ok_or(Structure)?)?;
+        previous = end;
+    }
+    check_font_padding(&bytes[previous..])
+}
+
+fn check_font_padding(padding: &[u8]) -> VerifyResult<()> {
+    if padding.len() > 3 || padding.iter().any(|&byte| byte != 0) {
+        return Err(UnsupportedProfile);
     }
     Ok(())
 }
