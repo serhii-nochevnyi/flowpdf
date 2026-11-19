@@ -423,7 +423,11 @@ fn load_form(graph: &NativePdfGraph, work: &mut usize) -> FieldResult<Form> {
         {
             return Err(Reference);
         }
-        let field_name = editable_name(values).ok_or(Reference)?;
+        // Read-only fields still reserve their names in the form namespace.
+        let label = graph
+            .resolve_metered(values.get("T").ok_or(Reference)?, work)
+            .map_err(|_| Reference)?;
+        let field_name = decode_field_name(label).ok_or(Reference)?;
         if names.insert(field_name, field).is_some() {
             return Err(Reference);
         }
@@ -778,6 +782,10 @@ fn display_name(
         }
         graph.resolve_metered(field.get("T")?, work).ok()?
     };
+    decode_field_name(label)
+}
+
+fn decode_field_name(label: &Value) -> Option<String> {
     let bytes = label.as_bytes()?;
     let name = if bytes.starts_with(&[0xfe, 0xff]) || bytes.starts_with(&[0xef, 0xbb, 0xbf]) {
         decode(bytes, MAX_NAME)?
