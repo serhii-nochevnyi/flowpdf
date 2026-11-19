@@ -258,6 +258,70 @@ fn nested_shared_image_invocations_are_isolated() {
 }
 
 #[test]
+fn scene_reads_nested_image_replacement_and_unchanged_sibling() {
+    let outer = stream(
+        "/Type /XObject /Subtype /Form /BBox [0 0 40 40] /Resources 9 0 R",
+        b"/Inner Do",
+    );
+    let inner = stream(
+        "/Type /XObject /Subtype /Form /BBox [0 0 40 40] /Resources << /XObject << /I 8 0 R >> >>",
+        b"q 10 0 0 10 10 10 cm /I Do Q",
+    );
+    let pixels = miniz_oxide::deflate::compress_to_vec_zlib(&[7], 6);
+    let image = stream(
+        "/Type /XObject /Subtype /Image /ColorSpace /DeviceGray /Width 1 /Height 1 /BitsPerComponent 8 /Filter /FlateDecode",
+        &pixels,
+    );
+    let source = fixture(
+        b"/Outer Do q 1 0 0 1 60 0 cm /Outer Do Q",
+        false,
+        "/Resources << /XObject << /Outer 6 0 R >> >>",
+        &[
+            outer,
+            inner,
+            image,
+            b"<< /XObject << /Inner 7 0 R >> >>".to_vec(),
+        ],
+    );
+    let mut jpeg = Vec::new();
+    image::codecs::jpeg::JpegEncoder::new(&mut jpeg)
+        .encode(&[30, 100, 200], 1, 1, image::ExtendedColorType::Rgb8)
+        .unwrap();
+    let hex: String = jpeg.iter().map(|byte| format!("{byte:02x}")).collect();
+    let mut session = open(&source);
+    let selected = target(&session, 0, 0);
+    apply(
+        &mut session,
+        json!({"kind":"replaceImage","target":selected,"assetHex":hex}),
+    )
+    .unwrap();
+
+    let reader = open_pdf(session.output_bytes(), Default::default()).unwrap();
+    let scene = read_pdf_scene(
+        &reader,
+        &PdfSceneRequest {
+            first_page: 0,
+            page_count: 1,
+        },
+    )
+    .unwrap();
+    let images: Vec<_> = scene.pages[0]
+        .elements
+        .iter()
+        .filter_map(|element| match element {
+            PdfSceneElement::Image { value } => Some(value),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(images.len(), 2);
+    assert_eq!(images[0].media_type, "image/jpeg");
+    assert_eq!(images[0].data_hex, hex);
+    assert_eq!(images[1].filter, "FlateDecode");
+    assert_eq!(images[1].data_hex, "07");
+    assert!(images[0].rect.x < images[1].rect.x);
+}
+
+#[test]
 fn invalid_targets_geometry_and_assets_are_atomic() {
     let source = fixture(b"10 20 30 40 re f", true, "", &[]);
     let mut session = open(&source);

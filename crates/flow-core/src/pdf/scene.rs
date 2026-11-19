@@ -4,7 +4,7 @@
 //! elements.  It intentionally does not produce FlowDocument nodes and never
 //! invokes a PDF action, URL, file, or external resource.
 
-use std::collections::BTreeMap;
+use std::{borrow::Cow, collections::BTreeMap};
 
 use serde::{Deserialize, Serialize};
 
@@ -493,11 +493,10 @@ struct SceneBuilder<'a> {
     page: &'a PdfPageRecord,
     elements: Vec<PdfSceneElement>,
     report: PdfReadReport,
-    fonts: BTreeMap<String, FontMap>,
+    fonts: BTreeMap<(PdfObjectRef, String), FontMap>,
     page_refs: BTreeMap<PdfObjectRef, u32>,
     state: GraphicsState,
     state_stack: Vec<GraphicsState>,
-    form_depth: usize,
     invocation_path: Vec<u32>,
 }
 
@@ -527,7 +526,6 @@ impl<'a> SceneBuilder<'a> {
                 .collect(),
             state: GraphicsState::default(),
             state_stack: Vec::new(),
-            form_depth: 0,
             invocation_path: Vec::new(),
         }
     }
@@ -539,7 +537,7 @@ impl<'a> SceneBuilder<'a> {
                 vec![u32::try_from(index).map_err(|_| PdfReadError::NumericLimit)?];
             match self.reader.object(*content_ref) {
                 Ok(PdfValue::Stream(stream)) => {
-                    self.interpret_stream(&stream, *content_ref, 0)?;
+                    self.interpret_stream(&stream, *content_ref, 0, self.page.resources.as_ref())?;
                 }
                 Ok(_) => self.report.push(PdfReadDiagnostic::warning(
                     PdfReadDiagnosticCode::PartialPage,
@@ -572,6 +570,7 @@ impl<'a> SceneBuilder<'a> {
         stream: &PdfStream,
         object_ref: PdfObjectRef,
         depth: usize,
+        resources: Option<&PdfValue>,
     ) -> Result<(), PdfReadError> {
         if depth > self.limits.max_form_depth {
             self.report.push(PdfReadDiagnostic::blocked(
@@ -606,7 +605,7 @@ impl<'a> SceneBuilder<'a> {
                         operand_span: operand_span.take(),
                         invocation_path: self.invocation_path.clone(),
                     };
-                    self.dispatch_operator(&operator, &operands, provenance, depth)?;
+                    self.dispatch_operator(&operator, &operands, provenance, depth, resources)?;
                     operands.clear();
                 }
                 other => {
@@ -630,6 +629,7 @@ impl<'a> SceneBuilder<'a> {
         operands: &[ContentToken],
         provenance: PdfSourceProvenance,
         depth: usize,
+        resources: Option<&PdfValue>,
     ) -> Result<(), PdfReadError> {
         let object_ref = provenance.object_ref;
         match operator {
@@ -709,7 +709,7 @@ impl<'a> SceneBuilder<'a> {
                 self.state.line_matrix = Matrix::IDENTITY;
             }
             "ET" => self.state.in_text = false,
-            "Tf" => self.set_font(operands)?,
+            "Tf" => self.set_font(operands, resources)?,
             "Tm" => {
                 self.state.text_matrix = six_numbers(operands).ok_or(PdfReadError::Syntax)?;
                 self.state.line_matrix = self.state.text_matrix;
@@ -767,7 +767,7 @@ impl<'a> SceneBuilder<'a> {
                     }
                 }
             }
-            "Do" => self.paint_xobject(operands, object_ref, provenance, depth)?,
+            "Do" => self.paint_xobject(operands, object_ref, provenance, depth, resources)?,
             "BI" | "ID" | "EI" => self.report.push(
                 PdfReadDiagnostic::blocked(
                     PdfReadDiagnosticCode::UnsupportedOperator,
@@ -844,7 +844,26 @@ impl<'a> SceneBuilder<'a> {
         Ok(())
     }
 
-    fn set_font(&mut self, operands: &[ContentToken]) -> Result<(), PdfReadError> {
+    fn resource_category<'r>(
+        &self,
+        resources: Option<&'r PdfValue>,
+        category: &str,
+    ) -> Result<Cow<'r, PdfValue>, PdfReadError> {
+        let value = resources
+            .and_then(PdfValue::as_dictionary)
+            .and_then(|dictionary| dictionary.get(category))
+            .ok_or(PdfReadError::ReferenceInvalid)?;
+        match value {
+            PdfValue::Reference(reference) => self.reader.object(*reference).map(Cow::Owned),
+            _ => Ok(Cow::Borrowed(value)),
+        }
+    }
+
+    fn set_font(
+        &mut self,
+        operands: &[ContentToken],
+        resources: Option<&PdfValue>,
+    ) -> Result<(), PdfReadError> {
         let Some(ContentToken::Name(name)) = operands.first() else {
             return Err(PdfReadError::Syntax);
         };
@@ -852,11 +871,18 @@ impl<'a> SceneBuilder<'a> {
             .get(1)
             .and_then(ContentToken::number)
             .ok_or(PdfReadError::Syntax)?;
-        let font = if let Some(font) = self.fonts.get(name) {
+        let font_ref = self
+            .resource_category(resources, "Font")?
+            .as_dictionary()
+            .and_then(|fonts| fonts.get(name))
+            .and_then(PdfValue::as_reference)
+            .ok_or(PdfReadError::ReferenceInvalid)?;
+        let key = (font_ref, name.clone());
+        let font = if let Some(font) = self.fonts.get(&key) {
             font.clone()
         } else {
-            let font = self.load_font(name)?;
-            self.fonts.insert(name.clone(), font.clone());
+            let font = self.load_font(font_ref, name)?;
+            self.fonts.insert(key, font.clone());
             font
         };
         self.state.font_name = Some(name.clone());
@@ -865,23 +891,7 @@ impl<'a> SceneBuilder<'a> {
         Ok(())
     }
 
-    fn load_font(&self, name: &str) -> Result<FontMap, PdfReadError> {
-        let resources = self
-            .page
-            .resources
-            .as_ref()
-            .ok_or(PdfReadError::ReferenceInvalid)?
-            .as_dictionary()
-            .ok_or(PdfReadError::ReferenceInvalid)?;
-        let fonts = resources
-            .get("Font")
-            .ok_or(PdfReadError::ReferenceInvalid)?
-            .as_dictionary()
-            .ok_or(PdfReadError::ReferenceInvalid)?;
-        let font_value = fonts.get(name).ok_or(PdfReadError::ReferenceInvalid)?;
-        let font_ref = font_value
-            .as_reference()
-            .ok_or(PdfReadError::ReferenceInvalid)?;
+    fn load_font(&self, font_ref: PdfObjectRef, name: &str) -> Result<FontMap, PdfReadError> {
         let font = self.reader.object(font_ref)?;
         let dictionary = font.as_dictionary().ok_or(PdfReadError::ReferenceInvalid)?;
         let base_name = dictionary
@@ -1054,22 +1064,15 @@ impl<'a> SceneBuilder<'a> {
         object_ref: PdfObjectRef,
         provenance: PdfSourceProvenance,
         depth: usize,
+        resources: Option<&PdfValue>,
     ) -> Result<(), PdfReadError> {
         let Some(ContentToken::Name(name)) = operands.last() else {
             return Err(PdfReadError::Syntax);
         };
-        let resources = self
-            .page
-            .resources
-            .as_ref()
-            .and_then(PdfValue::as_dictionary)
-            .ok_or(PdfReadError::ReferenceInvalid)?;
-        let xobjects = resources
-            .get("XObject")
-            .and_then(PdfValue::as_dictionary)
-            .ok_or(PdfReadError::ReferenceInvalid)?;
-        let xobject_ref = xobjects
-            .get(name)
+        let xobject_ref = self
+            .resource_category(resources, "XObject")?
+            .as_dictionary()
+            .and_then(|xobjects| xobjects.get(name))
             .and_then(PdfValue::as_reference)
             .ok_or(PdfReadError::ReferenceInvalid)?;
         let xobject = self.reader.object(xobject_ref)?;
@@ -1114,13 +1117,20 @@ impl<'a> SceneBuilder<'a> {
                         },
                     },
                 })?;
-                self.form_depth += 1;
+                let local_resources;
+                let effective_resources = match dictionary.get("Resources") {
+                    Some(PdfValue::Reference(reference)) => {
+                        local_resources = self.reader.object(*reference)?;
+                        Some(&local_resources)
+                    }
+                    Some(value) => Some(value),
+                    None => resources,
+                };
                 self.invocation_path.push(provenance.stream_offset);
-                let result = self.interpret_stream(&stream, xobject_ref, depth + 1);
+                let result =
+                    self.interpret_stream(&stream, xobject_ref, depth + 1, effective_resources);
                 self.invocation_path.pop();
-                result?;
-                self.form_depth = self.form_depth.saturating_sub(1);
-                Ok(())
+                result
             }
             _ => {
                 self.report.push(
