@@ -1817,6 +1817,13 @@ fn native_wire_limits() -> NativeWireLimits {
     }
 }
 
+#[derive(Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+enum NativeRedactionAdmission {
+    Supported,
+    Unavailable,
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct NativeWireSnapshot<S> {
@@ -1825,6 +1832,7 @@ struct NativeWireSnapshot<S> {
     output_hash: [u8; 32],
     consumed_request: u64,
     page_state: NativePageState,
+    redaction_admission: NativeRedactionAdmission,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     fields: Vec<NativeFieldView>,
     scene: S,
@@ -2265,6 +2273,11 @@ impl NativeRegistryEntry {
                         rect,
                     };
                     if matches!(action, AddMark { .. }) {
+                        if !self.session.redaction_admitted() {
+                            return Err(
+                                NativeSessionError::Graph(NativeEditError::Unsupported).code()
+                            );
+                        }
                         self.session
                             .add_redaction_mark(binding, mark)
                             .map_err(map_error)?;
@@ -2475,6 +2488,11 @@ impl NativeRegistryEntry {
             output_hash: snapshot.output_hash,
             consumed_request: snapshot.consumed_request,
             page_state: snapshot.page_state.clone(),
+            redaction_admission: if self.session.redaction_admitted() {
+                NativeRedactionAdmission::Supported
+            } else {
+                NativeRedactionAdmission::Unavailable
+            },
             fields: snapshot.fields.clone(),
             scene: &snapshot.scene,
             output_hex: encode_hex(self.session.output_bytes()),
@@ -2683,6 +2701,10 @@ fn verify_native_snapshot(response: &NativeResponse<NativeVerifiedScene>) -> Opt
         snapshot.scene.scene_hash,
         &snapshot.page_state,
         &snapshot.fields,
+        matches!(
+            snapshot.redaction_admission,
+            NativeRedactionAdmission::Supported
+        ),
     )
     .ok()?
     .then_some(())

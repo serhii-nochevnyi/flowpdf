@@ -471,17 +471,22 @@ for (const locale of ['en', 'uk'] as const) {
 
       lane = controlledWorker()
       await putOriginal(await redactionFixture(true))
+      await expect.element(redaction.getByText(t('redaction.documentUnavailable'), { exact: true })).toBeVisible()
+      expect(redactionButton('redaction.add').query()).toBeNull()
+      expect(redactionButton('redaction.apply').query()).toBeNull()
+      expect(marksOnPage()).toHaveLength(0)
+      expect(newOutput()).toBeNull()
+      await expect.element(button('note.add')).toBeEnabled()
+
+      lane = controlledWorker()
+      await putOriginal(source)
       await fillMark(20, 20, 59, 80)
       await addMark(1)
-      const apply = async () => activate((await openConfirmation('apply', '1', 1)).element())
       const refused = checkpoint()
-      await apply()
-      await expect.element(alert).toHaveTextContent(t('redaction.unsupported'))
-      expect(newOutput()).toBeNull()
-      expect(marksOnPage()).toHaveLength(1)
+      const sourceWrites = put.mock.calls.length
       lane.control.hold = 'stage'
       lane.control.resume = undefined
-      await apply()
+      await activate((await openConfirmation('apply', '1', 1)).element())
       await expect.poll(() => lane.control.resume).toBeTypeOf('function')
       for (const key of ['internal', 'structure', 'text', 'raster'] as const) await assertCheck(key, 'evidence.pending')
       lane.control.die()
@@ -492,7 +497,7 @@ for (const locale of ['en', 'uk'] as const) {
       expect(acceptedScope()?.binding.revision).toBe(0)
       expect(downloads).toHaveLength(refused.downloads)
       expect(urls).toHaveBeenCalledTimes(refused.urls)
-      expect(put).toHaveBeenCalledTimes(2)
+      expect(put).toHaveBeenCalledTimes(sourceWrites)
       expect(clipboard).not.toHaveBeenCalled()
       expect(clipboardItems).not.toHaveBeenCalled()
     } finally {

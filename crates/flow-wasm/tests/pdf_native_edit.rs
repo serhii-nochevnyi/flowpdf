@@ -135,6 +135,75 @@ fn redaction_pdf(size: u32) -> String {
 }
 
 #[test]
+fn redaction_admission_follows_the_accepted_pdf() {
+    let paint = "q 0 0 80 80 re W n 10 10 10 10 re f Q";
+    let clipped = fixture_pdf(&[
+        "<< /Type /Catalog /Pages 2 0 R >>",
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] /Contents 4 0 R >>",
+        &format!("<< /Length {} >>\nstream\n{paint}\nendstream", paint.len()),
+    ]);
+    let opened = call(native_pdf_open, open_request(clipped.as_bytes()));
+    assert_eq!(opened["status"], "opened");
+    let clipped = &opened["snapshot"];
+    assert_eq!(clipped["redactionAdmission"], "unavailable");
+    let rehashed = native_pdf_snapshot(bound("snapshot", 2, clipped).to_string());
+    assert!(verify_native_pdf_response(rehashed.clone()));
+    let reply: Value = serde_json::from_str(&rehashed).unwrap();
+    let previous_hash = reply["resultHash"].as_str().unwrap();
+    let tampered = rehashed.replace(
+        r#""redactionAdmission":"unavailable""#,
+        r#""redactionAdmission":"supported""#,
+    );
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"flowpdf:native-wire:v1");
+    hasher.update(tampered.replace(previous_hash, "").as_bytes());
+    assert!(!verify_native_pdf_response(
+        tampered.replace(previous_hash, hasher.finalize().to_hex().as_str()),
+    ));
+
+    let mark = |snapshot: &Value| {
+        json!({"kind":"addMark","pageId":snapshot["pageState"]["order"][0],
+            "rect":[12000,12000,13000,13000]})
+    };
+    let refused = call(
+        native_pdf_redaction,
+        redaction_request(2, clipped, mark(clipped)),
+    );
+    assert_eq!(refused["code"], "FLOW_PDF_NATIVE_UNSUPPORTED");
+    status_only(&refused);
+    assert_eq!(
+        call(native_pdf_close, bound("close", 3, clipped))["status"],
+        "closed"
+    );
+
+    let source = redaction_pdf(100);
+    let opened = call(native_pdf_open, open_request(source.as_bytes()));
+    let before = &opened["snapshot"];
+    assert_eq!(before["redactionAdmission"], "supported");
+    let mut edit = bound("command", 2, before);
+    edit["outputHash"] = before["outputHash"].clone();
+    edit["command"] = json!({"kind":"addCheckboxField","page":0,"name":"approved",
+        "rect":[60,60,80,80],"checked":false});
+    let response = call(native_pdf_command, edit);
+    assert_eq!(response["status"], "applied", "{response}");
+    let after = &response["snapshot"];
+    assert_eq!(after["binding"]["revision"], 1);
+    assert_eq!(after["fields"][0]["checked"], false);
+    assert_eq!(after["redactionAdmission"], "unavailable");
+    let refused = call(
+        native_pdf_redaction,
+        redaction_request(3, after, mark(after)),
+    );
+    assert_eq!(refused["code"], "FLOW_PDF_NATIVE_UNSUPPORTED");
+    status_only(&refused);
+    assert_eq!(
+        call(native_pdf_close, bound("close", 4, after))["status"],
+        "closed"
+    );
+}
+
+#[test]
 fn redaction_wire_releases_only_the_verified_exact_output() {
     let source = redaction_pdf(100);
     let opened = call(native_pdf_open, open_request(source.as_bytes()));
