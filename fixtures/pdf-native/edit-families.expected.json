@@ -141,7 +141,7 @@
         {
           "page": 2,
           "sourcePage": 2,
-          "text": "ЇAA B",
+          "text": "",
           "cropBoxPt": [
             4,
             4,
@@ -151,6 +151,23 @@
           "rotation": 90,
           "widthPx": 184,
           "heightPx": 304,
+          "raster": {
+            "comparison": "equal-to-source"
+          }
+        },
+        {
+          "page": 3,
+          "sourcePage": 3,
+          "text": "",
+          "cropBoxPt": [
+            0,
+            0,
+            160,
+            100
+          ],
+          "rotation": 0,
+          "widthPx": 320,
+          "heightPx": 200,
           "raster": {
             "comparison": "equal-to-source"
           }
@@ -247,7 +264,7 @@
         {
           "page": 2,
           "sourcePage": 2,
-          "text": "ЇAA B",
+          "text": "",
           "cropBoxPt": [
             4,
             4,
@@ -257,6 +274,23 @@
           "rotation": 90,
           "widthPx": 184,
           "heightPx": 304,
+          "raster": {
+            "comparison": "equal-to-source"
+          }
+        },
+        {
+          "page": 3,
+          "sourcePage": 3,
+          "text": "",
+          "cropBoxPt": [
+            0,
+            0,
+            160,
+            100
+          ],
+          "rotation": 0,
+          "widthPx": 320,
+          "heightPx": 200,
           "raster": {
             "comparison": "equal-to-source"
           }
@@ -353,7 +387,7 @@
         {
           "page": 2,
           "sourcePage": 2,
-          "text": "ЇAA B",
+          "text": "",
           "cropBoxPt": [
             4,
             4,
@@ -366,13 +400,30 @@
           "raster": {
             "comparison": "equal-to-source"
           }
+        },
+        {
+          "page": 3,
+          "sourcePage": 3,
+          "text": "",
+          "cropBoxPt": [
+            0,
+            0,
+            160,
+            100
+          ],
+          "rotation": 0,
+          "widthPx": 320,
+          "heightPx": 200,
+          "raster": {
+            "comparison": "equal-to-source"
+          }
         }
       ]
     },
     {
       "operation": "addGraphic",
       "request": {
-        "page": 1,
+        "page": 3,
         "graphic": {
           "shape": "rectangle",
           "pointsPt": [
@@ -396,10 +447,10 @@
       },
       "outcome": "admitted",
       "affectedSourcePages": [
-        1
+        3
       ],
       "affectedPages": [
-        1
+        3
       ],
       "output": "rewritten",
       "removed": [],
@@ -469,6 +520,40 @@
           "widthPx": 320,
           "heightPx": 200,
           "raster": {
+            "comparison": "equal-to-source"
+          }
+        },
+        {
+          "page": 2,
+          "sourcePage": 2,
+          "text": "",
+          "cropBoxPt": [
+            4,
+            4,
+            156,
+            96
+          ],
+          "rotation": 90,
+          "widthPx": 184,
+          "heightPx": 304,
+          "raster": {
+            "comparison": "equal-to-source"
+          }
+        },
+        {
+          "page": 3,
+          "sourcePage": 3,
+          "text": "",
+          "cropBoxPt": [
+            0,
+            0,
+            160,
+            100
+          ],
+          "rotation": 0,
+          "widthPx": 320,
+          "heightPx": 200,
+          "raster": {
             "comparison": "source-with-patches",
             "patches": [
               {
@@ -486,23 +571,6 @@
               }
             ]
           }
-        },
-        {
-          "page": 2,
-          "sourcePage": 2,
-          "text": "ЇAA B",
-          "cropBoxPt": [
-            4,
-            4,
-            156,
-            96
-          ],
-          "rotation": 90,
-          "widthPx": 184,
-          "heightPx": 304,
-          "raster": {
-            "comparison": "equal-to-source"
-          }
         }
       ]
     },
@@ -510,7 +578,7 @@
       "operation": "replaceGraphic",
       "request": {
         "target": {
-          "page": 1,
+          "page": 3,
           "kind": "path",
           "rectPt": [
             16,
@@ -542,14 +610,14 @@
       },
       "outcome": "admitted",
       "affectedSourcePages": [
-        1
+        3
       ],
       "affectedPages": [
-        1
+        3
       ],
       "output": "rewritten",
       "removed": [
-        "page-1 original red path"
+        "page-3 original red path"
       ],
       "noteReadback": [
         {
@@ -607,6 +675,40 @@
           "page": 1,
           "sourcePage": 1,
           "text": "ЇAA B",
+          "cropBoxPt": [
+            0,
+            0,
+            160,
+            100
+          ],
+          "rotation": 0,
+          "widthPx": 320,
+          "heightPx": 200,
+          "raster": {
+            "comparison": "equal-to-source"
+          }
+        },
+        {
+          "page": 2,
+          "sourcePage": 2,
+          "text": "",
+          "cropBoxPt": [
+            4,
+            4,
+            156,
+            96
+          ],
+          "rotation": 90,
+          "widthPx": 184,
+          "heightPx": 304,
+          "raster": {
+            "comparison": "equal-to-source"
+          }
+        },
+        {
+          "page": 3,
+          "sourcePage": 3,
+          "text": "",
           "cropBoxPt": [
             0,
             0,
@@ -634,30 +736,13 @@
               }
             ]
           }
-        },
-        {
-          "page": 2,
-          "sourcePage": 2,
-          "text": "ЇAA B",
-          "cropBoxPt": [
-            4,
-            4,
-            156,
-            96
-          ],
-          "rotation": 90,
-          "widthPx": 184,
-          "heightPx": 304,
-          "raster": {
-            "comparison": "equal-to-source"
-          }
         }
       ]
     },
     {
       "operation": "addImage",
       "request": {
-        "page": 1,
+        "page": 3,
         "rectPt": [
           106,
           44,
@@ -668,10 +753,10 @@
       },
       "outcome": "admitted",
       "affectedSourcePages": [
-        1
+        3
       ],
       "affectedPages": [
-        1
+        3
       ],
       "output": "rewritten",
       "removed": [],
@@ -731,6 +816,40 @@
           "page": 1,
           "sourcePage": 1,
           "text": "ЇAA B",
+          "cropBoxPt": [
+            0,
+            0,
+            160,
+            100
+          ],
+          "rotation": 0,
+          "widthPx": 320,
+          "heightPx": 200,
+          "raster": {
+            "comparison": "equal-to-source"
+          }
+        },
+        {
+          "page": 2,
+          "sourcePage": 2,
+          "text": "",
+          "cropBoxPt": [
+            4,
+            4,
+            156,
+            96
+          ],
+          "rotation": 90,
+          "widthPx": 184,
+          "heightPx": 304,
+          "raster": {
+            "comparison": "equal-to-source"
+          }
+        },
+        {
+          "page": 3,
+          "sourcePage": 3,
+          "text": "",
           "cropBoxPt": [
             0,
             0,
@@ -758,23 +877,6 @@
               }
             ]
           }
-        },
-        {
-          "page": 2,
-          "sourcePage": 2,
-          "text": "ЇAA B",
-          "cropBoxPt": [
-            4,
-            4,
-            156,
-            96
-          ],
-          "rotation": 90,
-          "widthPx": 184,
-          "heightPx": 304,
-          "raster": {
-            "comparison": "equal-to-source"
-          }
         }
       ]
     },
@@ -782,7 +884,7 @@
       "operation": "replaceImage",
       "request": {
         "target": {
-          "page": 1,
+          "page": 3,
           "kind": "image",
           "rectPt": [
             48,
@@ -795,14 +897,14 @@
       },
       "outcome": "admitted",
       "affectedSourcePages": [
-        1
+        3
       ],
       "affectedPages": [
-        1
+        3
       ],
       "output": "rewritten",
       "removed": [
-        "page-1 first original image invocation"
+        "page-3 first original image invocation"
       ],
       "noteReadback": [
         {
@@ -870,6 +972,40 @@
           "widthPx": 320,
           "heightPx": 200,
           "raster": {
+            "comparison": "equal-to-source"
+          }
+        },
+        {
+          "page": 2,
+          "sourcePage": 2,
+          "text": "",
+          "cropBoxPt": [
+            4,
+            4,
+            156,
+            96
+          ],
+          "rotation": 90,
+          "widthPx": 184,
+          "heightPx": 304,
+          "raster": {
+            "comparison": "equal-to-source"
+          }
+        },
+        {
+          "page": 3,
+          "sourcePage": 3,
+          "text": "",
+          "cropBoxPt": [
+            0,
+            0,
+            160,
+            100
+          ],
+          "rotation": 0,
+          "widthPx": 320,
+          "heightPx": 200,
+          "raster": {
             "comparison": "source-with-patches",
             "patches": [
               {
@@ -887,23 +1023,6 @@
               }
             ]
           }
-        },
-        {
-          "page": 2,
-          "sourcePage": 2,
-          "text": "ЇAA B",
-          "cropBoxPt": [
-            4,
-            4,
-            156,
-            96
-          ],
-          "rotation": 90,
-          "widthPx": 184,
-          "heightPx": 304,
-          "raster": {
-            "comparison": "equal-to-source"
-          }
         }
       ]
     },
@@ -911,7 +1030,7 @@
       "operation": "moveObject",
       "request": {
         "target": {
-          "page": 1,
+          "page": 3,
           "kind": "image",
           "rectPt": [
             48,
@@ -931,10 +1050,10 @@
       },
       "outcome": "admitted",
       "affectedSourcePages": [
-        1
+        3
       ],
       "affectedPages": [
-        1
+        3
       ],
       "output": "rewritten",
       "removed": [],
@@ -994,6 +1113,40 @@
           "page": 1,
           "sourcePage": 1,
           "text": "ЇAA B",
+          "cropBoxPt": [
+            0,
+            0,
+            160,
+            100
+          ],
+          "rotation": 0,
+          "widthPx": 320,
+          "heightPx": 200,
+          "raster": {
+            "comparison": "equal-to-source"
+          }
+        },
+        {
+          "page": 2,
+          "sourcePage": 2,
+          "text": "",
+          "cropBoxPt": [
+            4,
+            4,
+            156,
+            96
+          ],
+          "rotation": 90,
+          "widthPx": 184,
+          "heightPx": 304,
+          "raster": {
+            "comparison": "equal-to-source"
+          }
+        },
+        {
+          "page": 3,
+          "sourcePage": 3,
+          "text": "",
           "cropBoxPt": [
             0,
             0,
@@ -1034,23 +1187,6 @@
               }
             ]
           }
-        },
-        {
-          "page": 2,
-          "sourcePage": 2,
-          "text": "ЇAA B",
-          "cropBoxPt": [
-            4,
-            4,
-            156,
-            96
-          ],
-          "rotation": 90,
-          "widthPx": 184,
-          "heightPx": 304,
-          "raster": {
-            "comparison": "equal-to-source"
-          }
         }
       ]
     },
@@ -1058,7 +1194,7 @@
       "operation": "removeObject",
       "request": {
         "target": {
-          "page": 1,
+          "page": 3,
           "kind": "path",
           "rectPt": [
             16,
@@ -1070,14 +1206,14 @@
       },
       "outcome": "admitted",
       "affectedSourcePages": [
-        1
+        3
       ],
       "affectedPages": [
-        1
+        3
       ],
       "output": "rewritten",
       "removed": [
-        "page-1 original red path"
+        "page-3 original red path"
       ],
       "noteReadback": [
         {
@@ -1145,6 +1281,40 @@
           "widthPx": 320,
           "heightPx": 200,
           "raster": {
+            "comparison": "equal-to-source"
+          }
+        },
+        {
+          "page": 2,
+          "sourcePage": 2,
+          "text": "",
+          "cropBoxPt": [
+            4,
+            4,
+            156,
+            96
+          ],
+          "rotation": 90,
+          "widthPx": 184,
+          "heightPx": 304,
+          "raster": {
+            "comparison": "equal-to-source"
+          }
+        },
+        {
+          "page": 3,
+          "sourcePage": 3,
+          "text": "",
+          "cropBoxPt": [
+            0,
+            0,
+            160,
+            100
+          ],
+          "rotation": 0,
+          "widthPx": 320,
+          "heightPx": 200,
+          "raster": {
             "comparison": "source-with-patches",
             "patches": [
               {
@@ -1162,23 +1332,6 @@
               }
             ]
           }
-        },
-        {
-          "page": 2,
-          "sourcePage": 2,
-          "text": "ЇAA B",
-          "cropBoxPt": [
-            4,
-            4,
-            156,
-            96
-          ],
-          "rotation": 90,
-          "widthPx": 184,
-          "heightPx": 304,
-          "raster": {
-            "comparison": "equal-to-source"
-          }
         }
       ]
     },
@@ -1186,7 +1339,7 @@
       "operation": "moveObjectInvalidGeometry",
       "request": {
         "target": {
-          "page": 1,
+          "page": 3,
           "kind": "image",
           "rectPt": [
             48,
@@ -1281,7 +1434,7 @@
         {
           "page": 2,
           "sourcePage": 2,
-          "text": "ЇAA B",
+          "text": "",
           "cropBoxPt": [
             4,
             4,
@@ -1291,6 +1444,23 @@
           "rotation": 90,
           "widthPx": 184,
           "heightPx": 304,
+          "raster": {
+            "comparison": "equal-to-source"
+          }
+        },
+        {
+          "page": 3,
+          "sourcePage": 3,
+          "text": "",
+          "cropBoxPt": [
+            0,
+            0,
+            160,
+            100
+          ],
+          "rotation": 0,
+          "widthPx": 320,
+          "heightPx": 200,
           "raster": {
             "comparison": "equal-to-source"
           }
@@ -1382,7 +1552,7 @@
         {
           "page": 2,
           "sourcePage": 2,
-          "text": "ЇAA B",
+          "text": "",
           "cropBoxPt": [
             4,
             4,
@@ -1413,6 +1583,23 @@
             "comparison": "analytic-full-page",
             "fills": [],
             "sha256Rgb8": "7f87ec14c2318434151a875cf2c00a4cc7aaf1b444501c5a17c6f4bb6177a625"
+          }
+        },
+        {
+          "page": 4,
+          "sourcePage": 3,
+          "text": "",
+          "cropBoxPt": [
+            0,
+            0,
+            160,
+            100
+          ],
+          "rotation": 0,
+          "widthPx": 320,
+          "heightPx": 200,
+          "raster": {
+            "comparison": "equal-to-source"
           }
         }
       ]
@@ -1489,7 +1676,7 @@
         {
           "page": 1,
           "sourcePage": 2,
-          "text": "ЇAA B",
+          "text": "",
           "cropBoxPt": [
             4,
             4,
@@ -1507,6 +1694,23 @@
           "page": 2,
           "sourcePage": 1,
           "text": "ЇAA B",
+          "cropBoxPt": [
+            0,
+            0,
+            160,
+            100
+          ],
+          "rotation": 0,
+          "widthPx": 320,
+          "heightPx": 200,
+          "raster": {
+            "comparison": "equal-to-source"
+          }
+        },
+        {
+          "page": 3,
+          "sourcePage": 3,
+          "text": "",
           "cropBoxPt": [
             0,
             0,
@@ -1609,7 +1813,7 @@
         {
           "page": 2,
           "sourcePage": 2,
-          "text": "ЇAA B",
+          "text": "",
           "cropBoxPt": [
             4,
             4,
@@ -1621,6 +1825,23 @@
           "heightPx": 184,
           "raster": {
             "comparison": "source-transformed"
+          }
+        },
+        {
+          "page": 3,
+          "sourcePage": 3,
+          "text": "",
+          "cropBoxPt": [
+            0,
+            0,
+            160,
+            100
+          ],
+          "rotation": 0,
+          "widthPx": 320,
+          "heightPx": 200,
+          "raster": {
+            "comparison": "equal-to-source"
           }
         }
       ]
@@ -1764,7 +1985,7 @@
         {
           "page": 3,
           "sourcePage": 2,
-          "text": "ЇAA B",
+          "text": "",
           "cropBoxPt": [
             4,
             4,
@@ -1774,6 +1995,23 @@
           "rotation": 90,
           "widthPx": 184,
           "heightPx": 304,
+          "raster": {
+            "comparison": "equal-to-source"
+          }
+        },
+        {
+          "page": 4,
+          "sourcePage": 3,
+          "text": "",
+          "cropBoxPt": [
+            0,
+            0,
+            160,
+            100
+          ],
+          "rotation": 0,
+          "widthPx": 320,
+          "heightPx": 200,
           "raster": {
             "comparison": "equal-to-source"
           }
@@ -1806,7 +2044,7 @@
         {
           "page": 1,
           "sourcePage": 2,
-          "text": "ЇAA B",
+          "text": "",
           "cropBoxPt": [
             4,
             4,
@@ -1816,6 +2054,23 @@
           "rotation": 90,
           "widthPx": 184,
           "heightPx": 304,
+          "raster": {
+            "comparison": "equal-to-source"
+          }
+        },
+        {
+          "page": 2,
+          "sourcePage": 3,
+          "text": "",
+          "cropBoxPt": [
+            0,
+            0,
+            160,
+            100
+          ],
+          "rotation": 0,
+          "widthPx": 320,
+          "heightPx": 200,
           "raster": {
             "comparison": "equal-to-source"
           }
@@ -1829,6 +2084,10 @@
           {
             "operation": "deletePage",
             "page": 1
+          },
+          {
+            "operation": "deletePage",
+            "page": 2
           }
         ],
         "page": 1
@@ -1845,7 +2104,7 @@
         {
           "page": 1,
           "sourcePage": 2,
-          "text": "ЇAA B",
+          "text": "",
           "cropBoxPt": [
             4,
             4,
@@ -1968,7 +2227,7 @@
         {
           "page": 2,
           "sourcePage": 2,
-          "text": "ЇAA B",
+          "text": "",
           "cropBoxPt": [
             4,
             4,
@@ -1978,6 +2237,23 @@
           "rotation": 90,
           "widthPx": 184,
           "heightPx": 304,
+          "raster": {
+            "comparison": "equal-to-source"
+          }
+        },
+        {
+          "page": 3,
+          "sourcePage": 3,
+          "text": "",
+          "cropBoxPt": [
+            0,
+            0,
+            160,
+            100
+          ],
+          "rotation": 0,
+          "widthPx": 320,
+          "heightPx": 200,
           "raster": {
             "comparison": "equal-to-source"
           }
@@ -2093,7 +2369,7 @@
         {
           "page": 2,
           "sourcePage": 2,
-          "text": "ЇAA B",
+          "text": "",
           "cropBoxPt": [
             4,
             4,
@@ -2103,6 +2379,23 @@
           "rotation": 90,
           "widthPx": 184,
           "heightPx": 304,
+          "raster": {
+            "comparison": "equal-to-source"
+          }
+        },
+        {
+          "page": 3,
+          "sourcePage": 3,
+          "text": "",
+          "cropBoxPt": [
+            0,
+            0,
+            160,
+            100
+          ],
+          "rotation": 0,
+          "widthPx": 320,
+          "heightPx": 200,
           "raster": {
             "comparison": "equal-to-source"
           }
@@ -2196,7 +2489,7 @@
         {
           "page": 2,
           "sourcePage": 2,
-          "text": "ЇAA B",
+          "text": "",
           "cropBoxPt": [
             4,
             4,
@@ -2206,6 +2499,23 @@
           "rotation": 90,
           "widthPx": 184,
           "heightPx": 304,
+          "raster": {
+            "comparison": "equal-to-source"
+          }
+        },
+        {
+          "page": 3,
+          "sourcePage": 3,
+          "text": "",
+          "cropBoxPt": [
+            0,
+            0,
+            160,
+            100
+          ],
+          "rotation": 0,
+          "widthPx": 320,
+          "heightPx": 200,
           "raster": {
             "comparison": "equal-to-source"
           }
@@ -2299,7 +2609,7 @@
         {
           "page": 2,
           "sourcePage": 2,
-          "text": "ЇAA B",
+          "text": "",
           "cropBoxPt": [
             4,
             4,
@@ -2309,6 +2619,23 @@
           "rotation": 90,
           "widthPx": 184,
           "heightPx": 304,
+          "raster": {
+            "comparison": "equal-to-source"
+          }
+        },
+        {
+          "page": 3,
+          "sourcePage": 3,
+          "text": "",
+          "cropBoxPt": [
+            0,
+            0,
+            160,
+            100
+          ],
+          "rotation": 0,
+          "widthPx": 320,
+          "heightPx": 200,
           "raster": {
             "comparison": "equal-to-source"
           }
@@ -2408,7 +2735,7 @@
         {
           "page": 2,
           "sourcePage": 2,
-          "text": "ЇAA B",
+          "text": "",
           "cropBoxPt": [
             4,
             4,
@@ -2418,6 +2745,23 @@
           "rotation": 90,
           "widthPx": 184,
           "heightPx": 304,
+          "raster": {
+            "comparison": "equal-to-source"
+          }
+        },
+        {
+          "page": 3,
+          "sourcePage": 3,
+          "text": "",
+          "cropBoxPt": [
+            0,
+            0,
+            160,
+            100
+          ],
+          "rotation": 0,
+          "widthPx": 320,
+          "heightPx": 200,
           "raster": {
             "comparison": "equal-to-source"
           }
@@ -2500,7 +2844,7 @@
         {
           "page": 2,
           "sourcePage": 2,
-          "text": "ЇAA B",
+          "text": "",
           "cropBoxPt": [
             4,
             4,
@@ -2510,6 +2854,23 @@
           "rotation": 90,
           "widthPx": 184,
           "heightPx": 304,
+          "raster": {
+            "comparison": "equal-to-source"
+          }
+        },
+        {
+          "page": 3,
+          "sourcePage": 3,
+          "text": "",
+          "cropBoxPt": [
+            0,
+            0,
+            160,
+            100
+          ],
+          "rotation": 0,
+          "widthPx": 320,
+          "heightPx": 200,
           "raster": {
             "comparison": "equal-to-source"
           }
@@ -2599,7 +2960,7 @@
         {
           "page": 2,
           "sourcePage": 2,
-          "text": "ЇAA B",
+          "text": "",
           "cropBoxPt": [
             4,
             4,
@@ -2609,6 +2970,23 @@
           "rotation": 90,
           "widthPx": 184,
           "heightPx": 304,
+          "raster": {
+            "comparison": "equal-to-source"
+          }
+        },
+        {
+          "page": 3,
+          "sourcePage": 3,
+          "text": "",
+          "cropBoxPt": [
+            0,
+            0,
+            160,
+            100
+          ],
+          "rotation": 0,
+          "widthPx": 320,
+          "heightPx": 200,
           "raster": {
             "comparison": "equal-to-source"
           }
@@ -2707,7 +3085,7 @@
         {
           "page": 2,
           "sourcePage": 2,
-          "text": "ЇAA B",
+          "text": "",
           "cropBoxPt": [
             4,
             4,
@@ -2717,6 +3095,23 @@
           "rotation": 90,
           "widthPx": 184,
           "heightPx": 304,
+          "raster": {
+            "comparison": "equal-to-source"
+          }
+        },
+        {
+          "page": 3,
+          "sourcePage": 3,
+          "text": "",
+          "cropBoxPt": [
+            0,
+            0,
+            160,
+            100
+          ],
+          "rotation": 0,
+          "widthPx": 320,
+          "heightPx": 200,
           "raster": {
             "comparison": "equal-to-source"
           }

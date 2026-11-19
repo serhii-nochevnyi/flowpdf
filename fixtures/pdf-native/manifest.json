@@ -103,11 +103,11 @@
       "admission": "admitted",
       "source": {
         "path": "fixtures/pdf-native/edit-families.pdf",
-        "sha256": "f31e25833370766a0a4ce67f45f3dc1d2d264286340c29438e453aba2da381db"
+        "sha256": "006f86e7d1fa253edb21c90b213737d2fa71828fcc2fee9edb2c28b96748904d"
       },
       "expected": {
         "path": "fixtures/pdf-native/edit-families.expected.json",
-        "sha256": "5618a696baf47e48f2033bf03b8b440b6427cc2c7d2f834ac53ee5f276da7e45"
+        "sha256": "56e76bdcc43f0ae5709f8f58d890fc26fdabff688053660cfeaccf2f76bc7c00"
       }
     },
     {

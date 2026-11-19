@@ -182,27 +182,91 @@ test("generator is independent of the application and native writer", () => {
 const crop = [0, 0, 160, 100];
 const rotatedCrop = [4, 4, 156, 96];
 const pagePlans = {
-  replaceText: [[1], [1, 2], "source-with-patches"],
-  addGraphic: [[1], [1, 2], "source-with-patches"],
-  replaceGraphic: [[1], [1, 2], "source-with-patches"],
-  addImage: [[1], [1, 2], "source-with-patches"],
-  replaceImage: [[1], [1, 2], "source-with-patches"],
-  moveObject: [[1], [1, 2], "source-with-patches"],
-  removeObject: [[1], [1, 2], "source-with-patches"],
-  insertBlankPage: [[], [1, 2, null]],
-  reorderPage: [[1, 2], [2, 1]],
-  rotatePage: [[2], [1, 2]],
-  duplicatePage: [[1], [1, 1, 2]],
-  deletePage: [[1, 2], [2]],
+  replaceText: [[1], [1, 2, 3], "source-with-patches"],
+  addGraphic: [[3], [1, 2, 3], "source-with-patches"],
+  replaceGraphic: [[3], [1, 2, 3], "source-with-patches"],
+  addImage: [[3], [1, 2, 3], "source-with-patches"],
+  replaceImage: [[3], [1, 2, 3], "source-with-patches"],
+  moveObject: [[3], [1, 2, 3], "source-with-patches"],
+  removeObject: [[3], [1, 2, 3], "source-with-patches"],
+  insertBlankPage: [[], [1, 2, null, 3]],
+  reorderPage: [[1, 2], [2, 1, 3]],
+  rotatePage: [[2], [1, 2, 3]],
+  duplicatePage: [[1], [1, 1, 2, 3]],
+  deletePage: [[1, 2], [2, 3]],
   deleteFinalPage: [[], [2]],
-  addTextField: [[1], [1, 2]],
-  addCheckboxField: [[1], [1, 2]],
-  setFieldText: [[1], [1, 2]],
-  setFieldChecked: [[1], [1, 2]],
-  moveField: [[1], [1, 2]],
-  removeField: [[1], [1, 2]],
+  addTextField: [[1], [1, 2, 3]],
+  addCheckboxField: [[1], [1, 2, 3]],
+  setFieldText: [[1], [1, 2, 3]],
+  setFieldChecked: [[1], [1, 2, 3]],
+  moveField: [[1], [1, 2, 3]],
+  removeField: [[1], [1, 2, 3]],
   redact: [[1], [1, 2], "analytic-full-page"],
 };
+
+const white = [255, 255, 255];
+const green = [0, 255, 0];
+const newGray = [64, 64, 64];
+const originalGray = [160, 160, 160];
+const pathRect = [16, 44, 28, 56];
+const firstImageRect = [48, 44, 64, 56];
+const newObjectRect = [106, 44, 122, 56];
+const patch = (rectPt, rgb) => ({ rectPt, rgb });
+const pagePatches = {
+  replaceText: [{
+    ...patch([12, 70, 40, 92], white),
+    glyphRun: { cids: [3, 1], baselinePt: [16, 76], sizePt: 12 },
+  }],
+  addGraphic: [patch(newObjectRect, green)],
+  replaceGraphic: [patch(pathRect, green)],
+  addImage: [patch(newObjectRect, newGray)],
+  replaceImage: [patch(firstImageRect, newGray)],
+  moveObject: [patch(firstImageRect, white), patch([48, 32, 64, 44], originalGray)],
+  removeObject: [patch(pathRect, white)],
+};
+
+function verifyEditReadback(entry, order, label) {
+  const operation = entry.operation;
+  const noteRect = [128, 68, 144, 84];
+  const textRect = [16, 12, 64, 32];
+  const checkboxRect = [80, 12, 100, 32];
+  const textField = (page, name, rectPt, value = "", defaultValue = "") =>
+    ({ page, rectPt, name, value, defaultValue });
+  const checkbox = (page, name, rectPt, value = "Off") =>
+    ({ page, rectPt, name, value, defaultValue: "Off", appearanceState: value });
+
+  const textPages = order.flatMap((source, index) => source === 1 ? [index + 1] : []);
+  same(entry.noteReadback, textPages.map((page) =>
+    ({ page, rectPt: noteRect, contents: "Control note" })), label + " notes");
+
+  const fields = textPages.flatMap((page, index) => {
+    if (index > 0) return [
+      textField(page, "FlowPDFCopy18_0", textRect),
+      checkbox(page, "FlowPDFCopy19_0", checkboxRect),
+    ];
+
+    const result = [];
+    if (operation !== "removeField") {
+      result.push(textField(page, "recipient", textRect, operation === "setFieldText" ? "ЇA" : ""));
+    }
+    result.push(checkbox(page, "accepted", operation === "moveField" ? [104, 12, 124, 32] : checkboxRect,
+      operation === "setFieldChecked" ? "Yes" : "Off"));
+    if (operation === "addTextField") {
+      result.push(textField(page, "reviewer", [104, 12, 152, 32], "AB", "AB"));
+    }
+    if (operation === "addCheckboxField") {
+      result.push(checkbox(page, "approval", [104, 12, 124, 32]));
+    }
+    return result;
+  });
+  same(entry.fieldReadback, fields, label + " fields");
+
+  const [target] = textPages;
+  same(entry.destinations, target === undefined ? [] : [
+    { kind: "outline", title: "First page", target },
+    { kind: "link", page: order.indexOf(2) + 1, target },
+  ], label + " destinations");
+}
 
 function verifyPaint(paint, bounds, label, allowGlyphs) {
   keys(paint, ["rectPt", "rgb", ...(allowGlyphs ? ["glyphRun"] : [])], label);
@@ -260,18 +324,20 @@ test("edit families and redaction pin operation outcomes, page identities, text 
       ], label);
       assert.ok(Object.keys(entry.request).length > 0, label + " request missing");
       const refusal = profile.operations[op];
-      const [affected, order, firstComparison] = pagePlans[op] ?? [[], [1, 2]];
+      const [affected, order, firstComparison] = pagePlans[op] ?? [[], [1, 2, 3]];
       same(entry.outcome, refusal ? "FLOW_PDF_NATIVE_" + refusal : "admitted", label);
       same(entry.output, refusal ? "byte-identical-to-operation-base" : "rewritten", label);
       same(entry.affectedSourcePages, affected, label);
       same(entry.affectedPages, order.flatMap((source, index) =>
         affected.includes(source) || source === null ? [index + 1] : []), label);
       same(entry.pages.map(({ sourcePage }) => sourcePage), order, label);
+      if (id === "edit-families") verifyEditReadback(entry, order, label);
       for (const [index, page] of entry.pages.entries()) {
         const pageLabel = label + "/page-" + (index + 1);
         keys(page, ["page", "sourcePage", "text", "cropBoxPt", "rotation", "widthPx", "heightPx", "raster"], pageLabel);
         same(page.page, index + 1, pageLabel);
-        const inherited = id === "edit-families" && page.sourcePage !== 1;
+        const inherited = id === "edit-families"
+          && (page.sourcePage === 2 || page.sourcePage === null);
         const rotation = inherited ? (op === "rotatePage" ? 180 : 90) : 0;
         same(page.rotation, rotation, pageLabel);
         same(page.cropBoxPt, inherited ? rotatedCrop : crop, pageLabel);
@@ -279,9 +345,10 @@ test("edit families and redaction pin operation outcomes, page identities, text 
           ? (rotation === 90 ? [184, 304] : [304, 184])
           : [320, 200], pageLabel);
         const text = id === "redaction" ? (index === 0 ? "" : "B")
-          : page.sourcePage === null ? "" : op === "replaceText" && index === 0 ? "ЇA B" : "ЇAA B";
+          : page.sourcePage !== 1 ? "" : op === "replaceText" ? "ЇA B" : "ЇAA B";
         same(page.text, text, pageLabel);
-        let comparison = index === 0 && firstComparison ? firstComparison : "equal-to-source";
+        let comparison = affected.includes(page.sourcePage) && firstComparison
+          ? firstComparison : "equal-to-source";
         if (page.sourcePage === null) comparison = "analytic-full-page";
         if (op === "rotatePage" && page.sourcePage === 2) comparison = "source-transformed";
         same(page.raster.comparison, comparison, pageLabel);
@@ -289,7 +356,7 @@ test("edit families and redaction pin operation outcomes, page identities, text 
           verifyAnalyticRaster(page, pageLabel, id === "redaction" ? fills : []);
         } else if (comparison === "source-with-patches") {
           keys(page.raster, ["comparison", "patches"], pageLabel);
-          same(page.raster.patches.length, op === "moveObject" ? 2 : 1, pageLabel);
+          same(page.raster.patches, pagePatches[op], pageLabel);
           for (const paint of page.raster.patches) verifyPaint(paint, crop, pageLabel, op === "replaceText");
         } else {
           keys(page.raster, ["comparison"], pageLabel);

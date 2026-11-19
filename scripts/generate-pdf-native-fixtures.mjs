@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { readFileSync, writeFileSync } from "node:fs";
-import { constants, deflateSync } from "node:zlib";
+import { constants, deflateSync, inflateSync } from "node:zlib";
 
 const output = new URL("../fixtures/pdf-native/", import.meta.url);
 const data = new URL("../crates/flow-core/data/", import.meta.url);
@@ -50,7 +50,29 @@ const font = pinnedAsset("NotoSans-Regular.ttf",
   "b85c38ecea8a7cfb39c24e395a4007474fa5a4fc864f6ee33309eb4948d232d5");
 pinnedAsset("NotoSans-OFL.txt",
   "12e55f73bf39d88d7f2e37e094ad30b8f6752b3d25391ac23978b1e5e35ca66b");
-const encodedFont = deflateSync(font, { level: 9 });
+function encodeFont() {
+  const encodingHash = "d646c6930abab2de1bf59340b1bfb57aa7a3b566fa2b089fb946e1ca9ddac9f9";
+  const matches = (bytes) => createHash("sha256").update(bytes).digest("hex") === encodingHash;
+  const generated = deflateSync(font, { level: 9 });
+  if (matches(generated)) return generated;
+
+  // Different zlib builds can emit distinct bytes for the same font. Recover only
+  // the pinned encoding from the legacy fixture to keep its PDF bytes reproducible.
+  const legacy = readFileSync(new URL("notes-preservation.pdf", output));
+  if (legacy.length > MAX_BYTES) throw new Error("Legacy fixture byte limit");
+  const encodedLength = 285958;
+  const header = Buffer.from(`/Filter /FlateDecode /Length ${encodedLength} /Length1 ${font.length} >>\nstream\n`);
+  const offset = legacy.indexOf(header);
+  const start = offset + header.length;
+  const encoded = legacy.subarray(start, start + encodedLength);
+  if (offset < 0 || !matches(encoded) ||
+      !inflateSync(encoded, { maxOutputLength: font.length }).equals(font)) {
+    throw new Error("Legacy fixture font encoding mismatch");
+  }
+  return encoded;
+}
+
+const encodedFont = encodeFont();
 const cmap = `/CIDInit /ProcSet findresource begin
 12 dict begin
 begincmap
@@ -144,18 +166,17 @@ const grayImage = (samples) => fixedFlate(Buffer.from(samples),
 const flatPdf = (objects, trailer = "") =>
   classicPdf(objects.map((body) => [0, body]), `/Root 1 0 R${trailer}`);
 const appearances = "/Type /XObject /Subtype /Form";
+const checkboxBackground = "q 1 g 0 0 20 20 re f 0 G 1 w 1 1 18 18 re S\n";
 const editFamilies = flatPdf([
   "<< /Type /Catalog /Pages 2 0 R /AcroForm 16 0 R /Outlines 24 0 R >>",
-  `<< /Type /Pages /Kids [3 0 R 5 0 R] /Count 2 ${mediaBox} /Resources 7 0 R >>`,
+  `<< /Type /Pages /Kids [3 0 R 5 0 R 27 0 R] /Count 3 ${mediaBox} /Resources 7 0 R >>`,
   "<< /Type /Pages /Parent 2 0 R /Kids [4 0 R] /Count 1 >>",
   "<< /Type /Page /Parent 3 0 R /Contents 8 0 R /Annots [17 0 R 18 0 R 19 0 R] >>",
   "<< /Type /Pages /Parent 2 0 R /Kids [6 0 R] /Count 1 /Rotate 90 /CropBox [4 4 156 96] >>",
-  "<< /Type /Page /Parent 5 0 R /Contents 8 0 R /Annots [23 0 R] >>",
+  "<< /Type /Page /Parent 5 0 R /Contents 26 0 R /Annots [23 0 R] >>",
   "<< /Font << /F1 9 0 R >> /XObject << /Im 15 0 R >> >>",
   literalStream("BT /F1 12 Tf 16 76 Td <000300010001> Tj ET\n" +
-    "BT /F1 12 Tf 100 76 Td <0002> Tj ET\n" +
-    "1 0 0 rg 16 44 12 12 re f\n" +
-    "q 16 0 0 12 48 44 cm /Im Do Q\nq 16 0 0 12 80 44 cm /Im Do Q\n"),
+    "BT /F1 12 Tf 100 76 Td <0002> Tj ET\n"),
   ...compositeFont(9),
   grayImage([160]),
   "<< /Fields [18 0 R 19 0 R] /DR << /Font << /FlowField 9 0 R >> >> /DA (/FlowField 10 Tf 0 g) >>",
@@ -164,13 +185,16 @@ const editFamilies = flatPdf([
   "<< /Type /Annot /Subtype /Widget /P 4 0 R /FT /Btn /T (accepted) /V /Off /DV /Off /AS /Off /Rect [80 12 100 32] /AP << /N << /Off 21 0 R /Yes 22 0 R >> >> >>",
   literalStream("q 1 g 0 0 48 20 re f 0 G 1 w 1 1 46 18 re S\nBT /FlowField 10 Tf 0 g 2 4 Td <> Tj ET\nQ\n",
     `${appearances} /BBox [0 0 48 20] /Resources << /Font << /FlowField 9 0 R >> >>`),
-  literalStream("0 g 0 0 20 20 re f 1 g 2 2 16 16 re f",
+  literalStream(checkboxBackground + "Q\n",
     `${appearances} /BBox [0 0 20 20] /Resources <<>>`),
-  literalStream("0 g 0 0 20 20 re f 1 g 2 2 16 16 re f 0 g 6 6 8 8 re f",
+  literalStream(checkboxBackground + "2 w 2 2 m 18 18 l 2 18 m 18 2 l S\nQ\n",
     `${appearances} /BBox [0 0 20 20] /Resources <<>>`),
   "<< /Type /Annot /Subtype /Link /P 6 0 R /Rect [120 12 144 32] /Border [0 0 0] /Dest [4 0 R /Fit] >>",
   "<< /Type /Outlines /First 25 0 R /Last 25 0 R /Count 1 >>",
   "<< /Title (First page) /Parent 24 0 R /Dest [4 0 R /Fit] >>",
+  literalStream("1 0 0 rg 16 44 12 12 re f\n" +
+    "q 16 0 0 12 48 44 cm /Im Do Q\nq 16 0 0 12 80 44 cm /Im Do Q\n"),
+  "<< /Type /Page /Parent 2 0 R /Contents 26 0 R >>",
 ]);
 
 const metadata = (value) => literalStream(
