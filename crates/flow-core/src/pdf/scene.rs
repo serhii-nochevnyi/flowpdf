@@ -2108,3 +2108,25 @@ fn parse_decimal(bytes: &[u8]) -> Result<LayoutUnit, PdfReadError> {
         .map(LayoutUnit::from_raw)
         .map_err(|_| PdfReadError::NumericLimit)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::separated_content_streams;
+
+    #[test]
+    fn page_stream_boundary_proof_accepts_line_endings_on_either_side() {
+        assert!(separated_content_streams(b"0 g\r", b"10 10 5 5 re f"));
+        assert!(separated_content_streams(b"0 g", b"\n10 10 5 5 re f"));
+        assert!(separated_content_streams(b"", b"0 g"));
+    }
+
+    #[test]
+    fn page_stream_boundary_proof_requires_a_line_ending_after_nonempty_content() {
+        assert!(!separated_content_streams(b"0 g", b"10 10 5 5 re f"));
+        assert!(!separated_content_streams(
+            b"0 g % note",
+            b" 10 10 5 5 re f"
+        ));
+        assert!(!separated_content_streams(b"0 g", b""));
+    }
+}
