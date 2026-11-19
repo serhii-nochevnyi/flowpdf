@@ -9,7 +9,7 @@ use super::super::{
 };
 use super::{
     NativeBinding, NativeEditError, NativeSessionError,
-    graph::{NativePdfGraph, collect_refs, spend},
+    graph::{NativePdfGraph, collect_refs, decode_pdf_doc_encoding, spend},
     pages::{self, dict, dict_mut, refs},
     text::FieldFont,
 };
@@ -217,6 +217,14 @@ fn decode(bytes: &[u8], limit: usize) -> Option<String> {
     (value.len() <= limit).then_some(value)
 }
 
+fn editable_name(field: &Dict) -> Option<String> {
+    field
+        .get("T")
+        .and_then(Value::as_bytes)
+        .and_then(|bytes| decode(bytes, MAX_NAME))
+        .filter(|name| valid_name(name))
+}
+
 fn text_string(value: &str) -> Value {
     let mut bytes = vec![0xfe, 0xff];
     bytes.extend(value.encode_utf16().flat_map(u16::to_be_bytes));
@@ -415,12 +423,7 @@ fn load_form(graph: &NativePdfGraph, work: &mut usize) -> FieldResult<Form> {
         {
             return Err(Reference);
         }
-        let field_name = values
-            .get("T")
-            .and_then(Value::as_bytes)
-            .and_then(|bytes| decode(bytes, MAX_NAME))
-            .filter(|name| valid_name(name))
-            .ok_or(Reference)?;
+        let field_name = editable_name(values).ok_or(Reference)?;
         if names.insert(field_name, field).is_some() {
             return Err(Reference);
         }
@@ -623,10 +626,7 @@ fn recognize_identity(
             }
         }
     }
-    let field_name = fields
-        .get("T")
-        .and_then(Value::as_bytes)
-        .and_then(|bytes| decode(bytes, MAX_NAME))
+    let field_name = editable_name(fields)
         .filter(|name| form.names.get(name) == Some(&field))
         .ok_or(Reference)?;
     Ok((field, field_name))
@@ -745,6 +745,52 @@ fn id(binding: NativeBinding, widget: Ref) -> [u8; 32] {
     *hash.finalize().as_bytes()
 }
 
+fn display_name(
+    graph: &NativePdfGraph,
+    widget: Ref,
+    data: &Dict,
+    work: &mut usize,
+) -> Option<String> {
+    let widget_label = data
+        .get("T")
+        .map(|label| graph.resolve_metered(label, work))
+        .transpose()
+        .ok()?
+        .filter(|label| !matches!(label, Value::Null));
+    let label = if let Some(label) = widget_label {
+        label
+    } else {
+        let parent = data.get("Parent")?.as_reference()?;
+        let field = dict(graph, parent).ok()?;
+        let children = graph
+            .resolve_metered(field.get("Kids")?, work)
+            .ok()?
+            .as_array()?;
+        spend(work, children.len()).ok()?;
+        if children
+            .iter()
+            .filter(|child| child.as_reference() == Some(widget))
+            .take(2)
+            .count()
+            != 1
+        {
+            return None;
+        }
+        graph.resolve_metered(field.get("T")?, work).ok()?
+    };
+    let bytes = label.as_bytes()?;
+    let name = if bytes.starts_with(&[0xfe, 0xff]) || bytes.starts_with(&[0xef, 0xbb, 0xbf]) {
+        decode(bytes, MAX_NAME)?
+    } else {
+        if bytes.len() > MAX_NAME {
+            return None;
+        }
+        decode_pdf_doc_encoding(bytes).ok()?
+    };
+    (!name.is_empty() && name.len() <= MAX_NAME && !name.chars().any(char::is_control))
+        .then_some(name)
+}
+
 pub(super) fn project(
     graph: &NativePdfGraph,
     pages: &[NativePdfNotePage],
@@ -787,12 +833,15 @@ pub(super) fn project(
             spend(&mut work, form.fields.len() + page.annotations.len())?;
             spend(&mut work, data.get("AP").map_or(0, |_| MAX_TEXT))?;
         }
-        let mut readable_name = None;
         let admitted = form.as_ref().map_err(|&error| error).and_then(|form| {
             let identity = recognize_identity(graph, form, page, object, &mut work)?;
-            readable_name = Some(identity.1.clone());
             recognize_appearance(graph, form, page, object, identity)
         });
+        let readable_name = admitted
+            .as_ref()
+            .ok()
+            .map(|field| field.name.clone())
+            .or_else(|| display_name(graph, object, data, &mut work));
         if let Some(name) = &readable_name {
             spend(remaining, name.len())?;
         }
@@ -829,18 +878,25 @@ pub(super) struct ExpectedField {
     pub page: u32,
     pub rect: [i64; 4],
     value: Option<FieldValue>,
+    read_only_name_count: usize,
+}
+
+fn read_only_name_count(fields: &[NativeFieldView], name: &str) -> usize {
+    fields
+        .iter()
+        .filter(|field| !field.can_edit_appearance && field.name.as_deref() == Some(name))
+        .count()
 }
 
 impl ExpectedField {
     pub(super) fn verify(&self, fields: &[NativeFieldView]) -> Result<(), NativeSessionError> {
         let mut matching = fields
             .iter()
-            .filter(|field| field.name.as_ref() == Some(&self.name));
+            .filter(|field| field.can_edit_appearance && field.name.as_ref() == Some(&self.name));
         let valid = match (&self.value, matching.next()) {
             (None, None) => true,
             (Some(value), Some(field)) => {
-                field.can_edit_appearance
-                    && field.page == self.page
+                field.page == self.page
                     && field.rect == Some(self.rect)
                     && field.kind == Some(value.kind())
                     && match value {
@@ -850,7 +906,10 @@ impl ExpectedField {
             }
             _ => false,
         };
-        if valid && matching.next().is_none() {
+        if valid
+            && matching.next().is_none()
+            && read_only_name_count(fields, &self.name) == self.read_only_name_count
+        {
             Ok(())
         } else {
             Err(NativeSessionError::Postcondition)
@@ -1071,6 +1130,7 @@ pub(super) fn stage(
                 pages::replace_form_fields(graph, form.owner.ok_or(Reference)?, form.fields)?;
                 graph.refresh_page_graph(&BTreeSet::from([admitted.field, view.object]))?;
                 return Ok(ExpectedField {
+                    read_only_name_count: read_only_name_count(current, &admitted.name),
                     name: admitted.name,
                     page: view.page,
                     rect: admitted.rect,
@@ -1191,6 +1251,7 @@ pub(super) fn stage(
     )?;
     graph.refresh_page_graph(&BTreeSet::new())?;
     Ok(ExpectedField {
+        read_only_name_count: read_only_name_count(current, &name),
         name,
         page,
         rect: bounds,

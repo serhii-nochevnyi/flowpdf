@@ -114,7 +114,7 @@ pub(super) fn spend(remaining: &mut usize, amount: usize) -> Result<(), NativeEd
     Ok(())
 }
 
-fn decode_pdf_doc_encoding(bytes: &[u8]) -> Result<String, NativeEditError> {
+pub(super) fn decode_pdf_doc_encoding(bytes: &[u8]) -> Result<String, NativeEditError> {
     const ACCENTS: [char; 8] = ['˘', 'ˇ', 'ˆ', '˙', '˝', '˛', '˚', '˜'];
     const SPECIAL: [char; 31] = [
         '•', '†', '‡', '…', '—', '–', 'ƒ', '⁄', '‹', '›', '−', '‰', '„', '“', '”', '‘', '’', '‚',

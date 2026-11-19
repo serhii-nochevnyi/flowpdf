@@ -21,7 +21,18 @@ import {
   type NativePdfAcceptedDocument,
 } from '../src/pdf/pdf-native-edit-panel.js'
 import { nativePdfMessages, nativePdfText } from '../src/pdf/pdf-native-edit-messages.js'
-import { NATIVE_PDF_LIMITS, type NativePdfAnnotation, type NativePdfFieldView, type NativePdfObjectPage, type NativePdfRedactionResult, type NativePdfSnapshot, type NativePdfTextIsland } from '../src/pdf/pdf-native-edit-protocol.js'
+import {
+  NATIVE_PDF_LIMITS,
+  NATIVE_PDF_PROTOCOL_VERSION,
+  isNativeFieldCommand,
+  readNativeResponse,
+  type NativePdfAnnotation,
+  type NativePdfFieldView,
+  type NativePdfObjectPage,
+  type NativePdfRedactionResult,
+  type NativePdfSnapshot,
+  type NativePdfTextIsland,
+} from '../src/pdf/pdf-native-edit-protocol.js'
 
 const geometry = { bounds: [-10, 20, 190, 120], rotation: 90 } as const
 const hash = Array<number>(32).fill(42)
@@ -576,6 +587,21 @@ describe('native field drafts', () => {
     id: hash, object: ref, page: 0, kind: 'text', name: 'recipient',
     value: 'Ї', checked: null, rect: [0, 30, 140, 54], canEditAppearance: true, refusal: null,
   }
+  const readOnlyField: NativePdfFieldView = {
+    ...field, kind: null, name: 'Consent form', value: null, canEditAppearance: false,
+    refusal: 'FLOW_PDF_NATIVE_FIELD_PROFILE',
+  }
+  const initialDocument = documentWith([])
+  const binding = { ...initialDocument.snapshot.binding, revision: 0 }
+  const decodeFields = (fields: readonly NativePdfFieldView[]) => readNativeResponse(JSON.stringify({
+    protocolVersion: NATIVE_PDF_PROTOCOL_VERSION, operation: 'open', requestId: 1, status: 'opened',
+    binding, originStoreHash: initialDocument.snapshot.originStoreHash,
+    code: null, limits: NATIVE_PDF_LIMITS, resultHash: 'b'.repeat(64),
+    snapshot: {
+      ...initialDocument.snapshot, binding, consumedRequest: 0, fields, redactionAdmission: 'unavailable',
+      pageState: { order: [1], selected: 1, canDelete: false, maxPosition: 0 },
+    },
+  }))
 
   it('checks whole-point geometry against the selected page crop', () => {
     expect(nativeFieldBounds(['10', '10', '140', '24'], geometry.bounds)).toEqual(field.rect)
@@ -604,6 +630,8 @@ describe('native field drafts', () => {
     expect(rebindNativeField(field, [next], 1, [field, { ...other, page: 0 }])).toBeUndefined()
     expect(rebindNativeField(field, [other], 1, [field])).toBeUndefined()
     expect(rebindNativeField(field, [next], 0, [field])).toBeUndefined()
+    const displayOnly = { ...readOnlyField, name: field.name }
+    expect(rebindNativeField(field, [next, { ...displayOnly, page: 1 }], 1, [field, displayOnly])).toBe(next)
   })
 
   it('rebinds a survivor after removing a sibling and rejects changed accepted state', () => {
@@ -615,21 +643,50 @@ describe('native field drafts', () => {
     expect(rebindNativeField(before, [{ ...after, canEditAppearance: false }], 0, [sibling, before])).toBeUndefined()
   })
 
-  it('names unsupported widgets and their refusal without rendering edit controls for them', () => {
-    const initialDocument = documentWith([])
-    const widget: NativePdfFieldView = {
-      ...field, kind: null, name: null, value: null, canEditAppearance: false,
-      refusal: 'FLOW_PDF_NATIVE_FIELD_APPEARANCE',
-    }
+  it('excludes display-only fields from draft rebinding', () => {
+    const revised = { ...readOnlyField, id: hash.map(() => 43), page: 1 }
+    expect(rebindNativeField(readOnlyField, [revised], 1, [readOnlyField])).toBeUndefined()
+    const sameName = { ...revised, name: field.name }
+    expect(rebindNativeField(field, [sameName], 1, [field])).toBeUndefined()
+  })
+
+  it('decodes and displays distinct read-only widget labels and refusal reasons', () => {
+    const widgets = [
+      readOnlyField,
+      { ...readOnlyField, name: 'Згода', id: hash.map(() => 43), object: { ...ref, objectNumber: 2 } },
+      {
+        ...readOnlyField, name: null, id: hash.map(() => 44), object: { ...ref, objectNumber: 3 },
+        refusal: 'FLOW_PDF_NATIVE_FIELD_APPEARANCE',
+      },
+    ] satisfies NativePdfFieldView[]
+    const response = decodeFields(widgets)
+    if (response?.status !== 'opened') throw Error('Expected a decoded open response')
+    expect(response.snapshot.fields).toEqual(widgets)
     for (const locale of ['uk', 'en'] as const) {
       const html = renderToStaticMarkup(createElement(PdfNativeEditPanel, {
-        ...dependencies, locale, initialDocument: { ...initialDocument, snapshot: {
-          ...initialDocument.snapshot, fields: [widget],
-        } },
+        ...dependencies, locale, initialDocument: { ...initialDocument, snapshot: response.snapshot },
       }))
-      expect(html).toContain(nativePdfText(locale, 'field.widget', { object: 1, generation: 0 }))
+      for (const name of ['Consent form', 'Згода']) {
+        expect(html).toContain(nativePdfText(locale, 'field.onPage', { name, page: 1 }))
+      }
+      expect(html).toContain(nativePdfText(locale, 'field.widget', { object: 3, generation: 0 }))
+      expect(html).toContain(nativePdfText(locale, 'field.reason.profile'))
       expect(html).toContain(nativePdfText(locale, 'field.reason.appearance'))
-      expect(html).not.toContain(nativePdfText(locale, 'field.save'))
+      for (const action of ['field.save', 'field.move', 'field.remove'] as const) {
+        expect(html).not.toContain(nativePdfText(locale, action))
+      }
     }
+  })
+
+  it('enforces display label bounds and keeps the stricter editable field name contract', () => {
+    expect(decodeFields([{ ...readOnlyField, name: 'Ї'.repeat(32) }])?.status).toBe('opened')
+    for (const name of ['', 'Ї'.repeat(33), 'name\u0000', '\uD800']) {
+      expect(decodeFields([{ ...readOnlyField, name }])).toBeNull()
+    }
+    expect(decodeFields([{ ...readOnlyField, checked: true }])).toBeNull()
+    expect(decodeFields([{ ...field, name: readOnlyField.name }])).toBeNull()
+    const add = { kind: 'addTextField', page: 0, rect: field.rect, name: field.name, value: '' }
+    expect(isNativeFieldCommand(add)).toBe(true)
+    expect(isNativeFieldCommand({ ...add, name: readOnlyField.name })).toBe(false)
   })
 })

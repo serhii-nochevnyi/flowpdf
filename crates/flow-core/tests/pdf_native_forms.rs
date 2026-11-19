@@ -1,5 +1,5 @@
 use flow_core::pdf::native::{
-    NativeEditLimits, NativeFieldCommand, NativeFieldRefusal, NativePdfSession,
+    NativeEditLimits, NativeFieldCommand, NativeFieldRefusal, NativePageCommand, NativePdfSession,
 };
 use serde_json::json;
 
@@ -201,6 +201,133 @@ fn read_only_appearance_retains_verified_name_without_a_setter() {
 }
 
 #[test]
+fn named_read_only_widgets_keep_their_labels_after_a_page_rewrite() {
+    let form = "/Type /XObject /Subtype /Form /BBox [0 0 20 20] /Resources <<>>";
+    let max_label = format!("<{}>", "E9".repeat(32));
+    let oversized_label = format!("<{}>", "E9".repeat(33));
+    let expected_max_label = "é".repeat(32);
+    for (merged_name, parent_name, widget_label_entry, expected_names, refusal) in [
+        (
+            "(consent)",
+            "(approval)",
+            "",
+            [Some("consent"), Some("approval")],
+            NativeFieldRefusal::Profile,
+        ),
+        (
+            "(Consent form)",
+            "<FEFF04170433043E04340430>",
+            "",
+            [Some("Consent form"), Some("Згода")],
+            NativeFieldRefusal::Reference,
+        ),
+        (
+            "<436166E9>",
+            "<FEFF04170433043E04340430>",
+            "/T null",
+            [Some("Café"), Some("Згода")],
+            NativeFieldRefusal::Reference,
+        ),
+        (
+            max_label.as_str(),
+            oversized_label.as_str(),
+            "",
+            [Some(expected_max_label.as_str()), None],
+            NativeFieldRefusal::Reference,
+        ),
+    ] {
+        let bytes = build_pdf(&[
+            b"<< /Type /Catalog /Pages 2 0 R /AcroForm 4 0 R >>".to_vec(),
+            b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 500] /Annots [5 0 R 7 0 R] >>".to_vec(),
+            b"<< /Fields [5 0 R 6 0 R] >>".to_vec(),
+            format!("<< /Type /Annot /Subtype /Widget /FT /Btn /T {merged_name} /Ff 1 /V /Off /P 3 0 R /Rect [10 10 30 30] /AP << /N << /Off 8 0 R /Yes 9 0 R >> >> /AS /Off >>").into_bytes(),
+            format!("<< /FT /Btn /T {parent_name} /Ff 1 /V /Off /Kids [7 0 R] >>").into_bytes(),
+            format!("<< /Type /Annot /Subtype /Widget /Parent 6 0 R /P 3 0 R /Rect [40 10 60 30] /AP << /N << /Off 8 0 R /Yes 9 0 R >> >> /AS /Off {widget_label_entry} >>").into_bytes(),
+            stream(form, b"q 1 g 0 0 20 20 re f 0 G 1 w 1 1 18 18 re S\nQ\n"),
+            stream(form, b"q 1 g 0 0 20 20 re f 0 G 1 w 1 1 18 18 re S\n2 w 2 2 m 18 18 l 2 18 m 18 2 l S\nQ\n"),
+        ]);
+        let mut pdf = session(&bytes);
+        let assert_fields = |pdf: &NativePdfSession| {
+            let fields = &pdf.snapshot().fields;
+            assert_eq!(fields.len(), expected_names.len());
+            for (field, name) in fields.iter().zip(expected_names) {
+                assert_eq!(field.name.as_deref(), name);
+                assert_eq!(field.refusal, Some(refusal));
+                assert!(!field.can_edit_appearance);
+                assert_eq!(field.kind, None);
+                assert_eq!(field.value, None);
+                assert_eq!(field.checked, None);
+            }
+        };
+        assert_fields(&pdf);
+        for index in 0..expected_names.len() {
+            let field = pdf.snapshot().fields[index].id;
+            assert_eq!(
+                apply(
+                    &mut pdf,
+                    json!({"kind":"setFieldChecked","field":field,"checked":true})
+                ),
+                Err(refusal.code())
+            );
+        }
+        assert_eq!(pdf.output_bytes(), bytes);
+
+        let snapshot = pdf.snapshot();
+        let command: NativePageCommand = serde_json::from_value(json!({
+            "kind": "rotatePage", "degrees": 90,
+            "target": {"page": 0, "stableId": snapshot.page_state.order[0]}
+        }))
+        .unwrap();
+        pdf.apply_page(snapshot.binding, snapshot.consumed_request + 1, &command)
+            .unwrap();
+        assert_fields(&pdf);
+        assert_fields(&session(pdf.output_bytes()));
+    }
+}
+
+#[test]
+fn read_only_label_does_not_shadow_an_editable_field_name() {
+    let form = "/Type /XObject /Subtype /Form /BBox [0 0 20 20] /Resources <<>>";
+    let bytes = build_pdf(&[
+        b"<< /Type /Catalog /Pages 2 0 R /AcroForm 4 0 R >>".to_vec(),
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 500] /Annots [5 0 R 7 0 R] >>".to_vec(),
+        b"<< /Fields [5 0 R 6 0 R] >>".to_vec(),
+        b"<< /Type /Annot /Subtype /Widget /FT /Btn /T (consent) /V /Off /P 3 0 R /Rect [10 10 30 30] /AP << /N << /Off 8 0 R /Yes 9 0 R >> >> /AS /Off >>".to_vec(),
+        b"<< /FT /Btn /T (preferences) /Kids [7 0 R] >>".to_vec(),
+        b"<< /Type /Annot /Subtype /Widget /Parent 6 0 R /T (consent) /Ff 1 /V /Off /P 3 0 R /Rect [40 10 60 30] /AP << /N << /Off 8 0 R /Yes 9 0 R >> >> /AS /Off >>".to_vec(),
+        stream(form, b"q 1 g 0 0 20 20 re f 0 G 1 w 1 1 18 18 re S\nQ\n"),
+        stream(form, b"q 1 g 0 0 20 20 re f 0 G 1 w 1 1 18 18 re S\n2 w 2 2 m 18 18 l 2 18 m 18 2 l S\nQ\n"),
+    ]);
+    let mut pdf = session(&bytes);
+    let fields = &pdf.snapshot().fields;
+    assert_eq!(fields.len(), 2);
+    assert!(
+        fields
+            .iter()
+            .all(|field| field.name.as_deref() == Some("consent"))
+    );
+    assert!(fields[0].can_edit_appearance);
+    assert_eq!(fields[1].refusal, Some(NativeFieldRefusal::Profile));
+    let field = fields[0].id;
+    apply(
+        &mut pdf,
+        json!({"kind":"setFieldChecked","field":field,"checked":true}),
+    )
+    .unwrap();
+    assert_eq!(pdf.snapshot().fields[0].checked, Some(true));
+
+    let field = pdf.snapshot().fields[0].id;
+    apply(&mut pdf, json!({"kind":"removeField","field":field})).unwrap();
+    let reopened = session(pdf.output_bytes());
+    let fields = &reopened.snapshot().fields;
+    assert_eq!(fields.len(), 1);
+    assert_eq!(fields[0].name.as_deref(), Some("consent"));
+    assert_eq!(fields[0].refusal, Some(NativeFieldRefusal::Profile));
+}
+
+#[test]
 fn embedded_appearance_round_trips_ukrainian_and_refuses_unmapped_glyphs() {
     let font = include_bytes!("../data/NotoSans-Regular.ttf");
     let face = ttf_parser::Face::parse(font, 0).unwrap();
@@ -259,7 +386,7 @@ fn unsupported_controls_and_same_owner_aliases_remain_read_only() {
         let mut pdf = session(&bytes);
         let field = &pdf.snapshot().fields[0];
         assert_eq!(field.refusal, Some(reason));
-        assert_eq!(field.name, None);
+        assert_eq!(field.name.as_deref(), Some("agreement"));
         let id = field.id;
         assert_eq!(
             apply(&mut pdf, json!({"kind":"removeField","field":id})),
