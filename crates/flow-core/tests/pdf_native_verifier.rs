@@ -181,9 +181,10 @@ fn collapsed_diagonal_requires_retention_or_removal_by_segment_overlap() {
     let source = pdf(&[(&format!("{stroke}\n{square}"), "")], vec![], "");
     let stroke_only = pdf(&[(stroke, "")], vec![], "");
     let square_only = pdf(&[(square, "")], vec![], "");
+    let blank = pdf(&[("", "")], vec![], "");
 
     for (rect, expected, wrong) in [
-        ([19_000, 64_000, 23_000, 68_000], &stroke_only, &square_only),
+        ([19_000, 64_000, 23_000, 68_000], &stroke_only, &blank),
         ([39_000, 39_000, 41_000, 41_000], &square_only, &source),
     ] {
         let marks = [mark(91, rect)];

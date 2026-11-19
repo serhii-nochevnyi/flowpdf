@@ -1,6 +1,7 @@
 use flow_core::pdf::native::{
-    NativeEditLimits, NativeNoteCommand, NativePdfSession, NativeRedactionGeometry,
-    NativeRedactionMark, NativeRedactionStage, NativeRequestLookup, NativeVerificationStatus,
+    NativeEditError, NativeEditLimits, NativeNoteCommand, NativePdfSession,
+    NativeRedactionGeometry, NativeRedactionMark, NativeRedactionStage, NativeRequestLookup,
+    NativeSessionError, NativeVerificationStatus,
 };
 use miniz_oxide::deflate::compress_to_vec_zlib;
 
@@ -518,7 +519,10 @@ fn redaction_keeps_disjoint_paint_inside_overlapping_path_bounds() {
     let mut grazing = open(&source);
     let binding = grazing.snapshot().binding;
     add(&mut grazing, 0, [30_000, 31_001, 31_000, 32_000]);
-    assert!(grazing.stage_redaction(binding, 1).is_err());
+    assert_eq!(
+        grazing.stage_redaction(binding, 1).unwrap_err(),
+        NativeSessionError::Graph(NativeEditError::Unsupported)
+    );
     assert!(grazing.redaction_candidate_status().is_none());
     assert_accepted(&grazing, &source, 0, &source);
 }
