@@ -21,6 +21,11 @@ document.title =
 async function start(): Promise<void> {
   const lifecycle = new AbortController()
   let runtime: ReturnType<typeof createDefaultWorkerRuntime> | undefined
+  function dispose() {
+    lifecycle.abort()
+    runtime?.dispose()
+    runtime = undefined
+  }
   try {
     await init()
     if (
@@ -34,12 +39,9 @@ async function start(): Promise<void> {
       hyphenation_data_identity: wasm.hyphenation_data_identity,
     })
     runtime = createDefaultWorkerRuntime(fontCatalog)
-    const dispose = (event: PageTransitionEvent) => {
-      if (event.persisted) return
-      lifecycle.abort()
-      runtime?.dispose()
-    }
-    window.addEventListener('pagehide', dispose, { signal: lifecycle.signal })
+    window.addEventListener('pagehide', (event) => {
+      if (!event.persisted) dispose()
+    }, { signal: lifecycle.signal })
     appRoot.replaceChildren()
     await mountEditorApp(
       appRoot,
@@ -61,8 +63,7 @@ async function start(): Promise<void> {
       },
     )
   } catch (error: unknown) {
-    lifecycle.abort()
-    runtime?.dispose()
+    dispose()
     const message = error instanceof Error && /^FLOW_[A-Z_]{1,80}$/.test(error.message)
       ? error.message
       : 'FLOW_EDITOR_STARTUP'
