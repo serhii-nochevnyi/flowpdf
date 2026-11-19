@@ -11,16 +11,16 @@ import { mountEditorApp } from '../src/editor/editor-app.js'
 import { createNativePdfRuntime } from '../src/layout/layout-runtime.js'
 import { nativePdfText, type NativePdfLocale, type NativePdfMessage } from '../src/pdf/pdf-native-edit-messages.js'
 import {
-  nativeBytesHex, readNativeResponse,
+  nativeBytesHex, nativeHexBytes, readNativeResponse,
   type NativePdfSnapshot, type NativePdfWorkerRequest, type NativePdfWorkerResponse,
 } from '../src/pdf/pdf-native-edit-protocol.js'
+import type { PdfReaderWorkerInboundMessage } from '../src/pdf/pdf-protocol.js'
 
-function classicPdf(): Uint8Array<ArrayBuffer> {
-  const objects = [
-    '<< /Type /Catalog /Pages 2 0 R >>',
-    '<< /Type /Pages /Kids [3 0 R] /Count 1 >>',
-    '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>',
-  ]
+function classicPdf(objects = [
+  '<< /Type /Catalog /Pages 2 0 R >>',
+  '<< /Type /Pages /Kids [3 0 R] /Count 1 >>',
+  '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>',
+]): Uint8Array<ArrayBuffer> {
   let pdf = '%PDF-1.7\n'
   const offsets = objects.map((object, i) => {
     const offset = pdf.length
@@ -28,10 +28,26 @@ function classicPdf(): Uint8Array<ArrayBuffer> {
     return offset
   })
   const xref = pdf.length
-  pdf += 'xref\n0 4\n0000000000 65535 f \n'
+  pdf += `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n`
   for (const offset of offsets) pdf += `${String(offset).padStart(10, '0')} 00000 n \n`
-  pdf += `trailer\n<< /Size 4 /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF\n`
+  pdf += `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF\n`
   return new TextEncoder().encode(pdf)
+}
+
+function readOnlyTextPdf(first: string, second: string): Uint8Array<ArrayBuffer> {
+  const sheet = (stream: number) =>
+    `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 5 0 R >> >> /Contents ${stream} 0 R >>`
+  const content = (value: string) => {
+    const data = `BT /F1 12 Tf 72 650 Td (${value}) Tj ET\n`
+    return `<< /Length ${data.length} >>\nstream\n${data}endstream`
+  }
+  return classicPdf([
+    '<< /Type /Catalog /Pages 2 0 R >>',
+    '<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 >>',
+    sheet(6), sheet(7),
+    '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>',
+    content(first), content(second),
+  ])
 }
 
 function rustReply(json: string) {
@@ -111,6 +127,116 @@ function checkResponsive(panel: HTMLElement) {
 }
 
 for (const locale of ['uk', 'en'] satisfies NativePdfLocale[]) {
+  test(`reads accessible text from the exact accepted PDF and selected page in ${locale}`, async () => {
+    await init()
+    const root = document.createElement('div')
+    document.body.append(root)
+    const lifecycle = new AbortController()
+    const store = new PdfSourceStore(`flowpdf-native-readback-${crypto.randomUUID()}`)
+    const nativePdf = createNativePdfRuntime(undefined, store)
+    const firstText = '<First page text>'
+    const secondText = 'Second page text'
+    const secondReadback = `${secondText}\uFFFD`
+    const wrongText = 'Different PDF text'
+    const source = readOnlyTextPdf(firstText, `${secondText}\\351`)
+    const wrongSource = readOnlyTextPdf(firstText, wrongText)
+    let holdNextRead = true
+    let staleReply: (() => void) | undefined
+    let substituteBytes = false
+    const postMessage = Worker.prototype.postMessage
+    const post = vi.spyOn(Worker.prototype, 'postMessage').mockImplementation(
+      function (this: Worker, ...args: Parameters<Worker['postMessage']>) {
+        const message = args[0] as PdfReaderWorkerInboundMessage
+        if (message.type === 'read') {
+          if (holdNextRead) {
+            holdNextRead = false
+            const receive = this.onmessage
+            this.onmessage = (event) => {
+              this.onmessage = receive
+              staleReply = () => receive?.call(this, event)
+            }
+          } else if (substituteBytes) {
+            substituteBytes = false
+            postMessage.call(this, {
+              ...message, request: { ...message.request, bytesHex: nativeBytesHex(wrongSource) },
+            })
+            return
+          }
+        }
+        Reflect.apply(postMessage, this, args)
+      },
+    )
+    const t = (key: NativePdfMessage) => nativePdfText(locale, key)
+    try {
+      await mountEditorApp(root, { locale, databaseName: `native-readback-${crypto.randomUUID()}` },
+        {}, undefined, { nativePdf, signal: lifecycle.signal })
+      const workspace = page.getByRole('region', { name: t('title'), exact: true })
+      await expect.element(workspace).toBeVisible()
+      const projection = workspace.getByRole('region', { name: t('projection.label'), exact: true })
+      const text = (value: string) => projection.getByText(value, { exact: true })
+      const button = (key: NativePdfMessage) => workspace.getByRole('button', { name: t(key), exact: true })
+      const navigate = (key: 'navigation.next' | 'navigation.previous') =>
+        activate(button(key).element() as HTMLButtonElement)
+      const input = required<HTMLInputElement>(workspace.element(), 'input[type=file]')
+      dispatchFile(input, source, 'read-only-text.pdf')
+      await expect.poll(() => staleReply).toBeTypeOf('function')
+      await expect.element(projection).toHaveAttribute('aria-busy', 'true')
+      expect(text(firstText).query()).toBeNull()
+      const firstRead = post.mock.calls.map(([message]) => message as PdfReaderWorkerInboundMessage)
+        .find((message) => message.type === 'read')
+      expect(firstRead?.request).toMatchObject({ bytesHex: nativeBytesHex(source), firstPage: 0, pageCount: 1 })
+
+      await navigate('navigation.next')
+      await expect.element(text(secondReadback)).toBeVisible()
+      await expect.element(text(locale === 'uk' ? 'Текст вилучено не повністю. Показано лише розпізнаний текст.'
+        : 'Text extraction was incomplete. Only recognized text is shown.')).toBeVisible()
+      expect(post.mock.calls.some(([message]) => {
+        const request = message as PdfReaderWorkerInboundMessage
+        return request.type === 'cancel' && request.requestId === firstRead?.request.requestId
+      })).toBe(true)
+      staleReply?.()
+      expect(text(firstText).query()).toBeNull()
+
+      await navigate('navigation.previous')
+      await expect.element(text(firstText)).toBeVisible()
+      expect(text(secondReadback).query()).toBeNull()
+      expect(workspace.getByRole('region', { name: t('text.title'), exact: true }).element()
+        .querySelector('[id$="-text-capability"]')).not.toBeNull()
+      await expect.element(text(t('projection.partial'))).toBeVisible()
+
+      const addNote = button('note.add')
+      const edited = button('download.edited')
+      const previousHash = edited.element().getAttribute('data-output-hash')
+      await activate(addNote.element() as HTMLButtonElement)
+      await workspace.getByRole('textbox', { name: t('note.contents'), exact: true }).fill('Accepted note')
+      await activate(addNote.element() as HTMLButtonElement)
+      await expect.element(edited).toBeEnabled()
+      await expect.element(text(firstText)).toBeVisible()
+      const updatedRead = post.mock.calls.map(([message]) => message as PdfReaderWorkerInboundMessage)
+        .findLast((message) => message.type === 'read')
+      if (!updatedRead) throw new Error('Missing accepted PDF text request')
+      expect(updatedRead.request).toMatchObject({ firstPage: 0, pageCount: 1 })
+      const accepted = await readPdf(nativeHexBytes(updatedRead.request.bytesHex))
+      const acceptedHash = nativeBytesHex(Uint8Array.from(accepted.outputHash))
+      expect(acceptedHash).not.toBe(previousHash)
+      await expect.element(edited).toHaveAttribute('data-output-hash', acceptedHash)
+
+      substituteBytes = true
+      await navigate('navigation.next')
+      await expect.element(text(locale === 'uk' ? 'Вилучення тексту для цієї сторінки недоступне.'
+        : 'Text extraction is unavailable for this page.')).toBeVisible()
+      expect(substituteBytes).toBe(false)
+      expect(text(wrongText).query()).toBeNull()
+      expect(text(firstText).query()).toBeNull()
+      expect(text(secondReadback).query()).toBeNull()
+    } finally {
+      lifecycle.abort()
+      nativePdf.dispose()
+      post.mockRestore()
+      root.remove()
+    }
+  }, 30_000)
+
   test(`native note downloads round-trip through Chromium, the production worker and Rust in ${locale}`, async () => {
     await init()
     const initialWidth = locale === 'uk' ? 320 : 1280

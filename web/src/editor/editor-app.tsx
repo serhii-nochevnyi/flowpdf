@@ -95,7 +95,8 @@ export type {
 
 export type { FoundationInspectorLocale }
 
-export type EditorNativePdfRuntime = Pick<PdfNativeEditPanelProps, 'createCoordinator' | 'sourceStore'>
+export type EditorNativePdfRuntime = Pick<PdfNativeEditPanelProps,
+  'createCoordinator' | 'sourceStore' | 'extractPageText'>
 
 export interface EditorAppProps {
   readonly nativePdf?: EditorNativePdfRuntime
