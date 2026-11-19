@@ -315,7 +315,7 @@ fn page_preview_binds_the_rotated_crop_and_current_accepted_revision() {
     }
     let mut edit = bound("command", 4, base);
     edit["outputHash"] = base["outputHash"].clone();
-    edit["command"] = json!({"kind":"add","page":0,"rect":[8,6,12,10],"contents":"Review note"});
+    edit["command"] = json!({"kind":"add","page":0,"rect":[8,6,10,8],"contents":"Review note"});
     let applied = call(native_pdf_command, edit);
     assert_eq!(applied["status"], "applied");
     assert!(!verify_native_pdf_worker_response(original_reply.clone()));
@@ -336,7 +336,11 @@ fn page_preview_binds_the_rotated_crop_and_current_accepted_revision() {
     let updated: Value = serde_json::from_str(&updated_reply).unwrap();
     assert_eq!(updated["status"], "preview");
     assert_eq!(updated["preview"]["outputHash"], current["outputHash"]);
-    assert_ne!(updated["preview"]["rgbHex"], raster["rgbHex"]);
+    let updated_rgb = updated["preview"]["rgbHex"].as_str().unwrap();
+    let updated_pixel = |x: usize, y: usize| &updated_rgb[(y * 16 + x) * 6..][..6];
+    assert_eq!(updated_pixel(4, 12), "5e552e");
+    assert_eq!(updated_pixel(5, 13), "ffdc40");
+    assert_eq!(updated_pixel(4, 11), pixel(4, 11));
     for (field, accepted, other) in [
         ("pageId", first.clone(), json!(1)),
         (
