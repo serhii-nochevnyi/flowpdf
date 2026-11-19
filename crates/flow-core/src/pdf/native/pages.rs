@@ -1,10 +1,13 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt::Write;
 
 use serde::{Deserialize, Serialize};
 
 use super::super::reader::{PdfObjectRef, PdfValue};
 use super::super::scene::NativePdfNotePage;
-use super::forms::{MAX_FIELDS, field_name_inventory};
+use super::forms::{
+    FIELD_NAME_ENTRY_BYTES, MAX_FIELDS, NATIVE_MAX_FIELD_NAME_BYTES, field_name_inventory,
+};
 use super::graph::{NativeEditError, NativePdfGraph, PageTreeEdges, collect_refs, spend};
 use super::session::NativeSessionError;
 
@@ -214,6 +217,7 @@ fn page_widget_count(
 pub(super) fn restrictions(
     graph: &NativePdfGraph,
     projected: &[NativePdfNotePage],
+    remaining: usize,
 ) -> Result<Option<NativePageRestrictions>, NativeEditError> {
     use NativePageRefusal::{Geometry, Structure};
 
@@ -241,13 +245,24 @@ pub(super) fn restrictions(
             let annotations_supported = widgets.is_ok();
             let duplicate_annotations = match widgets {
                 Ok(0) => true,
-                Ok(count) => copyable_field_count
-                    .get_or_insert_with(|| {
-                        let (_, fields) = form_fields(graph).ok()?;
-                        field_name_inventory(graph, &fields, &mut work).ok()?;
-                        Some(fields.len())
-                    })
-                    .is_some_and(|fields| fields + count <= MAX_FIELDS),
+                Ok(count) => {
+                    if copyable_field_count.is_none() {
+                        let count = if let Ok((_, fields)) = form_fields(graph) {
+                            let mut available = remaining;
+                            match field_name_inventory(graph, &fields, &mut work, &mut available) {
+                                Ok(_) => Some(fields.len()),
+                                Err(Budget) => return Err(Budget),
+                                Err(_) => None,
+                            }
+                        } else {
+                            None
+                        };
+                        copyable_field_count = Some(count);
+                    }
+                    copyable_field_count
+                        .flatten()
+                        .is_some_and(|fields| fields + count <= MAX_FIELDS)
+                }
                 Err(_) => false,
             };
             let catalog_dependency = named_targets.as_ref().map_or(true, |pages| {
@@ -785,9 +800,13 @@ pub(super) fn annotation_membership(
 }
 
 fn unique_field_name(field: Ref, used: &BTreeMap<String, Ref>) -> Result<String, NativeEditError> {
+    let mut name = String::new();
+    name.try_reserve_exact(NATIVE_MAX_FIELD_NAME_BYTES)
+        .map_err(|_| Budget)?;
     for suffix in 0..=used.len() {
-        let name = format!("FlowPDFCopy{}_{}", field.object_number, suffix);
-        if !used.contains_key(&name) {
+        name.clear();
+        write!(name, "FlowPDFCopy{}_{}", field.object_number, suffix).map_err(|_| Budget)?;
+        if !used.contains_key(name.as_str()) {
             return Ok(name);
         }
     }
@@ -803,6 +822,7 @@ fn copy_annotations(
     let original = annotations(graph, source)?;
     graph.charge_page_work(original.len().saturating_mul(original.len()))?;
     let mut fields_update = None;
+    let mut inventory_charge = 0;
     for annot in original {
         let field = annotation_ownership(graph, source, annot)?;
         graph.reserve_page_copy(annot)?;
@@ -814,14 +834,21 @@ fn copy_annotations(
                 let (form, fields) = form_fields(graph)?;
                 let budget = graph.remaining_work();
                 let mut work = budget;
-                let names = field_name_inventory(graph, &fields, &mut work)?;
+                let available = graph.remaining_retained();
+                let mut remaining = available;
+                let names = field_name_inventory(graph, &fields, &mut work, &mut remaining)?;
                 graph.charge_page_work(budget - work)?;
+                inventory_charge = available - remaining;
+                graph.charge_page_retained(inventory_charge)?;
                 fields_update = Some((form, fields, names));
             }
             let (_, fields, names) = fields_update.as_mut().ok_or(Malformed)?;
             if fields.len() >= MAX_FIELDS {
                 return Err(Budget);
             }
+            let name_entry_charge = FIELD_NAME_ENTRY_BYTES + NATIVE_MAX_FIELD_NAME_BYTES;
+            graph.charge_page_retained(name_entry_charge + NATIVE_MAX_FIELD_NAME_BYTES)?;
+            inventory_charge += name_entry_charge;
             let name = unique_field_name(field, names)?;
             let label = PdfValue::String(name.as_bytes().to_vec());
             let (widget, copied_field) = if field == annot {
@@ -847,7 +874,9 @@ fn copy_annotations(
             copies.push(allocate(graph, copy)?);
         }
     }
-    if let Some((form, fields, _)) = fields_update {
+    if let Some((form, fields, names)) = fields_update {
+        drop(names);
+        graph.release_page_retained(inventory_charge);
         replace_form_fields(graph, form, fields)?;
     }
     Ok(copies)
