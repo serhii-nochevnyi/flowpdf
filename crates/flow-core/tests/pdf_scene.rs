@@ -1,6 +1,6 @@
 use flow_core::pdf::{
-    PdfReadDiagnosticCode, PdfSceneElement, PdfSceneRequest, PdfTextMapping, open_pdf,
-    read_pdf_scene,
+    PdfReadDiagnosticCode, PdfReaderLimits, PdfSceneElement, PdfSceneRequest, PdfTextMapping,
+    open_pdf, read_pdf_scene,
 };
 
 fn stream(id: u32, dictionary: &str, data: &[u8]) -> (u32, Vec<u8>) {
@@ -129,4 +129,108 @@ fn unsupported_operator_and_missing_mapping_are_reported_without_authored_payloa
     let serialized = serde_json::to_string(&scene.report).unwrap();
     assert!(!serialized.contains("JavaScript"));
     assert!(!serialized.contains("alert"));
+}
+
+#[test]
+fn single_content_stream_reads_at_low_nesting_limit() {
+    let bytes = pdf(vec![
+        (1, b"<< /Type /Catalog /Pages 2 0 R >>".to_vec()),
+        (2, b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec()),
+        (
+            3,
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Contents 4 0 R >>".to_vec(),
+        ),
+        stream(4, "", b"10 10 20 20 re f"),
+    ]);
+    let reader = open_pdf(
+        &bytes,
+        PdfReaderLimits {
+            max_nesting: 2,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(reader.summary().unwrap().page_count, 1);
+    let scene = read_pdf_scene(&reader, &PdfSceneRequest::default()).unwrap();
+    assert!(scene.pages[0].elements.iter().any(|element| matches!(
+        element,
+        PdfSceneElement::Path { value } if value.fill && value.provenance.object_ref.object_number == 4
+    )));
+}
+
+#[test]
+fn form_text_at_lower_clip_edge_is_retained_as_partial() {
+    let bytes = pdf(vec![
+        (1, b"<< /Type /Catalog /Pages 2 0 R >>".to_vec()),
+        (2, b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec()),
+        (3, b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Resources << /XObject << /Form1 5 0 R >> >> /Contents 4 0 R >>".to_vec()),
+        stream(4, "", b"/Form1 Do"),
+        stream(5, "/Type /XObject /Subtype /Form /BBox [10 20 40 40] /Resources << /Font << /F1 6 0 R >> >>", b"BT /F1 10 Tf 15 20 Td (A) Tj ET"),
+        (6, b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /MissingWidth 500 /ToUnicode 7 0 R >>".to_vec()),
+        stream(7, "", b"begincmap\n1 beginbfchar\n<41> <0041>\nendbfchar\nendcmap\n"),
+    ]);
+    let reader = open_pdf(&bytes, Default::default()).unwrap();
+    let scene = read_pdf_scene(&reader, &PdfSceneRequest::default()).unwrap();
+    let page = &scene.pages[0];
+    assert!(page.partial);
+    assert!(page.elements.iter().any(|element| matches!(
+        element,
+        PdfSceneElement::Text { value } if value.text == "A" && value.provenance.object_ref.object_number == 5
+    )));
+    assert!(
+        page.report
+            .diagnostics
+            .iter()
+            .any(
+                |diagnostic| diagnostic.code == PdfReadDiagnosticCode::PartialPage
+                    && diagnostic.object_number == Some(5)
+            )
+    );
+}
+
+#[test]
+fn nested_forms_resolve_equivalent_names_and_report_uncertain_clipping() {
+    let bytes = pdf(vec![
+        (1, b"<< /Type /Catalog /Pages 2 0 R >>".to_vec()),
+        (2, b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec()),
+        (3, b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Resources << /XObject << /Outer 5 0 R /Later 9 0 R >> >> /Contents 4 0 R >>".to_vec()),
+        stream(4, "", b"q 0 0 65 100 re W n /#4Futer Do Q /Later Do 90 5 5 5 re f"),
+        stream(5, "/Type /XObject /Subtype /Form /BBox [10 10 40 40] /Matrix [2 0 0 1 5 0] /Resources << /XObject << /In#6Eer 6 0 R >> >>", b"/Inner Do"),
+        stream(6, "/Type /XObject /Subtype /Form /BBox [0 0 100 100] /Resources << /Font << /F#31 7 0 R >> >>", b"BT /#461 10 Tf 15 25 Td (A) Tj ET 28 20 8 5 re f 35 30 2 2 re f 2 20 3 3 re f"),
+        (7, b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /MissingWidth 500 /ToUnicode 8 0 R >>".to_vec()),
+        stream(8, "", b"begincmap\n1 beginbfchar\n<41> <0041>\nendbfchar\nendcmap\n"),
+        stream(9, "/Type /XObject /Subtype /Form /BBox [70 0 90 20]", b"75 5 5 5 re f"),
+    ]);
+    let reader = open_pdf(&bytes, Default::default()).unwrap();
+    let scene = read_pdf_scene(&reader, &PdfSceneRequest::default()).unwrap();
+    let page = &scene.pages[0];
+    assert!(page.partial);
+    assert!(
+        page.report
+            .diagnostics
+            .iter()
+            .any(
+                |diagnostic| diagnostic.code == PdfReadDiagnosticCode::PartialPage
+                    && diagnostic.object_number == Some(6)
+            )
+    );
+    assert!(page.elements.iter().any(|element| matches!(
+        element,
+        PdfSceneElement::Annotation { value } if value.provenance.object_ref.object_number == 5
+            && value.rect.x.raw() == 25 * 64 && value.rect.y.raw() == 10 * 64
+            && value.rect.width.raw() == 60 * 64 && value.rect.height.raw() == 30 * 64
+    )));
+    assert!(page.elements.iter().any(|element| matches!(
+        element,
+        PdfSceneElement::Text { value } if value.text == "A" && value.mapping == PdfTextMapping::ToUnicode
+    )));
+    let painted_x: Vec<_> = page
+        .elements
+        .iter()
+        .filter_map(|element| match element {
+            PdfSceneElement::Path { value } => Some(value.rect.x.raw()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(painted_x, [61 * 64, 75 * 64, 90 * 64]);
 }

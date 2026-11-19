@@ -273,7 +273,7 @@ fn scene_reads_nested_image_replacement_and_unchanged_sibling() {
         &pixels,
     );
     let source = fixture(
-        b"/Outer Do q 1 0 0 1 60 0 cm /Outer Do Q",
+        b"/Outer Do q 1 0 0 1 60 0 cm /Outer Do Q\nq 1 0 0 1 180 0 cm /Outer Do Q\n2 3 4 5 re f\n",
         false,
         "/Resources << /XObject << /Outer 6 0 R >> >>",
         &[
@@ -314,6 +314,12 @@ fn scene_reads_nested_image_replacement_and_unchanged_sibling() {
         })
         .collect();
     assert_eq!(images.len(), 2);
+    assert!(!scene.pages[0].partial);
+    assert!(matches!(
+        scene.pages[0].elements.last(),
+        Some(PdfSceneElement::Path { value }) if value.rect.x.raw() == 2 * 64
+            && value.rect.y.raw() == 3 * 64 && value.rect.width.raw() == 4 * 64
+    ));
     assert_eq!(images[0].media_type, "image/jpeg");
     assert_eq!(images[0].data_hex, hex);
     assert_eq!(images[1].filter, "FlateDecode");
@@ -333,6 +339,32 @@ fn scene_reads_nested_image_replacement_and_unchanged_sibling() {
         ),
         (5_632, 832, 1_280, 640)
     );
+}
+
+#[test]
+fn escaped_content_names_keep_native_admission_conservative() {
+    let pixels = miniz_oxide::deflate::compress_to_vec_zlib(&[7], 6);
+    let image = stream(
+        "/Type /XObject /Subtype /Image /ColorSpace /DeviceGray /Width 1 /Height 1 /BitsPerComponent 8 /Filter /FlateDecode",
+        &pixels,
+    );
+    let source = fixture(
+        b"q 10 0 0 10 5 5 cm /#49 Do Q",
+        false,
+        "/Resources << /XObject << /I 6 0 R >> >>",
+        &[image],
+    );
+    let session = open(&source);
+    assert!(!session.snapshot().scene.object_pages[0].can_add);
+    assert_eq!(objects(&session, 0), json!([]));
+    assert!(!session.redaction_admitted());
+
+    let reader = open_pdf(&source, Default::default()).unwrap();
+    let scene = read_pdf_scene(&reader, &PdfSceneRequest::default()).unwrap();
+    assert!(matches!(
+        scene.pages[0].elements.as_slice(),
+        [PdfSceneElement::Image { value }] if value.data_hex == "07"
+    ));
 }
 
 #[test]
