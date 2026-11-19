@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
@@ -198,6 +199,7 @@ pub struct NativePdfSession {
     records: VecDeque<RequestRecord>,
     remaining_retained: usize,
     next_page_object_id: u64,
+    redaction_admission: OnceLock<bool>,
     redaction_marks: Vec<NativeRedactionMark>,
     redaction_marks_binding: Option<NativeBinding>,
     last_redaction_request: u64,
@@ -253,6 +255,7 @@ impl NativePdfSession {
             records: VecDeque::new(),
             remaining_retained,
             next_page_object_id: FIRST_PAGE_OBJECT_ID,
+            redaction_admission: OnceLock::new(),
             redaction_marks: Vec::new(),
             redaction_marks_binding: None,
             last_redaction_request: 0,
@@ -275,6 +278,13 @@ impl NativePdfSession {
 
     pub fn output_bytes(&self) -> &[u8] {
         self.graph.original_bytes()
+    }
+
+    pub fn redaction_admitted(&self) -> bool {
+        *self.redaction_admission.get_or_init(|| {
+            NativePdfGraph::open(self.output_bytes(), self.snapshot.limits)
+                .is_ok_and(|graph| redaction::admitted(&graph, &self.snapshot.page_state.order))
+        })
     }
 
     pub fn redaction_mark_geometry(
@@ -645,6 +655,7 @@ impl NativePdfSession {
             .ok_or(NativeSessionError::RedactionUnverified)?;
         reopened.source = verified.bytes;
         let previous = std::mem::replace(&mut self.graph, reopened);
+        self.redaction_admission.take();
         if self.origin.is_none() {
             self.origin = Some(previous.source);
         }
@@ -766,6 +777,7 @@ impl NativePdfSession {
         claimed_scene: [u8; 32],
         state: &NativePageState,
         claimed_fields: &[NativeFieldView],
+        redaction_admitted: bool,
     ) -> Result<bool, NativeSessionError> {
         let graph = NativePdfGraph::open(bytes, limits)?;
         let ids = initial_ids(&graph);
@@ -774,7 +786,8 @@ impl NativePdfSession {
         Ok(scene.scene_hash == claimed_scene
             && state.valid_for_count(scene.pages.len())
             && (binding.revision != 0 || *state == page_state(&graph, &ids, None))
-            && forms::project(&graph, &scene.pages, binding, &mut remaining)? == claimed_fields)
+            && forms::project(&graph, &scene.pages, binding, &mut remaining)? == claimed_fields
+            && redaction::admitted(&graph, &state.order) == redaction_admitted)
     }
 
     pub fn verify_page_projection(
@@ -1117,6 +1130,7 @@ impl NativePdfSession {
             self.verify_page_geometry(command, &scene, &state)?;
         }
         let previous = std::mem::replace(&mut self.graph, reopened);
+        self.redaction_admission.take();
         if self.origin.is_none() {
             self.origin = Some(previous.source);
         }

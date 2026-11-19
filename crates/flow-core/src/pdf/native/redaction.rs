@@ -1621,12 +1621,28 @@ pub(super) fn scrub(
     order: &[u64],
     marks: &[NativeRedactionMark],
 ) -> Result<()> {
-    if order.len() != graph.pages.len()
-        || order.len() > MAX_PAGES
-        || marks.is_empty()
+    if marks.is_empty()
         || marks.len() > MAX_MARKS
         || marks.iter().any(|mark| !order.contains(&mark.page_id))
     {
+        return Err(Unsupported);
+    }
+    let (roles, edits, remaining_work) = scan_document(graph, order, marks)?;
+    graph.charge_page_work(graph.remaining_work() - remaining_work)?;
+    apply(graph, roles, edits)
+}
+
+pub(super) fn admitted(graph: &NativePdfGraph, order: &[u64]) -> bool {
+    graph.original_bytes().len() <= super::verify_structure::MAX_INPUT
+        && scan_document(graph, order, &[]).is_ok()
+}
+
+fn scan_document(
+    graph: &NativePdfGraph,
+    order: &[u64],
+    marks: &[NativeRedactionMark],
+) -> Result<(BTreeMap<Object, Role>, Edits, usize)> {
+    if order.len() != graph.pages.len() || order.is_empty() || order.len() > MAX_PAGES {
         return Err(Unsupported);
     }
     let inventory = Inventory::read(graph)?;
@@ -1644,11 +1660,7 @@ pub(super) fn scrub(
             }
         }
     }
-    let remaining_work = scan.work;
-    let edits = scan.edits;
-    let roles = inventory.roles;
-    graph.charge_page_work(graph.remaining_work() - remaining_work)?;
-    apply(graph, roles, edits)
+    Ok((inventory.roles, scan.edits, scan.work))
 }
 
 fn apply(
