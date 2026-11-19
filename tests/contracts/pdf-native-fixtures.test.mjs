@@ -268,8 +268,8 @@ function verifyEditReadback(entry, order, label) {
 
   const [target] = textPages;
   same(entry.destinations, target === undefined ? [] : [
-    { kind: "outline", title: "First page", target },
-    { kind: "link", page: order.indexOf(2) + 1, target },
+    { kind: "outline", title: "First page", target, view: ["/Fit"] },
+    { kind: "link", page: order.indexOf(2) + 1, rectPt: [120, 12, 144, 32], target, view: ["/Fit"] },
   ], label + " destinations");
 }
 
