@@ -928,6 +928,27 @@ impl IncomingLinkIndex {
     }
 }
 
+fn owns_link_destination<'a>(
+    graph: &'a NativePdfGraph,
+    mut owner: Ref,
+    mut destination: &'a PdfValue,
+    trailer_refs: &BTreeSet<Ref>,
+    work: &mut usize,
+) -> Result<bool, NativeEditError> {
+    while let Some(reference) = destination.as_reference() {
+        spend(work, 1)?;
+        if trailer_refs.contains(&reference) {
+            return Ok(false);
+        }
+        let Ok(value) = exclusive_container(graph, owner, destination) else {
+            return Ok(false);
+        };
+        owner = reference;
+        destination = value;
+    }
+    Ok(true)
+}
+
 fn incoming_link_index(
     graph: &NativePdfGraph,
     work: &mut usize,
@@ -941,6 +962,9 @@ fn incoming_link_index(
     let mut index = IncomingLinkIndex::default();
     spend(work, graph.pages.len())?;
     let page_refs: BTreeSet<_> = graph.pages.iter().copied().collect();
+    index
+        .blocked
+        .extend(page_refs.intersection(&trailer_refs).copied());
     for &source in &graph.pages {
         let Some(annots) = dict(graph, source)?.get("Annots") else {
             continue;
@@ -986,6 +1010,11 @@ fn incoming_link_index(
                 index.blocked.insert(target);
                 continue;
             };
+            let destination = values.get("Dest").ok_or(Malformed)?;
+            if !owns_link_destination(graph, annot, destination, &trailer_refs, work)? {
+                index.blocked.insert(target);
+                continue;
+            }
             let drops = index.removable.entry(target).or_default().entry(source);
             if !drops.or_default().insert(annot) {
                 index.blocked.insert(target);

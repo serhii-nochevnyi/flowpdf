@@ -360,7 +360,7 @@ fn incoming_links_restrict_only_targets_with_unsupported_cleanup() {
 }
 
 #[test]
-fn trailer_owned_link_or_annotation_array_blocks_only_its_target() {
+fn trailer_owned_navigation_blocks_only_its_target() {
     let objects = [
         (0, "<< /Type /Catalog /Pages 2 0 R >>"),
         (
@@ -372,13 +372,16 @@ fn trailer_owned_link_or_annotation_array_blocks_only_its_target() {
         (0, "<< /Type /Page /Parent 2 0 R /Annots 7 0 R >>"),
         (
             0,
-            "<< /Type /Annot /Subtype /Link /P 5 0 R /Rect [20 30 50 60] /Dest [3 0 R /Fit] >>",
+            "<< /Type /Annot /Subtype /Link /P 5 0 R /Rect [20 30 50 60] /Dest 8 0 R >>",
         ),
         (0, "[6 0 R]"),
+        (0, "[3 0 R /Fit]"),
     ];
     for trailer in [
         " /FlowPDFNavigation 6 0 R",
         " /FlowPDFNavigation << /Arrays [7 0 R] >>",
+        " /FlowPDFNavigation 8 0 R",
+        " /FlowPDFNavigation 3 0 R",
     ] {
         let bytes = build_pdf_with_trailer(&objects, trailer);
         let mut session =
