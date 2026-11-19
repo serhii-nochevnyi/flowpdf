@@ -843,6 +843,7 @@ export function PdfNativeEditPanel({
   const outputHash = snapshot ? nativeBytesHex(Uint8Array.from(snapshot.outputHash)) : ''
   const redactionAvailable = !!coordinator && typeof coordinator.markRedaction === 'function'
     && typeof coordinator.applyRedaction === 'function' && pageState !== undefined
+    && service?.accepted === snapshot && snapshot?.redactionAdmission === 'supported'
   const markRect = geometry && nativeObjectBounds(redactionCoordinates, geometry.bounds)
   const pageMarks = marks.filter((mark) => mark.pageId === stableId)
   const duplicateMark = markRect !== null && pageMarks.some((mark) => sameNativeBytes(mark.rect, markRect))
@@ -1913,7 +1914,10 @@ export function PdfNativeEditPanel({
           </div>}
           {snapshot && <section className="native-stack" aria-labelledby={`${id}-redaction`}>
             <h3 id={`${id}-redaction`} tabIndex={-1}>{t('family.redaction')}</h3>
-            {(!redactionAvailable || invalidated) && <p>{t('redaction.unavailable')}</p>}
+            {(!redactionAvailable || invalidated) && <p>{t(
+              !invalidated && service?.accepted === snapshot && snapshot.redactionAdmission === 'unavailable'
+                ? 'redaction.documentUnavailable' : 'redaction.unavailable',
+            )}</p>}
             {redactionAvailable && <>
               {marks.length > 0 ? <>
                 <p>{t('redaction.marked')}</p>
@@ -1927,7 +1931,7 @@ export function PdfNativeEditPanel({
               }}>
                 <fieldset className="native-stack" disabled={!markInputs} aria-describedby={`${id}-mark-geometry-help`}>
                   <legend>{t('redaction.rectangle')}</legend>
-                  <p className="native-help" id={`${id}-mark-geometry-help`}>{t('geometry.help')}</p>
+                  <p className="native-help" id={`${id}-mark-geometry-help`}>{t('redaction.geometry.help')}</p>
                   <div className="native-coordinates">
                     {coordinateLabels.map((coordinate, index) => <label key={coordinate}>{t(`geometry.${coordinate}`)}
                       <input className="native-text-line" type="text" inputMode="decimal" value={redactionCoordinates[index]}
