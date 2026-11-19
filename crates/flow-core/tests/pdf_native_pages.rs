@@ -262,6 +262,99 @@ fn named_destination_restrictions_follow_indirect_targets() {
 }
 
 #[test]
+fn incoming_links_restrict_only_targets_with_unsupported_cleanup() {
+    use flow_core::layout::LayoutUnit;
+    use flow_core::pdf::{NativePdfAnnotation, NativeReadOnlyAnnotation};
+
+    let bytes = build_pdf(&[
+        (
+            0,
+            "<< /Type /Catalog /Pages 2 0 R /OCProperties << /OCGs [9 0 R] /D << /ON [9 0 R] >> >> >>",
+        ),
+        (
+            0,
+            "<< /Type /Pages /Kids [3 0 R 4 0 R 5 0 R 6 0 R] /Count 4 /MediaBox [0 0 300 500] /Resources <<>> >>",
+        ),
+        (0, "<< /Type /Page /Parent 2 0 R >>"),
+        (0, "<< /Type /Page /Parent 2 0 R >>"),
+        (0, "<< /Type /Page /Parent 2 0 R >>"),
+        (0, "<< /Type /Page /Parent 2 0 R /Annots [7 0 R 8 0 R] >>"),
+        (
+            0,
+            "<< /Type /Annot /Subtype /Link /P 6 0 R /Rect [20 30 50 60] /Dest [3 0 R /Fit] >>",
+        ),
+        (
+            0,
+            "<< /Type /Annot /Subtype /Link /P 6 0 R /Rect [20 70 50 90] /Dest 10 0 R /OC 9 0 R >>",
+        ),
+        (0, "<< /Type /OCG /Name (Layer) >>"),
+        (0, "[4 0 R /Fit]"),
+    ]);
+    let mut session =
+        NativePdfSession::open_scoped(&bytes, NativeEditLimits::default(), [3; 16]).unwrap();
+    let prior = session.snapshot().clone();
+    let pages = &prior.page_state.restrictions.as_ref().unwrap().pages;
+    assert!(pages[0].delete.is_none());
+    assert!(pages[1].delete.is_some());
+    assert!(pages[2].delete.is_none());
+    assert_eq!(
+        session
+            .apply_page(prior.binding, 1, &command("deletePage", 1, &prior))
+            .unwrap_err()
+            .code(),
+        "FLOW_PDF_NATIVE_UNSUPPORTED",
+    );
+    assert_eq!(session.output_bytes(), bytes);
+    assert_eq!(session.snapshot().binding, prior.binding);
+    assert_eq!(session.snapshot().page_state, prior.page_state);
+
+    session
+        .apply_page(prior.binding, 2, &command("deletePage", 0, &prior))
+        .unwrap();
+    let after_cleanup = session.snapshot();
+    assert_eq!(after_cleanup.page_state.order, prior.page_state.order[1..]);
+    let pages = &after_cleanup
+        .page_state
+        .restrictions
+        .as_ref()
+        .unwrap()
+        .pages;
+    assert!(pages[0].delete.is_some());
+    assert!(pages[1].delete.is_none());
+    session
+        .apply_page(
+            after_cleanup.binding,
+            3,
+            &command("deletePage", 1, after_cleanup),
+        )
+        .unwrap();
+    let after_delete = session.snapshot();
+    assert_eq!(
+        after_delete.page_state.order,
+        [prior.page_state.order[1], prior.page_state.order[3]],
+    );
+    let [
+        NativePdfAnnotation::ReadOnly {
+            profile: NativeReadOnlyAnnotation::Link,
+            rect: Some(rect),
+            ..
+        },
+    ] = after_delete.scene.pages[1].annotations.as_slice()
+    else {
+        panic!("expected only the read-only link to remain");
+    };
+    assert_eq!(
+        rect.map(LayoutUnit::raw),
+        [20, 70, 50, 90].map(|points| points * LayoutUnit::UNITS_PER_POINT),
+    );
+    assert!(
+        after_delete.page_state.restrictions.as_ref().unwrap().pages[0]
+            .delete
+            .is_some()
+    );
+}
+
+#[test]
 fn page_widget_operations_share_calculation_order_admission() {
     for (order, available) in [("[]", true), ("[5 0 R]", false)] {
         let bytes = build_pdf(&[
