@@ -935,7 +935,17 @@ fn link_destinations_survive(
     trailer_refs: &BTreeSet<Ref>,
     work: &mut usize,
 ) -> Result<bool, NativeEditError> {
-    let mut removed = BTreeSet::from([target]);
+    let mut removed = match page_owned_removals(graph, target, work) {
+        Ok(plan) => plan.removed,
+        Err(Budget) => return Err(Budget),
+        Err(_) => return Ok(true),
+    };
+    if removed
+        .iter()
+        .any(|reference| trailer_refs.contains(reference))
+    {
+        return Ok(true);
+    }
     let mut destinations = BTreeSet::new();
     for &annot in cleanup.values().flatten() {
         spend(work, 1)?;
@@ -1043,14 +1053,21 @@ fn incoming_link_index(
     Ok(index)
 }
 
-fn remove_page_dependencies(
-    graph: &mut NativePdfGraph,
+struct PageOwnedRemovals {
+    removed: BTreeSet<Ref>,
+    fields: BTreeSet<Ref>,
+}
+
+fn page_owned_removals(
+    graph: &NativePdfGraph,
     page: Ref,
-) -> Result<BTreeSet<Ref>, NativeEditError> {
+    work: &mut usize,
+) -> Result<PageOwnedRemovals, NativeEditError> {
     let mut removed = BTreeSet::from([page]);
     let mut fields_to_remove = BTreeSet::new();
     let page_annotations = annotations(graph, page)?;
-    graph.charge_page_work(
+    spend(
+        work,
         page_annotations
             .len()
             .saturating_mul(page_annotations.len()),
@@ -1064,8 +1081,22 @@ fn remove_page_dependencies(
             removed.insert(field);
         }
     }
+    Ok(PageOwnedRemovals {
+        removed,
+        fields: fields_to_remove,
+    })
+}
+
+fn remove_page_dependencies(
+    graph: &mut NativePdfGraph,
+    page: Ref,
+) -> Result<BTreeSet<Ref>, NativeEditError> {
     let budget = graph.remaining_work();
     let mut work = budget;
+    let PageOwnedRemovals {
+        mut removed,
+        fields: fields_to_remove,
+    } = page_owned_removals(graph, page, &mut work)?;
     let links = incoming_link_index(graph, &mut work)?;
     let cleanup = links.cleanup_for(page)?;
     graph.charge_page_work(budget - work)?;

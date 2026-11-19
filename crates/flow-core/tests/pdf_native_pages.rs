@@ -420,42 +420,54 @@ fn trailer_owned_navigation_blocks_only_its_target() {
 
 #[test]
 fn deleting_page_removes_both_links_with_a_shared_destination() {
-    let bytes = build_pdf(&[
-        (0, "<< /Type /Catalog /Pages 2 0 R >>"),
-        (
-            0,
-            "<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 /MediaBox [0 0 300 500] /Resources <<>> >>",
-        ),
-        (0, "<< /Type /Page /Parent 2 0 R >>"),
-        (0, "<< /Type /Page /Parent 2 0 R /Annots [5 0 R 6 0 R] >>"),
-        (
-            0,
-            "<< /Type /Annot /Subtype /Link /P 4 0 R /Rect [20 30 50 60] /Dest 7 0 R >>",
-        ),
-        (
-            0,
-            "<< /Type /Annot /Subtype /Link /P 4 0 R /Rect [60 30 90 60] /Dest 7 0 R >>",
-        ),
-        (0, "[3 0 R /Fit]"),
-    ]);
-    let mut session =
-        NativePdfSession::open_scoped(&bytes, NativeEditLimits::default(), [3; 16]).unwrap();
-    let prior = session.snapshot().clone();
-    assert!(
-        prior
-            .page_state
-            .restrictions
-            .as_ref()
-            .is_none_or(|caps| caps.pages[0].delete.is_none())
-    );
-    session
-        .apply_page(prior.binding, 1, &command("deletePage", 0, &prior))
-        .unwrap();
-    assert_eq!(
-        session.snapshot().page_state.order,
-        [prior.page_state.order[1]]
-    );
-    assert!(session.snapshot().scene.pages[0].annotations.is_empty());
+    for (first_annots, second_annots, link_owner) in
+        [("", "[5 0 R 6 0 R]", 4), ("/Annots [6 0 R]", "[5 0 R]", 3)]
+    {
+        let bytes = build_pdf(&[
+            (0, "<< /Type /Catalog /Pages 2 0 R >>"),
+            (
+                0,
+                "<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 /MediaBox [0 0 300 500] /Resources <<>> >>",
+            ),
+            (
+                0,
+                &format!("<< /Type /Page /Parent 2 0 R {first_annots} >>"),
+            ),
+            (
+                0,
+                &format!("<< /Type /Page /Parent 2 0 R /Annots {second_annots} >>"),
+            ),
+            (
+                0,
+                "<< /Type /Annot /Subtype /Link /P 4 0 R /Rect [20 30 50 60] /Dest 7 0 R >>",
+            ),
+            (
+                0,
+                &format!(
+                    "<< /Type /Annot /Subtype /Link /P {link_owner} 0 R /Rect [60 30 90 60] /Dest 7 0 R >>"
+                ),
+            ),
+            (0, "[3 0 R /Fit]"),
+        ]);
+        let mut session =
+            NativePdfSession::open_scoped(&bytes, NativeEditLimits::default(), [3; 16]).unwrap();
+        let prior = session.snapshot().clone();
+        assert!(
+            prior
+                .page_state
+                .restrictions
+                .as_ref()
+                .is_none_or(|caps| caps.pages[0].delete.is_none())
+        );
+        session
+            .apply_page(prior.binding, 1, &command("deletePage", 0, &prior))
+            .unwrap();
+        assert_eq!(
+            session.snapshot().page_state.order,
+            [prior.page_state.order[1]]
+        );
+        assert!(session.snapshot().scene.pages[0].annotations.is_empty());
+    }
 }
 
 #[test]
