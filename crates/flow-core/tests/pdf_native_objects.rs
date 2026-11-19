@@ -319,6 +319,9 @@ fn scene_reads_nested_image_replacement_and_unchanged_sibling() {
     assert_eq!(images[1].filter, "FlateDecode");
     assert_eq!(images[1].data_hex, "07");
     assert_eq!(images[0].rect.x.raw(), 640);
+    assert_eq!(images[0].rect.width.raw(), 640);
+    assert_eq!(images[0].rect.height.raw(), 640);
+    assert_eq!((images[1].width, images[1].height), (1, 1));
     let sibling = images[1].rect;
     assert_eq!(
         (
@@ -327,7 +330,7 @@ fn scene_reads_nested_image_replacement_and_unchanged_sibling() {
             sibling.width.raw(),
             sibling.height.raw()
         ),
-        (4_480, 640, 10, 10)
+        (4_480, 640, 640, 640)
     );
 }
 

@@ -1198,16 +1198,19 @@ impl<'a> SceneBuilder<'a> {
             return Ok(());
         }
         let matrix = self.state.ctm;
-        let (x, y) = matrix.point(LayoutUnit::from_raw(0), LayoutUnit::from_raw(0))?;
-        let (x1, y1) = matrix.point(
-            LayoutUnit::from_raw(i64::from(width)),
-            LayoutUnit::from_raw(i64::from(height)),
-        )?;
+        let zero = LayoutUnit::from_raw(0);
+        let one = LayoutUnit::from_raw(LayoutUnit::UNITS_PER_POINT);
+        let (x0, y0) = matrix.point(zero, zero)?;
+        let (x1, y1) = matrix.point(one, zero)?;
+        let (x2, y2) = matrix.point(zero, one)?;
+        let (x3, y3) = matrix.point(one, one)?;
+        let x = x0.min(x1).min(x2).min(x3);
+        let y = y0.min(y1).min(y2).min(y3);
         let rect = LayoutRect {
             x,
             y,
-            width: x1.checked_sub(x)?,
-            height: y1.checked_sub(y)?,
+            width: x0.max(x1).max(x2).max(x3).checked_sub(x)?,
+            height: y0.max(y1).max(y2).max(y3).checked_sub(y)?,
         };
         self.push_element(PdfSceneElement::Image {
             value: PdfImageElement {
