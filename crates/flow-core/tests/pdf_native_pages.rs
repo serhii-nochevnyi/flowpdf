@@ -308,6 +308,86 @@ fn page_widget_operations_share_calculation_order_admission() {
 }
 
 #[test]
+fn chapter_outline_blocks_delete_but_leaf_outline_can_be_removed() {
+    let bytes = build_pdf(&[
+        (0, "<< /Type /Catalog /Pages 2 0 R /Outlines 5 0 R >>"),
+        (
+            0,
+            "<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 /MediaBox [0 0 300 500] /Resources <<>> >>",
+        ),
+        (0, "<< /Type /Page /Parent 2 0 R >>"),
+        (0, "<< /Type /Page /Parent 2 0 R >>"),
+        (0, "<< /Type /Outlines /First 6 0 R /Last 6 0 R /Count 2 >>"),
+        (
+            0,
+            "<< /Title (Chapter) /Parent 5 0 R /Dest [3 0 R /Fit] /First 7 0 R /Last 7 0 R /Count 1 >>",
+        ),
+        (0, "<< /Title (Section) /Parent 6 0 R /Dest [4 0 R /Fit] >>"),
+    ]);
+    let mut session =
+        NativePdfSession::open_scoped(&bytes, NativeEditLimits::default(), [3; 16]).unwrap();
+    let prior = session.snapshot().clone();
+    let capabilities = &prior.page_state.restrictions.as_ref().unwrap().pages;
+    assert!(capabilities[0].delete.is_some());
+    assert!(capabilities[1].delete.is_none());
+    assert!(
+        session
+            .apply_page(prior.binding, 1, &command("deletePage", 0, &prior))
+            .is_err()
+    );
+    assert_eq!(session.output_bytes(), bytes);
+    session
+        .apply_page(prior.binding, 2, &command("deletePage", 1, &prior))
+        .unwrap();
+    assert_eq!(
+        session.snapshot().page_state.order,
+        prior.page_state.order[..1]
+    );
+}
+
+#[test]
+fn grouped_field_refuses_duplicate_without_blocking_unrelated_deletion() {
+    let bytes = build_pdf(&[
+        (0, "<< /Type /Catalog /Pages 2 0 R /AcroForm 6 0 R >>"),
+        (
+            0,
+            "<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 /MediaBox [0 0 300 500] /Resources <<>> >>",
+        ),
+        (0, "<< /Type /Page /Parent 2 0 R /Annots [5 0 R] >>"),
+        (0, "<< /Type /Page /Parent 2 0 R /Annots [8 0 R] >>"),
+        (
+            0,
+            "<< /Type /Annot /Subtype /Widget /P 3 0 R /Rect [40 60 80 90] /FT /Btn /T (Approval) /V /Off /AS /Off >>",
+        ),
+        (0, "<< /Fields [5 0 R 7 0 R] >>"),
+        (0, "<< /T (Section) /Kids [8 0 R] >>"),
+        (
+            0,
+            "<< /Type /Annot /Subtype /Widget /Parent 7 0 R /P 4 0 R /Rect [40 60 80 90] /FT /Btn /T (Approval) /V /Off /AS /Off >>",
+        ),
+    ]);
+    let mut session =
+        NativePdfSession::open_scoped(&bytes, NativeEditLimits::default(), [3; 16]).unwrap();
+    let prior = session.snapshot().clone();
+    let first = &prior.page_state.restrictions.as_ref().unwrap().pages[0];
+    assert!(first.duplicate.is_some());
+    assert!(first.delete.is_none());
+    assert!(
+        session
+            .apply_page(prior.binding, 1, &command("duplicatePage", 0, &prior))
+            .is_err()
+    );
+    assert_eq!(session.output_bytes(), bytes);
+    session
+        .apply_page(prior.binding, 2, &command("deletePage", 0, &prior))
+        .unwrap();
+    assert_eq!(
+        session.snapshot().page_state.order,
+        prior.page_state.order[1..]
+    );
+}
+
+#[test]
 fn scaled_page_allows_safe_structural_edits_without_editable_geometry() {
     let bytes = build_pdf(&[
         (0, "<< /Type /Catalog /Pages 2 0 R >>"),

@@ -196,15 +196,18 @@ fn named_destination_pages(
     Ok(targets)
 }
 
-fn supports_page_annotations(graph: &NativePdfGraph, page: Ref, work: &mut usize) -> bool {
-    let Ok(items) = annotations(graph, page) else {
-        return false;
-    };
+fn page_widget_count(
+    graph: &NativePdfGraph,
+    page: Ref,
+    work: &mut usize,
+) -> Result<usize, NativeEditError> {
+    let items = annotations(graph, page)?;
     let cost_per_annotation = items.len() + super::forms::MAX_FIELDS + graph.limits.max_nesting;
-    spend(work, items.len().saturating_mul(cost_per_annotation)).is_ok()
-        && items
-            .iter()
-            .all(|&annot| annotation_ownership(graph, page, annot).is_ok())
+    spend(work, items.len().saturating_mul(cost_per_annotation))?;
+    items.into_iter().try_fold(0, |count, annot| {
+        let is_widget = annotation_ownership(graph, page, annot)?.is_some();
+        Ok(count + usize::from(is_widget))
+    })
 }
 
 pub(super) fn restrictions(
@@ -218,6 +221,7 @@ pub(super) fn restrictions(
     let catalog_values = dict(graph, catalog)?;
     let mut work = graph.remaining_work();
     let named_targets = named_destination_pages(graph, catalog_values, &mut work);
+    let mut copyable_field_count = None;
     let pages: Vec<_> = projected
         .iter()
         .map(|page| {
@@ -225,7 +229,19 @@ pub(super) fn restrictions(
             let parent = reference(values, "Parent")?;
             let geometry = page.geometry.is_none().then_some(Geometry);
             let tagged = values.contains_key("StructParents");
-            let annotations_supported = supports_page_annotations(graph, page.object, &mut work);
+            let widgets = page_widget_count(graph, page.object, &mut work);
+            let annotations_supported = widgets.is_ok();
+            let duplicate_annotations = match widgets {
+                Ok(0) => true,
+                Ok(count) => copyable_field_count
+                    .get_or_insert_with(|| {
+                        let (_, fields) = form_fields(graph).ok()?;
+                        field_names(graph, &fields, &mut work).ok()?;
+                        Some(fields.len())
+                    })
+                    .is_some_and(|fields| fields + count <= super::forms::MAX_FIELDS),
+                Err(_) => false,
+            };
             let catalog_dependency = named_targets.as_ref().map_or(true, |pages| {
                 pages.contains(&page.object)
                     || graph
@@ -238,14 +254,17 @@ pub(super) fn restrictions(
                 geometry,
                 reparent: geometry.or(tagged.then_some(Structure)),
                 duplicate: geometry.or_else(|| {
-                    (!annotations_supported
+                    (!duplicate_annotations
                         || values
                             .keys()
                             .any(|key| !DUPLICATE_KEYS.contains(&key.as_str())))
                     .then_some(Structure)
                 }),
-                delete: (tagged || catalog_dependency || !annotations_supported)
-                    .then_some(Structure),
+                delete: (tagged
+                    || catalog_dependency
+                    || !annotations_supported
+                    || outline_removal_plan(graph, page.object, &mut work).is_err())
+                .then_some(Structure),
             })
         })
         .collect::<Result<_, NativeEditError>>()?;
@@ -731,12 +750,12 @@ pub(super) fn annotation_membership(
     Ok(field)
 }
 
-fn unique_field_name(
-    graph: &mut NativePdfGraph,
-    field: Ref,
+fn field_names(
+    graph: &NativePdfGraph,
     fields: &[Ref],
-) -> Result<PdfValue, NativeEditError> {
-    graph.charge_page_work(fields.len())?;
+    work: &mut usize,
+) -> Result<BTreeSet<Vec<u8>>, NativeEditError> {
+    spend(work, fields.len())?;
     let mut used = BTreeSet::new();
     for &entry in fields {
         let values = dict(graph, entry)?;
@@ -746,6 +765,7 @@ fn unique_field_name(
         let Some(PdfValue::String(name)) = values.get("T") else {
             return Err(Unsupported);
         };
+        spend(work, name.len())?;
         // @contract: Reserve the generated namespace across ASCII and Unicode PDF strings.
         if let Some(units) = name.strip_prefix(&[0xfe, 0xff]) {
             if units.len() % 2 != 0 {
@@ -769,6 +789,18 @@ fn unique_field_name(
             );
         }
     }
+    Ok(used)
+}
+
+fn unique_field_name(
+    graph: &mut NativePdfGraph,
+    field: Ref,
+    fields: &[Ref],
+) -> Result<PdfValue, NativeEditError> {
+    let budget = graph.remaining_work();
+    let mut work = budget;
+    let used = field_names(graph, fields, &mut work)?;
+    graph.charge_page_work(budget - work)?;
     for suffix in 0..=fields.len() {
         let name = format!("FlowPDFCopy{}_{}", field.object_number, suffix).into_bytes();
         if !used.contains(&name) {
@@ -1057,23 +1089,35 @@ pub(super) fn stage(
     Ok(selected)
 }
 
-fn remove_outline_destinations(
-    graph: &mut NativePdfGraph,
+struct OutlineSiblingEdit {
+    parent: Ref,
+    retained: Vec<Ref>,
+    removed: Vec<Ref>,
+}
+
+struct OutlineRemovalPlan {
+    groups: Vec<OutlineSiblingEdit>,
+    counts: BTreeMap<Ref, i64>,
+}
+
+fn outline_removal_plan(
+    graph: &NativePdfGraph,
     page: Ref,
-    removed: &mut BTreeSet<Ref>,
-) -> Result<(), NativeEditError> {
+    work: &mut usize,
+) -> Result<OutlineRemovalPlan, NativeEditError> {
+    let mut plan = OutlineRemovalPlan {
+        groups: Vec::new(),
+        counts: BTreeMap::new(),
+    };
     let catalog = catalog(graph)?;
     let Some(root) = dict(graph, catalog)?
         .get("Outlines")
         .and_then(PdfValue::as_reference)
     else {
-        return Ok(());
+        return Ok(plan);
     };
-    let budget = graph.remaining_work();
-    let mut work = budget;
     let mut pending = vec![(root, 0)];
     let mut seen = BTreeSet::from([root]);
-    let mut groups = Vec::new();
     while let Some((parent, depth)) = pending.pop() {
         if depth > graph.limits.max_nesting {
             return Err(Unsupported);
@@ -1085,7 +1129,7 @@ fn remove_outline_destinations(
         let mut children = Vec::new();
         let mut drops = Vec::new();
         while let Some(child) = current {
-            spend(&mut work, 1)?;
+            spend(work, 1)?;
             if !seen.insert(child) {
                 return Err(Unsupported);
             }
@@ -1129,49 +1173,70 @@ fn remove_outline_destinations(
             return Err(Unsupported);
         }
         if !drops.is_empty() {
-            groups.push((parent, children, drops));
+            let delta = i64::try_from(drops.len()).map_err(|_| Budget)?;
+            let mut ancestor = parent;
+            loop {
+                spend(work, 1)?;
+                let values = dict(graph, ancestor)?;
+                let count = plan
+                    .counts
+                    .get(&ancestor)
+                    .copied()
+                    .or_else(|| values.get("Count").and_then(PdfValue::as_integer));
+                let Some(count) = count else {
+                    if ancestor != root {
+                        return Err(Unsupported);
+                    }
+                    break;
+                };
+                let magnitude = count
+                    .checked_abs()
+                    .and_then(|count| count.checked_sub(delta))
+                    .filter(|&count| count >= 0)
+                    .ok_or(Unsupported)?;
+                plan.counts
+                    .insert(ancestor, if count < 0 { -magnitude } else { magnitude });
+                if ancestor == root || count < 0 {
+                    break;
+                }
+                ancestor = reference(values, "Parent")?;
+            }
+            plan.groups.push(OutlineSiblingEdit {
+                parent,
+                retained: children,
+                removed: drops,
+            });
         }
     }
+    Ok(plan)
+}
+
+fn remove_outline_destinations(
+    graph: &mut NativePdfGraph,
+    page: Ref,
+    removed: &mut BTreeSet<Ref>,
+) -> Result<(), NativeEditError> {
+    let budget = graph.remaining_work();
+    let mut work = budget;
+    let plan = outline_removal_plan(graph, page, &mut work)?;
     graph.charge_page_work(budget - work)?;
-    for (parent, children, drops) in groups {
-        let values = dict_mut(graph, parent)?;
-        set_ref(values, "First", children.first().copied());
-        set_ref(values, "Last", children.last().copied());
-        for (index, &child) in children.iter().enumerate() {
+    for group in plan.groups {
+        let values = dict_mut(graph, group.parent)?;
+        set_ref(values, "First", group.retained.first().copied());
+        set_ref(values, "Last", group.retained.last().copied());
+        for (index, &child) in group.retained.iter().enumerate() {
             let values = dict_mut(graph, child)?;
             set_ref(
                 values,
                 "Prev",
-                index.checked_sub(1).map(|index| children[index]),
+                index.checked_sub(1).map(|index| group.retained[index]),
             );
-            set_ref(values, "Next", children.get(index + 1).copied());
+            set_ref(values, "Next", group.retained.get(index + 1).copied());
         }
-        let delta = i64::try_from(drops.len()).map_err(|_| Budget)?;
-        let mut ancestor = parent;
-        loop {
-            let values = dict_mut(graph, ancestor)?;
-            let Some(count) = values.get("Count").and_then(PdfValue::as_integer) else {
-                if ancestor != root {
-                    // @contract: Without a visibility count, ancestor counts are ambiguous.
-                    return Err(Unsupported);
-                }
-                break;
-            };
-            let magnitude = count
-                .checked_abs()
-                .and_then(|count| count.checked_sub(delta))
-                .filter(|&count| count >= 0)
-                .ok_or(Unsupported)?;
-            values.insert(
-                "Count".into(),
-                PdfValue::Integer(if count < 0 { -magnitude } else { magnitude }),
-            );
-            if ancestor == root || count < 0 {
-                break;
-            }
-            ancestor = reference(values, "Parent")?;
-        }
-        removed.extend(drops);
+        removed.extend(group.removed);
+    }
+    for (ancestor, count) in plan.counts {
+        dict_mut(graph, ancestor)?.insert("Count".into(), PdfValue::Integer(count));
     }
     Ok(())
 }
