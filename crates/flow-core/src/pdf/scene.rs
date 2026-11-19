@@ -897,11 +897,7 @@ impl<'a> SceneBuilder<'a> {
             let commands = transform_path(&self.state.path, self.state.ctm)?;
             let rect = path_bounds(&commands)?;
             let stroke = matches!(operator, "S" | "s" | "B" | "b" | "B*");
-            if self.form_paint_visible(
-                rect,
-                !stroke && !self.state.path_ctm_changed,
-                &provenance,
-            )? {
+            if self.paint_visible(rect, !stroke && !self.state.path_ctm_changed, &provenance)? {
                 self.push_element(PdfSceneElement::Path {
                     value: PdfPathElement {
                         commands,
@@ -929,13 +925,13 @@ impl<'a> SceneBuilder<'a> {
         ));
     }
 
-    fn form_paint_visible(
+    fn paint_visible(
         &mut self,
         rect: LayoutRect,
         bounded: bool,
         provenance: &PdfSourceProvenance,
     ) -> Result<bool, PdfReadError> {
-        if self.invocation_path.len() <= 1 {
+        if self.invocation_path.len() <= 1 && self.page.crop_box.is_none() {
             return Ok(true);
         }
         let clip = self.state.clip;
@@ -1159,7 +1155,7 @@ impl<'a> SceneBuilder<'a> {
         }
         if !glyphs.is_empty() {
             let rect = union_rect(glyphs.iter().map(|glyph| glyph.rect))?;
-            if !self.form_paint_visible(rect, false, &provenance)? {
+            if !self.paint_visible(rect, false, &provenance)? {
                 return Ok(());
             }
             self.push_element(PdfSceneElement::Text {
@@ -1368,7 +1364,7 @@ impl<'a> SceneBuilder<'a> {
                 height: one,
             },
         )?;
-        if !self.form_paint_visible(rect, true, &provenance)? {
+        if !self.paint_visible(rect, true, &provenance)? {
             return Ok(());
         }
         let Matrix { a, b, c, d, .. } = self.state.ctm;

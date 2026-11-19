@@ -1086,6 +1086,8 @@ fn parse_page_box(value: &PdfValue) -> Result<LayoutRect, PdfReadError> {
     let y0 = values[1].as_number().ok_or(PdfReadError::NumericLimit)?;
     let x1 = values[2].as_number().ok_or(PdfReadError::NumericLimit)?;
     let y1 = values[3].as_number().ok_or(PdfReadError::NumericLimit)?;
+    let (x0, x1) = (x0.min(x1), x0.max(x1));
+    let (y0, y1) = (y0.min(y1), y0.max(y1));
     let width = x1.checked_sub(x0).map_err(|_| PdfReadError::NumericLimit)?;
     let height = y1.checked_sub(y0).map_err(|_| PdfReadError::NumericLimit)?;
     if width.raw() <= 0 || height.raw() <= 0 {

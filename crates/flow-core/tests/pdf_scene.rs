@@ -238,18 +238,19 @@ fn nested_forms_resolve_equivalent_names_and_report_uncertain_clipping() {
 #[test]
 fn nested_form_paint_respects_direct_and_inherited_page_crop() {
     for (parent_crop, page_crop) in [
-        ("/CropBox [100 100 150 150]", "/CropBox [20 -10 90 70]"),
+        ("/CropBox [100 100 150 150]", "/CropBox [90 70 20 -10]"),
         ("/CropBox 8 0 R", ""),
     ] {
         let bytes = pdf(vec![
             (1, b"<< /Type /Catalog /Pages 2 0 R >>".to_vec()),
             (2, format!("<< /Type /Pages /Kids [3 0 R] /Count 1 {parent_crop} >>").into_bytes()),
-            (3, format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] {page_crop} /Resources << /XObject << /Outer 5 0 R /Later 7 0 R >> >> /Contents 4 0 R >>").into_bytes()),
-            stream(4, "", b"q 1 0 0 1 3 0 cm /Outer Do 70 5 5 5 re f /Later Do Q 85 5 2 2 re f"),
+            (3, format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] {page_crop} /Resources << /XObject << /Outer 5 0 R /Later 7 0 R /Image 9 0 R >> >> /Contents 4 0 R >>").into_bytes()),
+            stream(4, "", b"q 1 0 0 1 3 0 cm /Outer Do 70 5 5 5 re f /Later Do Q 85 5 2 2 re f q 4 0 0 4 82 10 cm /Image Do Q q 4 0 0 4 95 10 cm /Image Do Q q 4 0 0 4 88 10 cm /Image Do Q"),
             stream(5, "/Type /XObject /Subtype /Form /BBox [-20 -20 60 100] /Matrix [1 0 0 1 5 0] /Resources << /XObject << /Inner 6 0 R >> >>", b"/Inner Do 0 0 2 2 re W n 1 0 0 1 100 0 cm"),
             stream(6, "/Type /XObject /Subtype /Form /BBox [-20 -20 60 100] /Matrix [1 0 0 1 2 0]", b"2 20 3 3 re f 20 -8 3 3 re f 8 25 6 4 re f 20 65 4 10 re f 25 35 4 4 re f"),
             stream(7, "/Type /XObject /Subtype /Form /BBox [70 0 110 18]", b"75 10 4 4 re f 95 10 4 4 re f"),
-            (8, b"[20 -10 90 70]".to_vec()),
+            (8, b"[20 70 90 -10]".to_vec()),
+            stream(9, "/Type /XObject /Subtype /Image /Width 1 /Height 1 /ColorSpace /DeviceRGB /BitsPerComponent 8", &[0x12, 0x34, 0x56]),
         ]);
         let reader = open_pdf(&bytes, Default::default()).unwrap();
         let scene = read_pdf_scene(&reader, &PdfSceneRequest::default()).unwrap();
@@ -257,8 +258,10 @@ fn nested_form_paint_respects_direct_and_inherited_page_crop() {
         assert!(page.partial && scene.report.partial);
         assert!(matches!(
             page.report.diagnostics.as_slice(),
-            [diagnostic] if diagnostic.code == PdfReadDiagnosticCode::PartialPage
-                && diagnostic.object_number == Some(6)
+            [nested, direct] if nested.code == PdfReadDiagnosticCode::PartialPage
+                && nested.object_number == Some(6)
+                && direct.code == PdfReadDiagnosticCode::PartialPage
+                && direct.object_number == Some(4)
         ));
         let painted: Vec<_> = page
             .elements
@@ -288,6 +291,15 @@ fn nested_form_paint_respects_direct_and_inherited_page_crop() {
                 (4, [85, 5, 2, 2].map(|points| points * 64)),
             ]
         );
+        let image_x: Vec<_> = page
+            .elements
+            .iter()
+            .filter_map(|element| match element {
+                PdfSceneElement::Image { value } => Some(value.rect.x.raw()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(image_x, [82 * 64, 88 * 64]);
     }
 }
 
