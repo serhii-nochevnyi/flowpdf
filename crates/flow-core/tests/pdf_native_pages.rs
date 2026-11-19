@@ -419,6 +419,60 @@ fn trailer_owned_navigation_blocks_only_its_target() {
 }
 
 #[test]
+fn retained_references_outside_navigation_block_only_the_target_page() {
+    for (tree_entry, page_entry) in [
+        ("/FlowPDFRetained [3 0 R]", ""),
+        ("", "/FlowPDFRetained 6 0 R"),
+    ] {
+        let bytes = build_pdf(&[
+            (0, "<< /Type /Catalog /Pages 2 0 R >>"),
+            (
+                0,
+                &format!(
+                    "<< /Type /Pages /Kids [3 0 R 4 0 R 5 0 R] /Count 3 /MediaBox [0 0 300 500] {tree_entry} >>"
+                ),
+            ),
+            (0, "<< /Type /Page /Parent 2 0 R >>"),
+            (0, "<< /Type /Page /Parent 2 0 R >>"),
+            (0, &format!("<< /Type /Page /Parent 2 0 R {page_entry} >>")),
+            (0, "<< /References [3 0 R] >>"),
+        ]);
+        let mut session =
+            NativePdfSession::open_scoped(&bytes, NativeEditLimits::default(), [3; 16]).unwrap();
+        let prior = session.snapshot().clone();
+        let capabilities = prior.page_state.restrictions.as_ref().unwrap();
+        assert!(capabilities.pages[0].delete.is_some());
+        assert!(capabilities.pages[1].delete.is_none());
+
+        assert_eq!(
+            session
+                .apply_page(prior.binding, 1, &command("deletePage", 0, &prior))
+                .unwrap_err()
+                .code(),
+            "FLOW_PDF_NATIVE_UNSUPPORTED"
+        );
+        assert_eq!(session.output_bytes(), bytes);
+        assert_eq!(session.snapshot().binding, prior.binding);
+        assert_eq!(session.snapshot().page_state, prior.page_state);
+
+        session
+            .apply_page(prior.binding, 2, &command("deletePage", 1, &prior))
+            .unwrap();
+        let after = &session.snapshot().page_state;
+        assert_eq!(
+            after.order,
+            [prior.page_state.order[0], prior.page_state.order[2]]
+        );
+        assert!(
+            after.restrictions.as_ref().unwrap().pages[0]
+                .delete
+                .is_some()
+        );
+        assert!(String::from_utf8_lossy(session.output_bytes()).contains("/FlowPDFRetained"));
+    }
+}
+
+#[test]
 fn retained_annotation_references_block_only_the_link_target() {
     for (annots, retained) in [
         ("[6 0 R]", ""),

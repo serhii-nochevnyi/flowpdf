@@ -515,6 +515,84 @@ impl NativePdfGraph {
         reserve_page_value(value, &mut self.work, &mut self.retained)
     }
 
+    pub(super) fn reserve_page_value(
+        &self,
+        owner: PdfObjectRef,
+        work: &mut usize,
+        retained: &mut usize,
+    ) -> Result<(), NativeEditError> {
+        let value = self.objects.get(&owner).ok_or(NativeEditError::Malformed)?;
+        reserve_page_value(value, work, retained)
+    }
+
+    pub(super) fn charge_page_retained(&mut self, retained: usize) -> Result<(), NativeEditError> {
+        spend(&mut self.retained, retained)
+    }
+
+    pub(super) fn trailer_references(
+        &self,
+        work: &mut usize,
+    ) -> Result<BTreeSet<PdfObjectRef>, NativeEditError> {
+        let mut retained = self.retained;
+        let mut refs = Vec::new();
+        for value in self.trailer.values() {
+            collect_refs(value, &mut refs, work, &mut retained)?;
+        }
+        Ok(refs.into_iter().collect())
+    }
+
+    pub(super) fn check_page_removals(
+        &self,
+        removed: &BTreeSet<PdfObjectRef>,
+        replacements: &BTreeMap<PdfObjectRef, BTreeMap<String, PdfValue>>,
+        trailer: &BTreeSet<PdfObjectRef>,
+        work: &mut usize,
+        mut retained: usize,
+    ) -> Result<(), NativeEditError> {
+        let mut replacement_owners = BTreeMap::<_, BTreeSet<_>>::new();
+        for (&owner, values) in replacements {
+            let mut refs = Vec::new();
+            for value in values.values() {
+                collect_refs(value, &mut refs, work, &mut retained)?;
+            }
+            for target in refs {
+                replacement_owners.entry(target).or_default().insert(owner);
+            }
+        }
+
+        let mut seen = BTreeSet::new();
+        let mut pending = Vec::new();
+        for &target in removed {
+            spend(&mut retained, 128)?;
+            pending.push(target);
+        }
+        while let Some(target) = pending.pop() {
+            spend(work, 1)?;
+            if !seen.insert(target) {
+                continue;
+            }
+            if trailer.contains(&target) {
+                return Err(NativeEditError::Unsupported);
+            }
+            if let Some(owners) = self.reverse.get(&target) {
+                spend(work, owners.len())?;
+                for &owner in owners {
+                    if !replacements.contains_key(&owner) {
+                        spend(&mut retained, 128)?;
+                        pending.push(owner);
+                    }
+                }
+            }
+            if let Some(owners) = replacement_owners.get(&target) {
+                for &owner in owners {
+                    spend(&mut retained, 128)?;
+                    pending.push(owner);
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub(super) fn charge_page_work(&mut self, work: usize) -> Result<(), NativeEditError> {
         spend(&mut self.work, work)
     }
@@ -1024,6 +1102,46 @@ mod tests {
         graph.retained = retained;
         assert_eq!(before, graph.rewrite().unwrap());
         assert_eq!(graph.original_bytes(), bytes);
+    }
+
+    #[test]
+    fn page_removal_preflight_checks_replacement_edges_and_terminates_on_detached_cycles() {
+        let payload = miniz_oxide::deflate::compress_to_vec_zlib(b"q Q", 6);
+        let bytes = super::super::tests::fixture("", &payload);
+        let mut graph = NativePdfGraph::open(&bytes, NativeEditLimits::default()).unwrap();
+        let page = graph.pages[0];
+        let root = graph.trailer["Root"].as_reference().unwrap();
+        let parent = graph.objects[&page].as_dictionary().unwrap()["Parent"]
+            .as_reference()
+            .unwrap();
+        let detached = PdfObjectRef {
+            object_number: 100,
+            generation: 0,
+        };
+        graph.reverse.entry(page).or_default().insert(detached);
+        graph.reverse.insert(detached, BTreeSet::from([page]));
+        let removed = BTreeSet::from([page]);
+        let mut replacements = BTreeMap::from([(parent, BTreeMap::new())]);
+        let mut work = graph.remaining_work();
+        let trailer = graph.trailer_references(&mut work).unwrap();
+        let retained = graph.remaining_retained();
+
+        assert_eq!(
+            graph.check_page_removals(&removed, &replacements, &trailer, &mut work, retained),
+            Ok(())
+        );
+        replacements.insert(
+            root,
+            BTreeMap::from([("Retained".into(), PdfValue::Reference(detached))]),
+        );
+        assert_eq!(
+            graph.check_page_removals(&removed, &replacements, &trailer, &mut work, retained),
+            Err(NativeEditError::Unsupported)
+        );
+        assert_eq!(
+            graph.check_page_removals(&removed, &replacements, &trailer, &mut 0, retained),
+            Err(NativeEditError::Budget)
+        );
     }
 
     #[test]

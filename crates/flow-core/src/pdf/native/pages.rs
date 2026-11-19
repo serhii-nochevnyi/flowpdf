@@ -225,7 +225,9 @@ pub(super) fn restrictions(
     if matches!(outlines, Err(Budget)) {
         return Err(Budget);
     }
-    let incoming_links = incoming_link_index(graph, outlines.as_ref().ok(), &mut work)?;
+    let trailer = graph.trailer_references(&mut work)?;
+    let incoming_links = incoming_link_index(graph, &trailer, &mut work)?;
+    let mut parent_refs = None;
     let mut copyable_field_count = None;
     let pages: Vec<_> = projected
         .iter()
@@ -254,13 +256,27 @@ pub(super) fn restrictions(
                         .get(&page.object)
                         .is_some_and(|owners| owners.contains(&catalog))
             });
-            let outline_dependency = match &outlines {
-                Ok(index) => match index.count_changes(graph, page.object, &mut work) {
-                    Ok(_) => false,
+            let delete = if tagged || catalog_dependency || !annotations_supported {
+                Some(Structure)
+            } else {
+                match outlines
+                    .as_ref()
+                    .map_err(Clone::clone)
+                    .and_then(|outlines| {
+                        deletion_preflight(
+                            graph,
+                            page.object,
+                            outlines,
+                            &incoming_links,
+                            &trailer,
+                            &mut parent_refs,
+                            &mut work,
+                        )
+                    }) {
+                    Ok(_) => None,
                     Err(Budget) => return Err(Budget),
-                    Err(_) => true,
-                },
-                Err(_) => true,
+                    Err(_) => Some(Structure),
+                }
             };
             Ok(NativePageCapability {
                 parent: (u64::from(parent.object_number) << 16) | u64::from(parent.generation),
@@ -273,12 +289,7 @@ pub(super) fn restrictions(
                             .any(|key| !DUPLICATE_KEYS.contains(&key.as_str())))
                     .then_some(Structure)
                 }),
-                delete: (tagged
-                    || catalog_dependency
-                    || !annotations_supported
-                    || incoming_links.cleanup_for(page.object).is_err()
-                    || outline_dependency)
-                    .then_some(Structure),
+                delete,
             })
         })
         .collect::<Result<_, NativeEditError>>()?;
@@ -577,7 +588,14 @@ pub(super) fn replace_form_fields(
 ) -> Result<(), NativeEditError> {
     graph.reserve_page_copy(owner)?;
     let direct = owner == catalog(graph)?;
-    let values = dict_mut(graph, owner)?;
+    set_form_fields(dict_mut(graph, owner)?, direct, fields)
+}
+
+fn set_form_fields(
+    values: &mut Dict,
+    direct: bool,
+    fields: Vec<Ref>,
+) -> Result<(), NativeEditError> {
     let form = if direct {
         match values.get_mut("AcroForm") {
             Some(PdfValue::Dictionary(form)) => form,
@@ -928,89 +946,17 @@ impl IncomingLinkIndex {
     }
 }
 
-fn link_destinations_survive(
-    graph: &NativePdfGraph,
-    target: Ref,
-    cleanup: &LinkCleanup,
-    outlines: Option<&OutlineIndex>,
-    trailer_refs: &BTreeSet<Ref>,
-    work: &mut usize,
-) -> Result<bool, NativeEditError> {
-    let mut removed = match page_owned_removals(graph, target, work) {
-        Ok(plan) => plan.removed,
-        Err(Budget) => return Err(Budget),
-        Err(_) => return Ok(true),
-    };
-    if let Some(groups) = outlines.and_then(|outlines| outlines.removable.get(&target)) {
-        for drops in groups.values() {
-            spend(work, drops.len())?;
-            removed.extend(drops);
-        }
-    }
-    if removed
-        .iter()
-        .any(|reference| trailer_refs.contains(reference))
-    {
-        return Ok(true);
-    }
-    let mut destinations = BTreeSet::new();
-    for &annot in cleanup.values().flatten() {
-        spend(work, 1)?;
-        removed.insert(annot);
-    }
-    for &owner in &removed {
-        spend(work, 1)?;
-        let values = dict(graph, owner)?;
-        if explicit_destination(graph, values, work)?
-            .and_then(|destination| destination.first())
-            .and_then(PdfValue::as_reference)
-            != Some(target)
-        {
-            continue;
-        }
-        let mut value = values.get("Dest").ok_or(Malformed)?;
-        while let Some(reference) = value.as_reference() {
-            spend(work, 1)?;
-            if trailer_refs.contains(&reference) {
-                return Ok(true);
-            }
-            if !destinations.insert(reference) {
-                break;
-            }
-            value = graph.objects.get(&reference).ok_or(Malformed)?;
-        }
-    }
-    for reference in &destinations {
-        if let Some(owners) = graph.reverse.get(reference) {
-            spend(work, owners.len())?;
-            if owners
-                .iter()
-                .any(|owner| !removed.contains(owner) && !destinations.contains(owner))
-            {
-                return Ok(true);
-            }
-        }
-    }
-    Ok(false)
-}
-
 fn incoming_link_index(
     graph: &NativePdfGraph,
-    outlines: Option<&OutlineIndex>,
+    trailer_refs: &BTreeSet<Ref>,
     work: &mut usize,
 ) -> Result<IncomingLinkIndex, NativeEditError> {
-    let mut trailer_refs = Vec::new();
-    let mut remaining = graph.remaining_retained();
-    for value in graph.trailer.values() {
-        collect_refs(value, &mut trailer_refs, work, &mut remaining)?;
-    }
-    let trailer_refs: BTreeSet<_> = trailer_refs.into_iter().collect();
     let mut index = IncomingLinkIndex::default();
     spend(work, graph.pages.len())?;
     let page_refs: BTreeSet<_> = graph.pages.iter().copied().collect();
     index
         .blocked
-        .extend(page_refs.intersection(&trailer_refs).copied());
+        .extend(page_refs.intersection(trailer_refs).copied());
     for &source in &graph.pages {
         let source_values = dict(graph, source)?;
         let Some(annots) = source_values.get("Annots") else {
@@ -1083,20 +1029,6 @@ fn incoming_link_index(
             }
         }
     }
-    let mut targets = BTreeSet::new();
-    targets.extend(index.removable.keys().copied());
-    if let Some(outlines) = outlines {
-        targets.extend(outlines.removable.keys().copied());
-    }
-    let empty_cleanup = LinkCleanup::new();
-    for target in targets {
-        let cleanup = index.removable.get(&target).unwrap_or(&empty_cleanup);
-        if !index.blocked.contains(&target)
-            && link_destinations_survive(graph, target, cleanup, outlines, &trailer_refs, work)?
-        {
-            index.blocked.insert(target);
-        }
-    }
     Ok(index)
 }
 
@@ -1134,37 +1066,113 @@ fn page_owned_removals(
     })
 }
 
-fn remove_page_dependencies(
-    graph: &mut NativePdfGraph,
+struct PageDeletion {
+    removed: BTreeSet<Ref>,
+    replacements: BTreeMap<Ref, Dict>,
+    retained: usize,
+}
+
+impl PageDeletion {
+    fn edit<'a>(
+        &'a mut self,
+        graph: &NativePdfGraph,
+        owner: Ref,
+        work: &mut usize,
+    ) -> Result<&'a mut Dict, NativeEditError> {
+        use std::collections::btree_map::Entry;
+        Ok(match self.replacements.entry(owner) {
+            Entry::Occupied(entry) => entry.into_mut(),
+            Entry::Vacant(entry) => {
+                graph.reserve_page_value(owner, work, &mut self.retained)?;
+                entry.insert(dict(graph, owner)?.clone())
+            }
+        })
+    }
+}
+
+fn deletion_preflight(
+    graph: &NativePdfGraph,
     page: Ref,
-) -> Result<BTreeSet<Ref>, NativeEditError> {
-    let budget = graph.remaining_work();
-    let mut work = budget;
-    let PageOwnedRemovals {
-        mut removed,
-        fields: fields_to_remove,
-    } = page_owned_removals(graph, page, &mut work)?;
-    let outlines = outline_index(graph, &mut work)?;
-    let links = incoming_link_index(graph, Some(&outlines), &mut work)?;
+    outlines: &OutlineIndex,
+    links: &IncomingLinkIndex,
+    trailer: &BTreeSet<Ref>,
+    parent_refs: &mut Option<(Ref, BTreeSet<Ref>)>,
+    work: &mut usize,
+) -> Result<PageDeletion, NativeEditError> {
     let cleanup = links.cleanup_for(page)?;
-    graph.charge_page_work(budget - work)?;
+    if outlines.blocked.contains(&page) {
+        return Err(Unsupported);
+    }
+    let PageOwnedRemovals { removed, fields } = page_owned_removals(graph, page, work)?;
+    let mut plan = PageDeletion {
+        removed,
+        replacements: BTreeMap::new(),
+        retained: graph.remaining_retained(),
+    };
+    let parent = reference(dict(graph, page)?, "Parent")?;
+    let parent_values = dict(graph, parent)?;
+    let kids = parent_values.get("Kids").ok_or(Malformed)?;
+    if plan.removed.len() == 1
+        && cleanup.is_none()
+        && !outlines.removable.contains_key(&page)
+        && kids.as_array().is_some()
+        && !trailer.contains(&page)
+        && graph
+            .reverse
+            .get(&page)
+            .is_some_and(|owners| owners.len() == 1 && owners.contains(&parent))
+    {
+        if parent_refs
+            .as_ref()
+            .is_none_or(|(owner, _)| *owner != parent)
+        {
+            let mut refs = Vec::new();
+            let mut retained = graph.remaining_retained();
+            for (key, value) in parent_values {
+                if key != "Kids" {
+                    collect_refs(value, &mut refs, work, &mut retained)?;
+                }
+            }
+            *parent_refs = Some((parent, refs.into_iter().collect()));
+        }
+        if parent_refs
+            .as_ref()
+            .is_some_and(|(_, refs)| refs.contains(&page))
+        {
+            return Err(Unsupported);
+        }
+        return Ok(plan);
+    }
+    let mut children = array_refs(graph, kids, work)?;
+    children.retain(|&child| child != page);
+    plan.edit(graph, parent, work)?
+        .insert("Kids".into(), refs(children));
     if let Some(cleanup) = cleanup {
         for (&source, drops) in cleanup {
-            let mut keep = annotations(graph, source)?;
-            graph.charge_page_work(keep.len())?;
+            let annots = dict(graph, source)?.get("Annots").ok_or(Malformed)?;
+            let mut keep = array_refs(graph, annots, work)?;
             keep.retain(|annot| !drops.contains(annot));
-            graph.reserve_page_copy(source)?;
-            dict_mut(graph, source)?.insert("Annots".into(), refs(keep));
-            removed.extend(drops);
+            plan.edit(graph, source, work)?
+                .insert("Annots".into(), refs(keep));
+            plan.removed.extend(drops);
         }
     }
-    if !fields_to_remove.is_empty() {
-        let (form, mut fields) = form_fields(graph)?;
-        fields.retain(|field| !fields_to_remove.contains(field));
-        replace_form_fields(graph, form, fields)?;
+    if !fields.is_empty() {
+        let (form, mut keep) = form_fields(graph)?;
+        spend(work, keep.len())?;
+        keep.retain(|field| !fields.contains(field));
+        let direct = form == catalog(graph)?;
+        set_form_fields(plan.edit(graph, form, work)?, direct, keep)?;
     }
-    remove_outline_destinations(graph, &outlines, page, &mut removed)?;
-    Ok(removed)
+    plan_outline_cleanup(graph, outlines, page, &mut plan, work)?;
+    graph.check_page_removals(
+        &plan.removed,
+        &plan.replacements,
+        trailer,
+        work,
+        plan.retained,
+    )?;
+    Ok(plan)
 }
 
 fn page_tree_reorder(
@@ -1276,10 +1284,25 @@ pub(super) fn stage(
             if order.len() == 1 {
                 return Err(NativeSessionError::FinalPage);
             }
-            removed = remove_page_dependencies(graph, page)?;
-            let mut children = kids(graph, parent)?;
-            children.retain(|&child| child != page);
-            replace_kids(graph, parent, children)?;
+            let budget = graph.remaining_work();
+            let mut work = budget;
+            let outlines = outline_index(graph, &mut work)?;
+            let trailer = graph.trailer_references(&mut work)?;
+            let links = incoming_link_index(graph, &trailer, &mut work)?;
+            let plan = deletion_preflight(
+                graph, page, &outlines, &links, &trailer, &mut None, &mut work,
+            )?;
+            graph.charge_page_work(budget - work)?;
+            graph.charge_page_retained(graph.remaining_retained() - plan.retained)?;
+            removed = plan.removed;
+            if plan.replacements.is_empty() {
+                let mut children = kids(graph, parent)?;
+                children.retain(|&child| child != page);
+                replace_kids(graph, parent, children)?;
+            }
+            for (owner, values) in plan.replacements {
+                *dict_mut(graph, owner)? = values;
+            }
             change_count(graph, parent, -1)?;
             order.remove(index);
             order[index.min(order.len() - 1)]
@@ -1430,29 +1453,28 @@ fn outline_index(
     Ok(index)
 }
 
-fn remove_outline_destinations(
-    graph: &mut NativePdfGraph,
+fn plan_outline_cleanup(
+    graph: &NativePdfGraph,
     index: &OutlineIndex,
     page: Ref,
-    removed: &mut BTreeSet<Ref>,
+    plan: &mut PageDeletion,
+    work: &mut usize,
 ) -> Result<(), NativeEditError> {
-    let budget = graph.remaining_work();
-    let mut work = budget;
-    let counts = index.count_changes(graph, page, &mut work)?;
+    let counts = index.count_changes(graph, page, work)?;
     if let Some(groups) = index.removable.get(&page) {
         for (&parent, drops) in groups {
             let siblings = index.siblings.get(&parent).ok_or(Malformed)?;
-            spend(&mut work, siblings.len())?;
+            spend(work, siblings.len())?;
             let retained: Vec<_> = siblings
                 .iter()
                 .copied()
                 .filter(|child| !drops.contains(child))
                 .collect();
-            let values = dict_mut(graph, parent)?;
+            let values = plan.edit(graph, parent, work)?;
             set_ref(values, "First", retained.first().copied());
             set_ref(values, "Last", retained.last().copied());
             for (position, &child) in retained.iter().enumerate() {
-                let values = dict_mut(graph, child)?;
+                let values = plan.edit(graph, child, work)?;
                 set_ref(
                     values,
                     "Prev",
@@ -1460,13 +1482,13 @@ fn remove_outline_destinations(
                 );
                 set_ref(values, "Next", retained.get(position + 1).copied());
             }
-            removed.extend(drops);
+            plan.removed.extend(drops);
         }
     }
     for (ancestor, count) in counts {
-        dict_mut(graph, ancestor)?.insert("Count".into(), PdfValue::Integer(count));
+        plan.edit(graph, ancestor, work)?
+            .insert("Count".into(), PdfValue::Integer(count));
     }
-    graph.charge_page_work(budget - work)?;
     Ok(())
 }
 
