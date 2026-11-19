@@ -111,13 +111,102 @@ const refused = classicPdf([
   [0, stream(`/Length ${Buffer.byteLength(paint("A"))}`, paint("A"))],
 ], "/Root 1 2 R");
 
+const literalStream = (bytes, dictionary = "") =>
+  stream(`/Length ${Buffer.byteLength(bytes)} ${dictionary}`.trimEnd(), bytes);
+const fixedFlate = (bytes, dictionary) => literalStream(
+  deflateSync(bytes, { level: 9, strategy: constants.Z_FIXED }),
+  `/Filter /FlateDecode ${dictionary}`,
+);
+
+function compositeFont(start) {
+  // CIDs 1–3 are A, B and Ї. Glyph IDs and widths come from the pinned font.
+  const unicode = cmap.replace("Fixture-Latin", "Fixture-Composite")
+    .replace("<00> <FF>", "<0000> <FFFF>")
+    .replace("2 beginbfchar\n<41> <0041>\n<42> <0042>",
+      "3 beginbfchar\n<0001> <0041>\n<0002> <0042>\n<0003> <0407>");
+  return [
+    `<< /Type /Font /Subtype /Type0 /BaseFont /NotoSans-Regular /Encoding /Identity-H /DescendantFonts [${start + 1} 0 R] /ToUnicode ${start + 4} 0 R >>`,
+    "<< /Type /Font /Subtype /CIDFontType2 /BaseFont /NotoSans-Regular " +
+      "/CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> " +
+      `/W [1 [639 650 339]] /FontDescriptor ${start + 2} 0 R /CIDToGIDMap ${start + 5} 0 R >>`,
+    "<< /Type /FontDescriptor /FontName /NotoSans-Regular /Flags 32 " +
+      "/FontBBox [-621 -389 2800 1067] /ItalicAngle 0 /Ascent 1069 /Descent -293 " +
+      `/CapHeight 714 /StemV 80 /FontFile2 ${start + 3} 0 R >>`,
+    resources[3][1],
+    literalStream(unicode),
+    literalStream(Buffer.from([0, 0, 0, 36, 0, 37, 1, 160])),
+  ];
+}
+
+const grayImage = (samples) => fixedFlate(Buffer.from(samples),
+  `/Type /XObject /Subtype /Image /ColorSpace /DeviceGray /Width ${samples.length} /Height 1 /BitsPerComponent 8`);
+const flatPdf = (objects, trailer = "") =>
+  classicPdf(objects.map((body) => [0, body]), `/Root 1 0 R${trailer}`);
+const appearances = "/Type /XObject /Subtype /Form";
+const editFamilies = flatPdf([
+  "<< /Type /Catalog /Pages 2 0 R /AcroForm 16 0 R /Outlines 24 0 R >>",
+  `<< /Type /Pages /Kids [3 0 R 5 0 R] /Count 2 ${mediaBox} /Resources 7 0 R >>`,
+  "<< /Type /Pages /Parent 2 0 R /Kids [4 0 R] /Count 1 >>",
+  "<< /Type /Page /Parent 3 0 R /Contents 8 0 R /Annots [17 0 R 18 0 R 19 0 R] >>",
+  "<< /Type /Pages /Parent 2 0 R /Kids [6 0 R] /Count 1 /Rotate 90 /CropBox [4 4 156 96] >>",
+  "<< /Type /Page /Parent 5 0 R /Contents 8 0 R /Annots [23 0 R] >>",
+  "<< /Font << /F1 9 0 R >> /XObject << /Im 15 0 R >> >>",
+  literalStream("BT /F1 12 Tf 16 76 Td <000300010001> Tj ET\n" +
+    "BT /F1 12 Tf 100 76 Td <0002> Tj ET\n" +
+    "1 0 0 rg 16 44 12 12 re f\n" +
+    "q 16 0 0 12 48 44 cm /Im Do Q\nq 16 0 0 12 80 44 cm /Im Do Q\n"),
+  ...compositeFont(9),
+  grayImage([160]),
+  "<< /Fields [18 0 R 19 0 R] /DR << /Font << /FlowField 9 0 R >> >> /DA (/FlowField 10 Tf 0 g) >>",
+  "<< /Type /Annot /Subtype /Text /P 4 0 R /Rect [128 68 144 84] /Contents (Control note) >>",
+  "<< /Type /Annot /Subtype /Widget /P 4 0 R /FT /Tx /T (recipient) /V () /DV () /Rect [16 12 64 32] /AP << /N 20 0 R >> >>",
+  "<< /Type /Annot /Subtype /Widget /P 4 0 R /FT /Btn /T (accepted) /V /Off /DV /Off /AS /Off /Rect [80 12 100 32] /AP << /N << /Off 21 0 R /Yes 22 0 R >> >> >>",
+  literalStream("q 1 g 0 0 48 20 re f 0 G 1 w 1 1 46 18 re S\nBT /FlowField 10 Tf 0 g 2 4 Td <> Tj ET\nQ\n",
+    `${appearances} /BBox [0 0 48 20] /Resources << /Font << /FlowField 9 0 R >> >>`),
+  literalStream("0 g 0 0 20 20 re f 1 g 2 2 16 16 re f",
+    `${appearances} /BBox [0 0 20 20] /Resources <<>>`),
+  literalStream("0 g 0 0 20 20 re f 1 g 2 2 16 16 re f 0 g 6 6 8 8 re f",
+    `${appearances} /BBox [0 0 20 20] /Resources <<>>`),
+  "<< /Type /Annot /Subtype /Link /P 6 0 R /Rect [120 12 144 32] /Border [0 0 0] /Dest [4 0 R /Fit] >>",
+  "<< /Type /Outlines /First 25 0 R /Last 25 0 R /Count 1 >>",
+  "<< /Title (First page) /Parent 24 0 R /Dest [4 0 R /Fit] >>",
+]);
+
+const metadata = (value) => literalStream(
+  `<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"><rdf:Description rdf:about="" xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:description>${value}</dc:description></rdf:Description></rdf:RDF></x:xmpmeta>`,
+  "/Type /Metadata /Subtype /XML",
+);
+const redaction = flatPdf([
+  "<< /Type /Catalog /Pages 2 0 R /Metadata 17 0 R /FlowPDFSource 20 0 R >>",
+  `<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 ${mediaBox} >>`,
+  "<< /Type /Page /Parent 2 0 R /Contents 5 0 R /Resources 7 0 R /Annots [14 0 R 15 0 R] /Metadata 18 0 R >>",
+  "<< /Type /Page /Parent 2 0 R /Contents 6 0 R /Resources << /Font << /F1 8 0 R >> >> >>",
+  literalStream("BT /F1 12 Tf 16 76 Td <000300010001> Tj ET\n" +
+    "1 0 0 rg 16 44 12 12 re f\n" +
+    "q 32 0 0 12 48 44 cm /Im Do Q\n" +
+    "0 0 1 rg 112 20 16 12 re f\n"),
+  literalStream("BT /F1 12 Tf 16 76 Td <0002> Tj ET\n0 1 0 rg 16 20 16 12 re f\n"),
+  "<< /Font << /F1 8 0 R >> /XObject << /Im 16 0 R >> >>",
+  ...compositeFont(8),
+  "<< /Type /Annot /Subtype /Text /P 3 0 R /Rect [96 68 112 84] /Contents (Sensitive note) >>",
+  "<< /Type /Annot /Subtype /Text /P 3 0 R /Rect [128 68 144 84] /Contents (Control note) >>",
+  grayImage([217, 83]),
+  metadata("Sensitive catalog metadata"),
+  metadata("Sensitive page metadata"),
+  "<< /Title (Sensitive title) /Author (Sensitive author) >>",
+  literalStream("Sensitive source envelope", "/Type /Metadata /Subtype /FlowPDF.Source"),
+], " /Info 19 0 R /ID [<7A2B29194DE84059865FC3E05D770AB2> <7A2B29194DE84059865FC3E05D770AB2>]");
+
 const args = process.argv.slice(2);
 const check = args[0] === "--check";
 if (args.length !== Number(check)) {
   throw new Error("Usage: node scripts/generate-pdf-native-fixtures.mjs [--check]");
 }
 
-for (const [name, bytes] of [["notes-preservation.pdf", notes], ["refused.pdf", refused]]) {
+for (const [name, bytes] of [
+  ["notes-preservation.pdf", notes], ["refused.pdf", refused],
+  ["edit-families.pdf", editFamilies], ["redaction.pdf", redaction],
+]) {
   const path = new URL(name, output);
   if (check) {
     let existing;

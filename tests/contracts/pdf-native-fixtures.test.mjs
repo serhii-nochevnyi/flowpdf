@@ -52,6 +52,27 @@ const matrix = {
   },
 };
 
+const expanded = {
+  "edit-families": {
+    profile: "embedded-text-shared-graphics-pages-fields",
+    operations: {
+      replaceText: "", replaceTextAbsentCode: "TEXT_MAPPING", replaceTextOverflow: "TEXT_OVERFLOW",
+      addGraphic: "", replaceGraphic: "", addImage: "", replaceImage: "",
+      moveObject: "", removeObject: "", moveObjectInvalidGeometry: "OBJECT_GEOMETRY",
+      insertBlankPage: "", reorderPage: "", rotatePage: "", duplicatePage: "", deletePage: "",
+      deleteFinalPage: "FINAL_PAGE",
+      addTextField: "", addCheckboxField: "", setFieldText: "", setFieldChecked: "",
+      moveField: "", removeField: "", setFieldTextAbsentGlyph: "FIELD_GLYPH",
+      redactWithForms: "UNSUPPORTED",
+    },
+  },
+  redaction: {
+    profile: "scrub-text-path-image-note-metadata",
+    operations: { redact: "" },
+  },
+};
+
+
 test("corpus has closed provenance, exact source and expected hashes, and unique fixture IDs", () => {
   keys(manifest, [
     "schemaVersion", "generator", "font", "fixtures", "unsupportedPolicy", "evidence",
@@ -67,7 +88,7 @@ test("corpus has closed provenance, exact source and expected hashes, and unique
   assert.equal(manifest.font.license.sha256,
     "12e55f73bf39d88d7f2e37e094ad30b8f6752b3d25391ac23978b1e5e35ca66b");
 
-  same(manifest.fixtures.map(({ id }) => id), Object.keys(matrix));
+  same(manifest.fixtures.map(({ id }) => id), [...Object.keys(matrix), ...Object.keys(expanded)]);
   const font = bytes(manifest.font.binary.path);
   for (const fixture of manifest.fixtures) {
     const { id, provenance, profile, admission, source, expected } = fixture;
@@ -75,11 +96,11 @@ test("corpus has closed provenance, exact source and expected hashes, and unique
     same(provenance, {
       origin: "original-synthetic", license: "CC0-1.0", generatorVersion: 1,
     }, id);
-    assert.equal(profile, matrix[id].profile, id);
-    assert.equal(admission, matrix[id].admission, id);
+    assert.equal(profile, (matrix[id] ?? expanded[id]).profile, id);
+    assert.equal(admission, matrix[id]?.admission ?? "admitted", id);
     bind(source, corpus + id + ".pdf");
     verifyEmbeddedFont(bytes(source.path), font, id);
-    if (id === "notes-preservation") {
+    if (id !== "refused") {
       bind(expected, corpus + id + ".expected.json");
     } else {
       keys(expected, ["inline", "sha256"], id);
@@ -94,6 +115,7 @@ test("every operation has complete page text, retention and versioned raster exp
     "indirect-length", "encoded-content-streams", "embedded-noto-sans",
   ];
   for (const { id, expected } of manifest.fixtures) {
+    if (expanded[id]) continue;
     const { operations, text, admission } = matrix[id];
     const data = expected.inline ?? json(expected.path);
     keys(data, ["schemaVersion", "fixtureId", "raster", "operations"], id);
@@ -155,4 +177,144 @@ test("generator is independent of the application and native writer", () => {
   assert.equal([...source.matchAll(/\bimport\b(?!\.meta)/g)].length, imports.length);
   assert.equal(/\b(?:import\s*\(|require\s*\(|eval\s*\()/.test(source), false);
   assert.ok(source.includes("startxref") && source.includes("endobj"), "literal classic xref");
+});
+
+const crop = [0, 0, 160, 100];
+const rotatedCrop = [4, 4, 156, 96];
+const pagePlans = {
+  replaceText: [[1], [1, 2], "source-with-patches"],
+  addGraphic: [[1], [1, 2], "source-with-patches"],
+  replaceGraphic: [[1], [1, 2], "source-with-patches"],
+  addImage: [[1], [1, 2], "source-with-patches"],
+  replaceImage: [[1], [1, 2], "source-with-patches"],
+  moveObject: [[1], [1, 2], "source-with-patches"],
+  removeObject: [[1], [1, 2], "source-with-patches"],
+  insertBlankPage: [[], [1, 2, null]],
+  reorderPage: [[1, 2], [2, 1]],
+  rotatePage: [[2], [1, 2]],
+  duplicatePage: [[1], [1, 1, 2]],
+  deletePage: [[1, 2], [2]],
+  deleteFinalPage: [[], [2]],
+  addTextField: [[1], [1, 2]],
+  addCheckboxField: [[1], [1, 2]],
+  setFieldText: [[1], [1, 2]],
+  setFieldChecked: [[1], [1, 2]],
+  moveField: [[1], [1, 2]],
+  removeField: [[1], [1, 2]],
+  redact: [[1], [1, 2], "analytic-full-page"],
+};
+
+function verifyPaint(paint, bounds, label, allowGlyphs) {
+  keys(paint, ["rectPt", "rgb", ...(allowGlyphs ? ["glyphRun"] : [])], label);
+  const [left, bottom, right, top] = paint.rectPt;
+  assert.ok(paint.rectPt.length === 4 && paint.rectPt.every(Number.isInteger)
+    && left >= bounds[0] && bottom >= bounds[1] && right <= bounds[2]
+    && top <= bounds[3] && left < right && bottom < top, label + " paint bounds");
+  assert.ok(paint.rgb.length === 3
+    && paint.rgb.every((n) => Number.isInteger(n) && n >= 0 && n <= 255), label + " paint color");
+  if (allowGlyphs) {
+    same(paint.glyphRun, { cids: [3, 1], baselinePt: [16, 76], sizePt: 12 }, label);
+  }
+}
+
+function verifyAnalyticRaster(page, label, expectedFills) {
+  keys(page.raster, ["comparison", "fills", "sha256Rgb8"], label);
+  same(page.raster.fills, expectedFills, label);
+  const rgb = Buffer.alloc(page.widthPx * page.heightPx * 3, 255);
+  for (const fill of page.raster.fills) {
+    verifyPaint(fill, page.cropBoxPt, label, false);
+    // Full-page colored baselines are unrotated. The rotated inserted page is white.
+    const [left, bottom, right, top] = fill.rectPt;
+    for (let row = page.heightPx - 2 * top; row < page.heightPx - 2 * bottom; row++) {
+      const start = (row * page.widthPx + 2 * left) * 3;
+      rgb.fill(Buffer.from(fill.rgb), start, start + (right - left) * 6);
+    }
+  }
+  assert.ok(sha256(rgb) === page.raster.sha256Rgb8, label + " analytic raster digest");
+}
+
+test("edit families and redaction pin operation outcomes, page identities, text and full raster rules", () => {
+  const fills = [
+    { rectPt: [48, 44, 64, 56], rgb: [0, 0, 0] },
+    { rectPt: [64, 44, 80, 56], rgb: [83, 83, 83] },
+    { rectPt: [112, 20, 128, 32], rgb: [0, 0, 255] },
+  ];
+  for (const [id, profile] of Object.entries(expanded)) {
+    const data = json(corpus + id + ".expected.json");
+    keys(data, ["schemaVersion", "fixtureId", "raster", "operations"], id);
+    same(data.schemaVersion, 2, id);
+    same(data.fixtureId, id, id);
+    same(data.raster, {
+      policy: "page-content-rgb8", version: 2, dpi: 144, origin: "top-left",
+      annotationLayer: "excluded", evidence: "designed", backgroundRgb: [255, 255, 255],
+      pixelCoverage: "positive-area image sample intersection; pixel centers for aligned flat fills",
+      flatChannelTolerance: 0, edgeBandPx: 1, edgeChannelTolerance: 64,
+    }, id);
+    same(data.operations.map(({ operation }) => operation), Object.keys(profile.operations), id);
+    for (const entry of data.operations) {
+      const op = entry.operation;
+      const label = id + "/" + op;
+      keys(entry, [
+        "operation", "request", "outcome", "affectedSourcePages", "affectedPages", "output",
+        "removed", "noteReadback", "fieldReadback", "destinations", "pages",
+      ], label);
+      assert.ok(Object.keys(entry.request).length > 0, label + " request missing");
+      const refusal = profile.operations[op];
+      const [affected, order, firstComparison] = pagePlans[op] ?? [[], [1, 2]];
+      same(entry.outcome, refusal ? "FLOW_PDF_NATIVE_" + refusal : "admitted", label);
+      same(entry.output, refusal ? "byte-identical-to-operation-base" : "rewritten", label);
+      same(entry.affectedSourcePages, affected, label);
+      same(entry.affectedPages, order.flatMap((source, index) =>
+        affected.includes(source) || source === null ? [index + 1] : []), label);
+      same(entry.pages.map(({ sourcePage }) => sourcePage), order, label);
+      for (const [index, page] of entry.pages.entries()) {
+        const pageLabel = label + "/page-" + (index + 1);
+        keys(page, ["page", "sourcePage", "text", "cropBoxPt", "rotation", "widthPx", "heightPx", "raster"], pageLabel);
+        same(page.page, index + 1, pageLabel);
+        const inherited = id === "edit-families" && page.sourcePage !== 1;
+        const rotation = inherited ? (op === "rotatePage" ? 180 : 90) : 0;
+        same(page.rotation, rotation, pageLabel);
+        same(page.cropBoxPt, inherited ? rotatedCrop : crop, pageLabel);
+        same([page.widthPx, page.heightPx], inherited
+          ? (rotation === 90 ? [184, 304] : [304, 184])
+          : [320, 200], pageLabel);
+        const text = id === "redaction" ? (index === 0 ? "" : "B")
+          : page.sourcePage === null ? "" : op === "replaceText" && index === 0 ? "ЇA B" : "ЇAA B";
+        same(page.text, text, pageLabel);
+        let comparison = index === 0 && firstComparison ? firstComparison : "equal-to-source";
+        if (page.sourcePage === null) comparison = "analytic-full-page";
+        if (op === "rotatePage" && page.sourcePage === 2) comparison = "source-transformed";
+        same(page.raster.comparison, comparison, pageLabel);
+        if (comparison === "analytic-full-page") {
+          verifyAnalyticRaster(page, pageLabel, id === "redaction" ? fills : []);
+        } else if (comparison === "source-with-patches") {
+          keys(page.raster, ["comparison", "patches"], pageLabel);
+          same(page.raster.patches.length, op === "moveObject" ? 2 : 1, pageLabel);
+          for (const paint of page.raster.patches) verifyPaint(paint, crop, pageLabel, op === "replaceText");
+        } else {
+          keys(page.raster, ["comparison"], pageLabel);
+        }
+      }
+    }
+  }
+});
+
+test("redaction accounts for sensitive families and preserves control content", () => {
+  const [entry] = json(corpus + "redaction.expected.json").operations;
+  same(entry.request.marks, [
+    { page: 1, rectPt: [12, 70, 40, 92] },
+    { page: 1, rectPt: [16, 44, 28, 56] },
+    { page: 1, rectPt: [51, 46, 52, 47] },
+    { page: 1, rectPt: [96, 68, 112, 84] },
+  ], "redaction marks");
+  same(entry.removed, [
+    "page-1 text ЇAA", "red vector fill", "image sample 217", "Sensitive note",
+    "Sensitive title", "Sensitive author", "Sensitive catalog metadata",
+    "Sensitive page metadata", "Sensitive source envelope", "trailer ID",
+  ], "removed families");
+  same(entry.noteReadback, [
+    { page: 1, rectPt: [128, 68, 144, 84], contents: "Control note" },
+  ], "retained annotation");
+  same(entry.fieldReadback, [], "forms excluded from positive scrub");
+  same(entry.destinations, [], "redaction has no destinations");
 });
