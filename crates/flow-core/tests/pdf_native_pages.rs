@@ -1,4 +1,6 @@
-use flow_core::pdf::native::{NativeEditLimits, NativePageCommand, NativePdfSession};
+use flow_core::pdf::native::{
+    NativeEditLimits, NativePageCommand, NativePdfSession, NativeRequestLookup, NativeSessionError,
+};
 
 fn fixture() -> Vec<u8> {
     build_pdf(&[
@@ -1315,13 +1317,73 @@ fn duplicate_skips_copy_names_reserved_by_read_only_fields() {
 }
 
 #[test]
+fn copy_name_inventory_uses_the_live_projection_and_staging_budgets() {
+    let long_name = "a".repeat(24 * 1024);
+    let bytes = build_pdf(&[
+        (0, "<< /Type /Catalog /Pages 2 0 R /AcroForm 6 0 R >>"),
+        (
+            0,
+            "<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 /MediaBox [0 0 300 500] >>",
+        ),
+        (0, "<< /Type /Page /Parent 2 0 R /Annots [5 0 R] >>"),
+        (0, "<< /Type /Page /Parent 2 0 R /Annots [7 0 R] >>"),
+        (
+            0,
+            "<< /Type /Annot /Subtype /Widget /P 3 0 R /Rect [40 60 80 90] /FT /Btn /T (approval) /V /Off /AS /Off >>",
+        ),
+        (0, "<< /Fields [5 0 R 7 0 R] >>"),
+        (
+            0,
+            &format!(
+                "<< /Type /Annot /Subtype /Widget /P 4 0 R /Rect [40 60 80 90] /FT /Tx /Ff 1 /T ({long_name}) >>"
+            ),
+        ),
+    ]);
+    let limits = NativeEditLimits {
+        max_retained_bytes: 256 * 1024,
+        ..NativeEditLimits::default()
+    };
+    let mut pdf = NativePdfSession::open_scoped(&bytes, limits, [3; 16]).unwrap();
+    let accepted = pdf.snapshot().clone();
+    assert_eq!(
+        NativePdfSession::verify_page_projection(
+            &bytes,
+            NativeEditLimits {
+                max_retained_bytes: 128 * 1024,
+                ..limits
+            },
+            accepted.binding,
+            accepted.scene.scene_hash,
+            &accepted.page_state,
+        ),
+        Err(NativeSessionError::Budget)
+    );
+    let duplicate = command("duplicatePage", 0, &accepted);
+    assert_eq!(
+        pdf.apply_page(accepted.binding, 1, &duplicate),
+        Err(NativeSessionError::Budget)
+    );
+    assert_eq!(pdf.snapshot().binding, accepted.binding);
+    assert_eq!(pdf.snapshot().consumed_request, accepted.consumed_request);
+    assert_eq!(pdf.snapshot().page_state, accepted.page_state);
+    assert_eq!(
+        pdf.lookup(accepted.binding, 1),
+        Ok(NativeRequestLookup::Unseen)
+    );
+    assert_eq!(pdf.output_bytes(), bytes);
+}
+
+#[test]
 fn owned_checkbox_copies_remain_independently_editable_after_page_deletion() {
     use flow_core::pdf::native::NativeFieldCommand;
     use serde_json::json;
 
     let bytes = fixture();
-    let mut pdf =
-        NativePdfSession::open_scoped(&bytes, NativeEditLimits::default(), [3; 16]).unwrap();
+    let limits = NativeEditLimits {
+        max_retained_bytes: 512 * 1024,
+        ..NativeEditLimits::default()
+    };
+    let mut pdf = NativePdfSession::open_scoped(&bytes, limits, [3; 16]).unwrap();
     let add = serde_json::from_value::<NativeFieldCommand>(json!({
         "kind": "addCheckboxField", "page": 0, "rect": [10,10,35,35], "name": "approval", "checked": false,
     })).unwrap();

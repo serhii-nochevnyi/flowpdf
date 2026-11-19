@@ -16,6 +16,8 @@ use super::{
 
 type Dict = BTreeMap<String, Value>;
 pub(super) const MAX_FIELDS: usize = 128;
+// @security: Allow a full B-tree node per entry, including child pointers.
+pub(super) const FIELD_NAME_ENTRY_BYTES: usize = 512;
 pub const NATIVE_MAX_FIELD_NAME_BYTES: usize = 64;
 const MAX_NAME: usize = NATIVE_MAX_FIELD_NAME_BYTES;
 pub const NATIVE_MAX_FIELD_TEXT_BYTES: usize = 1024;
@@ -217,14 +219,6 @@ fn decode(bytes: &[u8], limit: usize) -> Option<String> {
     (value.len() <= limit).then_some(value)
 }
 
-fn editable_name(field: &Dict) -> Option<String> {
-    field
-        .get("T")
-        .and_then(Value::as_bytes)
-        .and_then(|bytes| decode(bytes, MAX_NAME))
-        .filter(|name| valid_name(name))
-}
-
 fn text_string(value: &str) -> Value {
     let mut bytes = vec![0xfe, 0xff];
     bytes.extend(value.encode_utf16().flat_map(u16::to_be_bytes));
@@ -308,15 +302,19 @@ struct Form {
     trailer_refs: BTreeSet<Ref>,
 }
 
-fn owner_refs(graph: &NativePdfGraph, owner: Ref, work: &mut usize) -> FieldResult<Vec<Ref>> {
+fn owner_refs(
+    graph: &NativePdfGraph,
+    owner: Ref,
+    work: &mut usize,
+    mut remaining: usize,
+) -> Result<Vec<Ref>, NativeSessionError> {
     let mut refs = Vec::new();
     collect_refs(
         graph.objects.get(&owner).ok_or(Reference)?,
         &mut refs,
         work,
-        &mut graph.remaining_retained(),
-    )
-    .map_err(|_| Reference)?;
+        &mut remaining,
+    )?;
     Ok(refs)
 }
 
@@ -328,13 +326,16 @@ fn singular(refs: &[Ref], target: Ref) -> bool {
         == 1
 }
 
-fn load_form(graph: &NativePdfGraph, work: &mut usize) -> FieldResult<Form> {
+fn load_form(
+    graph: &NativePdfGraph,
+    work: &mut usize,
+    remaining: &mut usize,
+) -> Result<Form, NativeSessionError> {
     let catalog = pages::catalog(graph).map_err(|_| Reference)?;
     let values = dict(graph, catalog).map_err(|_| Reference)?;
     let mut trailer_refs = Vec::new();
-    let mut remaining = graph.remaining_retained();
     for value in graph.trailer.values() {
-        collect_refs(value, &mut trailer_refs, work, &mut remaining).map_err(|_| Reference)?;
+        collect_refs(value, &mut trailer_refs, work, remaining)?;
     }
     let trailer_refs: BTreeSet<_> = trailer_refs.into_iter().collect();
     let Some(entry) = values.get("AcroForm") else {
@@ -354,22 +355,23 @@ fn load_form(graph: &NativePdfGraph, work: &mut usize) -> FieldResult<Form> {
                 .get(&owner)
                 .is_some_and(|owners| owners.len() == 1 && owners.contains(&catalog))
     {
-        return Err(Reference);
+        return Err(Reference.into());
     }
     if owner != catalog
-        && (trailer_refs.contains(&owner) || !singular(&owner_refs(graph, catalog, work)?, owner))
+        && (trailer_refs.contains(&owner)
+            || !singular(&owner_refs(graph, catalog, work, *remaining)?, owner))
     {
-        return Err(Reference);
+        return Err(Reference.into());
     }
     let values = pages::form_dict(graph, owner).map_err(|_| Reference)?;
     if let Some(container) = values.get("Fields").and_then(Value::as_reference)
         && (trailer_refs.contains(&container)
-            || !singular(&owner_refs(graph, owner, work)?, container))
+            || !singular(&owner_refs(graph, owner, work, *remaining)?, container))
     {
-        return Err(Reference);
+        return Err(Reference.into());
     }
     if entry.as_reference() == Some(catalog) || values.contains_key("XFA") {
-        return Err(Profile);
+        return Err(Profile.into());
     }
     for key in ["CO", "SigFlags", "NeedAppearances"] {
         let Some(value) = values.get(key) else {
@@ -383,7 +385,7 @@ fn load_form(graph: &NativePdfGraph, work: &mut usize) -> FieldResult<Form> {
             | ("SigFlags", Value::Integer(0))
             | ("NeedAppearances", Value::Boolean(false)) => {}
             ("CO", Value::Array(order)) if order.is_empty() => {}
-            _ => return Err(Profile),
+            _ => return Err(Profile.into()),
         }
     }
     let font = (|| {
@@ -415,10 +417,14 @@ fn load_form(graph: &NativePdfGraph, work: &mut usize) -> FieldResult<Form> {
                 .resolve_metered(value, &mut graph.remaining_work())
                 .is_ok_and(|value| value.as_name() == Some("Sig"))
         }) {
-            return Err(Profile);
+            return Err(Profile.into());
         }
     }
-    let names = field_name_inventory(graph, &fields, work).map_err(|_| Reference)?;
+    let names =
+        field_name_inventory(graph, &fields, work, remaining).map_err(|error| match error {
+            NativeEditError::Budget => NativeSessionError::Budget,
+            _ => Reference.into(),
+        })?;
     Ok(Form {
         owner: Some(owner),
         fields,
@@ -562,7 +568,8 @@ fn recognize_identity(
     page: &NativePdfNotePage,
     widget: Ref,
     work: &mut usize,
-) -> FieldResult<(Ref, String)> {
+    mut remaining: usize,
+) -> Result<(Ref, String), NativeSessionError> {
     let widget_data = dict(graph, widget).map_err(|_| Reference)?;
     let field = widget_data
         .get("Parent")
@@ -571,7 +578,7 @@ fn recognize_identity(
     if fields.contains_key("Parent") && field != widget
         || widget_data.get("P").and_then(Value::as_reference) != Some(page.object)
     {
-        return Err(Reference);
+        return Err(Reference.into());
     }
     if !matches!(
         fields.get("FT").and_then(Value::as_name),
@@ -581,12 +588,12 @@ fn recognize_identity(
         .is_some_and(|flags| !matches!(flags.as_integer(), Some(0 | 2)))
         || field != widget && widget_data.contains_key("T")
     {
-        return Err(Profile);
+        return Err(Profile.into());
     }
     if pages::annotation_membership(graph, page.object, widget, false).map_err(|_| Reference)?
         != Some(field)
     {
-        return Err(Reference);
+        return Err(Reference.into());
     }
     // @security: Reverse edges identify owners. Count references within each owner to rule out aliases.
     let containers = [
@@ -602,25 +609,29 @@ fn recognize_identity(
     ];
     for (owner, container) in containers.into_iter().flatten() {
         if form.trailer_refs.contains(&container)
-            || !singular(&owner_refs(graph, owner, work)?, container)
+            || !singular(&owner_refs(graph, owner, work, remaining)?, container)
         {
-            return Err(Reference);
+            return Err(Reference.into());
         }
     }
     for object in BTreeSet::from([widget, field]) {
         if form.trailer_refs.contains(&object) {
-            return Err(Reference);
+            return Err(Reference.into());
         }
         for &owner in graph.reverse.get(&object).ok_or(Reference)? {
-            if !singular(&owner_refs(graph, owner, work)?, object) {
-                return Err(Reference);
+            if !singular(&owner_refs(graph, owner, work, remaining)?, object) {
+                return Err(Reference.into());
             }
         }
     }
-    let field_name = editable_name(fields)
-        .filter(|name| form.names.get(name) == Some(&field))
+    fields.get("T").and_then(Value::as_bytes).ok_or(Reference)?;
+    let field_name = form
+        .names
+        .iter()
+        .find_map(|(name, &owner)| (owner == field && valid_name(name)).then_some(name))
         .ok_or(Reference)?;
-    Ok((field, field_name))
+    spend(&mut remaining, field_name.len())?;
+    Ok((field, field_name.clone()))
 }
 
 fn recognize_appearance(
@@ -736,12 +747,12 @@ fn id(binding: NativeBinding, widget: Ref) -> [u8; 32] {
     *hash.finalize().as_bytes()
 }
 
-fn display_name(
-    graph: &NativePdfGraph,
+fn display_name_bytes<'a>(
+    graph: &'a NativePdfGraph,
     widget: Ref,
-    data: &Dict,
+    data: &'a Dict,
     work: &mut usize,
-) -> Option<String> {
+) -> Option<&'a [u8]> {
     let widget_label = data
         .get("T")
         .map(|label| graph.resolve_metered(label, work))
@@ -769,14 +780,14 @@ fn display_name(
         }
         graph.resolve_metered(field.get("T")?, work).ok()?
     };
-    decode_field_name(label.as_bytes()?, MAX_NAME)
-        .filter(|name| !name.is_empty() && !name.chars().any(char::is_control))
+    label.as_bytes()
 }
 
 pub(super) fn field_name_inventory(
     graph: &NativePdfGraph,
     fields: &[Ref],
     work: &mut usize,
+    remaining: &mut usize,
 ) -> Result<BTreeMap<String, Ref>, NativeEditError> {
     use NativeEditError::{Budget, Unsupported};
 
@@ -784,6 +795,7 @@ pub(super) fn field_name_inventory(
         return Err(Budget);
     }
     spend(work, fields.len())?;
+    spend(remaining, fields.len() * FIELD_NAME_ENTRY_BYTES)?;
     let mut names = BTreeMap::new();
     for &field in fields {
         let values = dict(graph, field)?;
@@ -796,7 +808,7 @@ pub(super) fn field_name_inventory(
         let bytes = label.as_bytes().ok_or(Unsupported)?;
         // @security: Meter the full encoded name before decoding it for collision checks.
         spend(work, bytes.len())?;
-        let name = decode_field_name(bytes, usize::MAX).ok_or(Unsupported)?;
+        let name = decode_field_name(bytes, usize::MAX, remaining)?.ok_or(Unsupported)?;
         if names.insert(name, field).is_some() {
             return Err(Unsupported);
         }
@@ -804,16 +816,57 @@ pub(super) fn field_name_inventory(
     Ok(names)
 }
 
-fn decode_field_name(bytes: &[u8], limit: usize) -> Option<String> {
-    let name = if bytes.starts_with(&[0xfe, 0xff]) || bytes.starts_with(&[0xef, 0xbb, 0xbf]) {
-        decode(bytes, limit)?
+fn decode_field_name(
+    bytes: &[u8],
+    limit: usize,
+    remaining: &mut usize,
+) -> Result<Option<String>, NativeEditError> {
+    use NativeEditError::Budget;
+
+    let mut available = *remaining;
+    let name = if let Some(utf16) = bytes.strip_prefix(&[0xfe, 0xff]) {
+        if utf16.len() % 2 != 0 || utf16.len() / 2 > limit {
+            return Ok(None);
+        }
+        // @security: Decode code units directly into reserved UTF-8 storage.
+        let capacity = (utf16.len() / 2).checked_mul(3).ok_or(Budget)?;
+        spend(&mut available, capacity)?;
+        let mut name = String::new();
+        name.try_reserve_exact(capacity).map_err(|_| Budget)?;
+        let units = utf16
+            .chunks_exact(2)
+            .map(|unit| u16::from_be_bytes([unit[0], unit[1]]));
+        for scalar in char::decode_utf16(units) {
+            let Ok(scalar) = scalar else {
+                return Ok(None);
+            };
+            name.push(scalar);
+        }
+        name
+    } else if let Some(utf8) = bytes.strip_prefix(&[0xef, 0xbb, 0xbf]) {
+        let Ok(utf8) = std::str::from_utf8(utf8) else {
+            return Ok(None);
+        };
+        if utf8.len() > limit {
+            return Ok(None);
+        }
+        spend(&mut available, utf8.len())?;
+        let mut name = String::new();
+        name.try_reserve_exact(utf8.len()).map_err(|_| Budget)?;
+        name.push_str(utf8);
+        name
     } else {
         if bytes.len() > limit {
-            return None;
+            return Ok(None);
         }
-        decode_pdf_doc_encoding(bytes).ok()?
+        spend(&mut available, bytes.len().checked_mul(3).ok_or(Budget)?)?;
+        decode_pdf_doc_encoding(bytes)?
     };
-    (name.len() <= limit).then_some(name)
+    if name.len() > limit {
+        return Ok(None);
+    }
+    *remaining = available;
+    Ok(Some(name))
 }
 
 pub(super) fn project(
@@ -821,7 +874,7 @@ pub(super) fn project(
     pages: &[NativePdfNotePage],
     binding: NativeBinding,
     remaining: &mut usize,
-) -> Result<Vec<NativeFieldView>, NativeEditError> {
+) -> Result<Vec<NativeFieldView>, NativeSessionError> {
     let mut widgets = pages
         .iter()
         .flat_map(|page| {
@@ -849,7 +902,13 @@ pub(super) fn project(
         return Ok(Vec::new());
     }
     let mut work = graph.remaining_work();
-    let form = load_form(graph, &mut work);
+    let mut available = *remaining;
+    let (form, form_bytes) = match load_form(graph, &mut work, &mut available) {
+        Ok(form) => (Ok(form), *remaining - available),
+        Err(NativeSessionError::Field(reason)) => (Err(reason), 0),
+        Err(error) => return Err(error),
+    };
+    spend(remaining, form_bytes)?;
     let mut result = Vec::new();
     for (page, object, data) in widgets {
         spend(remaining, std::mem::size_of::<NativeFieldView>() * 2)?;
@@ -858,24 +917,25 @@ pub(super) fn project(
             spend(&mut work, form.fields.len() + page.annotations.len())?;
             spend(&mut work, data.get("AP").map_or(0, |_| MAX_TEXT))?;
         }
-        let admitted = form.as_ref().map_err(|&error| error).and_then(|form| {
-            let identity = recognize_identity(graph, form, page, object, &mut work)?;
-            recognize_appearance(graph, form, page, object, identity)
-        });
-        let readable_name = admitted
+        let admitted = form
             .as_ref()
-            .ok()
-            .map(|field| field.name.clone())
-            .or_else(|| display_name(graph, object, data, &mut work));
-        if let Some(name) = &readable_name {
-            spend(remaining, name.len())?;
-        }
+            .map_err(|&error| error.into())
+            .and_then(|form| {
+                let identity =
+                    recognize_identity(graph, form, page, object, &mut work, *remaining)?;
+                recognize_appearance(graph, form, page, object, identity).map_err(Into::into)
+            });
+        let admitted = match admitted {
+            Ok(admitted) => Ok(admitted),
+            Err(NativeSessionError::Field(reason)) => Err(reason),
+            Err(error) => return Err(error),
+        };
         let mut view = NativeFieldView {
             id: id(binding, object),
             object,
             page: page.id.0,
             kind: None,
-            name: readable_name,
+            name: None,
             rect: data
                 .get("Rect")
                 .and_then(rect)
@@ -886,15 +946,26 @@ pub(super) fn project(
             refusal: admitted.as_ref().err().copied(),
         };
         if let Ok(admitted) = admitted {
+            spend(remaining, admitted.name.capacity())?;
             spend(remaining, MAX_TEXT)?;
+            view.name = Some(admitted.name);
             view.kind = Some(admitted.value.kind());
             match admitted.value {
                 FieldValue::Text(value) => view.value = Some(value),
                 FieldValue::Checkbox { checked, .. } => view.checked = Some(checked),
             }
+        } else if let Some(bytes) = display_name_bytes(graph, object, data, &mut work) {
+            let mut available = *remaining;
+            view.name = decode_field_name(bytes, MAX_NAME, &mut available)?
+                .filter(|name| !name.is_empty() && !name.chars().any(char::is_control));
+            if view.name.is_some() {
+                *remaining = available;
+            }
         }
         result.push(view);
     }
+    drop(form);
+    *remaining += form_bytes;
     Ok(result)
 }
 
@@ -962,7 +1033,12 @@ fn replace_annots(
         .and_then(Value::as_reference)
         && (form.trailer_refs.contains(&container)
             || !singular(
-                &owner_refs(graph, page, &mut graph.remaining_work())?,
+                &owner_refs(
+                    graph,
+                    page,
+                    &mut graph.remaining_work(),
+                    graph.remaining_retained(),
+                )?,
                 container,
             ))
     {
@@ -1119,7 +1195,8 @@ pub(super) fn stage(
     command.validate()?;
     let budget = graph.remaining_work();
     let mut work = budget;
-    let mut form = load_form(graph, &mut work)?;
+    let mut remaining = graph.remaining_retained();
+    let mut form = load_form(graph, &mut work, &mut remaining)?;
     graph.charge_page_work(budget - work)?;
     let page_at = |page: u32| pages.get(page as usize).ok_or(Geometry);
     let target = command
@@ -1141,7 +1218,9 @@ pub(super) fn stage(
         graph.charge_page_work(old_page.annotations.len() + form.fields.len())?;
         let mut work = graph.remaining_work();
         let budget = work;
-        let identity = recognize_identity(graph, &form, old_page, view.object, &mut work)?;
+        let identity =
+            recognize_identity(graph, &form, old_page, view.object, &mut work, remaining)?;
+        form.names.clear();
         let admitted = recognize_appearance(graph, &form, old_page, view.object, identity)?;
         graph.charge_page_work(budget - work)?;
         graph.reserve_page_copy(admitted.field)?;
@@ -1238,6 +1317,7 @@ pub(super) fn stage(
         if form.names.contains_key(field_name) {
             return Err(Reference.into());
         }
+        form.names.clear();
         let owner = install_form(graph, &form)?;
         form.owner = Some(owner);
         let ft = match value.kind() {

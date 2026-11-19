@@ -886,6 +886,13 @@ impl NativePdfSession {
                 page == claimed_page && object == claimed_object && valid_id && seen.insert(id)
             })
             && projected_notes.next().is_none();
+        if scene.scene_hash != claimed_scene
+            || !notes_match
+            || !state.valid_for_count(scene.pages.len())
+            || forms::project(&graph, &scene.pages, binding, &mut remaining)? != claimed_fields
+        {
+            return Ok(false);
+        }
         let page_state_matches = if let Some(session) = live {
             *state == session.snapshot.page_state
         } else {
@@ -893,12 +900,7 @@ impl NativePdfSession {
             state.restrictions == projected.restrictions
                 && (binding.revision != 0 || *state == projected)
         };
-        Ok(scene.scene_hash == claimed_scene
-            && notes_match
-            && state.valid_for_count(scene.pages.len())
-            && page_state_matches
-            && forms::project(&graph, &scene.pages, binding, &mut remaining)? == claimed_fields
-            && redaction::admitted(&graph, &state.order) == redaction_admitted)
+        Ok(page_state_matches && redaction::admitted(&graph, &state.order) == redaction_admitted)
     }
 
     pub fn verify_page_projection(
@@ -1260,10 +1262,6 @@ impl NativePdfSession {
             output_hash,
             scene_hash: scene.scene_hash,
         };
-        self.records
-            .try_reserve_exact(usize::from(self.records.len() < NATIVE_REQUEST_HISTORY))
-            .map_err(|_| NativeSessionError::Budget)?;
-
         let state = page_state(
             &reopened,
             &ids,
@@ -1277,6 +1275,9 @@ impl NativePdfSession {
         if let Command::Page(command) = command {
             self.verify_page_geometry(command, &scene, &state)?;
         }
+        self.records
+            .try_reserve_exact(usize::from(self.records.len() < NATIVE_REQUEST_HISTORY))
+            .map_err(|_| NativeSessionError::Budget)?;
         let previous = std::mem::replace(&mut self.graph, reopened);
         self.redaction_admission.take();
         if self.origin.is_none() {
@@ -1384,7 +1385,7 @@ fn page_state(
     use pages::NativePageCapability;
     let capability_bytes = graph.pages.len() * std::mem::size_of::<NativePageCapability>();
     spend(remaining, capability_bytes)?;
-    let restrictions = pages::restrictions(graph, &scene.pages)?;
+    let restrictions = pages::restrictions(graph, &scene.pages, *remaining)?;
     if restrictions.is_none() {
         *remaining += capability_bytes;
     }

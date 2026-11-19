@@ -1,5 +1,6 @@
 use flow_core::pdf::native::{
     NativeEditLimits, NativeFieldCommand, NativeFieldRefusal, NativePageCommand, NativePdfSession,
+    NativeRequestLookup, NativeSessionError,
 };
 use serde_json::json;
 
@@ -293,6 +294,8 @@ fn supported_checkbox_stays_editable_alongside_read_only_field_names() {
     for (read_only_name, label, collision) in [
         ("(Consent form)", Some("Consent form"), false),
         ("<436166E9>", Some("Café"), false),
+        ("<EFBBBF436166C3A9>", Some("Café"), false),
+        ("<FEFFD83DDE00>", Some("😀"), false),
         (long_name.as_str(), None, false),
         ("<FEFF0041000A0042>", None, false),
         (
@@ -346,6 +349,62 @@ fn supported_checkbox_stays_editable_alongside_read_only_field_names() {
         assert_eq!(fields[1].name.as_deref(), label);
         assert_eq!(fields[1].refusal, Some(NativeFieldRefusal::Profile));
     }
+}
+
+#[test]
+fn form_name_inventory_uses_the_live_projection_and_command_budgets() {
+    let long_name = "a".repeat(24 * 1024);
+    let bytes = build_pdf(&[
+        b"<< /Type /Catalog /Pages 2 0 R /AcroForm 4 0 R >>".to_vec(),
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 300 500] >>".to_vec(),
+        b"<< /Type /Page /Parent 2 0 R /Annots [5 0 R 6 0 R] >>".to_vec(),
+        b"<< /Fields [5 0 R 6 0 R] >>".to_vec(),
+        b"<< /Type /Annot /Subtype /Widget /FT /Btn /Ff 1 /T (reserved) /P 3 0 R /Rect [10 10 30 30] >>".to_vec(),
+        format!("<< /Type /Annot /Subtype /Widget /FT /Btn /Ff 1 /T ({long_name}) /P 3 0 R /Rect [40 10 60 30] >>").into_bytes(),
+    ]);
+    let add: NativeFieldCommand = serde_json::from_value(json!({
+        "kind": "addCheckboxField", "page": 0, "rect": [70,10,90,30],
+        "name": "reserved", "checked": false,
+    }))
+    .unwrap();
+    let mut roomy = session(&bytes);
+    assert_eq!(
+        roomy.apply_field(roomy.snapshot().binding, 1, &add),
+        Err(NativeSessionError::Field(NativeFieldRefusal::Reference))
+    );
+    assert!(matches!(
+        NativePdfSession::open_scoped(
+            &bytes,
+            NativeEditLimits {
+                max_retained_bytes: 128 * 1024,
+                ..NativeEditLimits::default()
+            },
+            [7; 16],
+        ),
+        Err(NativeSessionError::Budget)
+    ));
+
+    let limits = NativeEditLimits {
+        max_retained_bytes: 256 * 1024,
+        ..NativeEditLimits::default()
+    };
+    let mut pdf = NativePdfSession::open_scoped(&bytes, limits, [7; 16]).unwrap();
+    let accepted = pdf.snapshot().clone();
+    assert_eq!(accepted.fields[0].name.as_deref(), Some("reserved"));
+    assert!(!accepted.fields[0].can_edit_appearance);
+    assert_eq!(accepted.fields[1].name, None);
+    assert_eq!(
+        pdf.apply_field(accepted.binding, 1, &add),
+        Err(NativeSessionError::Budget)
+    );
+    assert_eq!(pdf.snapshot().binding, accepted.binding);
+    assert_eq!(pdf.snapshot().consumed_request, accepted.consumed_request);
+    assert_eq!(pdf.snapshot().fields, accepted.fields);
+    assert_eq!(
+        pdf.lookup(accepted.binding, 1),
+        Ok(NativeRequestLookup::Unseen)
+    );
+    assert_eq!(pdf.output_bytes(), bytes);
 }
 
 #[test]
