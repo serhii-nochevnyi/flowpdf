@@ -1400,15 +1400,40 @@ impl Image<'_> {
                 image_index(x, e + c, -c, self.data.height)?,
             )
         };
+        Some(self.sample(column, row))
+    }
+
+    fn sample(&self, column: usize, row: usize) -> Pixel {
         if self.masked(column, row) {
-            return Some([0; 3]);
+            return [0; 3];
         }
         let start = (row * self.data.width + column) * self.data.channels;
-        Some(if self.data.channels == 1 {
+        if self.data.channels == 1 {
             [self.data.bytes[start]; 3]
         } else {
-            self.data.bytes[start..start + 3].try_into().ok()?
-        })
+            let bytes = self.data.bytes;
+            [bytes[start], bytes[start + 1], bytes[start + 2]]
+        }
+    }
+
+    // @invariant: Preview coverage includes every image sample with positive-area overlap.
+    fn uniform_pixel(&self, rect: Rect, work: &mut usize) -> VerifyResult<Option<Pixel>> {
+        let [l, t, r, b] = self.mask(rect).ok_or(UnsupportedProfile)?;
+        spend(
+            work,
+            ((r - l) * (b - t))
+                .checked_mul(self.masks.len() + 1)
+                .ok_or(Budget)?,
+        )?;
+        let first = self.sample(l, t);
+        for row in t..b {
+            for col in l..r {
+                if self.sample(col, row) != first {
+                    return Ok(None);
+                }
+            }
+        }
+        Ok(Some(first))
     }
 }
 
@@ -1475,19 +1500,14 @@ enum PreviewPaint<'a> {
 }
 
 impl PreviewPaint<'_> {
-    fn uniform_background(&self, bounds: Rect, pixel: Rect) -> bool {
-        match self {
-            Self::Outline(_) => true,
-            Self::Image(image) => image
-                .mask(pixel)
-                .is_some_and(|[l, t, r, b]| r - l == 1 && b - t == 1),
-            Self::Note => {
-                let [l, b, r, t] = bounds;
-                let inset = ((r - l).min(t - b) / 8).min(POINT);
-                let interior = [l + inset, b + inset, r - inset, t - inset];
-                contains(interior, pixel) || !intersects(interior, pixel)
-            }
+    fn mixed_background(&self, bounds: Rect, pixel: Rect) -> bool {
+        if matches!(self, Self::Note) {
+            let [l, b, r, t] = bounds;
+            let inset = ((r - l).min(t - b) / 8).min(POINT);
+            let interior = [l + inset, b + inset, r - inset, t - inset];
+            return !contains(interior, pixel) && intersects(interior, pixel);
         }
+        false
     }
 }
 
@@ -1744,6 +1764,19 @@ impl Grid {
                 } else if !intersects(bounds, rect) {
                     continue;
                 }
+                if let PreviewPaint::Image(image) = paint {
+                    let Some(ink) = image.uniform_pixel(rect, work)? else {
+                        *coverage = PreviewCoverage::Unresolved;
+                        continue;
+                    };
+                    if contains(bounds, rect) {
+                        *pixel = ink;
+                        *coverage = PreviewCoverage::Clear;
+                    } else {
+                        coverage.paint_partial(pixel, color, None, Some(ink));
+                    }
+                    continue;
+                }
                 if let Some(color) = color {
                     let full = if let Some(outline) = outline {
                         outline.covers_pixel(rect, work)?
@@ -1752,15 +1785,22 @@ impl Grid {
                     };
                     if full {
                         *pixel = color;
-                        *coverage = if paint.uniform_background(bounds, rect) {
-                            PreviewCoverage::Clear
-                        } else {
+                        *coverage = if paint.mixed_background(bounds, rect) {
                             PreviewCoverage::MixedBackground
+                        } else {
+                            PreviewCoverage::Clear
                         };
                         continue;
                     }
                 }
-                coverage.paint_partial(pixel, color, outline);
+                coverage.paint_partial(
+                    pixel,
+                    color,
+                    outline.map(|outline| outline.ink),
+                    outline
+                        .filter(|outline| outline.draw_edges)
+                        .map(|outline| outline.ink),
+                );
             }
         }
         Ok(())
@@ -1772,9 +1812,9 @@ impl PreviewCoverage {
         &mut self,
         pixel: &mut Pixel,
         color: Option<Pixel>,
-        outline: Option<RasterOutline<'_>>,
+        ink: Option<Pixel>,
+        edge_ink: Option<Pixel>,
     ) {
-        let ink = outline.map(|outline| outline.ink);
         let visible = match *self {
             Self::Clear => false,
             Self::Partial {
@@ -1787,9 +1827,6 @@ impl PreviewCoverage {
                 return;
             }
         };
-        let edge_ink = outline
-            .filter(|outline| outline.draw_edges)
-            .map(|outline| outline.ink);
         if let Some(color) = color {
             *pixel = color;
         } else if let Some(ink) = edge_ink.filter(|_| !visible) {
