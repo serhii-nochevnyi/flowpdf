@@ -588,6 +588,9 @@ impl<'a> SceneBuilder<'a> {
     }
 
     fn run(mut self) -> Result<PdfScenePage, PdfReadError> {
+        if let Some(crop_box) = self.page.crop_box {
+            self.state.clip = self.state.clip.intersect(crop_box, true)?;
+        }
         self.inspect_annotations()?;
         for (index, content_ref) in self.page.contents.iter().enumerate() {
             self.invocation_path =
@@ -894,11 +897,7 @@ impl<'a> SceneBuilder<'a> {
             let commands = transform_path(&self.state.path, self.state.ctm)?;
             let rect = path_bounds(&commands)?;
             let stroke = matches!(operator, "S" | "s" | "B" | "b" | "B*");
-            if self.form_paint_visible(
-                rect,
-                !stroke && !self.state.path_ctm_changed,
-                &provenance,
-            )? {
+            if self.paint_visible(rect, !stroke && !self.state.path_ctm_changed, &provenance)? {
                 self.push_element(PdfSceneElement::Path {
                     value: PdfPathElement {
                         commands,
@@ -926,13 +925,13 @@ impl<'a> SceneBuilder<'a> {
         ));
     }
 
-    fn form_paint_visible(
+    fn paint_visible(
         &mut self,
         rect: LayoutRect,
         bounded: bool,
         provenance: &PdfSourceProvenance,
     ) -> Result<bool, PdfReadError> {
-        if self.invocation_path.len() <= 1 {
+        if self.invocation_path.len() <= 1 && self.page.crop_box.is_none() {
             return Ok(true);
         }
         let clip = self.state.clip;
@@ -1156,7 +1155,7 @@ impl<'a> SceneBuilder<'a> {
         }
         if !glyphs.is_empty() {
             let rect = union_rect(glyphs.iter().map(|glyph| glyph.rect))?;
-            if !self.form_paint_visible(rect, false, &provenance)? {
+            if !self.paint_visible(rect, false, &provenance)? {
                 return Ok(());
             }
             self.push_element(PdfSceneElement::Text {
@@ -1365,7 +1364,13 @@ impl<'a> SceneBuilder<'a> {
                 height: one,
             },
         )?;
-        if !self.form_paint_visible(rect, true, &provenance)? {
+        if !self.paint_visible(rect, true, &provenance)? {
+            return Ok(());
+        }
+        let Matrix { a, b, c, d, .. } = self.state.ctm;
+        // @contract: An image rectangle carries only positive axis-aligned placement.
+        if a <= zero || d <= zero || b != zero || c != zero {
+            self.report_partial(provenance.object_ref);
             return Ok(());
         }
         self.push_element(PdfSceneElement::Image {
