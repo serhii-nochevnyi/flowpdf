@@ -931,8 +931,7 @@ fn redaction_wire_refuses_marks_on_oversized_pages() {
 
 #[test]
 fn redaction_wire_retains_marks_when_only_some_checks_pass() {
-    // The retained convex polygon has 51 edges and 3840-by-3840 pixel bounds.
-    // Its paint charge exceeds the work budget before pixel sampling starts.
+    // @contract: The retained polygon exceeds the raster paint budget before sampling.
     let mut paint = String::from("10 10 10 10 re f 40 616 m");
     for step in -23..=24 {
         write!(paint, " {} {} l", 1_000 + 40 * step, 40 + step * step).unwrap();
