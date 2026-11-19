@@ -107,7 +107,7 @@
       },
       "expected": {
         "path": "fixtures/pdf-native/edit-families.expected.json",
-        "sha256": "e43a12a11a18e2059bc2e999135c9ab9a18a206ff7183efff9d2602d8db240d6"
+        "sha256": "507025827b59f65c9b241db7def65592cc8de79f61b0d3e13d369fe8ee48dfb8"
       }
     },
     {

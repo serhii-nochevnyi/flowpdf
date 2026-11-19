@@ -167,6 +167,13 @@ impl Default for Graphics {
     }
 }
 
+pub(super) fn within_pixel_budget<E>(
+    mut pages: impl Iterator<Item = Result<NativeRedactionGeometry, E>>,
+) -> bool {
+    let mut pixels_left = MAX_TOTAL_PIXELS;
+    pages.all(|page| page.is_ok_and(|geometry| Grid::new(geometry, &mut pixels_left).is_ok()))
+}
+
 pub(super) fn verify(
     accepted: &[u8],
     candidate: &[u8],

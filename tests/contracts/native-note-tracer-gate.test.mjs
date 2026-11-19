@@ -103,6 +103,7 @@ for (const [profile, revision, expanded] of [
   ['previous reviewed page and redaction', '9a14e505d07f341beaa0af023da2c2ae4b095758', true],
   ['previous reviewed page and stroke', '793ff4c687a71210205258e58003400c7738affa', true],
   ['previous reviewed preview and redaction', '956ae26938bb952bba2339a18db3d8b46db7b88e', true],
+  ['previous reviewed verified-raster redaction', 'b3340c7aa5919715320d65548463fdff68cb2e43', true],
 ]) {
   test(`accepts the exact ${profile} harness`, (t) => {
     const options = { cwd: root, encoding: 'utf8' }

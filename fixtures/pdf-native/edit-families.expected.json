@@ -108,12 +108,24 @@
         {
           "kind": "outline",
           "title": "First page",
-          "target": 1
+          "target": 1,
+          "view": [
+            "/Fit"
+          ]
         },
         {
           "kind": "link",
           "page": 2,
-          "target": 1
+          "rectPt": [
+            120,
+            12,
+            144,
+            32
+          ],
+          "target": 1,
+          "view": [
+            "/Fit"
+          ]
         }
       ],
       "pages": [
@@ -257,12 +269,24 @@
         {
           "kind": "outline",
           "title": "First page",
-          "target": 1
+          "target": 1,
+          "view": [
+            "/Fit"
+          ]
         },
         {
           "kind": "link",
           "page": 2,
-          "target": 1
+          "rectPt": [
+            120,
+            12,
+            144,
+            32
+          ],
+          "target": 1,
+          "view": [
+            "/Fit"
+          ]
         }
       ],
       "pages": [
@@ -380,12 +404,24 @@
         {
           "kind": "outline",
           "title": "First page",
-          "target": 1
+          "target": 1,
+          "view": [
+            "/Fit"
+          ]
         },
         {
           "kind": "link",
           "page": 2,
-          "target": 1
+          "rectPt": [
+            120,
+            12,
+            144,
+            32
+          ],
+          "target": 1,
+          "view": [
+            "/Fit"
+          ]
         }
       ],
       "pages": [
@@ -519,12 +555,24 @@
         {
           "kind": "outline",
           "title": "First page",
-          "target": 1
+          "target": 1,
+          "view": [
+            "/Fit"
+          ]
         },
         {
           "kind": "link",
           "page": 2,
-          "target": 1
+          "rectPt": [
+            120,
+            12,
+            144,
+            32
+          ],
+          "target": 1,
+          "view": [
+            "/Fit"
+          ]
         }
       ],
       "pages": [
@@ -684,12 +732,24 @@
         {
           "kind": "outline",
           "title": "First page",
-          "target": 1
+          "target": 1,
+          "view": [
+            "/Fit"
+          ]
         },
         {
           "kind": "link",
           "page": 2,
-          "target": 1
+          "rectPt": [
+            120,
+            12,
+            144,
+            32
+          ],
+          "target": 1,
+          "view": [
+            "/Fit"
+          ]
         }
       ],
       "pages": [
@@ -825,12 +885,24 @@
         {
           "kind": "outline",
           "title": "First page",
-          "target": 1
+          "target": 1,
+          "view": [
+            "/Fit"
+          ]
         },
         {
           "kind": "link",
           "page": 2,
-          "target": 1
+          "rectPt": [
+            120,
+            12,
+            144,
+            32
+          ],
+          "target": 1,
+          "view": [
+            "/Fit"
+          ]
         }
       ],
       "pages": [
@@ -971,12 +1043,24 @@
         {
           "kind": "outline",
           "title": "First page",
-          "target": 1
+          "target": 1,
+          "view": [
+            "/Fit"
+          ]
         },
         {
           "kind": "link",
           "page": 2,
-          "target": 1
+          "rectPt": [
+            120,
+            12,
+            144,
+            32
+          ],
+          "target": 1,
+          "view": [
+            "/Fit"
+          ]
         }
       ],
       "pages": [
@@ -1122,12 +1206,24 @@
         {
           "kind": "outline",
           "title": "First page",
-          "target": 1
+          "target": 1,
+          "view": [
+            "/Fit"
+          ]
         },
         {
           "kind": "link",
           "page": 2,
-          "target": 1
+          "rectPt": [
+            120,
+            12,
+            144,
+            32
+          ],
+          "target": 1,
+          "view": [
+            "/Fit"
+          ]
         }
       ],
       "pages": [
@@ -1280,12 +1376,24 @@
         {
           "kind": "outline",
           "title": "First page",
-          "target": 1
+          "target": 1,
+          "view": [
+            "/Fit"
+          ]
         },
         {
           "kind": "link",
           "page": 2,
-          "target": 1
+          "rectPt": [
+            120,
+            12,
+            144,
+            32
+          ],
+          "target": 1,
+          "view": [
+            "/Fit"
+          ]
         }
       ],
       "pages": [
@@ -1427,12 +1535,24 @@
         {
           "kind": "outline",
           "title": "First page",
-          "target": 1
+          "target": 1,
+          "view": [
+            "/Fit"
+          ]
         },
         {
           "kind": "link",
           "page": 2,
-          "target": 1
+          "rectPt": [
+            120,
+            12,
+            144,
+            32
+          ],
+          "target": 1,
+          "view": [
+            "/Fit"
+          ]
         }
       ],
       "pages": [
@@ -1545,12 +1665,24 @@
         {
           "kind": "outline",
           "title": "First page",
-          "target": 1
+          "target": 1,
+          "view": [
+            "/Fit"
+          ]
         },
         {
           "kind": "link",
           "page": 2,
-          "target": 1
+          "rectPt": [
+            120,
+            12,
+            144,
+            32
+          ],
+          "target": 1,
+          "view": [
+            "/Fit"
+          ]
         }
       ],
       "pages": [
@@ -1686,12 +1818,24 @@
         {
           "kind": "outline",
           "title": "First page",
-          "target": 2
+          "target": 2,
+          "view": [
+            "/Fit"
+          ]
         },
         {
           "kind": "link",
           "page": 1,
-          "target": 2
+          "rectPt": [
+            120,
+            12,
+            144,
+            32
+          ],
+          "target": 2,
+          "view": [
+            "/Fit"
+          ]
         }
       ],
       "pages": [
@@ -1806,12 +1950,24 @@
         {
           "kind": "outline",
           "title": "First page",
-          "target": 1
+          "target": 1,
+          "view": [
+            "/Fit"
+          ]
         },
         {
           "kind": "link",
           "page": 2,
-          "target": 1
+          "rectPt": [
+            120,
+            12,
+            144,
+            32
+          ],
+          "target": 1,
+          "view": [
+            "/Fit"
+          ]
         }
       ],
       "pages": [
@@ -1961,12 +2117,24 @@
         {
           "kind": "outline",
           "title": "First page",
-          "target": 1
+          "target": 1,
+          "view": [
+            "/Fit"
+          ]
         },
         {
           "kind": "link",
           "page": 3,
-          "target": 1
+          "rectPt": [
+            120,
+            12,
+            144,
+            32
+          ],
+          "target": 1,
+          "view": [
+            "/Fit"
+          ]
         }
       ],
       "pages": [
@@ -2220,12 +2388,24 @@
         {
           "kind": "outline",
           "title": "First page",
-          "target": 1
+          "target": 1,
+          "view": [
+            "/Fit"
+          ]
         },
         {
           "kind": "link",
           "page": 2,
-          "target": 1
+          "rectPt": [
+            120,
+            12,
+            144,
+            32
+          ],
+          "target": 1,
+          "view": [
+            "/Fit"
+          ]
         }
       ],
       "pages": [
@@ -2362,12 +2542,24 @@
         {
           "kind": "outline",
           "title": "First page",
-          "target": 1
+          "target": 1,
+          "view": [
+            "/Fit"
+          ]
         },
         {
           "kind": "link",
           "page": 2,
-          "target": 1
+          "rectPt": [
+            120,
+            12,
+            144,
+            32
+          ],
+          "target": 1,
+          "view": [
+            "/Fit"
+          ]
         }
       ],
       "pages": [
@@ -2482,12 +2674,24 @@
         {
           "kind": "outline",
           "title": "First page",
-          "target": 1
+          "target": 1,
+          "view": [
+            "/Fit"
+          ]
         },
         {
           "kind": "link",
           "page": 2,
-          "target": 1
+          "rectPt": [
+            120,
+            12,
+            144,
+            32
+          ],
+          "target": 1,
+          "view": [
+            "/Fit"
+          ]
         }
       ],
       "pages": [
@@ -2602,12 +2806,24 @@
         {
           "kind": "outline",
           "title": "First page",
-          "target": 1
+          "target": 1,
+          "view": [
+            "/Fit"
+          ]
         },
         {
           "kind": "link",
           "page": 2,
-          "target": 1
+          "rectPt": [
+            120,
+            12,
+            144,
+            32
+          ],
+          "target": 1,
+          "view": [
+            "/Fit"
+          ]
         }
       ],
       "pages": [
@@ -2728,12 +2944,24 @@
         {
           "kind": "outline",
           "title": "First page",
-          "target": 1
+          "target": 1,
+          "view": [
+            "/Fit"
+          ]
         },
         {
           "kind": "link",
           "page": 2,
-          "target": 1
+          "rectPt": [
+            120,
+            12,
+            144,
+            32
+          ],
+          "target": 1,
+          "view": [
+            "/Fit"
+          ]
         }
       ],
       "pages": [
@@ -2837,12 +3065,24 @@
         {
           "kind": "outline",
           "title": "First page",
-          "target": 1
+          "target": 1,
+          "view": [
+            "/Fit"
+          ]
         },
         {
           "kind": "link",
           "page": 2,
-          "target": 1
+          "rectPt": [
+            120,
+            12,
+            144,
+            32
+          ],
+          "target": 1,
+          "view": [
+            "/Fit"
+          ]
         }
       ],
       "pages": [
@@ -2953,12 +3193,24 @@
         {
           "kind": "outline",
           "title": "First page",
-          "target": 1
+          "target": 1,
+          "view": [
+            "/Fit"
+          ]
         },
         {
           "kind": "link",
           "page": 2,
-          "target": 1
+          "rectPt": [
+            120,
+            12,
+            144,
+            32
+          ],
+          "target": 1,
+          "view": [
+            "/Fit"
+          ]
         }
       ],
       "pages": [
@@ -3078,12 +3330,24 @@
         {
           "kind": "outline",
           "title": "First page",
-          "target": 1
+          "target": 1,
+          "view": [
+            "/Fit"
+          ]
         },
         {
           "kind": "link",
           "page": 2,
-          "target": 1
+          "rectPt": [
+            120,
+            12,
+            144,
+            32
+          ],
+          "target": 1,
+          "view": [
+            "/Fit"
+          ]
         }
       ],
       "pages": [

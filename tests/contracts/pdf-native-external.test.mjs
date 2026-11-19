@@ -3,11 +3,17 @@ import { readFileSync } from 'node:fs'
 import { test } from 'node:test'
 import {
   checkStructure, compareRaster, compareWidgetRegion, decodePpm, externalExitCode, matchesWidgetBounds,
-  nativeSession, operationOutput, pdfStructure, probeVersion,
+  loadFixtures, nativeSession, operationOutput, pdfStructure, probeVersion,
 } from '../../scripts/verify-pdf-native-external.mjs'
 
 const fixture = (name) => readFileSync(new URL(`../../fixtures/pdf-native/${name}`, import.meta.url))
 const editFamilies = JSON.parse(fixture('edit-families.expected.json'))
+
+test('the external verifier loads and validates the pinned fixture corpus', () => {
+  const fixtures = loadFixtures()
+  assert.deepEqual(fixtures.map(({ id }) => id), JSON.parse(fixture('manifest.json')).fixtures.map(({ id }) => id))
+  assert.ok(fixtures.some(({ spec }) => spec.operations.some(({ operation }) => operation === 'deletePage')))
+})
 
 test('strict external rejects unavailable or failed checks', () => {
   assert.equal(externalExitCode('unavailable', true), 2)
@@ -212,6 +218,38 @@ test('widget readback compares PDF field types and requires the Off and Yes appe
   check({ ...operation, fieldReadback: [textField, { ...checkboxField, value: 'Yes', appearanceState: 'Yes' }] })
 })
 
+test('preserved destinations compare link rectangles and complete views', () => {
+  const [source] = editFamilies.operations
+  const rectPt = [120, 12, 144, 32]
+  const linkView = ['/XYZ', 20, null, 1.25]
+  const outlineView = ['/FitR', 12, 16, 144, 160]
+  const operation = { pages: source.pages, noteReadback: [], removed: [], destinations: [
+    { kind: 'outline', title: 'Second page', target: 2, view: outlineView },
+    { kind: 'link', page: 1, rectPt, target: 2, view: linkView },
+  ] }
+  const { json, objects } = structuralReadback(operation.pages)
+  const link = { '/Subtype': '/Link', '/Rect': '11 0 R', '/Dest': '12 0 R' }
+  const outline = { '/Title': 'u:Second page', '/Dest': ['3 0 R', ...outlineView] }
+  objects['obj:1 0 R'].value['/Outlines'] = { '/First': '13 0 R' }
+  objects['obj:2 0 R'].value['/Annots'] = ['10 0 R']
+  objects['obj:10 0 R'] = { value: link }
+  objects['obj:11 0 R'] = { value: [...rectPt] }
+  objects['obj:12 0 R'] = { value: ['3 0 R', ...linkView] }
+  objects['obj:13 0 R'] = { value: outline }
+  const check = () => checkStructure(pdfStructure(json), null, operation)
+  check()
+  objects['obj:11 0 R'].value = [120, 12, 145, 32]
+  assert.throws(check, /destination-structure/)
+  objects['obj:11 0 R'].value = [...rectPt]
+  for (const view of [['/Fit'], ['/XYZ', 20, 0, 1.25], ['/XYZ', null, 20, 1.25], ['/XYZ', 20, null, 1.5]]) {
+    objects['obj:12 0 R'].value = ['3 0 R', ...view]
+    assert.throws(check, /destination-structure/)
+  }
+  objects['obj:12 0 R'].value = ['3 0 R', ...linkView]
+  outline['/Dest'] = ['3 0 R', '/FitR', 12, 16, 144, 161]
+  assert.throws(check, /destination-structure/)
+})
+
 test('deleting a destination page requires removing its inbound link annotation', () => {
   const operation = editFamilies.operations.find(({ operation }) => operation === 'deletePage')
   const { json, objects } = structuralReadback(operation.pages)
@@ -221,7 +259,9 @@ test('deleting a destination page requires removing its inbound link annotation'
   page['/Annots'] = ['10 0 R']
   const link = { '/Subtype': '/Link', '/Rect': [120, 12, 144, 32], '/Dest': ['3 0 R', '/Fit'] }
   objects['obj:10 0 R'] = { value: link }
-  check({ ...operation, destinations: [{ kind: 'link', page: 1, target: 2 }] })
+  check({ ...operation, destinations: [
+    { kind: 'link', page: 1, rectPt: [120, 12, 144, 32], target: 2, view: ['/Fit'] },
+  ] })
   delete link['/Dest']
   assert.throws(() => check(), /destination-structure/)
   delete page['/Annots']

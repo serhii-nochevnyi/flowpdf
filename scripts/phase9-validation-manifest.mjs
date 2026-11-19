@@ -1,3 +1,19 @@
+import { lstatSync } from 'node:fs'
+import { resolve } from 'node:path'
+
+export const wasmPrerequisite = Object.freeze({
+  buildTaskId: '09-60-01',
+  fixtureTaskId: '09-16-02',
+  outputs: Object.freeze(['flow_wasm.js', 'flow_wasm.d.ts', 'flow_wasm_bg.wasm']),
+})
+
+export function hasGeneratedWasm(cwd) {
+  return wasmPrerequisite.outputs.every((name) => {
+    const file = lstatSync(resolve(cwd, 'web/generated', name), { throwIfNoEntry: false })
+    return file?.isFile() && file.size > 0
+  })
+}
+
 const cargo = (crate, ...target) => ['cargo', 'test', '--offline', '--locked', '-p', crate, ...target, '--', '--nocapture']
 const core = (...targets) => cargo('flow-core', ...targets.flatMap((target) => ['--test', target]))
 const contract = (...names) => ['node', '--test', ...names.map((name) => `tests/contracts/${name}.test.mjs`)]
@@ -13,6 +29,7 @@ function task(id, lane, argv, requirementIds, aliases = [], timeout = 300_000) {
 }
 
 export const tasks = Object.freeze([
+  task(wasmPrerequisite.buildTaskId, 'local', ['npm', 'run', 'build:wasm'], requirements(1, 5), [], 1_200_000),
   task('09-01-01', 'local', cargo('flow-core', '--lib', 'pdf::native'), requirements(1), ['09-01-02']),
   task('09-18-01', 'local', core('pdf_native_graph', 'pdf_native_session', 'pdf_reader', 'pdf_scene', 'pdf_cos'),
     requirements(1), ['09-18-02']),
@@ -29,7 +46,7 @@ export const tasks = Object.freeze([
   task('09-12-01', 'local', core('pdf_native_verifier', 'pdf_native_redaction'), requirements(5),
     ['09-12-02', '09-13-01', '09-13-02']),
   task('09-16-01', 'local', ['node', 'scripts/generate-pdf-native-fixtures.mjs', '--check'], all, ['09-20-01']),
-  task('09-16-02', 'local', contract('pdf-native-fixtures'), all, ['09-20-02']),
+  task(wasmPrerequisite.fixtureTaskId, 'local', contract('pdf-native-fixtures'), all, ['09-20-02']),
   task('09-17-01', 'smoke', contract('pdf-native-external', 'phase9-gate'), all),
   task('09-03-02', 'browser', ['node', 'scripts/check-native-note-tracer.mjs', '--run'], requirements(1), [], 2_400_000),
   task('09-05-02', 'browser', ['npx', '--no-install', 'vitest', 'run', '--project', 'browser',

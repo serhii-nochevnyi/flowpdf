@@ -1244,6 +1244,59 @@ fn split_text_widget_and_direct_form_clone_as_independent_owners() {
 }
 
 #[test]
+fn duplicate_skips_copy_name_reserved_by_an_indirect_read_only_field() {
+    let bytes = build_pdf(&[
+        (0, "<< /Type /Catalog /Pages 2 0 R /AcroForm 6 0 R >>"),
+        (
+            0,
+            "<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 /MediaBox [0 0 300 500] /Resources <<>> >>",
+        ),
+        (0, "<< /Type /Page /Parent 2 0 R /Annots [5 0 R] >>"),
+        (0, "<< /Type /Page /Parent 2 0 R /Annots [7 0 R 9 0 R] >>"),
+        (
+            0,
+            "<< /Type /Annot /Subtype /Widget /P 3 0 R /Rect [40 60 80 90] /FT /Btn /T (approval) /V /Off /AS /Off >>",
+        ),
+        (0, "<< /Fields [5 0 R 7 0 R 9 0 R] >>"),
+        (
+            0,
+            "<< /Type /Annot /Subtype /Widget /P 4 0 R /Rect [40 60 80 90] /FT /Tx /Ff 1 /T 8 0 R /V (data) >>",
+        ),
+        (
+            0,
+            "<FEFF0046006C006F00770050004400460043006F007000790035005F0030>",
+        ),
+        (
+            0,
+            "<< /Type /Annot /Subtype /Widget /P 4 0 R /Rect [40 100 80 130] /FT /Tx /Ff 1 /T (aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa) /V (data) >>",
+        ),
+    ]);
+    let mut session =
+        NativePdfSession::open_scoped(&bytes, NativeEditLimits::default(), [3; 16]).unwrap();
+    let prior = session.snapshot();
+    let restrictions = &prior.page_state.restrictions.as_ref().unwrap().pages;
+    assert!(restrictions[0].duplicate.is_none());
+    assert!(restrictions[1].duplicate.is_some());
+    assert!(prior.fields.iter().any(|field| {
+        field.name.as_deref() == Some("FlowPDFCopy5_0") && !field.can_edit_appearance
+    }));
+
+    let duplicate = command("duplicatePage", 0, prior);
+    session.apply_page(prior.binding, 1, &duplicate).unwrap();
+    let fields = &session.snapshot().fields;
+    assert_eq!(fields.len(), 4);
+    let copy = fields.iter().find(|field| field.page == 1).unwrap();
+    assert_eq!(copy.name.as_deref(), Some("FlowPDFCopy5_1"));
+    let read_only = fields
+        .iter()
+        .find(|field| field.page == 2 && field.name.as_deref() == Some("FlowPDFCopy5_0"))
+        .unwrap();
+    assert!(!read_only.can_edit_appearance);
+    let output = String::from_utf8_lossy(session.output_bytes());
+    assert!(output.contains(&format!("/T <{}>", "61".repeat(65))));
+}
+
+#[test]
 fn owned_checkbox_copies_remain_independently_editable_after_page_deletion() {
     use flow_core::pdf::native::NativeFieldCommand;
     use serde_json::json;
