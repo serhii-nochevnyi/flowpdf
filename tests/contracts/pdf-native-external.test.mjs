@@ -1,12 +1,12 @@
 import assert from 'node:assert/strict'
-import { mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { basename, delimiter, join } from 'node:path'
 import { test } from 'node:test'
 import {
   alternateCheckboxPdf, checkStructure, compareCheckboxAppearances, compareFixtures, compareRaster, compareWidgetRegion,
-  decodePpm, externalExitCode, matchesWidgetBounds,
-  loadFixtures, nativeSession, operationOutput, pdfStructure, probeVersion,
+  comparisonInvoker, decodePpm, externalExitCode, loadFixtures, matchesWidgetBounds,
+  nativeSession, operationOutput, pdfStructure, probeTool,
 } from '../../scripts/verify-pdf-native-external.mjs'
 
 const fixture = (name) => readFileSync(new URL(`../../fixtures/pdf-native/${name}`, import.meta.url))
@@ -22,9 +22,81 @@ test('strict external rejects unavailable or failed checks', () => {
   assert.equal(externalExitCode('unavailable', true), 2)
   assert.equal(externalExitCode('fail', true), 1)
   assert.equal(externalExitCode('unavailable', false), 0)
-  assert.equal(probeVersion('qpdf', () => ({ error: { code: 'ENOENT' } })), null)
-  assert.equal(probeVersion('pdftoppm', () => ({ status: 0, stderr: 'private payload' })), null)
-  assert.equal(probeVersion('pdftotext', () => ({ status: 0, stderr: 'pdftotext version 25.04.0\nother text' })), '25.04.0')
+})
+
+test('external comparisons use the executables probed before changing directories', (t) => {
+  const scratch = realpathSync(mkdtempSync(join(tmpdir(), 'flowpdf-executable-contract-')))
+  t.after(() => rmSync(scratch, { recursive: true, force: true }))
+  const probeDirectory = join(scratch, 'probe')
+  const directory = join(scratch, 'comparison')
+  const tools = ['qpdf', 'pdftotext', 'pdftoppm']
+  for (const cwd of [probeDirectory, directory]) {
+    mkdirSync(join(cwd, 'bin'), { recursive: true })
+    for (const tool of tools) writeFileSync(join(cwd, 'bin', tool), '', { mode: 0o700 })
+  }
+  const env = { PATH: ['unavailable', 'bin'].join(delimiter) }
+  const options = { cwd: probeDirectory, env }
+  const calls = []
+  const refused = loadFixtures().find(({ id }) => id === 'refused')
+  const [operation] = refused.spec.operations
+  const [{ widthPx, heightPx, text }] = operation.pages
+  const { json } = structuralReadback(operation.pages)
+  const ppm = Buffer.concat([Buffer.from(`P6\n${widthPx} ${heightPx}\n255\n`),
+    Buffer.alloc(widthPx * heightPx * 3, 255)])
+  const run = ([executable, flag], { cwd, env, encoding, maxBuffer, timeout }) => {
+    const tool = basename(executable)
+    calls.push([executable, flag, cwd])
+    assert.equal(env.PATH, options.env.PATH)
+    if (cwd === probeDirectory) {
+      return tool === 'qpdf' ? { status: 0, stdout: 'qpdf version 11.9.1\n' } :
+        { status: 0, stderr: `${tool} version 25.04.0\nother text` }
+    }
+    assert.equal(encoding, 'buffer')
+    assert.equal(maxBuffer, 4 * 1024 * 1024)
+    assert.ok(timeout > 0 && timeout <= 15_000)
+    assert.equal(env.TMPDIR, directory)
+    if (flag === '--check') return { status: 0, stdout: Buffer.alloc(0) }
+    if (flag === '--json=2') return { status: 0, stdout: Buffer.from(JSON.stringify(json)) }
+    return { status: 0, stdout: tool === 'pdftotext' ? Buffer.from(text) : ppm }
+  }
+  const executables = new Map(tools.map((tool) => {
+    const probe = probeTool(tool, run, options)
+    assert.equal(probe.version, tool === 'qpdf' ? '11.9.1' : '25.04.0')
+    return [tool, probe.executable]
+  }))
+  const wasm = {
+    native_pdf_open: (json) => {
+      const { operation: name, requestId } = JSON.parse(json)
+      return JSON.stringify({ operation: name, requestId, status: 'failed', code: operation.outcome, snapshot: null })
+    },
+    verify_native_pdf_response: () => true,
+  }
+  const evidence = { status: 'unavailable', commands: {}, fixtures: [] }
+  compareFixtures([refused], wasm, directory, comparisonInvoker(executables, directory, env, evidence.commands, run),
+    evidence)
+  assert.equal(evidence.status, 'pass', evidence.reason)
+  assert.deepEqual(calls, [
+    ['qpdf', '--version', probeDirectory],
+    ['pdftotext', '-v', probeDirectory],
+    ['pdftoppm', '-v', probeDirectory],
+    ['qpdf', '--json=2', directory],
+    ['qpdf', '--check', directory],
+    ['qpdf', '--json=2', directory],
+    ['pdftotext', '-f', directory],
+    ['pdftoppm', '-r', directory],
+    ['pdftoppm', '-r', directory],
+  ].map(([tool, flag, cwd]) => [join(probeDirectory, 'bin', tool), flag, cwd]))
+
+  assert.equal(probeTool('qpdf', () => assert.fail('missing executable was invoked'),
+    { cwd: probeDirectory, env: { PATH: 'unavailable' } }), null)
+  assert.equal(probeTool('qpdf', () => ({ error: { code: 'ENOENT' } }), options), null)
+  assert.equal(probeTool('pdftoppm', () => ({ status: 0, stderr: 'private payload' }), options), null)
+  const missing = comparisonInvoker(executables, directory, env, evidence.commands, ([executable]) => {
+    assert.equal(executable, join(probeDirectory, 'bin', 'qpdf'))
+    return { error: { code: 'ENOENT' } }
+  })
+  assert.throws(() => missing('qpdf-check', ['qpdf', '--check']), { message: 'tool-disappeared', status: 'unavailable' })
+  assert.deepEqual(evidence.commands['qpdf-check'], { pass: 1, fail: 0, unavailable: 1 })
 })
 
 test('raster parsing and comparison cover the entire page including controls', () => {
@@ -291,6 +363,33 @@ function structuralReadback(pages) {
   }
   return { json, objects }
 }
+
+test('editing and removing notes reject exact retired contents in unlinked saved Text annotations', () => {
+  const { spec } = loadFixtures().find(({ id }) => id === 'notes-preservation')
+  for (const name of ['editNote', 'removeNote']) {
+    const operation = { ...spec.operations.find(({ operation }) => operation === name), retained: [] }
+    const retired = operation.removed.find((entry) => entry !== 'UnreachableDecoy')
+    const { json, objects } = structuralReadback(operation.pages)
+    for (const { page, rectPt, contents } of operation.noteReadback) {
+      objects[`obj:${page + 1} 0 R`].value['/Annots'] = ['10 0 R']
+      objects['obj:10 0 R'] = { value: { '/Subtype': '/Text', '/Rect': rectPt, '/Contents': `u:${contents}` } }
+    }
+    const check = () => checkStructure(pdfStructure(json), null, operation)
+    check()
+    const annotation = { '/Subtype': '/Text', '/Contents': '12 0 R' }
+    objects['obj:11 0 R'] = { value: annotation }
+    objects['obj:12 0 R'] = { value: `u:${retired} draft` }
+    check()
+    objects['obj:12 0 R'].value = `u:${retired}`
+    assert.throws(check, /retired-note-contents/)
+    annotation['/Contents'] = `u:${retired}`
+    assert.throws(check, /retired-note-contents/)
+    annotation['/Subtype'] = '/Link'
+    check()
+    objects['obj:13 0 R'] = { value: { '/UnreachableDecoy': 'u:Unused sample' } }
+    assert.throws(check, /pruned-decoy/)
+  }
+})
 
 test('widget readback compares PDF field types and requires distinct Off and Yes Forms', () => {
   const [source] = editFamilies.operations
