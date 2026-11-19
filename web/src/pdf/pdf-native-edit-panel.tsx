@@ -1048,7 +1048,8 @@ export function PdfNativeEditPanel({
       if (!result || result.action !== attempt.action.kind || result.published || result.candidate !== null
         || result.verification !== null || result.markCount !== attempt.nextMarks.length || current !== attempt.before
         || !sameNativeBytes(result.acceptedHash, attempt.before.outputHash)) {
-        throw new NativePdfWorkerError('FLOW_PDF_NATIVE_RESPONSE_INVALID')
+        refuseRedaction(attempt, null, undefined, true)
+        return true
       }
       setMarks(attempt.nextMarks)
       setRedactionRefusal(null)
@@ -1105,7 +1106,8 @@ export function PdfNativeEditPanel({
     setBusy(applying ? 'redacting' : 'marking')
     let requiresReopen = false
     try {
-      const result = applying ? await coordinator.applyRedaction(attempt.pages, attempt.controller.signal) : await coordinator.markRedaction(action)
+      const result = applying ? await coordinator.applyRedaction(attempt.pages, attempt.controller.signal)
+        : await coordinator.markRedaction(action, attempt.nextMarks.length)
       if (mounted.current) requiresReopen = finishRedaction(attempt, result, coordinator.snapshot().accepted)
     } catch (cause) {
       if (!mounted.current) return
@@ -1115,12 +1117,13 @@ export function PdfNativeEditPanel({
         || cause.code === 'FLOW_PDF_NATIVE_REDACTION_MARK_INVALID')) setError(['redaction.unsupported'])
       else setFailure(cause, false)
     } finally {
-      const reconcile = coordinator.snapshot().phase === 'reconciliationRequired'
+      const current = coordinator.snapshot()
+      const reconcile = current.phase === 'reconciliationRequired'
       if (!reconcile) pendingRedaction.current = null
       locked.current = false
       if (mounted.current) {
         if (pageActionOwnsFocus(invoker) || document.activeElement?.id === `${id}-redaction-cancel`) {
-          focusAfterRender.current = reconcile ? reconcileId : requiresReopen ? `${id}-reopen`
+          focusAfterRender.current = reconcile ? reconcileId : requiresReopen || current.reopenOriginal ? `${id}-reopen`
             : invoker?.id || `${id}-redaction-${applying ? 'stage' : 'add'}`
         }
         setBusy(null)
@@ -1845,7 +1848,7 @@ export function PdfNativeEditPanel({
       ? [t('error.file', { code: code ?? t('error.unknown') }),
           reason === 'reason.structure' ? `${t('admission.refused', { reason: t(reason) })} ${t('error.importRefused')}`
             : reason === 'error.importRefused' ? t(reason) : ''].filter(Boolean).join(' ')
-      : needsReconcile ? t('error.reconcile')
+      : invalidated ? t('error.session') : needsReconcile ? t('error.reconcile')
         : t('error.command', { nextAction: t(reason), code: code ?? t('error.unknown') })
   }
   if (invalidated && !failure) failure = t('error.session')
