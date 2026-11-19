@@ -1536,7 +1536,7 @@ impl From<NativeVerificationStatus> for NativeWireVerificationStatus {
     }
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct NativeWireRedactionCheck {
     status: NativeWireVerificationStatus,
@@ -1575,7 +1575,7 @@ impl NativeWireRedactionCheck {
     }
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct NativeWireRedactionVerification {
     status: NativeWireVerificationStatus,
@@ -1626,7 +1626,7 @@ impl NativeWireRedactionVerification {
     }
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct NativeWireRedaction {
     action: NativeRedactionActionKind,
@@ -1640,6 +1640,17 @@ struct NativeWireRedaction {
 }
 
 impl NativeWireRedaction {
+    fn new(action: NativeRedactionActionKind, accepted_hash: [u8; 32], mark_count: usize) -> Self {
+        Self {
+            action,
+            accepted_hash,
+            mark_count,
+            candidate: None,
+            verification: None,
+            published: false,
+        }
+    }
+
     fn set_candidate(&mut self, status: NativeRedactionCandidateStatus<'_>) {
         self.candidate = Some(NativeWireCandidate::new(
             status.identity.candidate_hash,
@@ -1650,6 +1661,12 @@ impl NativeWireRedaction {
             status.evidence,
             status.affected_pages,
         ));
+    }
+
+    fn terminal_receipt(&self, binding: NativeBinding, request_id: u64) -> Option<blake3::Hash> {
+        let mut writer = NativeHashWriter(blake3::Hasher::new(), 0);
+        serde_json::to_writer(&mut writer, &(binding, request_id, self)).ok()?;
+        Some(writer.0.finalize())
     }
 }
 
@@ -2020,6 +2037,8 @@ struct NativeRegistryEntry {
     origin_store_hash: String,
     base_outputs: VecDeque<(u64, [u8; 32])>,
     last_mark: Option<NativeRedactionMarkReceipt>,
+    last_cancel: Option<blake3::Hash>,
+    last_empty_status: Option<blake3::Hash>,
 }
 
 struct NativeRedactionMarkReceipt {
@@ -2193,6 +2212,8 @@ impl NativeRegistry {
                 origin_store_hash,
                 base_outputs: VecDeque::with_capacity(NATIVE_REQUEST_HISTORY),
                 last_mark: None,
+                last_cancel: None,
+                last_empty_status: None,
             });
             let entry = self.sessions.last().expect("session just inserted");
             response.binding = Some(entry.session.snapshot().binding);
@@ -2333,14 +2354,11 @@ impl NativeRegistryEntry {
     ) -> Result<NativeWireRedaction, &'static str> {
         use NativeWireRedactionAction::*;
         let current = self.session.snapshot();
-        let mut result = NativeWireRedaction {
-            action: action.kind(),
+        let mut result = NativeWireRedaction::new(
+            action.kind(),
             accepted_hash,
-            mark_count: self.session.redaction_marks().len(),
-            candidate: None,
-            verification: None,
-            published: false,
-        };
+            self.session.redaction_marks().len(),
+        );
         if current.binding != binding {
             let expected = match &action {
                 Status {
@@ -2422,6 +2440,8 @@ impl NativeRegistryEntry {
                 accepted_hash,
                 action,
             });
+            self.last_cancel = None;
+            self.last_empty_status = None;
             result.mark_count = self.session.redaction_marks().len();
             return Ok(result);
         }
@@ -2438,6 +2458,8 @@ impl NativeRegistryEntry {
                     return Err(NATIVE_RECONCILE);
                 }
                 result.set_candidate(status);
+                self.last_cancel = None;
+                self.last_empty_status = None;
             }
             Status { candidate } => {
                 if self.session.redaction_candidate_status().is_some() {
@@ -2446,6 +2468,8 @@ impl NativeRegistryEntry {
                         request_id,
                         candidate.as_ref(),
                     )?);
+                } else {
+                    self.last_empty_status = result.terminal_receipt(binding, request_id);
                 }
             }
             Verify { candidate } => {
@@ -2465,10 +2489,11 @@ impl NativeRegistryEntry {
             ReadPublished { .. } => return Err(NATIVE_REDACTION_UNVERIFIED),
             Cancel { candidate } => {
                 self.bound_candidate(binding, request_id, Some(candidate))?;
+                result.candidate = Some(candidate.clone());
                 self.session
                     .cancel_redaction(binding, request_id)
                     .map_err(map_error)?;
-                result.candidate = Some(candidate.clone());
+                self.last_cancel = result.terminal_receipt(binding, request_id);
             }
             _ => return Err(NATIVE_DECODE),
         }
@@ -2539,6 +2564,64 @@ impl NativeRegistryEntry {
         ));
         result.published = true;
         Ok(())
+    }
+
+    fn matches_live_redaction(
+        &self,
+        binding: NativeBinding,
+        request_id: u64,
+        redaction: &NativeWireRedaction,
+    ) -> bool {
+        use NativeRedactionActionKind::*;
+        if redaction.published {
+            let Some(candidate) = redaction.candidate.as_ref() else {
+                return false;
+            };
+            let mut expected =
+                NativeWireRedaction::new(redaction.action, redaction.accepted_hash, 0);
+            return self
+                .published_redaction(binding, request_id, &mut expected, candidate)
+                .is_ok()
+                && expected == *redaction;
+        }
+
+        let current = self.session.snapshot();
+        if current.binding != binding
+            || current.output_hash != redaction.accepted_hash
+            || self.session.redaction_marks().len() != redaction.mark_count
+        {
+            return false;
+        }
+        match redaction.action {
+            AddMark | RemoveMark | ClearMarks => self.last_mark.as_ref().is_some_and(|last| {
+                last.binding == binding
+                    && last.request_id == request_id
+                    && last.accepted_hash == redaction.accepted_hash
+                    && last.action.kind() == redaction.action
+            }),
+            Cancel | Status if redaction.verification.is_none() => {
+                let receipt = if redaction.action == Cancel {
+                    self.last_cancel
+                } else {
+                    self.last_empty_status
+                };
+                self.session.redaction_candidate_status().is_none()
+                    && receipt.is_some_and(|receipt| {
+                        redaction.terminal_receipt(binding, request_id) == Some(receipt)
+                    })
+            }
+            Stage | Status | Verify => self
+                .bound_candidate(binding, request_id, redaction.candidate.as_ref())
+                .is_ok_and(|status| {
+                    redaction.verification
+                        == Some(NativeWireRedactionVerification::new(
+                            status.status(),
+                            status.evidence,
+                            status.affected_pages,
+                        ))
+                }),
+            _ => false,
+        }
     }
 
     fn apply(
@@ -2883,6 +2966,21 @@ fn verify_native_snapshot(
     })
 }
 
+fn verify_native_live_redaction(response: &NativeResponse<NativeVerifiedScene>) -> Option<()> {
+    let redaction = response.redaction.as_ref()?;
+    let binding = response.binding?;
+    let origin_store_hash = response.origin_store_hash.as_deref()?;
+    NATIVE_REGISTRY
+        .with(|registry| {
+            registry.borrow().sessions.iter().any(|entry| {
+                entry.origin_store_hash == origin_store_hash
+                    && native_same_session(entry.session.snapshot().binding, binding)
+                    && entry.matches_live_redaction(binding, response.request_id, redaction)
+            })
+        })
+        .then_some(())
+}
+
 fn verify_native_redaction_response(
     response: &NativeResponse<NativeVerifiedScene>,
     require_live_session: bool,
@@ -3101,6 +3199,7 @@ fn verify_native_pdf_response_inner(response_json: &str, require_live_session: b
         }
         (NativeOperation::Redaction, NativeStatus::Redaction | NativeStatus::Published) => {
             verify_native_redaction_response(&response, require_live_session).is_some()
+                && (!require_live_session || verify_native_live_redaction(&response).is_some())
         }
         (NativeOperation::Preview, NativeStatus::Preview) => {
             response.request_id > 0

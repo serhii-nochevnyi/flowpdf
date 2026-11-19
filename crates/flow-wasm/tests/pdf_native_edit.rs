@@ -729,7 +729,7 @@ fn redaction_wire_releases_only_the_verified_exact_output() {
     let mut edit = bound("command", 8, base);
     edit["outputHash"] = base["outputHash"].clone();
     edit["command"] = json!({"kind":"add","page":0,"rect":[1,2,3,4],"contents":"queued note"});
-    let blocked = call(native_pdf_command, edit);
+    let blocked = call(native_pdf_command, edit.clone());
     assert_eq!(blocked["code"], "FLOW_PDF_NATIVE_REDACTION_BUSY");
     status_only(&blocked);
     let published = call(native_pdf_redaction, publish.clone());
@@ -738,13 +738,15 @@ fn redaction_wire_releases_only_the_verified_exact_output() {
     assert_eq!(published["snapshot"]["consumedRequest"], 7);
     assert_eq!(published["snapshot"]["outputHash"], candidate["hash"]);
     assert_ne!(published["snapshot"]["outputHex"], base["outputHex"]);
-    let published_status = call(native_pdf_redaction, lookup(candidate.clone()));
+    let status_wire = native_pdf_redaction(lookup(candidate.clone()).to_string());
+    assert!(verify_native_pdf_worker_response(status_wire.clone()));
+    let published_status: Value = serde_json::from_str(&status_wire).unwrap();
     status_only(&published_status);
     assert_eq!(published_status["redaction"]["published"], true);
     let readback = call(native_pdf_redaction, read_published);
     assert_eq!(readback["snapshot"], published["snapshot"]);
     assert_eq!(readback["redaction"]["action"], "readPublished");
-    assert_eq!(call(native_pdf_redaction, publish), published);
+    assert_eq!(call(native_pdf_redaction, publish.clone()), published);
     let mut stale = request(7, json!({"kind":"publish","candidate":candidate}));
     stale["acceptedHash"] = json!(vec![0; 32]);
     assert_eq!(call(native_pdf_redaction, stale)["status"], "failed");
@@ -755,6 +757,30 @@ fn redaction_wire_releases_only_the_verified_exact_output() {
     let refused = call(native_pdf_redaction, consumed);
     assert_eq!(refused["code"], "FLOW_PDF_NATIVE_REQUEST_INVALID");
     status_only(&refused);
+
+    edit["binding"] = published["snapshot"]["binding"].clone();
+    edit["outputHash"] = published["snapshot"]["outputHash"].clone();
+    let advanced = call(native_pdf_command, edit);
+    assert_eq!(advanced["status"], "applied", "{advanced}");
+    assert_eq!(advanced["snapshot"]["binding"]["revision"], 2);
+    assert!(!verify_native_pdf_worker_response(status_wire.clone()));
+    assert!(verify_native_pdf_response(status_wire));
+    let refused = call(native_pdf_redaction, publish);
+    assert_eq!(refused["code"], "FLOW_PDF_NATIVE_REVISION_MISMATCH");
+    status_only(&refused);
+
+    let current = &advanced["snapshot"];
+    let empty = native_pdf_redaction(
+        redaction_request(9, current, json!({"kind":"status","candidate":null})).to_string(),
+    );
+    assert!(verify_native_pdf_worker_response(empty.clone()));
+    let different = rehash_with_replacement(
+        &empty,
+        &format!(r#""acceptedHash":{}"#, current["outputHash"]),
+        &format!(r#""acceptedHash":{}"#, base["outputHash"]),
+    );
+    assert!(verify_native_pdf_response(different.clone()));
+    assert!(!verify_native_pdf_worker_response(different));
 }
 
 #[test]
@@ -770,14 +796,59 @@ fn cancelling_a_verified_redaction_keeps_the_base_and_prevents_publication() {
     );
     assert_eq!(added["redaction"]["markCount"], 1);
     status_only(&added);
-    let staged = start(3, json!({"kind":"stage"}));
+    let request = |action| native_pdf_redaction(redaction_request(3, base, action).to_string());
+    let staged_wire = request(json!({"kind":"stage"}));
+    assert!(verify_native_pdf_worker_response(staged_wire.clone()));
+    let staged: Value = serde_json::from_str(&staged_wire).unwrap();
     status_only(&staged);
     let candidate = &staged["redaction"]["candidate"];
-    let verified = start(3, json!({"kind":"verify","candidate":candidate}));
+    let verified_wire = request(json!({"kind":"verify","candidate":candidate}));
+    assert!(!verify_native_pdf_worker_response(staged_wire));
+    assert!(verify_native_pdf_worker_response(verified_wire.clone()));
+    let verified: Value = serde_json::from_str(&verified_wire).unwrap();
     assert_eq!(verified["redaction"]["verification"]["status"], "passed");
     status_only(&verified);
+    let status_wire = request(json!({"kind":"status","candidate":candidate}));
+    assert!(verify_native_pdf_worker_response(status_wire.clone()));
+    assert!(verify_native_pdf_worker_response(verified_wire.clone()));
 
-    let cancelled = start(3, json!({"kind":"cancel","candidate":candidate}));
+    for (field, accepted, other) in [
+        ("requestId", json!(3), json!(4)),
+        (
+            "sessionId",
+            base["binding"]["sessionId"].clone(),
+            json!(base["binding"]["sessionId"].as_u64().unwrap() + 1),
+        ),
+        ("revision", json!(0), json!(1)),
+        (
+            "originStoreHash",
+            base["originStoreHash"].clone(),
+            json!("00".repeat(32)),
+        ),
+        ("markCount", json!(1), json!(2)),
+        ("hash", candidate["hash"].clone(), json!(vec![0; 32])),
+    ] {
+        let different = rehash_with_replacement(
+            &verified_wire,
+            &format!(r#""{field}":{accepted}"#),
+            &format!(r#""{field}":{other}"#),
+        );
+        assert!(verify_native_pdf_response(different.clone()), "{field}");
+        assert!(!verify_native_pdf_worker_response(different), "{field}");
+    }
+    let different = rehash_with_replacement(
+        &verified_wire,
+        r#""verification":{"status":"passed""#,
+        r#""verification":{"status":"failed""#,
+    );
+    assert!(verify_native_pdf_response(different.clone()));
+    assert!(!verify_native_pdf_worker_response(different));
+
+    let cancelled_wire = request(json!({"kind":"cancel","candidate":candidate}));
+    assert!(verify_native_pdf_worker_response(cancelled_wire.clone()));
+    assert!(!verify_native_pdf_worker_response(verified_wire.clone()));
+    assert!(!verify_native_pdf_worker_response(status_wire));
+    let cancelled: Value = serde_json::from_str(&cancelled_wire).unwrap();
     status_only(&cancelled);
     assert_eq!(cancelled["redaction"]["markCount"], 1);
     assert_eq!(&cancelled["redaction"]["candidate"], candidate);
@@ -800,6 +871,25 @@ fn cancelling_a_verified_redaction_keeps_the_base_and_prevents_publication() {
     status_only(&next);
     assert_eq!(next["redaction"]["markCount"], 1);
     assert_eq!(next["redaction"]["verification"]["status"], "pending");
+    assert!(!verify_native_pdf_worker_response(cancelled_wire));
+    let next_cancelled = native_pdf_redaction(
+        redaction_request(
+            4,
+            base,
+            json!({"kind":"cancel","candidate":next["redaction"]["candidate"]}),
+        )
+        .to_string(),
+    );
+    assert!(verify_native_pdf_worker_response(next_cancelled.clone()));
+    assert_eq!(
+        call(native_pdf_close, bound("close", 5, base))["status"],
+        "closed"
+    );
+    assert!(!verify_native_pdf_worker_response(next_cancelled));
+    assert!(!verify_native_pdf_worker_response(verified_wire.clone()));
+    std::thread::spawn(move || assert!(verify_native_pdf_response(verified_wire)))
+        .join()
+        .unwrap();
 }
 
 #[test]
