@@ -29,9 +29,9 @@ export function runBounded([command, ...args], { cwd = root, timeout = 15_000, e
 }
 
 export function isProductInput(path) {
-  if (path.split('/').some((part) => /^(?:\.planning|\.shipyard.*|.*audit.*|AGENTS\.md|CLAUDE\.md)$/i.test(part))) return false
-  return /^(?:Cargo\.(?:toml|lock)|rust-toolchain\.toml|package(?:-lock)?\.json|(?:tsconfig(?:\.web)?)\.json|(?:vite|vitest)\.config\.ts|\.nvmrc)$/.test(path) ||
-    /^(?:crates\/[^/]+\/(?:src\/|tests\/|data\/|Cargo\.toml$)|web\/(?:src\/|tests\/|persistence\/|[^/]+\.html$)|scripts\/|tests\/contracts\/|config\/|fixtures\/pdf-native\/|artifacts\/provenance\/|\.github\/workflows\/pdf-native-note-tracer\.yml$)/
+  if (path.split('/').some((part) => /^(?:\.planning|\.shipyard.*|\.agents|\.claude|\.codex|\.cursor|AGENTS\.md|CLAUDE\.md)$/i.test(part))) return false
+  return /^(?:Cargo\.(?:toml|lock)|rust-toolchain\.toml|package(?:-lock)?\.json|(?:tsconfig(?:\.web)?)\.json|(?:vite|vitest)\.config\.ts|\.nvmrc|\.node-version)$/.test(path) ||
+    /^(?:crates\/[^/]+\/(?:src\/|tests\/|data\/|Cargo\.toml$)|web\/(?:src\/|tests\/|persistence\/|[^/]+\.html$)|scripts\/|tests\/contracts\/|config\/|fixtures\/pdf-native\/|artifacts\/provenance\/|\.github\/workflows\/pdf-native-(?:note-tracer|core)\.yml$)/
       .test(path) && !/\.md$/i.test(path)
 }
 

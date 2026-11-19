@@ -22,12 +22,16 @@ test('inventory covers each planned task once and runs the existing note tracer'
 
 test('only declared product inputs participate in the fingerprint', () => {
   for (const path of ['.planning/09-VALIDATION.md', '.shipyard/audit.json', 'scripts/AGENTS.md',
-    'web/CLAUDE.md', 'docs/audits/phase9.md', 'artifacts/phase9/local-validation.json', 'web/generated/test.js']) {
-    assert.equal(isProductInput(path), false)
+    'web/CLAUDE.md', 'docs/audits/phase9.md', 'audit/phase9.json', 'artifacts/audits/phase9.json',
+    'scripts/.agents/review.json', 'scripts/.planning/review.json', 'scripts/.shipyard-review.json',
+    'artifacts/phase9/local-validation.json', 'web/generated/test.js']) {
+    assert.equal(isProductInput(path), false, path)
   }
   for (const path of ['crates/flow-core/src/pdf/native/graph.rs', 'web/src/pdf/pdf-native-edit-worker.ts',
-    'tests/contracts/phase9-gate.test.mjs', 'fixtures/pdf-native/redaction.pdf', 'package.json']) {
-    assert.equal(isProductInput(path), true)
+    'tests/contracts/phase9-gate.test.mjs', 'fixtures/pdf-native/redaction.pdf', 'package.json',
+    'crates/flow-core/src/audit/mod.rs', 'crates/flow-core/tests/audit_redaction.rs',
+    '.node-version', '.github/workflows/pdf-native-core.yml']) {
+    assert.equal(isProductInput(path), true, path)
   }
   assert.ok(tasks.every(({ argv }) => argv.every((value) => !/\.planning|\.shipyard|install$/.test(value) || value === '--no-install')))
 })
