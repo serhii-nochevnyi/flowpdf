@@ -707,7 +707,7 @@ export class NativePdfEditCoordinator {
     })
     try {
       const reply = await this.send(request, signal)
-      if (signal.aborted || this.state.accepted !== accepted
+      if (signal.aborted || this.state.phase !== 'ready' || this.state.accepted !== accepted
         || reply.status !== 'preview' || reply.preview.rotation !== geometry.rotation) return null
       const [l, b, r, t] = reply.preview.cropBox
       // @contract: Note geometry rounds inward to whole points within the exact raster crop.
@@ -812,7 +812,7 @@ export class NativePdfEditCoordinator {
     readonly status: 'accepted' | 'unseen'; readonly snapshot: NativePdfVerifiedSnapshot
   }> {
     const requestId = job.request.requestId
-    this.update('reconciling', requestId)
+    this.update('reconciling', requestId, null, job.previous, this.state.redaction, this.state.reopenOriginal)
     try {
       if (job.request.action.kind !== 'stage') {
         const { redaction } = await this.redactionStep(job, job.request.action)
@@ -839,8 +839,11 @@ export class NativePdfEditCoordinator {
     } catch (cause: unknown) {
       const error = errorFor(cause, requestId)
       if (this.redactionJob === job) {
-        if ((job.publishing || job.expectedMarkCount !== null) && error.code !== REPLY_LOST) this.invalidate(error.code)
-        else this.update('reconciliationRequired', requestId, error.code)
+        if (error.code === REPLY_LOST) {
+          this.update('reconciliationRequired', requestId, error.code, job.previous, this.state.redaction, true)
+        } else {
+          this.invalidate(error.code)
+        }
       }
       throw error
     }
@@ -1002,11 +1005,12 @@ export class NativePdfEditCoordinator {
     code: string | null = null,
     accepted = this.state.accepted,
     redaction = accepted === this.state.accepted ? this.state.redaction : null,
+    allowReopen = phase === 'invalidated',
   ): void {
     const showingPriorAccepted = accepted !== null && (phase === 'invalidated' || this.redactionJob?.request.action.kind === 'stage'
       || redaction?.action === 'cancel' || redaction?.verification != null && !redaction.published)
     this.state = Object.freeze({ phase, pendingRequestId, code, accepted, redaction, showingPriorAccepted,
-      reopenOriginal: phase === 'invalidated' && this.original !== null })
+      reopenOriginal: allowReopen && this.original !== null })
     for (const listener of this.listeners) {
       try {
         listener()

@@ -757,6 +757,7 @@ export function PdfNativeEditPanel({
   const [previewRead, setPreviewRead] = useState<{
     readonly snapshot: NativePdfSnapshot; readonly pageId: number; readonly raster: NativePdfPagePreview | null
   } | null>(null)
+  const [previewRetry, setPreviewRetry] = useState(0)
   const [paintedPreview, setPaintedPreview] = useState<NativePdfPagePreview | null>(null)
   const previewCanvas = useRef<HTMLCanvasElement>(null)
   const [textDrafts, setTextDrafts] = useState<readonly TextDraft[]>([])
@@ -814,6 +815,7 @@ export function PdfNativeEditPanel({
   const snapshot = accepted?.snapshot
   const currentRefusal = redactionRefusal?.before === snapshot ? redactionRefusal : null
   const invalidated = service?.phase === 'invalidated' || currentRefusal?.requiresReopen === true
+  const canReopen = invalidated || service?.reopenOriginal === true
   const pages = snapshot?.scene.pages ?? []
   const page = pages.find((entry) => entry.id === pageId)
   const pageIndex = page === undefined ? -1 : pages.indexOf(page)
@@ -841,6 +843,7 @@ export function PdfNativeEditPanel({
   const refusedActions = new Set([deleteRefusal, insertRefusal, rotateRefusal, duplicateRefusal, ...moveRefusals])
   const navigationBlocked = busy !== null || navigation?.failed === false
   const pageSelectorId = `${id}-page-selector`
+  const viewportId = `${id}-viewport`
   const reconcileId = `${id}-reconcile`
   const objectPage = snapshot?.scene.objectPages?.find((entry) => entry.page === pageId)
   const selectedObject = objectPage?.objects.find((entry) => objectId && sameNativeBytes(entry.id, objectId))
@@ -885,11 +888,12 @@ export function PdfNativeEditPanel({
   const needsReconcile = service?.phase === 'reconciliationRequired'
   const revision = snapshot?.binding.revision ?? 0
   const outputHash = snapshot ? nativeBytesHex(Uint8Array.from(snapshot.outputHash)) : ''
-  const previewCoordinator = snapshot && service?.accepted === snapshot && !invalidated
+  const previewCoordinator = snapshot && service?.accepted === snapshot && service.phase === 'ready' && !invalidated
     && typeof coordinator?.previewPage === 'function' ? coordinator : null
   const currentPreview = previewRead && previewRead.snapshot === snapshot
     && previewRead.pageId === stableId ? previewRead : null
   const raster = currentPreview?.raster ?? null
+  const hasPreview = raster !== null
   const previewVerified = raster !== null && raster === paintedPreview
   const previewPending = !!(previewCoordinator && geometry && stableId !== undefined && !currentPreview)
   const redactionAvailable = !!coordinator && typeof coordinator.markRedaction === 'function'
@@ -924,14 +928,14 @@ export function PdfNativeEditPanel({
   const position = page === undefined ? '' : t('navigation.position', { page: pageIndex + 1, total: pages.length })
 
   useEffect(() => {
-    if (!previewCoordinator?.previewPage || !snapshot || stableId === undefined || !geometry) return
+    if (!previewCoordinator?.previewPage || !snapshot || stableId === undefined || !geometry || hasPreview) return
     const controller = new AbortController()
     const settle = (raster: NativePdfPagePreview | null) => {
       if (!controller.signal.aborted) setPreviewRead({ snapshot, pageId: stableId, raster })
     }
     void previewCoordinator.previewPage(stableId, controller.signal).then(settle, () => settle(null))
     return () => controller.abort()
-  }, [previewCoordinator, snapshot, stableId, geometry])
+  }, [previewCoordinator, snapshot, stableId, geometry, hasPreview, previewRetry])
 
   useLayoutEffect(() => {
     const canvas = previewCanvas.current
@@ -1853,6 +1857,9 @@ export function PdfNativeEditPanel({
   }
   if (invalidated && !failure) failure = t('error.session')
   if (currentRefusal) failure = [t('redaction.noOutput', { reason: t(currentRefusal.reason) }), failure].filter(Boolean).join(' ')
+  if (canReopen && !invalidated && needsReconcile) {
+    failure = [failure, t('session.redactionRecovery')].filter(Boolean).join(' ')
+  }
   const announcement = busy === 'opening' ? t('status.opening')
     : busy === 'mutating' ? t('status.pending')
       : busy === 'redacting' ? t(activeRedaction?.controller.signal.aborted ? 'redaction.cancelling' : 'redaction.pending')
@@ -1926,7 +1933,7 @@ export function PdfNativeEditPanel({
                 setError(['error.download'])
               }
             }}>{t(preRedactionOutput && revision > 0 ? 'redaction.downloadPrior' : 'download.edited')}</button>}
-          {invalidated && accepted && <button type="button" id={`${id}-reopen`} ref={reopenOriginal} disabled={busy !== null} onClick={() => {
+          {canReopen && accepted && <button type="button" id={`${id}-reopen`} ref={reopenOriginal} disabled={busy !== null} onClick={() => {
             const origin = accepted.snapshot.originStoreHash
             void open(accepted.filename, async () => {
               const original = await sourceStore.get(origin)
@@ -2029,7 +2036,7 @@ export function PdfNativeEditPanel({
           </fieldset>}
           {page && <div className="native-stack">
             <p>{position}</p>
-            <div className="native-viewport" role="region" aria-label={t('viewport.label')} tabIndex={0}>
+            <div id={viewportId} className="native-viewport" role="region" aria-label={t('viewport.label')} tabIndex={0}>
               {geometry && <NativePagePaper geometry={geometry} zoom={zoom} notes={notes}
                 marks={previewVerified ? pageMarks : []} selected={selected?.id} onSelect={chooseNote}
                 raster={raster} canvasRef={previewCanvas} previewVerified={previewVerified} revision={revision} outputHash={outputHash} />}
@@ -2037,6 +2044,12 @@ export function PdfNativeEditPanel({
             <div aria-live="polite">
               {!previewVerified && <p className="native-help">{t(previewPending ? 'viewport.loading' : 'viewport.unavailable')}</p>}
             </div>
+            {!previewVerified && currentPreview && previewCoordinator && <button type="button"
+              disabled={!sessionReady || navigationBlocked} onClick={() => {
+                document.getElementById(viewportId)?.focus()
+                setPreviewRead(null)
+                setPreviewRetry((count) => count + 1)
+              }}>{t('viewport.retry')}</button>}
           </div>}
           {snapshot && <section className="native-stack" aria-labelledby={`${id}-redaction`}>
             <h3 id={`${id}-redaction`} tabIndex={-1}>{t('family.redaction')}</h3>
