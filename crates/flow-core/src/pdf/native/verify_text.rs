@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::mem::size_of;
 
 use ttf_parser::{Face, GlyphId, Rect as GlyphBox, Tag};
 
@@ -7,7 +8,7 @@ use super::super::scene::{ContentCursor, ContentToken, separated_content_streams
 use super::verifier::{
     MAX_COORD, NativeRedactionMark, NativeRedactionPageEvidence,
     NativeVerificationFailure::{Budget, Structure, TextMismatch, UnsupportedProfile},
-    POINT, Rect, VerifyResult, contains, intersects, spend, valid_rect,
+    POINT, Rect, Reservation, VerifyResult, Workspace, contains, intersects, spend, valid_rect,
 };
 use super::verify_structure::{
     Dict, Document, Side, coverage, decimal, get, name, number, rect, reference, reject_comments,
@@ -20,32 +21,48 @@ const MAX_STREAM: usize = 512 * 1024;
 const MAX_TEXT_WORK: usize = 8_000_000;
 const MAX_GLYPHS_PER_SHOW: usize = 4_096;
 const MAX_FONT_WORK: usize = 1_000_000;
+const MAX_STREAM_TOKENS: usize = 16_384;
 
+#[cfg(test)]
 pub(super) fn verify(
     accepted: &[u8],
     candidate: &[u8],
     order: &[u64],
     marks: &[NativeRedactionMark],
 ) -> VerifyResult<Vec<NativeRedactionPageEvidence>> {
-    let accepted = Document::open(accepted, Side::Accepted)?;
-    let candidate = Document::open(candidate, Side::Candidate)?;
-    let covered = coverage(&accepted, &candidate, order, marks)?;
-    let mut before = Extraction::new();
-    let mut after = Extraction::new();
+    let workspace = Workspace::new(super::verifier::STANDALONE_WORKSPACE);
+    verify_with_workspace(accepted, candidate, order, marks, &workspace)
+}
+
+pub(super) fn verify_with_workspace(
+    accepted: &[u8],
+    candidate: &[u8],
+    order: &[u64],
+    marks: &[NativeRedactionMark],
+    workspace: &Workspace,
+) -> VerifyResult<Vec<NativeRedactionPageEvidence>> {
+    let mut documents = workspace.scope();
+    let accepted = Document::open(accepted, Side::Accepted, workspace, &mut documents)?;
+    let candidate = Document::open(candidate, Side::Candidate, workspace, &mut documents)?;
+    let covered = coverage(&accepted, &candidate, order, marks, workspace)?;
+    let mut retained = workspace.scope();
+    let mut before = Extraction::new(workspace);
+    let mut after = Extraction::new(workspace);
     let mut removed_sources = BTreeSet::new();
     let mut removed_streams = BTreeSet::new();
     let mut matching_sources = BTreeSet::new();
     let mut removed_operators = BTreeSet::new();
     let mut retained_operators = BTreeSet::new();
     for (index, &page_id) in order.iter().enumerate() {
-        let old_page = accepted.page(index)?;
-        let new_page = candidate.page(index)?;
-        let mut expected = before.page(&accepted, &old_page)?;
-        let found = after.page(&candidate, &new_page)?;
-        let page_marks = marks
-            .iter()
-            .filter(|mark| mark.page_id == page_id)
-            .collect::<Vec<_>>();
+        let mut page_bytes = workspace.scope();
+        let old_page = accepted.page(index, &mut page_bytes)?;
+        let new_page = candidate.page(index, &mut page_bytes)?;
+        let mut expected = before.page(&accepted, &old_page, &mut page_bytes)?;
+        let found = after.page(&candidate, &new_page, &mut page_bytes)?;
+        let mark_count = marks.iter().filter(|mark| mark.page_id == page_id).count();
+        page_bytes.grow(mark_count * size_of::<&NativeRedactionMark>())?;
+        let mut page_marks: Vec<&NativeRedactionMark> = Vec::with_capacity(mark_count);
+        page_marks.extend(marks.iter().filter(|mark| mark.page_id == page_id));
         spend(
             &mut before.work,
             expected
@@ -53,19 +70,23 @@ pub(super) fn verify(
                 .checked_mul(page_marks.len() + 1)
                 .ok_or(Budget)?,
         )?;
-        expected.retain(|run| {
+        let mut retained_count = 0;
+        for index in 0..expected.len() {
+            let run = &expected[index];
             let removed = page_marks
                 .iter()
                 .any(|mark| intersects(mark.rect, run.bounds));
             if removed {
-                removed_streams.insert(before.stream_digests[&run.source.0]);
-                removed_sources.insert(run.source.0);
-                removed_operators.insert(run.source);
+                retained.insert(&mut removed_streams, before.stream_digests[&run.source.0])?;
+                retained.insert(&mut removed_sources, run.source.0)?;
+                retained.insert(&mut removed_operators, run.source)?;
             } else {
-                retained_operators.insert(run.source);
+                retained.insert(&mut retained_operators, run.source)?;
+                expected.swap(retained_count, index);
+                retained_count += 1;
             }
-            !removed
-        });
+        }
+        expected.truncate(retained_count);
         if !expected
             .iter()
             .map(|run| &run.signature)
@@ -77,14 +98,16 @@ pub(super) fn verify(
             let source = left.source.0;
             let result = right.source.0;
             if before.stream_digests[&source] == after.stream_digests[&result] {
-                matching_sources.insert((source, result));
+                retained.insert(&mut matching_sources, (source, result))?;
             }
         }
     }
-    let independently_retained: BTreeSet<_> = matching_sources
-        .into_iter()
-        .filter_map(|(source, result)| (!removed_sources.contains(&source)).then_some(result))
-        .collect();
+    let mut independently_retained = BTreeSet::new();
+    for (source, result) in matching_sources {
+        if !removed_sources.contains(&source) {
+            retained.insert(&mut independently_retained, result)?;
+        }
+    }
     if !removed_operators.is_disjoint(&retained_operators)
         || after.stream_digests.iter().any(|(id, hash)| {
             removed_streams.contains(hash) && !independently_retained.contains(id)
@@ -110,15 +133,19 @@ struct Run {
     source: (PdfObjectRef, usize),
 }
 
-struct Extraction<'a> {
+struct Extraction<'a, 'w> {
+    workspace: &'w Workspace,
+    retained: Reservation<'w>,
     fonts: Fonts<'a>,
     work: usize,
     stream_digests: BTreeMap<PdfObjectRef, [u8; 32]>,
 }
 
-impl<'a> Extraction<'a> {
-    fn new() -> Self {
+impl<'a, 'w> Extraction<'a, 'w> {
+    fn new(workspace: &'w Workspace) -> Self {
         Self {
+            workspace,
+            retained: workspace.scope(),
             fonts: Fonts::new(),
             work: MAX_TEXT_WORK,
             stream_digests: BTreeMap::new(),
@@ -129,7 +156,9 @@ impl<'a> Extraction<'a> {
         &mut self,
         doc: &'a Document,
         page: &super::verify_structure::Page<'a>,
+        page_bytes: &mut Reservation<'_>,
     ) -> VerifyResult<Vec<Run>> {
+        let mut stack_bytes = self.workspace.scope();
         let mut output = Vec::new();
         let mut matrix = Matrix::IDENTITY;
         let mut stack = Vec::new();
@@ -148,6 +177,8 @@ impl<'a> Extraction<'a> {
                 page.geometry.crop_box,
                 0,
                 &mut output,
+                page_bytes,
+                &mut stack_bytes,
             )?;
             previous = data;
         }
@@ -168,19 +199,23 @@ impl<'a> Extraction<'a> {
         clip: Rect,
         depth: usize,
         output: &mut Vec<Run>,
+        page_bytes: &mut Reservation<'_>,
+        stack_bytes: &mut Reservation<'_>,
     ) -> VerifyResult<Matrix> {
         if depth > MAX_DEPTH {
             return Err(UnsupportedProfile);
         }
         let stream = doc.stream(id)?;
         spend(&mut self.work, stream.data.len() + 1)?;
-        self.stream_digests
-            .entry(id)
-            .or_insert_with(|| *blake3::hash(&stream.data).as_bytes());
+        if let std::collections::btree_map::Entry::Vacant(entry) = self.stream_digests.entry(id) {
+            self.retained.tree_entry::<(PdfObjectRef, [u8; 32])>()?;
+            entry.insert(*blake3::hash(&stream.data).as_bytes());
+        }
         let mut text = None;
         let mut operation = 0;
         let mut available = self.work;
-        operations(&stream.data, doc.side, &mut available, |op, args, cost| {
+        let workspace = self.workspace;
+        let visit = |op: &str, args: &[Operand<'_>], cost| {
             spend(&mut self.work, cost)?;
             operation += 1;
             if let Some(state) = &mut text {
@@ -190,30 +225,40 @@ impl<'a> Extraction<'a> {
                     return Ok(());
                 } else if let Some(show) = text_operator(state, op, args)? {
                     let font_id = resource(doc, resources, "Font", show.font)?;
-                    let font = self.fonts.get(doc, font_id)?;
+                    let font = self
+                        .fonts
+                        .get(doc, font_id, workspace, &mut self.retained)?;
                     spend(&mut self.work, show.codes.len() * 4 + 1)?;
+                    let _glyph_bytes = workspace.reserve(show.codes.len() * size_of::<Glyph>())?;
                     let layout = font.layout(show.codes, show.origin, show.size)?;
                     let bounds = matrix.bounds(layout.bounds)?;
                     if !contains(clip, bounds) {
                         return Err(UnsupportedProfile);
                     }
-                    output.push(Run {
-                        signature: Signature {
-                            text: layout.glyphs.iter().map(|glyph| glyph.scalar).collect(),
-                            font: font.digest,
-                            matrix,
-                            origin: show.origin,
-                            size: show.size,
+                    let capacity = layout.glyphs.len() * 4;
+                    page_bytes.grow(capacity)?;
+                    let mut text = String::with_capacity(capacity);
+                    text.extend(layout.glyphs.iter().map(|glyph| glyph.scalar));
+                    page_bytes.push(
+                        output,
+                        Run {
+                            signature: Signature {
+                                text,
+                                font: font.digest,
+                                matrix,
+                                origin: show.origin,
+                                size: show.size,
+                            },
+                            bounds,
+                            source: (id, operation),
                         },
-                        bounds,
-                        source: (id, operation),
-                    });
+                    )?;
                 }
                 return Ok(());
             }
             match op {
                 "BT" if args.is_empty() => text = Some(TextState::default()),
-                "q" if args.is_empty() && stack.len() < 32 => stack.push(matrix),
+                "q" if args.is_empty() && stack.len() < 32 => stack_bytes.push(stack, matrix)?,
                 "Q" if args.is_empty() => matrix = stack.pop().ok_or(UnsupportedProfile)?,
                 "cm" => matrix = matrix.compose(Matrix::new(numbers(args)?)?)?,
                 "Do" => {
@@ -222,6 +267,7 @@ impl<'a> Extraction<'a> {
                     if name(dict, "Subtype") == Some("Form") {
                         let (matrix, form_clip, resources) =
                             form(doc, dict, resources, matrix, clip)?;
+                        let mut form_stack_bytes = workspace.scope();
                         let mut form_stack = Vec::new();
                         self.stream(
                             doc,
@@ -232,6 +278,8 @@ impl<'a> Extraction<'a> {
                             form_clip,
                             depth + 1,
                             output,
+                            page_bytes,
+                            &mut form_stack_bytes,
                         )?;
                         if !form_stack.is_empty() {
                             return Err(UnsupportedProfile);
@@ -243,7 +291,8 @@ impl<'a> Extraction<'a> {
                 _ => return Err(UnsupportedProfile),
             }
             Ok(())
-        })?;
+        };
+        operations(&stream.data, doc.side, &mut available, workspace, visit)?;
         if text.is_some() {
             return Err(UnsupportedProfile);
         }
@@ -260,6 +309,7 @@ pub(super) fn operations(
     data: &[u8],
     side: Side,
     available: &mut usize,
+    workspace: &Workspace,
     mut visit: impl FnMut(&str, &[Operand<'_>], usize) -> VerifyResult<()>,
 ) -> VerifyResult<()> {
     if data.len() > MAX_STREAM {
@@ -269,10 +319,16 @@ pub(super) fn operations(
     if side == Side::Candidate {
         reject_comments(data)?;
     }
+    // @security: Bound operand storage before the shared token reader allocates.
+    let _tokens = workspace.reserve(
+        8 * size_of::<Operand<'_>>()
+            + data.len().min(MAX_STREAM_TOKENS) * 4 * size_of::<ContentToken>()
+            + data.len() * 2,
+    )?;
     let mut cursor = ContentCursor::new(
         data,
         PdfReaderLimits {
-            max_content_tokens: 16_384,
+            max_content_tokens: MAX_STREAM_TOKENS,
             max_nesting: 2,
             max_array_items: 4096,
             max_string_bytes: 2 * MAX_GLYPHS_PER_SHOW,
@@ -566,7 +622,7 @@ pub(super) fn text_operator<'a>(
 }
 
 pub(super) struct Fonts<'a> {
-    keyed: BTreeMap<PdfObjectRef, Font<'a>>,
+    keyed: BTreeMap<PdfObjectRef, Box<Font<'a>>>,
     work: usize,
 }
 
@@ -578,11 +634,22 @@ impl<'a> Fonts<'a> {
         }
     }
 
-    pub fn get(&mut self, document: &'a Document, id: PdfObjectRef) -> VerifyResult<&Font<'a>> {
+    pub fn get(
+        &mut self,
+        document: &'a Document,
+        id: PdfObjectRef,
+        workspace: &Workspace,
+        retained: &mut Reservation<'_>,
+    ) -> VerifyResult<&Font<'a>> {
         use std::collections::btree_map::Entry;
         match self.keyed.entry(id) {
             Entry::Occupied(entry) => Ok(entry.into_mut()),
-            Entry::Vacant(entry) => Ok(entry.insert(Font::read(document, id, &mut self.work)?)),
+            Entry::Vacant(entry) => {
+                retained.tree_entry::<(PdfObjectRef, Box<Font<'a>>)>()?;
+                retained.grow(size_of::<Font<'a>>())?;
+                let font = Font::read(document, id, &mut self.work, workspace, retained)?;
+                Ok(entry.insert(Box::new(font)))
+            }
         }
     }
 }
@@ -614,7 +681,13 @@ pub(super) struct Layout {
 }
 
 impl<'a> Font<'a> {
-    fn read(doc: &'a Document, id: PdfObjectRef, work: &mut usize) -> VerifyResult<Self> {
+    fn read(
+        doc: &'a Document,
+        id: PdfObjectRef,
+        work: &mut usize,
+        workspace: &Workspace,
+        retained: &mut Reservation<'_>,
+    ) -> VerifyResult<Self> {
         let root = doc.dict(id)?;
         let (metrics, code_bytes) = match (name(root, "Subtype"), name(root, "Encoding")) {
             (Some("TrueType"), Some("WinAnsiEncoding")) => (root, 1),
@@ -664,10 +737,13 @@ impl<'a> Font<'a> {
                     return Err(UnsupportedProfile);
                 }
                 spend(work, bytes.len())?;
+                let mut scratch = workspace.scope();
                 let mut unique = BTreeSet::new();
                 for pair in bytes.chunks_exact(2) {
                     let glyph = u16::from_be_bytes([pair[0], pair[1]]);
-                    if glyph >= face.number_of_glyphs() || (glyph != 0 && !unique.insert(glyph)) {
+                    if glyph >= face.number_of_glyphs()
+                        || (glyph != 0 && !scratch.insert(&mut unique, glyph)?)
+                    {
                         return Err(UnsupportedProfile);
                     }
                 }
@@ -675,10 +751,11 @@ impl<'a> Font<'a> {
             }
             _ => None,
         };
-        let (default_width, widths) = read_widths(doc, metrics, code_bytes)?;
+        let mut scratch = workspace.scope();
+        let (default_width, widths) = read_widths(doc, metrics, code_bytes, &mut scratch)?;
         let unicode = &doc.stream(reference(get(root, "ToUnicode")?)?)?.data;
         spend(work, unicode.len())?;
-        let mappings = read_cmap(unicode, code_bytes)?;
+        let mappings = read_cmap(unicode, code_bytes, &mut scratch)?;
         let loca = ttf_parser::loca::Table::parse(
             tables.maxp.number_of_glyphs,
             tables.head.index_to_location_format,
@@ -708,7 +785,7 @@ impl<'a> Font<'a> {
             };
             if glyph.0 == 0
                 || glyph.0 >= face.number_of_glyphs()
-                || !seen.insert(glyph.0)
+                || !scratch.insert(&mut seen, glyph.0)?
                 || face.glyph_index(scalar) != Some(glyph)
                 || cmap
                     .subtables
@@ -744,6 +821,7 @@ impl<'a> Font<'a> {
                 }
                 Some(header)
             };
+            retained.tree_entry::<(u16, Character)>()?;
             characters.insert(
                 code,
                 Character {
@@ -880,6 +958,7 @@ fn read_widths(
     doc: &Document,
     dict: &Dict,
     code_bytes: usize,
+    scratch: &mut Reservation<'_>,
 ) -> VerifyResult<(i64, BTreeMap<u16, i64>)> {
     let width = |v| {
         number(v).and_then(|width| {
@@ -911,6 +990,7 @@ fn read_widths(
             if !(0..=10_000 * POINT).contains(&value) {
                 return Err(UnsupportedProfile);
             }
+            scratch.tree_entry::<(u16, i64)>()?;
             widths.insert(code as u16, value);
         }
         return Ok((0, widths));
@@ -928,9 +1008,11 @@ fn read_widths(
         let start =
             u16::try_from(start.as_integer().ok_or(Structure)?).map_err(|_| UnsupportedProfile)?;
         let mut add = |code, value| {
-            if widths.len() >= MAX_MAP || widths.insert(code, width(value)?).is_some() {
+            if widths.len() >= MAX_MAP || widths.contains_key(&code) {
                 return Err(UnsupportedProfile);
             }
+            scratch.tree_entry::<(u16, i64)>()?;
+            widths.insert(code, width(value)?);
             Ok(())
         };
         if let Some(list) = next.as_array() {
@@ -1032,7 +1114,11 @@ fn unicode(rest: &mut &[u8], offset: u32) -> VerifyResult<char> {
         .ok_or(UnsupportedProfile)
 }
 
-fn read_cmap(mut rest: &[u8], width: usize) -> VerifyResult<BTreeMap<u16, char>> {
+fn read_cmap(
+    mut rest: &[u8],
+    width: usize,
+    scratch: &mut Reservation<'_>,
+) -> VerifyResult<BTreeMap<u16, char>> {
     if rest.len() > 128 * 1024 || !rest.is_ascii() {
         return Err(UnsupportedProfile);
     }
@@ -1052,7 +1138,7 @@ fn read_cmap(mut rest: &[u8], width: usize) -> VerifyResult<BTreeMap<u16, char>>
     loop {
         let mut look = rest;
         let next = token(&mut look)?;
-        if next.starts_with(b"/") && !metadata.insert(next) {
+        if next.starts_with(b"/") && !scratch.insert(&mut metadata, next)? {
             return Err(UnsupportedProfile);
         }
         match next {
@@ -1132,11 +1218,13 @@ fn read_cmap(mut rest: &[u8], width: usize) -> VerifyResult<BTreeMap<u16, char>>
                             for code in low..=high {
                                 rest = start;
                                 let scalar = unicode(&mut rest, code - low)?;
-                                if codes.insert(code as u16, scalar).is_some()
-                                    || !scalars.insert(scalar)
+                                if codes.contains_key(&(code as u16))
+                                    || !scratch.insert(&mut scalars, scalar)?
                                 {
                                     return Err(UnsupportedProfile);
                                 }
+                                scratch.tree_entry::<(u16, char)>()?;
+                                codes.insert(code as u16, scalar);
                             }
                         }
                         expect(

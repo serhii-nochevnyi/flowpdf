@@ -5,11 +5,12 @@ use serde::Serialize;
 
 use super::super::reader::PdfObjectRef;
 use super::session::OBJECT_ID_BYTES;
+use super::verifier::verify_with_workspace;
 use super::{
     NATIVE_REDACTION_VALIDATOR_PROFILE, NATIVE_REDACTION_VALIDATOR_VERSION, NativeBinding,
     NativeEditReceipt, NativeNoteId, NativeRedactionContext, NativeRedactionMark,
     NativeRedactionPageEvidence, NativeRedactionPolicy, NativeVerificationStatus,
-    VersionedNativeRedactionEvidence, verify_native_redaction,
+    VersionedNativeRedactionEvidence,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -131,10 +132,6 @@ impl Candidate {
             + evidence_reserve(self.affected.len())
     }
 
-    pub(super) fn verification_input_bytes(&self) -> usize {
-        self.bytes.len()
-    }
-
     fn policy<'a>(&self, marks: &'a [NativeRedactionMark]) -> NativeRedactionPolicy<'a> {
         NativeRedactionPolicy {
             binding: self.identity.binding,
@@ -150,10 +147,11 @@ impl Candidate {
         accepted: &[u8],
         context: NativeRedactionContext<'_>,
         marks: &[NativeRedactionMark],
+        allowance: usize,
     ) -> &VersionedNativeRedactionEvidence {
         let policy = self.policy(marks);
         self.evidence.get_or_insert_with(|| {
-            verify_native_redaction(origin, accepted, &self.bytes, context, policy)
+            verify_with_workspace(origin, accepted, &self.bytes, context, policy, allowance)
         })
     }
 
@@ -202,6 +200,7 @@ pub(super) fn evidence_reserve(pages: usize) -> usize {
 
 #[cfg(test)]
 mod tests {
+    use super::super::verifier::STANDALONE_WORKSPACE;
     use super::super::{NativeRedactionGeometry, tests::redaction_fixture};
     use super::*;
 
@@ -240,7 +239,7 @@ mod tests {
         let mut mismatch = Candidate::new(other.clone(), BTreeMap::new(), context, &marks);
         assert!(
             !mismatch
-                .verify(&source, &source, context, &marks)
+                .verify(&source, &source, context, &marks, STANDALONE_WORKSPACE)
                 .checks_passed()
         );
         assert_eq!(mismatch.status().status(), NativeVerificationStatus::Failed);
@@ -248,7 +247,7 @@ mod tests {
 
         assert!(
             candidate
-                .verify(&source, &source, context, &marks)
+                .verify(&source, &source, context, &marks, STANDALONE_WORKSPACE)
                 .checks_passed()
         );
         assert_eq!(

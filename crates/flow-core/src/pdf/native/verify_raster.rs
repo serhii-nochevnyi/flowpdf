@@ -1,5 +1,6 @@
 // @contract: 144 dpi; four fixed subpixel samples per pixel, half-open coverage, nearest image sampling.
 use std::collections::{BTreeMap, BTreeSet};
+use std::mem::size_of;
 
 use ttf_parser::OutlineBuilder;
 
@@ -8,11 +9,12 @@ use super::super::scene::{ContentToken, separated_content_streams};
 use super::verifier::{
     MAX_COORD, NativeRedactionGeometry, NativeRedactionMark, NativeRedactionPageEvidence,
     NativeVerificationFailure::{Budget, RasterMismatch, Structure, UnsupportedProfile},
-    POINT, Rect, VerifyResult, contains, intersects, spend, valid_rect,
+    POINT, Rect, Reservation, STANDALONE_WORKSPACE, VerifyResult, Workspace, contains, intersects,
+    spend, valid_rect,
 };
 use super::verify_structure::{Dict, Document, Page, Side, coverage, get, name};
 use super::verify_text::{
-    Fonts, Matrix, Operand, TextState, form, numbers, operand_name, operations, resource,
+    Fonts, Glyph, Matrix, Operand, TextState, form, numbers, operand_name, operations, resource,
     text_operator,
 };
 
@@ -45,8 +47,11 @@ pub(super) fn accepted_page(
     index: usize,
     geometry: NativeRedactionGeometry,
 ) -> VerifyResult<NativePageRaster> {
-    let document = Document::open(bytes, Side::Accepted)?;
-    let page = document.page(index)?;
+    let workspace = Workspace::new(STANDALONE_WORKSPACE);
+    let mut documents = workspace.scope();
+    let document = Document::open(bytes, Side::Accepted, &workspace, &mut documents)?;
+    let mut page_bytes = workspace.scope();
+    let page = document.page(index, &mut page_bytes)?;
     if page.geometry != geometry {
         return Err(Structure);
     }
@@ -55,7 +60,8 @@ pub(super) fn accepted_page(
     if grid.width > NATIVE_PREVIEW_MAX_DIMENSION || grid.height > NATIVE_PREVIEW_MAX_DIMENSION {
         return Err(Budget);
     }
-    let paints = Interpreter::new().page(&document, &page)?;
+    let mut draw = DrawBudget::new(&workspace);
+    let paints = Interpreter::new(&workspace).page(&document, &page, &mut draw)?;
     let mut work = MAX_RASTER_WORK;
     let mut pixels = grid.draw(&paints, None, &mut work)?;
     // @contract: Preview RGB starts at the top left of the rotated crop.
@@ -174,17 +180,31 @@ pub(super) fn within_pixel_budget<E>(
     pages.all(|page| page.is_ok_and(|geometry| Grid::new(geometry, &mut pixels_left).is_ok()))
 }
 
+#[cfg(test)]
 pub(super) fn verify(
     accepted: &[u8],
     candidate: &[u8],
     order: &[u64],
     marks: &[NativeRedactionMark],
 ) -> VerifyResult<Vec<NativeRedactionPageEvidence>> {
-    let accepted = Document::open(accepted, Side::Accepted)?;
-    let candidate = Document::open(candidate, Side::Candidate)?;
-    let covered = coverage(&accepted, &candidate, order, marks)?;
-    let mut expected = Interpreter::new();
-    let mut actual = Interpreter::new();
+    let workspace = Workspace::new(STANDALONE_WORKSPACE);
+    verify_with_workspace(accepted, candidate, order, marks, &workspace)
+}
+
+pub(super) fn verify_with_workspace(
+    accepted: &[u8],
+    candidate: &[u8],
+    order: &[u64],
+    marks: &[NativeRedactionMark],
+    workspace: &Workspace,
+) -> VerifyResult<Vec<NativeRedactionPageEvidence>> {
+    let mut documents = workspace.scope();
+    let accepted = Document::open(accepted, Side::Accepted, workspace, &mut documents)?;
+    let candidate = Document::open(candidate, Side::Candidate, workspace, &mut documents)?;
+    let covered = coverage(&accepted, &candidate, order, marks, workspace)?;
+    let mut expected = Interpreter::new(workspace);
+    let mut actual = Interpreter::new(workspace);
+    let mut retained = workspace.scope();
     let mut pixels_left = MAX_TOTAL_PIXELS;
     let mut work = MAX_RASTER_WORK;
     let mut removed_notes = BTreeSet::new();
@@ -197,41 +217,49 @@ pub(super) fn verify(
     let mut sensitive_images = BTreeSet::new();
     let mut image_replacements = BTreeMap::new();
     for (index, &page_id) in order.iter().enumerate() {
-        let original = accepted.page(index)?;
-        let result = candidate.page(index)?;
-        let marks = marks
-            .iter()
-            .filter(|mark| mark.page_id == page_id)
-            .map(|mark| mark.rect)
-            .collect::<Vec<_>>();
+        let mut page_bytes = workspace.scope();
+        let original = accepted.page(index, &mut page_bytes)?;
+        let result = candidate.page(index, &mut page_bytes)?;
+        let mark_count = marks.iter().filter(|mark| mark.page_id == page_id).count();
+        page_bytes.grow(mark_count * size_of::<Rect>())?;
+        let mut page_marks = Vec::with_capacity(mark_count);
+        page_marks.extend(
+            marks
+                .iter()
+                .filter(|mark| mark.page_id == page_id)
+                .map(|mark| mark.rect),
+        );
         let grid = Grid::new(original.geometry, &mut pixels_left)?;
-        let mut source_paint = expected.page(&accepted, &original)?;
-        let candidate_paint = actual.page(&candidate, &result)?;
+        let mut source_draw = DrawBudget::new(workspace);
+        let mut candidate_draw = DrawBudget::new(workspace);
+        let mut source_paint = expected.page(&accepted, &original, &mut source_draw)?;
+        let candidate_paint = actual.page(&candidate, &result, &mut candidate_draw)?;
         let mut retained_count = 0;
         for index in 0..source_paint.len() {
             let paint = &mut source_paint[index];
-            spend(&mut work, marks.len() + 1)?;
+            spend(&mut work, page_marks.len() + 1)?;
             if let PaintKind::Image(image) = &mut paint.kind {
-                image.add_masks(&marks, &mut expected.draw_bytes, &mut work)?;
+                source_draw.build(|memory| image.add_masks(&page_marks, memory, &mut work))?;
             } else {
                 let mut removed = false;
-                for &mark in &marks {
-                    removed |= paint.intersects_mark(mark, &mut work)?;
+                for &mark in &page_marks {
+                    removed |= paint.intersects_mark(mark, &mut work, workspace)?;
                 }
                 if let PaintKind::Note(note) = &paint.kind {
                     if removed {
-                        removed_notes.insert(note.id);
+                        retained.insert(&mut removed_notes, note.id)?;
                     } else {
-                        retained_notes.insert(note.id);
+                        retained.insert(&mut retained_notes, note.id)?;
                     }
                 }
                 if let Some(operator) = paint.source {
                     if removed {
-                        removed_streams.insert(expected.stream_hashes[&operator.0]);
-                        removed_sources.insert(operator.0);
-                        removed_operators.insert(operator);
+                        retained
+                            .insert(&mut removed_streams, expected.stream_hashes[&operator.0])?;
+                        retained.insert(&mut removed_sources, operator.0)?;
+                        retained.insert(&mut removed_operators, operator)?;
                     } else {
-                        retained_operators.insert(operator);
+                        retained.insert(&mut retained_operators, operator)?;
                     }
                 }
                 if removed {
@@ -251,20 +279,30 @@ pub(super) fn verify(
             }
             if let (Some((source, _)), Some((result, _))) = (left.source, right.source) {
                 if expected.stream_hashes[&source] == actual.stream_hashes[&result] {
-                    matching_sources.insert((source, result));
+                    retained.insert(&mut matching_sources, (source, result))?;
                 }
             }
             if let (PaintKind::Image(before), PaintKind::Image(after)) = (&left.kind, &right.kind) {
                 let source = before.data.digest;
                 let scrubbed = after.data.digest;
-                if *image_replacements.entry(source).or_insert(scrubbed) != scrubbed {
-                    return Err(RasterMismatch);
+                match image_replacements.entry(source) {
+                    std::collections::btree_map::Entry::Vacant(entry) => {
+                        retained.tree_entry::<([u8; 32], [u8; 32])>()?;
+                        entry.insert(scrubbed);
+                    }
+                    std::collections::btree_map::Entry::Occupied(entry)
+                        if *entry.get() != scrubbed =>
+                    {
+                        return Err(RasterMismatch);
+                    }
+                    _ => {}
                 }
                 if source != scrubbed {
-                    sensitive_images.insert(source);
+                    retained.insert(&mut sensitive_images, source)?;
                 }
             }
         }
+        let _samples = workspace.reserve(grid.width * grid.height * 2 * size_of::<Pixel>())?;
         for sample in SAMPLE_OFFSETS {
             let expected_pixels = grid.draw(&source_paint, Some(sample), &mut work)?;
             let candidate_pixels = grid.draw(&candidate_paint, Some(sample), &mut work)?;
@@ -273,10 +311,12 @@ pub(super) fn verify(
             }
         }
     }
-    let independently_retained: BTreeSet<_> = matching_sources
-        .into_iter()
-        .filter_map(|(source, result)| (!removed_sources.contains(&source)).then_some(result))
-        .collect();
+    let mut independently_retained = BTreeSet::new();
+    for (source, result) in matching_sources {
+        if !removed_sources.contains(&source) {
+            retained.insert(&mut independently_retained, result)?;
+        }
+    }
     if !removed_notes.is_disjoint(&retained_notes)
         || !removed_operators.is_disjoint(&retained_operators)
         || actual.stream_hashes.iter().any(|(id, hash)| {
@@ -292,22 +332,54 @@ pub(super) fn verify(
     Ok(covered)
 }
 
-struct Interpreter<'a> {
+struct DrawBudget<'w> {
+    workspace: &'w Workspace,
+    reservation: Reservation<'w>,
+    remaining: usize,
+}
+
+impl<'w> DrawBudget<'w> {
+    fn new(workspace: &'w Workspace) -> Self {
+        Self {
+            workspace,
+            reservation: workspace.scope(),
+            remaining: MAX_DRAW_BYTES,
+        }
+    }
+
+    fn build<T>(&mut self, build: impl FnOnce(&mut usize) -> VerifyResult<T>) -> VerifyResult<T> {
+        // @invariant: The paint meter counts elements. Allow for vector capacity growth.
+        const CAPACITY_FACTOR: usize = 4;
+        let limit = self
+            .remaining
+            .min(self.workspace.remaining() / CAPACITY_FACTOR);
+        let mut left = limit;
+        let value = build(&mut left)?;
+        let used = limit - left;
+        self.reservation.grow(used * CAPACITY_FACTOR)?;
+        self.remaining -= used;
+        Ok(value)
+    }
+}
+
+struct Interpreter<'a, 'w> {
+    workspace: &'w Workspace,
+    retained: Reservation<'w>,
     fonts: Fonts<'a>,
     parse_work: usize,
-    draw_bytes: usize,
     assets: BTreeSet<PdfObjectRef>,
     stream_hashes: BTreeMap<PdfObjectRef, [u8; 32]>,
     image_hashes: BTreeSet<[u8; 32]>,
     image_cache: BTreeMap<PdfObjectRef, ImageData<'a>>,
 }
 
-impl<'a> Interpreter<'a> {
-    fn new() -> Self {
+impl<'a, 'w> Interpreter<'a, 'w> {
+    fn new(workspace: &'w Workspace) -> Self {
         Self {
+            workspace,
+            retained: workspace.scope(),
             fonts: Fonts::new(),
             parse_work: MAX_PARSE_WORK,
-            draw_bytes: MAX_DRAW_BYTES,
             assets: BTreeSet::new(),
             stream_hashes: BTreeMap::new(),
             image_hashes: BTreeSet::new(),
@@ -315,8 +387,13 @@ impl<'a> Interpreter<'a> {
         }
     }
 
-    fn page(&mut self, document: &'a Document, page: &Page<'a>) -> VerifyResult<Vec<Paint<'a>>> {
-        self.draw_bytes = MAX_DRAW_BYTES;
+    fn page(
+        &mut self,
+        document: &'a Document,
+        page: &Page<'a>,
+        draw: &mut DrawBudget<'_>,
+    ) -> VerifyResult<Vec<Paint<'a>>> {
+        let mut stack_bytes = self.workspace.scope();
         let mut paints = Vec::new();
         let mut graphics = Graphics::default();
         let crop = page.geometry.crop_box;
@@ -336,6 +413,8 @@ impl<'a> Interpreter<'a> {
                 crop,
                 0,
                 &mut paints,
+                draw,
+                &mut stack_bytes,
             )?;
             previous = data;
         }
@@ -344,7 +423,8 @@ impl<'a> Interpreter<'a> {
         }
         for &(id, bounds, contents) in &page.annotations {
             spend(&mut self.parse_work, contents.len() + 1)?;
-            self.add(
+            Self::add(
+                draw,
                 &mut paints,
                 crop,
                 Paint {
@@ -357,11 +437,16 @@ impl<'a> Interpreter<'a> {
         Ok(paints)
     }
 
-    fn add(&mut self, out: &mut Vec<Paint<'a>>, clip: Rect, paint: Paint<'a>) -> VerifyResult<()> {
+    fn add(
+        draw: &mut DrawBudget<'_>,
+        out: &mut Vec<Paint<'a>>,
+        clip: Rect,
+        paint: Paint<'a>,
+    ) -> VerifyResult<()> {
         if !contains(clip, paint.bounds) {
             return Err(UnsupportedProfile);
         }
-        spend(&mut self.draw_bytes, std::mem::size_of::<Paint<'_>>())?;
+        draw.build(|memory| spend(memory, size_of::<Paint<'_>>()))?;
         out.push(paint);
         Ok(())
     }
@@ -377,20 +462,25 @@ impl<'a> Interpreter<'a> {
         clip: Rect,
         depth: usize,
         paints: &mut Vec<Paint<'a>>,
+        draw: &mut DrawBudget<'_>,
+        stack_bytes: &mut Reservation<'_>,
     ) -> VerifyResult<Graphics> {
         if depth > MAX_FORM_DEPTH {
             return Err(UnsupportedProfile);
         }
         let data = &document.stream(id)?.data;
         spend(&mut self.parse_work, data.len() + 1)?;
-        self.stream_hashes
-            .entry(id)
-            .or_insert_with(|| *blake3::hash(data).as_bytes());
+        if let std::collections::btree_map::Entry::Vacant(entry) = self.stream_hashes.entry(id) {
+            self.retained.tree_entry::<(PdfObjectRef, [u8; 32])>()?;
+            entry.insert(*blake3::hash(data).as_bytes());
+        }
+        let workspace = self.workspace;
+        let _path_bytes = workspace.reserve(3 * MAX_PATH_POINTS / 2 * size_of::<Point>())?;
         let mut path = Path::default();
         let mut text = None;
         let mut operation = 0;
         let mut available = self.parse_work;
-        operations(data, document.side, &mut available, |op, args, cost| {
+        let visit = |op: &str, args: &[Operand<'_>], cost| {
             spend(&mut self.parse_work, cost)?;
             operation += 1;
             if path.points.is_empty() {
@@ -414,35 +504,38 @@ impl<'a> Interpreter<'a> {
                     text = None;
                 } else if let Some(show) = text_operator(state, op, args)? {
                     let font_id = resource(document, resources, "Font", show.font)?;
-                    self.assets.insert(font_id);
-                    let font = self.fonts.get(document, font_id)?;
+                    self.retained.insert(&mut self.assets, font_id)?;
+                    let font = self
+                        .fonts
+                        .get(document, font_id, workspace, &mut self.retained)?;
                     spend(&mut self.parse_work, show.codes.len() * 8 + 1)?;
+                    let _glyph_bytes = workspace.reserve(show.codes.len() * size_of::<Glyph>())?;
                     let layout = font.layout(show.codes, show.origin, show.size)?;
                     let bounds = graphics.matrix.bounds(layout.bounds)?;
-                    let mut glyph_ids = Vec::new();
-                    let mut glyphs = Vec::new();
-                    for glyph in layout.glyphs {
-                        spend(
-                            &mut self.draw_bytes,
-                            std::mem::size_of::<ttf_parser::GlyphId>(),
-                        )?;
-                        glyph_ids.push(glyph.id);
-                        if !glyph.has_ink {
-                            continue;
+                    let (glyph_ids, glyphs) = draw.build(|memory| {
+                        let mut glyph_ids = Vec::new();
+                        let mut glyphs = Vec::new();
+                        for glyph in layout.glyphs {
+                            spend(memory, size_of::<ttf_parser::GlyphId>())?;
+                            glyph_ids.push(glyph.id);
+                            if !glyph.has_ink {
+                                continue;
+                            }
+                            let mut outline = Outline::new(
+                                [glyph.offset, show.origin[1]],
+                                show.size,
+                                font.face.units_per_em(),
+                                graphics.matrix,
+                                &mut self.parse_work,
+                                memory,
+                            );
+                            font.face
+                                .outline_glyph(glyph.id, &mut outline)
+                                .ok_or(UnsupportedProfile)?;
+                            glyphs.push(outline.finish()?);
                         }
-                        let mut outline = Outline::new(
-                            [glyph.offset, show.origin[1]],
-                            show.size,
-                            font.face.units_per_em(),
-                            graphics.matrix,
-                            &mut self.parse_work,
-                            &mut self.draw_bytes,
-                        );
-                        font.face
-                            .outline_glyph(glyph.id, &mut outline)
-                            .ok_or(UnsupportedProfile)?;
-                        glyphs.push(outline.finish()?);
-                    }
+                        Ok((glyph_ids, glyphs))
+                    })?;
                     let paint = TextPaint {
                         font: font.digest,
                         glyph_ids,
@@ -452,7 +545,8 @@ impl<'a> Interpreter<'a> {
                         origin: show.origin,
                         color: graphics.fill,
                     };
-                    self.add(
+                    Self::add(
+                        draw,
                         paints,
                         clip,
                         Paint {
@@ -487,13 +581,13 @@ impl<'a> Interpreter<'a> {
                 }
                 "n" if args.is_empty() && path.points.is_empty() => {}
                 "f" | "F" | "f*" | "S" | "s" | "B" | "B*" | "b" | "b*" if args.is_empty() => {
-                    let (vector, bounds) = Vector::new(
-                        std::mem::take(&mut path),
-                        op,
-                        graphics,
-                        &mut self.draw_bytes,
-                    )?;
-                    self.add(
+                    let _stroke_bytes =
+                        workspace.reserve((path.points.len() * 2 + 6) * size_of::<Point>())?;
+                    let (vector, bounds) = draw.build(|memory| {
+                        Vector::new(std::mem::take(&mut path), op, graphics, memory)
+                    })?;
+                    Self::add(
+                        draw,
                         paints,
                         clip,
                         Paint {
@@ -504,7 +598,7 @@ impl<'a> Interpreter<'a> {
                     )?;
                 }
                 _ if !path.points.is_empty() => return Err(UnsupportedProfile),
-                "q" if args.is_empty() && saved.len() < 32 => saved.push(graphics),
+                "q" if args.is_empty() && saved.len() < 32 => stack_bytes.push(saved, graphics)?,
                 "Q" if args.is_empty() => graphics = saved.pop().ok_or(UnsupportedProfile)?,
                 "cm" => graphics.matrix = graphics.matrix.compose(Matrix::new(numbers(args)?)?)?,
                 "w" => {
@@ -517,19 +611,21 @@ impl<'a> Interpreter<'a> {
                 "BT" if args.is_empty() => text = Some(TextState::default()),
                 "Do" => {
                     let object = resource(document, resources, "XObject", operand_name(args)?)?;
-                    self.assets.insert(object);
+                    self.retained.insert(&mut self.assets, object)?;
                     let stream = document.stream(object)?;
                     match name(&stream.dict, "Subtype") {
                         Some("Image") => {
                             let image_data = match self.image_cache.entry(object) {
                                 std::collections::btree_map::Entry::Occupied(entry) => *entry.get(),
                                 std::collections::btree_map::Entry::Vacant(entry) => {
+                                    self.retained
+                                        .tree_entry::<(PdfObjectRef, ImageData<'_>)>()?;
                                     let image = ImageData::read(
                                         &stream.dict,
                                         &stream.data,
                                         &mut self.parse_work,
                                     )?;
-                                    self.image_hashes.insert(image.digest);
+                                    self.retained.insert(&mut self.image_hashes, image.digest)?;
                                     *entry.insert(image)
                                 }
                             };
@@ -539,7 +635,8 @@ impl<'a> Interpreter<'a> {
                                 matrix: graphics.matrix,
                                 masks: Vec::new(),
                             };
-                            self.add(
+                            Self::add(
+                                draw,
                                 paints,
                                 clip,
                                 Paint {
@@ -552,6 +649,7 @@ impl<'a> Interpreter<'a> {
                         Some("Form") => {
                             let (matrix, nested_clip, resources) =
                                 form(document, &stream.dict, resources, graphics.matrix, clip)?;
+                            let mut form_stack_bytes = workspace.scope();
                             let mut form_stack = Vec::new();
                             self.stream(
                                 document,
@@ -562,6 +660,8 @@ impl<'a> Interpreter<'a> {
                                 nested_clip,
                                 depth + 1,
                                 paints,
+                                draw,
+                                &mut form_stack_bytes,
                             )?;
                             if !form_stack.is_empty() {
                                 return Err(UnsupportedProfile);
@@ -573,7 +673,8 @@ impl<'a> Interpreter<'a> {
                 _ => return Err(UnsupportedProfile),
             }
             Ok(())
-        })?;
+        };
+        operations(data, document.side, &mut available, workspace, visit)?;
         if !path.points.is_empty() || text.is_some() {
             return Err(UnsupportedProfile);
         }
@@ -595,7 +696,12 @@ enum PaintKind<'a> {
 }
 
 impl Paint<'_> {
-    fn intersects_mark(&self, mark: Rect, work: &mut usize) -> VerifyResult<bool> {
+    fn intersects_mark(
+        &self,
+        mark: Rect,
+        work: &mut usize,
+        workspace: &Workspace,
+    ) -> VerifyResult<bool> {
         if !intersects(mark, self.bounds) {
             return Ok(false);
         }
@@ -604,6 +710,8 @@ impl Paint<'_> {
         };
         let mut hit = false;
         if let (Some((_, evenodd)), Some(fill)) = (vector.fill, &vector.fill_path) {
+            let _scratch = workspace
+                .reserve(fill.edges * (size_of::<bool>() + 6 * size_of::<(Point, i32)>()))?;
             hit |= fill.fill_intersects_rect(mark, evenodd, work)?;
         }
         // @invariant: Ambiguous contact in any stroke component overrides a definite hit.

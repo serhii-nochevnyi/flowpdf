@@ -588,7 +588,7 @@ impl PdfReader {
         let (mut cursor, source_offset) = self.object_cursor(reference, depth, retention)?;
         let mut value = cursor.parse_value(0)?;
         cursor.skip_space();
-        if cursor.consume_keyword(b"stream") {
+        if cursor.consume_keyword(b"stream")? {
             let dictionary = match value {
                 PdfValue::Dictionary(dict) => dict,
                 _ => return Err(PdfReadError::Syntax),
@@ -617,16 +617,19 @@ impl PdfReader {
             let raw = self.bytes[cursor.position()..end].to_vec();
             cursor.set_position(end);
             cursor.skip_space();
-            if !cursor.consume_keyword(b"endstream") {
+            if !cursor.consume_keyword(b"endstream")? {
                 return Err(PdfReadError::Syntax);
             }
-            if let Some(remaining) = cursor.remaining {
-                cursor.limits.max_decoded_stream_bytes =
-                    cursor.limits.max_decoded_stream_bytes.min(remaining);
-            }
             let encoded = raw.clone();
-            let data = decode_stream(&dictionary, raw, &cursor.limits, cursor.exact)?;
-            cursor.charge(data.len())?;
+            let data = decode_stream(&dictionary, raw, &cursor.limits, cursor.remaining)?;
+            if matches!(
+                dictionary.get("Filter").and_then(single_filter),
+                Some("FlateDecode" | "Fl" | "DCTDecode" | "DCT")
+            ) && let Some(remaining) = &mut cursor.remaining
+            {
+                *remaining += length;
+                cursor.charge(data.capacity())?;
+            }
             value = PdfValue::Stream(PdfStream {
                 dict: dictionary,
                 data,
@@ -634,7 +637,7 @@ impl PdfReader {
                 source_offset,
             });
         }
-        if !cursor.consume_keyword(b"endobj") {
+        if !cursor.consume_keyword(b"endobj")? {
             return Err(PdfReadError::Syntax);
         }
         if retention.is_some() && cursor.position() > self.xref_offset {
@@ -669,7 +672,7 @@ impl PdfReader {
                 .ok_or(PdfReadError::TokenLimit)?;
             if cursor.parse_u64_token()? != Some(u64::from(reference.object_number))
                 || cursor.parse_u64_token()? != Some(u64::from(reference.generation))
-                || !cursor.consume_keyword(b"obj")
+                || !cursor.consume_keyword(b"obj")?
             {
                 return Err(PdfReadError::XrefInvalid);
             }
@@ -677,7 +680,7 @@ impl PdfReader {
                 .parse_value(0)?
                 .as_integer()
                 .ok_or(PdfReadError::Syntax)?;
-            if !cursor.consume_keyword(b"endobj") || cursor.position() > self.xref_offset {
+            if !cursor.consume_keyword(b"endobj")? || cursor.position() > self.xref_offset {
                 return Err(PdfReadError::Syntax);
             }
             owner.tokens = owner
@@ -784,12 +787,12 @@ impl PdfReader {
                         }
                         match cursor.parse_value(0)? {
                             array @ PdfValue::Array(_) => {
-                                if !cursor.consume_keyword(b"endobj") {
+                                if !cursor.consume_keyword(b"endobj")? {
                                     return Err(PdfReadError::Syntax);
                                 }
                                 refs_from_array(&array)?
                             }
-                            PdfValue::Dictionary(_) if cursor.consume_keyword(b"stream") => {
+                            PdfValue::Dictionary(_) if cursor.consume_keyword(b"stream")? => {
                                 vec![*reference]
                             }
                             _ => return Err(PdfReadError::ReferenceInvalid),
@@ -1007,7 +1010,8 @@ fn parse_xref(
         {
             return Err(PdfReadError::XrefInvalid);
         }
-        if !cursor.consume_keyword(b"startxref") || cursor.parse_u64_token()? != Some(offset as u64)
+        if !cursor.consume_keyword(b"startxref")?
+            || cursor.parse_u64_token()? != Some(offset as u64)
         {
             return Err(PdfReadError::StartxrefInvalid);
         }
@@ -1112,7 +1116,7 @@ fn decode_stream(
     dictionary: &BTreeMap<String, PdfValue>,
     raw: Vec<u8>,
     limits: &PdfReaderLimits,
-    exact: bool,
+    workspace: Option<usize>,
 ) -> Result<Vec<u8>, PdfReadError> {
     let Some(filter) = dictionary.get("Filter") else {
         if raw.len() > limits.max_decoded_stream_bytes {
@@ -1121,8 +1125,10 @@ fn decode_stream(
         return Ok(raw);
     };
     let filter = single_filter(filter).ok_or(PdfReadError::FilterUnsupported)?;
-    if exact && matches!(filter, "DCTDecode" | "DCT") {
-        return decode_retained_jpeg(dictionary, &raw, limits);
+    if let Some(available) = workspace
+        && matches!(filter, "DCTDecode" | "DCT")
+    {
+        return decode_retained_jpeg(dictionary, &raw, limits, available);
     }
     match filter {
         "Identity" => {
@@ -1138,17 +1144,27 @@ fn decode_stream(
             Ok(raw)
         }
         "FlateDecode" | "Fl" => {
-            let decoded = miniz_oxide::inflate::decompress_to_vec_zlib_with_limit(
-                &raw,
-                limits.max_decoded_stream_bytes,
-            )
-            .map_err(|error| {
-                if error.status == miniz_oxide::inflate::TINFLStatus::HasMoreOutput {
-                    PdfReadError::DecodedStreamLimit
-                } else {
-                    PdfReadError::Syntax
+            let mut output_limit = limits.max_decoded_stream_bytes;
+            if let Some(available) = workspace {
+                let scratch = std::mem::size_of::<miniz_oxide::inflate::core::DecompressorOxide>();
+                let buffers = available
+                    .checked_sub(scratch + 8)
+                    .ok_or(PdfReadError::DecodedStreamLimit)?;
+                // @security: Vec growth may briefly hold both the old and new output buffers.
+                output_limit = output_limit.min(buffers / 3);
+                if output_limit == 0 {
+                    return Err(PdfReadError::DecodedStreamLimit);
                 }
-            })?;
+            }
+            let decoded =
+                miniz_oxide::inflate::decompress_to_vec_zlib_with_limit(&raw, output_limit)
+                    .map_err(|error| {
+                        if error.status == miniz_oxide::inflate::TINFLStatus::HasMoreOutput {
+                            PdfReadError::DecodedStreamLimit
+                        } else {
+                            PdfReadError::Syntax
+                        }
+                    })?;
             if decoded.len() > limits.max_decoded_stream_bytes {
                 return Err(PdfReadError::DecodedStreamLimit);
             }
@@ -1163,6 +1179,11 @@ fn decode_stream(
 }
 
 pub(super) fn jpeg_frame(bytes: &[u8]) -> Option<(u32, u32, ColorType)> {
+    let (width, height, color, _) = jpeg_frame_details(bytes)?;
+    Some((width, height, color))
+}
+
+fn jpeg_frame_details(bytes: &[u8]) -> Option<(u32, u32, ColorType, &[u8])> {
     let mut segments = bytes
         .strip_prefix(&[0xff, 0xd8])?
         .strip_suffix(&[0xff, 0xd9])?;
@@ -1193,6 +1214,7 @@ pub(super) fn jpeg_frame(bytes: &[u8]) -> Option<(u32, u32, ColorType)> {
                 u16::from_be_bytes([w1, w2]).into(),
                 u16::from_be_bytes([h1, h2]).into(),
                 color,
+                &segment[6..],
             ));
         }
         segments = rest.get(length..)?;
@@ -1203,6 +1225,7 @@ fn decode_retained_jpeg(
     dictionary: &BTreeMap<String, PdfValue>,
     raw: &[u8],
     limits: &PdfReaderLimits,
+    available: usize,
 ) -> Result<Vec<u8>, PdfReadError> {
     use super::native::{NATIVE_MAX_IMAGE_DIMENSION, NATIVE_MAX_IMAGE_PIXELS};
 
@@ -1231,7 +1254,7 @@ fn decode_retained_jpeg(
     {
         return Err(PdfReadError::FilterUnsupported);
     }
-    let (width, height, color) = jpeg_frame(raw).ok_or(PdfReadError::Syntax)?;
+    let (width, height, color, components) = jpeg_frame_details(raw).ok_or(PdfReadError::Syntax)?;
     let expected_color = match name("ColorSpace") {
         Some("DeviceGray") => ColorType::L8,
         Some("DeviceRGB") => ColorType::Rgb8,
@@ -1254,6 +1277,17 @@ fn decode_retained_jpeg(
     if samples > limits.max_decoded_stream_bytes {
         return Err(PdfReadError::DecodedStreamLimit);
     }
+    let peak = retained_jpeg_peak(
+        raw.len(),
+        width as usize,
+        height as usize,
+        components,
+        samples,
+    )
+    .ok_or(PdfReadError::DecodedStreamLimit)?;
+    if peak > available {
+        return Err(PdfReadError::DecodedStreamLimit);
+    }
     let mut decoder = JpegDecoder::new(IoCursor::new(raw)).map_err(|_| PdfReadError::Syntax)?;
     if decoder.dimensions() != (width, height) || decoder.color_type() != color {
         return Err(PdfReadError::Syntax);
@@ -1270,6 +1304,41 @@ fn decode_retained_jpeg(
         .read_image(&mut data)
         .map_err(|_| PdfReadError::Syntax)?;
     Ok(data)
+}
+
+// @security: Bound the pinned JPEG decoder's progressive and multi-scan allocations.
+fn retained_jpeg_peak(
+    encoded: usize,
+    width: usize,
+    height: usize,
+    components: &[u8],
+    samples: usize,
+) -> Option<usize> {
+    let mut horizontal = 1;
+    let mut vertical = 1;
+    for component in components.chunks_exact(3) {
+        horizontal = horizontal.max(usize::from(component[1] >> 4));
+        vertical = vertical.max(usize::from(component[1] & 15));
+    }
+    let mcu_width = horizontal * 8;
+    let mcu_height = vertical * 8;
+    let padded_width = width.div_ceil(mcu_width).checked_mul(mcu_width)?;
+    let padded_height = height.div_ceil(mcu_height).checked_mul(mcu_height)?;
+    let count = components.len() / 3;
+    let coefficients = padded_width
+        .checked_mul(padded_height)?
+        .checked_mul(count)?
+        .checked_mul(std::mem::size_of::<i16>())?;
+    // @security: Include coefficient rows, upsampling destinations, and a shared scratch row.
+    let rows = padded_width
+        .checked_mul(mcu_height)?
+        .checked_mul(8 * count + 1)?;
+    // @security: Allow for the wrapper input Vec, copied APP metadata, and decoder tables.
+    let input_and_headers = encoded.checked_mul(8)?.checked_add(64 * 1024)?;
+    samples
+        .checked_add(coefficients)?
+        .checked_add(rows)?
+        .checked_add(input_and_headers)
 }
 
 fn decode_ascii_hex(mut bytes: Vec<u8>, limit: usize) -> Result<Vec<u8>, PdfReadError> {
@@ -1549,15 +1618,15 @@ impl<'a> Cursor<'a> {
         Ok(Some(value))
     }
 
-    fn consume_keyword(&mut self, keyword: &[u8]) -> bool {
+    fn consume_keyword(&mut self, keyword: &[u8]) -> Result<bool, PdfReadError> {
         let checkpoint = self.position;
-        if let Ok(Some(token)) = self.token()
+        if let Some(token) = self.token()?
             && token == keyword
         {
-            return true;
+            return Ok(true);
         }
         self.position = checkpoint;
-        false
+        Ok(false)
     }
 
     fn consume_stream_eol(&mut self) {
@@ -1626,9 +1695,9 @@ impl<'a> Cursor<'a> {
                         if let PdfValue::Integer(object_number) = first {
                             let checkpoint = self.position;
                             self.skip_space();
-                            if let Ok(Some(second)) = self.token()
+                            if let Some(second) = self.token()?
                                 && let Ok(generation) = parse_u16(&second)
-                                && self.consume_keyword(b"R")
+                                && self.consume_keyword(b"R")?
                                 && object_number >= 0
                             {
                                 return Ok(PdfValue::Reference(PdfObjectRef {
@@ -1887,21 +1956,52 @@ mod retained_reader_tests {
             ..Default::default()
         };
         assert_eq!(
-            decode_stream(&dictionary, bytes.clone(), &limits, true),
+            decode_stream(&dictionary, bytes.clone(), &limits, Some(usize::MAX)),
             Err(PdfReadError::DecodedStreamLimit)
         );
         limits.max_decoded_stream_bytes = 4;
+        let (_, _, _, components) = jpeg_frame_details(&bytes).unwrap();
+        let peak = retained_jpeg_peak(bytes.len(), 2, 2, components, 4).unwrap();
         assert_eq!(
-            decode_stream(&dictionary, bytes.clone(), &limits, true)
+            decode_stream(&dictionary, bytes.clone(), &limits, Some(peak - 1)),
+            Err(PdfReadError::DecodedStreamLimit)
+        );
+        assert_eq!(
+            decode_stream(&dictionary, bytes.clone(), &limits, Some(peak))
                 .unwrap()
                 .len(),
             4
         );
         dictionary.insert("Width".into(), PdfValue::Integer(1));
         assert_eq!(
-            decode_stream(&dictionary, bytes, &limits, true),
+            decode_stream(&dictionary, bytes, &limits, Some(usize::MAX)),
             Err(PdfReadError::Syntax)
         );
+    }
+
+    #[test]
+    fn retained_lookahead_preserves_byte_and_token_exhaustion() {
+        let mut cursor = Cursor::new(b"endobj", 0, PdfReaderLimits::default());
+        cursor.exact = true;
+        cursor.remaining = Some(5);
+        assert_eq!(
+            cursor.consume_keyword(b"stream"),
+            Err(PdfReadError::InputSizeLimit)
+        );
+
+        for work in [2, 3] {
+            let mut cursor = Cursor::new(b"1 0 R", 0, PdfReaderLimits::default());
+            cursor.exact = true;
+            cursor.remaining = Some(1024);
+            cursor.limits.max_content_tokens = work;
+            assert_eq!(cursor.parse_value(0).unwrap_err(), PdfReadError::TokenLimit);
+        }
+
+        let mut cursor = Cursor::new(b"endobj", 0, PdfReaderLimits::default());
+        cursor.exact = true;
+        cursor.remaining = Some(12);
+        assert_eq!(cursor.consume_keyword(b"stream"), Ok(false));
+        assert_eq!(cursor.consume_keyword(b"endobj"), Ok(true));
     }
 
     #[test]

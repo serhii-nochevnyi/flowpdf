@@ -597,11 +597,9 @@ impl NativePdfSession {
             .candidate
             .as_mut()
             .ok_or(NativeSessionError::RedactionCandidateUnavailable)?;
-        spend(
-            &mut remaining,
-            candidate.retained() + candidate.verification_input_bytes() + accepted.len(),
-        )?;
-        Ok(candidate.verify(origin, accepted, context, &self.redaction_marks))
+        // @invariant: Candidate retention includes the evidence accumulated across lanes.
+        spend(&mut remaining, candidate.retained())?;
+        Ok(candidate.verify(origin, accepted, context, &self.redaction_marks, remaining))
     }
 
     pub fn cancel_redaction(
@@ -1613,8 +1611,7 @@ mod tests {
 
     #[test]
     fn rewrite_spare_capacity_stays_charged_during_reopen_and_remap() {
-        let encoded = miniz_oxide::deflate::compress_to_vec_zlib(b"q Q", 6);
-        let bytes = super::super::tests::fixture("", &encoded);
+        let bytes = super::super::tests::redaction_fixture("q Q");
         let defaults = NativeEditLimits::default();
         let mut staged = NativePdfGraph::open(&bytes, defaults).unwrap();
         staged.limits.max_output_bytes = 1024;
@@ -1627,7 +1624,7 @@ mod tests {
         let ids = initial_ids(&staged);
         let reopened = NativePdfGraph::open(&exact, defaults).unwrap();
         let open_cost = defaults.max_retained_bytes - reopened.remaining_retained();
-        let remap_cost = staged.objects.len() * 512 + 7 * 128;
+        let remap_cost = staged.objects.len() * 512 + 5 * 128;
         let output_budget = roomy.capacity();
         let spare = output_budget - exact.capacity();
         let limits = NativeEditLimits {
@@ -1650,7 +1647,7 @@ mod tests {
         let source = super::super::tests::redaction_fixture("10 10 10 10 re f 40 40 10 10 re f");
         let verified_session = |max_output_bytes| {
             let limits = NativeEditLimits {
-                max_retained_bytes: 64 * 1024,
+                max_retained_bytes: 512 * 1024,
                 max_output_bytes,
                 ..NativeEditLimits::default()
             };

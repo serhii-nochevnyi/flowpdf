@@ -125,6 +125,41 @@ fn jpeg_pdf(filter: &str, data: &[u8]) -> Vec<u8> {
 }
 
 #[test]
+fn ordinary_rgb_scan_readback() {
+    let samples = [208, 140, 80].repeat(1_600 * 1_200);
+    let source = pdf(
+        vec![
+            b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+            b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] /Contents 4 0 R /Resources << /XObject << /Photo 5 0 R >> >> >>".to_vec(),
+            stream("", b"q 80 0 0 60 10 20 cm /Photo Do Q"),
+            flate(
+                "/Type /XObject /Subtype /Image /Width 1600 /Height 1200 /ColorSpace /DeviceRGB /BitsPerComponent 8",
+                &samples,
+            ),
+        ],
+        "",
+    );
+    let mut session = open(&source);
+    let binding = session.snapshot().binding;
+    add(&mut session, 0, [14_000, 32_000, 15_000, 33_000]);
+    let NativeRedactionStage::Pending(candidate) = session.stage_redaction(binding, 1).unwrap()
+    else {
+        panic!("expected pending redaction");
+    };
+    let evidence = session.verify_redaction(binding, 1).unwrap();
+    assert!(evidence.checks_passed(), "{evidence:?}");
+    assert_accepted(&session, &source, 0, &source);
+
+    let receipt = session.publish_redaction(binding, 1).unwrap();
+    assert_eq!(receipt.output_hash, candidate.candidate_hash);
+    assert_eq!(
+        session.redacted_output_bytes(),
+        Some(session.output_bytes())
+    );
+}
+
+#[test]
 fn jpeg_filter_forms_publish_the_verified_scrubbed_samples() {
     let jpeg = grayscale_jpeg();
     let samples = image::load_from_memory_with_format(&jpeg, image::ImageFormat::Jpeg)
@@ -513,7 +548,7 @@ fn raster_budget_refuses_native_marks_and_staging_without_mutation() {
 
 #[test]
 fn an_inconclusive_raster_check_preserves_the_previous_accepted_revision() {
-    // @contract: The retained polygon exceeds the raster paint budget before sampling.
+    // @contract: Both full-page rasters exceed the session workspace allowance.
     let mut paint = String::from("10 10 10 10 re f 40 616 m");
     for step in -23..=24 {
         write!(paint, " {} {} l", 1_000 + 40 * step, 40 + step * step).unwrap();
@@ -564,6 +599,61 @@ fn an_inconclusive_raster_check_preserves_the_previous_accepted_revision() {
     assert_eq!(session.snapshot().scene.scene_hash, prior.scene_hash);
     assert_eq!(session.redaction_marks(), &[mark]);
     assert!(session.accepted_redaction_evidence().is_none());
+}
+
+#[test]
+fn readback_budgets_both_rasters_and_preserves_partial_evidence() {
+    let source = raster_fixture(100, "10 10 10 10 re f 40 40 10 10 re f");
+    // @contract: One 200 × 200 RGB buffer fits this cap. The pair needs 240,000 bytes.
+    let mut session = NativePdfSession::open_scoped(
+        &source,
+        NativeEditLimits {
+            max_retained_bytes: 192 * 1024,
+            ..NativeEditLimits::default()
+        },
+        [5; 16],
+    )
+    .unwrap();
+    let binding = session.snapshot().binding;
+    let mark = mark(&session, 0, [12_000, 12_000, 13_000, 13_000]);
+    session.add_redaction_mark(binding, mark).unwrap();
+
+    for request in 1..=2 {
+        session.stage_redaction(binding, request).unwrap();
+        let evidence = session.verify_redaction(binding, request).unwrap();
+        assert_eq!(evidence.identity_failure(), None);
+        assert_eq!(
+            evidence.structure().status(),
+            NativeVerificationStatus::Passed
+        );
+        assert_eq!(evidence.text().status(), NativeVerificationStatus::Passed);
+        assert_eq!(
+            evidence.raster().status(),
+            NativeVerificationStatus::Inconclusive
+        );
+        assert_eq!(
+            evidence.raster().failure(),
+            Some(NativeVerificationFailure::Budget)
+        );
+        assert!(evidence.raster().covered_pages().is_empty());
+        assert!(!evidence.checks_passed());
+        let status = session.redaction_candidate_status().unwrap();
+        assert_eq!(status.status(), NativeVerificationStatus::Inconclusive);
+        let wire = serde_json::to_value(status).unwrap();
+        assert_eq!(
+            wire["evidence"]["raster"],
+            serde_json::json!({"status": "inconclusive", "failure": "budget", "coveredPages": []})
+        );
+        assert_eq!(
+            session.publish_redaction(binding, request),
+            Err(NativeSessionError::RedactionUnverified)
+        );
+        assert_accepted(&session, &source, 0, &source);
+        assert_eq!(session.redaction_marks(), &[mark]);
+        assert_eq!(session.redaction_marks_binding(), Some(binding));
+        assert!(session.accepted_redaction_evidence().is_none());
+        session.cancel_redaction(binding, request).unwrap();
+    }
 }
 
 #[test]
