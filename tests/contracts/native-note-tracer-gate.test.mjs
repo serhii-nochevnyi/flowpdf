@@ -15,6 +15,7 @@ const browserSuites = ['edit', 'text', 'objects', 'pages', 'forms', 'redaction']
 const baselineRevision = '5683541fe572a4d88d36df15db37ff6cde85f828'
 const verifiedRasterRevision = 'b3340c7aa5919715320d65548463fdff68cb2e43'
 const olderPageRevision = '793ff4c687a71210205258e58003400c7738affa'
+const recoveryNoteRevision = '6f4b7ea593f2efd3ac3237cf8c3f1660ad0d4263'
 const pagesSuite = 'web/tests/pdf-native-pages.browser.test.ts'
 const redactionSuite = 'web/tests/pdf-native-redaction.browser.test.ts'
 
@@ -126,6 +127,7 @@ for (const [profile, revision, expanded] of [
   ['previous reviewed preview and redaction', '956ae26938bb952bba2339a18db3d8b46db7b88e', true],
   ['previous reviewed verified-raster redaction (b3340c7)', verifiedRasterRevision, true],
   ['reviewed baseline (5683541)', baselineRevision, true],
+  ['reviewed recovery note', recoveryNoteRevision, true],
 ]) {
   test(`accepts the exact ${profile} harness`, (t) => {
     const paths = ['.github/workflows/pdf-native-note-tracer.yml', 'package.json',
@@ -153,10 +155,20 @@ for (const [profile, revision] of [['5683541', baselineRevision], ['b3340c7', ve
   })
 }
 
+for (const [suite, revision] of [[pagesSuite, olderPageRevision], [redactionSuite, verifiedRasterRevision]]) {
+  test(`refuses accessible page text with a different reviewed ${suite} suite`, (t) => {
+    const historicalFiles = harnessFilesFrom(t, revision, [suite])
+    if (!historicalFiles) return
+    const { command } = fixture({ historicalFiles })
+    assert.throws(() => requirePassedCi('HEAD', command), { message: 'NATIVE_NOTE_TRACER_HARNESS_NOT_APPROVED' })
+  })
+}
+
 test('refuses the recovery note suite with a different reviewed redaction suite', (t) => {
-  const historicalFiles = harnessFilesFrom(t, verifiedRasterRevision, [redactionSuite])
-  if (!historicalFiles) return
-  const { command } = fixture({ historicalFiles })
+  const recovery = harnessFilesFrom(t, recoveryNoteRevision, [browserSuites[0]])
+  const redaction = harnessFilesFrom(t, verifiedRasterRevision, [redactionSuite])
+  if (!recovery || !redaction) return
+  const { command } = fixture({ historicalFiles: new Map([...recovery, ...redaction]) })
   assert.throws(() => requirePassedCi('HEAD', command), { message: 'NATIVE_NOTE_TRACER_HARNESS_NOT_APPROVED' })
 })
 
