@@ -31,6 +31,22 @@ function requireMatch(condition, code) {
   if (!condition) throw new GateError('fail', code)
 }
 
+function withCleanup(run, cleanup) {
+  let failed = false
+  try {
+    return run()
+  } catch (error) {
+    failed = true
+    throw error
+  } finally {
+    try {
+      cleanup()
+    } catch (error) {
+      if (!failed) throw error
+    }
+  }
+}
+
 function boundedRead(path, limit = byteLimit) {
   try {
     const size = statSync(path).size
@@ -415,11 +431,16 @@ function redact(session, operation) {
   if (staged.code) return staged
   const candidate = staged.redaction.candidate
   requireInput(candidate, 'native-redaction-candidate')
-  const verified = session.redact({ kind: 'verify', candidate }, true)
-  requireInput(verified.redaction?.verification?.status === 'passed', 'native-redaction-verification')
-  const published = session.redact({ kind: 'publish', candidate }, true)
-  requireMatch(published.status === 'published' && same(published.snapshot.outputHash, candidate.hash), 'native-redaction-publication')
-  return published
+  let published
+  return withCleanup(() => {
+    const verified = session.redact({ kind: 'verify', candidate }, true)
+    requireInput(verified.redaction?.verification?.status === 'passed', 'native-redaction-verification')
+    published = session.redact({ kind: 'publish', candidate }, true)
+    requireMatch(published.status === 'published' && same(published.snapshot.outputHash, candidate.hash), 'native-redaction-publication')
+    return published
+  }, () => {
+    if (published?.status !== 'published') session.redact({ kind: 'cancel', candidate }, true)
+  })
 }
 
 export function operationOutput(session, fixture, operation) {
@@ -660,18 +681,15 @@ function compareFixture(fixture, wasm, directory, invoke, observations) {
     '-singlefile', path]), width, height)
   const sources = new Map()
   const ordered = fixture.id === 'notes-preservation' ? nativeSession(wasm, fixture.input) : null
-  try {
+  withCleanup(() => {
     for (const operation of spec.operations) {
       const evidence = { operation: operation.operation, status: 'unavailable',
         affectedPages: operation.affectedPages, pageChecks: [], checks: {} }
       observation.operations.push(evidence)
       const session = ordered ?? nativeSession(wasm, fixture.input)
-      let output
-      try {
-        output = operationOutput(session, fixture, operation)
-      } finally {
+      const output = withCleanup(() => operationOutput(session, fixture, operation), () => {
         if (!ordered) session.close()
-      }
+      })
       evidence.outputHash = digest(output)
       writeFileSync(outputPath, output, { mode: 0o600 })
       invoke('qpdf-check', ['qpdf', '--check', outputPath])
@@ -752,8 +770,22 @@ function compareFixture(fixture, wasm, directory, invoke, observations) {
       evidence.status = 'pass'
     }
     requireMatch(digest(boundedRead(inputPath)) === fixture.sourceHash, 'source-changed')
-  } finally {
-    ordered?.close()
+  }, () => ordered?.close())
+}
+
+function recordComparisonError(evidence, error) {
+  evidence.status = error instanceof GateError ? error.status : 'fail'
+  evidence.reason = error instanceof GateError ? error.message : 'comparison-error'
+  const last = evidence.fixtures.at(-1)?.operations.at(-1)
+  if (last && last.status !== 'pass') last.status = evidence.status
+}
+
+export function compareFixtures(fixtures, wasm, directory, invoke, evidence) {
+  try {
+    for (const fixture of fixtures) compareFixture(fixture, wasm, directory, invoke, evidence.fixtures)
+    evidence.status = 'pass'
+  } catch (error) {
+    recordComparisonError(evidence, error)
   }
 }
 
@@ -806,15 +838,17 @@ export async function verifyExternal() {
       stats.pass++
       return result.stdout
     }
-    for (const fixture of fixtures) compareFixture(fixture, wasm, directory, invoke, evidence.fixtures)
-    evidence.status = 'pass'
+    compareFixtures(fixtures, wasm, directory, invoke, evidence)
   } catch (error) {
-    evidence.status = error instanceof GateError ? error.status : 'fail'
-    evidence.reason = error instanceof GateError ? error.message : 'comparison-error'
-    const last = evidence.fixtures.at(-1)?.operations.at(-1)
-    if (last && last.status !== 'pass') last.status = evidence.status
+    recordComparisonError(evidence, error)
   } finally {
-    if (directory) rmSync(directory, { recursive: true, force: true })
+    if (directory) {
+      try {
+        rmSync(directory, { recursive: true, force: true })
+      } catch (error) {
+        if (evidence.status === 'pass') recordComparisonError(evidence, error)
+      }
+    }
   }
   return evidence
 }
