@@ -407,6 +407,7 @@ struct PdfXrefEntry {
 pub(crate) struct PdfPageRecord {
     pub object_ref: PdfObjectRef,
     pub media_box: LayoutRect,
+    pub crop_box: Option<LayoutRect>,
     pub resources: Option<PdfValue>,
     pub contents: Vec<PdfObjectRef>,
     pub annotations: Vec<PdfObjectRef>,
@@ -507,7 +508,7 @@ impl PdfReader {
             .ok_or(PdfReadError::PageTreeInvalid)?;
         let mut pages = Vec::new();
         let mut active = BTreeSet::new();
-        self.collect_pages(pages_ref, None, None, 0, &mut active, &mut pages)?;
+        self.collect_pages(pages_ref, (None, None), None, 0, &mut active, &mut pages)?;
         Ok(pages)
     }
 
@@ -703,7 +704,7 @@ impl PdfReader {
     fn collect_pages(
         &self,
         reference: PdfObjectRef,
-        inherited_media_box: Option<LayoutRect>,
+        inherited_boxes: (Option<LayoutRect>, Option<LayoutRect>),
         inherited_resources: Option<PdfValue>,
         depth: usize,
         active: &mut BTreeSet<PdfObjectRef>,
@@ -721,17 +722,26 @@ impl PdfReader {
             .get("Type")
             .and_then(PdfValue::as_name)
             .unwrap_or("");
+        let (inherited_media_box, inherited_crop_box) = inherited_boxes;
         let media_box = dictionary
             .get("MediaBox")
             .map(|value| self.resolve(value, depth + 1))
             .transpose()?
-            .map(|value| parse_media_box(&value))
+            .map(|value| parse_page_box(&value))
+            .transpose()?;
+        let crop_box = dictionary
+            .get("CropBox")
+            .map(|value| self.resolve(value, depth + 1))
+            .transpose()?
+            .filter(|value| !matches!(value, PdfValue::Null))
+            .map(|value| parse_page_box(&value))
             .transpose()?;
         let resources = dictionary
             .get("Resources")
             .map(|value| self.resolve(value, depth + 1))
             .transpose()?;
         let media_box = media_box.or(inherited_media_box);
+        let crop_box = crop_box.or(inherited_crop_box);
         let resources = resources.or(inherited_resources);
         match type_name {
             "Pages" => {
@@ -749,7 +759,7 @@ impl PdfReader {
                     let kid = kid.as_reference().ok_or(PdfReadError::PageTreeInvalid)?;
                     self.collect_pages(
                         kid,
-                        media_box,
+                        (media_box, crop_box),
                         resources.clone(),
                         depth + 1,
                         active,
@@ -794,6 +804,7 @@ impl PdfReader {
                 pages.push(PdfPageRecord {
                     object_ref: reference,
                     media_box,
+                    crop_box,
                     resources,
                     contents,
                     annotations,
@@ -1066,7 +1077,7 @@ fn refs_from_array(value: &PdfValue) -> Result<Vec<PdfObjectRef>, PdfReadError> 
         .collect()
 }
 
-fn parse_media_box(value: &PdfValue) -> Result<LayoutRect, PdfReadError> {
+fn parse_page_box(value: &PdfValue) -> Result<LayoutRect, PdfReadError> {
     let values = value.as_array().ok_or(PdfReadError::PageTreeInvalid)?;
     if values.len() != 4 {
         return Err(PdfReadError::PageTreeInvalid);

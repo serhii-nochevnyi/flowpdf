@@ -2,7 +2,9 @@ use flow_core::pdf::native::{
     NativeEditLimits, NativeObjectCommand, NativeObjectRefusal, NativePdfSession,
     NativeRedactionMark, NativeSessionError,
 };
-use flow_core::pdf::{PdfSceneElement, PdfSceneRequest, open_pdf, read_pdf_scene};
+use flow_core::pdf::{
+    PdfReadDiagnosticCode, PdfSceneElement, PdfSceneRequest, open_pdf, read_pdf_scene,
+};
 use image::ImageDecoder;
 use serde_json::{Value, json};
 use std::io::Cursor;
@@ -257,6 +259,77 @@ fn nested_shared_image_invocations_are_isolated() {
         objects(&session, 1)[1]["bounds"],
         json!([70000, 10000, 80000, 20000])
     );
+}
+
+#[test]
+fn scene_reports_partial_after_turning_an_asymmetric_form_image() {
+    let form = stream(
+        "/Type /XObject /Subtype /Form /BBox [0 0 40 40] /Resources << /XObject << /I 7 0 R >> >>",
+        b"q 12 0 0 8 10 10 cm /I Do Q",
+    );
+    let pixels = miniz_oxide::deflate::compress_to_vec_zlib(&[16, 48, 80, 112, 144, 176], 6);
+    let image = stream(
+        "/Type /XObject /Subtype /Image /ColorSpace /DeviceGray /Width 3 /Height 2 /BitsPerComponent 8 /Filter /FlateDecode",
+        &pixels,
+    );
+    let source = fixture(
+        b"/Fm Do q 1 0 0 1 60 0 cm /Fm Do Q",
+        false,
+        "/Resources << /XObject << /Fm 6 0 R >> >>",
+        &[form, image],
+    );
+    let reader = open_pdf(&source, Default::default()).unwrap();
+    let before = read_pdf_scene(&reader, &PdfSceneRequest::default()).unwrap();
+    assert!(!before.pages[0].partial);
+    assert_eq!(
+        before.pages[0]
+            .elements
+            .iter()
+            .filter(|element| matches!(element, PdfSceneElement::Image { .. }))
+            .count(),
+        2
+    );
+
+    for (transform, expected_bounds) in [
+        ([0, 1, -1, 0, 90, -60], [72_000, 10_000, 80_000, 22_000]),
+        ([-1, 0, 0, -1, 152, 28], [70_000, 10_000, 82_000, 18_000]),
+    ] {
+        let mut session = open(&source);
+        let selected = target(&session, 0, 1);
+        apply(
+            &mut session,
+            json!({"kind":"moveObject","target":selected,"transform":transform}),
+        )
+        .unwrap();
+        assert_eq!(objects(&session, 0)[1]["bounds"], json!(expected_bounds));
+
+        let reader = open_pdf(session.output_bytes(), Default::default()).unwrap();
+        let scene = read_pdf_scene(&reader, &PdfSceneRequest::default()).unwrap();
+        let page = &scene.pages[0];
+        assert!(page.partial && scene.report.partial);
+        assert!(page.report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == PdfReadDiagnosticCode::PartialPage
+                && diagnostic.page_index == Some(0)
+        }));
+        let images: Vec<_> = page
+            .elements
+            .iter()
+            .filter_map(|element| match element {
+                PdfSceneElement::Image { value } => Some(value),
+                _ => None,
+            })
+            .collect();
+        let [sibling] = images.as_slice() else {
+            panic!("expected only the unchanged image, got {images:?}");
+        };
+        assert_eq!((sibling.width, sibling.height), (3, 2));
+        assert_eq!(sibling.filter, "FlateDecode");
+        assert_eq!(sibling.data_hex, "1030507090b0");
+        assert_eq!(sibling.rect.x.raw(), 10 * 64);
+        assert_eq!(sibling.rect.y.raw(), 10 * 64);
+        assert_eq!(sibling.rect.width.raw(), 12 * 64);
+        assert_eq!(sibling.rect.height.raw(), 8 * 64);
+    }
 }
 
 #[test]

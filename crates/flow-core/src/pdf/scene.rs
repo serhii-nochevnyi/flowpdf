@@ -588,6 +588,9 @@ impl<'a> SceneBuilder<'a> {
     }
 
     fn run(mut self) -> Result<PdfScenePage, PdfReadError> {
+        if let Some(crop_box) = self.page.crop_box {
+            self.state.clip = self.state.clip.intersect(crop_box, true)?;
+        }
         self.inspect_annotations()?;
         for (index, content_ref) in self.page.contents.iter().enumerate() {
             self.invocation_path =
@@ -1366,6 +1369,12 @@ impl<'a> SceneBuilder<'a> {
             },
         )?;
         if !self.form_paint_visible(rect, true, &provenance)? {
+            return Ok(());
+        }
+        let Matrix { a, b, c, d, .. } = self.state.ctm;
+        // @contract: An image rectangle carries only positive axis-aligned placement.
+        if a <= zero || d <= zero || b != zero || c != zero {
+            self.report_partial(provenance.object_ref);
             return Ok(());
         }
         self.push_element(PdfSceneElement::Image {
