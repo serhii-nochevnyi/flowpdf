@@ -1,8 +1,11 @@
+use std::fmt::Write as _;
+
 use flow_core::pdf::PdfReadError;
 use flow_core::pdf::native::{
-    NativeEditError, NativeEditLimits, NativeNoteCommand, NativePdfSession, NativeRedactionContext,
-    NativeRedactionGeometry, NativeRedactionMark, NativeRedactionPolicy, NativeRedactionStage,
-    NativeRequestLookup, NativeSessionError, NativeVerificationFailure, NativeVerificationStatus,
+    NativeEditError, NativeEditLimits, NativeNoteCommand, NativePageCommand, NativePageSide,
+    NativePageTarget, NativePdfSession, NativeRedactionContext, NativeRedactionGeometry,
+    NativeRedactionMark, NativeRedactionPolicy, NativeRedactionStage, NativeRequestLookup,
+    NativeSessionError, NativeVerificationFailure, NativeVerificationStatus,
     verify_native_redaction,
 };
 use miniz_oxide::deflate::compress_to_vec_zlib;
@@ -447,17 +450,76 @@ fn valid_form_storage_is_outside_the_scrub_profile() {
     assert!(session.redaction_candidate_status().is_none());
 }
 
-#[test]
-fn an_inconclusive_raster_check_preserves_the_previous_accepted_revision() {
-    let source = pdf(
+fn raster_fixture(size: u32, paint: &str) -> Vec<u8> {
+    pdf(
         vec![
             b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
-            b"<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 3000 3000] >>".to_vec(),
+            format!("<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 {size} {size}] >>")
+                .into_bytes(),
             b"<< /Type /Page /Parent 2 0 R /Contents 4 0 R >>".to_vec(),
-            flate("", b"10 10 10 10 re f"),
+            flate("", paint.as_bytes()),
         ],
         "",
-    );
+    )
+}
+
+#[test]
+fn raster_budget_refuses_native_marks_and_staging_without_mutation() {
+    for (size, page_count) in [(3_000, 1), (2_000, 4)] {
+        let source = raster_fixture(size, "10 10 10 10 re f");
+        let mut session = open(&source);
+        let page_id = session.snapshot().page_state.order[0];
+        let insert = NativePageCommand::InsertBlankPage {
+            target: NativePageTarget {
+                page: 0,
+                stable_id: page_id,
+            },
+            side: NativePageSide::After,
+        };
+        for request_id in 1..page_count {
+            assert!(session.redaction_admitted(), "{request_id} pages");
+            session
+                .apply_page(session.snapshot().binding, request_id, &insert)
+                .unwrap();
+        }
+        assert_eq!(session.snapshot().page_state.order.len() as u64, page_count);
+
+        let binding = session.snapshot().binding;
+        let before = session.output_bytes().to_vec();
+        let mark = NativeRedactionMark {
+            page_id,
+            geometry: session.redaction_mark_geometry(page_id).unwrap(),
+            rect: [12_000, 12_000, 13_000, 13_000],
+        };
+        assert_eq!(
+            session.add_redaction_mark(binding, mark),
+            Err(NativeSessionError::Budget)
+        );
+        assert_eq!(
+            session.stage_redaction(binding, page_count),
+            Err(NativeSessionError::Budget)
+        );
+        assert_eq!(
+            session.lookup(binding, page_count),
+            Ok(NativeRequestLookup::Unseen)
+        );
+        assert!(!session.redaction_admitted());
+        assert!(session.redaction_marks().is_empty());
+        assert!(session.redaction_marks_binding().is_none());
+        assert!(session.redaction_candidate_status().is_none());
+        assert_accepted(&session, &before, binding.revision, &source);
+    }
+}
+
+#[test]
+fn an_inconclusive_raster_check_preserves_the_previous_accepted_revision() {
+    // @contract: The retained polygon exceeds the raster paint budget before sampling.
+    let mut paint = String::from("10 10 10 10 re f 40 616 m");
+    for step in -23..=24 {
+        write!(paint, " {} {} l", 1_000 + 40 * step, 40 + step * step).unwrap();
+    }
+    paint.push_str(" 1960 1960 l 40 1960 l h f");
+    let source = raster_fixture(1_980, &paint);
     let mut session = open(&source);
     let prior = session
         .apply(
@@ -470,12 +532,13 @@ fn an_inconclusive_raster_check_preserves_the_previous_accepted_revision() {
             },
         )
         .unwrap();
+    assert!(session.redaction_admitted());
     let before = session.output_bytes().to_vec();
     let page_id = session.snapshot().page_state.order[0];
     let mark = NativeRedactionMark {
         page_id,
         geometry: session.redaction_mark_geometry(page_id).unwrap(),
-        rect: [11_000, 11_000, 13_000, 13_000],
+        rect: [12_000, 12_000, 13_000, 13_000],
     };
     session.add_redaction_mark(prior.binding, mark).unwrap();
     session.stage_redaction(prior.binding, 2).unwrap();
@@ -493,7 +556,10 @@ fn an_inconclusive_raster_check_preserves_the_previous_accepted_revision() {
         session.redaction_candidate_status().unwrap().status(),
         NativeVerificationStatus::Inconclusive
     );
-    assert!(session.publish_redaction(prior.binding, 2).is_err());
+    assert_eq!(
+        session.publish_redaction(prior.binding, 2),
+        Err(NativeSessionError::RedactionUnverified)
+    );
     assert_accepted(&session, &before, 1, &source);
     assert_eq!(session.snapshot().scene.scene_hash, prior.scene_hash);
     assert_eq!(session.redaction_marks(), &[mark]);
