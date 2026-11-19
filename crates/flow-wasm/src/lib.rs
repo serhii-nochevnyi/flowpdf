@@ -2714,8 +2714,6 @@ fn verify_native_snapshot(response: &NativeResponse<NativeVerifiedScene>) -> Opt
                 })
         })
         .collect();
-    // The worker can also check the stable IDs against its Rust-owned session.
-    // The coordinator's separate WASM instance verifies the byte projection.
     let live_notes_match = NATIVE_REGISTRY.with(|registry| {
         let registry = registry.borrow();
         registry
