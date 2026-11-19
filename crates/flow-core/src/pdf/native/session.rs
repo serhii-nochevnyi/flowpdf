@@ -1165,14 +1165,9 @@ impl NativePdfSession {
         let mut reopen_limits = self.snapshot.limits;
         reopen_limits.max_source_bytes = reopen_limits.max_output_bytes;
         reopen_limits.max_total_decoded_bytes = staged.remaining_decoded();
-        reopen_limits.max_retained_bytes = staged_remaining
-            .unwrap_or_else(|| staged.remaining_retained())
-            + (output_budget - output.len());
-        if reopen_limits.max_retained_bytes == 0 {
-            return Err(NativeSessionError::Budget);
-        }
-        let reopened = NativePdfGraph::open(&output, reopen_limits)?;
-        let ids = preserve_and_remap(&staged, &reopened, &ids)?;
+        reopen_limits.max_retained_bytes =
+            staged_remaining.unwrap_or_else(|| staged.remaining_retained());
+        let (reopened, ids) = reopen_rewrite(&staged, &output, output_budget, reopen_limits, &ids)?;
         let output_hash = *blake3::hash(&output).as_bytes();
         drop(staged);
         drop(output);
@@ -1246,7 +1241,7 @@ impl NativePdfSession {
             self.origin = Some(previous.source);
         }
         self.remaining_retained = self.snapshot.limits.max_retained_bytes
-            - reopen_limits.max_retained_bytes
+            - self.graph.limits.max_retained_bytes
             + scene_remaining;
         self.ids = ids;
         self.next_page_object_id = next_page_object_id;
@@ -1427,6 +1422,25 @@ fn verify_note(
     }
 }
 
+fn reopen_rewrite(
+    staged: &NativePdfGraph,
+    output: &Vec<u8>,
+    output_budget: usize,
+    mut limits: NativeEditLimits,
+    ids: &BTreeMap<PdfObjectRef, NativeNoteId>,
+) -> Result<(NativePdfGraph, BTreeMap<PdfObjectRef, NativeNoteId>), NativeSessionError> {
+    let refund = output_budget
+        .checked_sub(output.capacity())
+        .ok_or(NativeSessionError::Budget)?;
+    limits.max_retained_bytes += refund;
+    if limits.max_retained_bytes == 0 {
+        return Err(NativeSessionError::Budget);
+    }
+    let reopened = NativePdfGraph::open(output, limits)?;
+    let ids = preserve_and_remap(staged, &reopened, ids)?;
+    Ok((reopened, ids))
+}
+
 fn preserve_and_remap(
     staged: &NativePdfGraph,
     reopened: &NativePdfGraph,
@@ -1553,6 +1567,40 @@ enum FailurePoint {
 mod tests {
     use super::super::notes::NativePageId;
     use super::*;
+
+    #[test]
+    fn rewrite_spare_capacity_stays_charged_during_reopen_and_remap() {
+        let encoded = miniz_oxide::deflate::compress_to_vec_zlib(b"q Q", 6);
+        let bytes = super::super::tests::fixture("", &encoded);
+        let defaults = NativeEditLimits::default();
+        let mut staged = NativePdfGraph::open(&bytes, defaults).unwrap();
+        staged.limits.max_output_bytes = 1024;
+        let roomy = staged.rewrite().unwrap();
+        staged.limits.max_output_bytes = roomy.len();
+        let exact = staged.rewrite().unwrap();
+        assert_eq!(exact, roomy);
+        assert!(exact.capacity() < roomy.capacity());
+
+        let ids = initial_ids(&staged);
+        let reopened = NativePdfGraph::open(&exact, defaults).unwrap();
+        let open_cost = defaults.max_retained_bytes - reopened.remaining_retained();
+        let remap_cost = staged.objects.len() * 512 + 7 * 128;
+        let output_budget = roomy.capacity();
+        let spare = output_budget - exact.capacity();
+        let limits = NativeEditLimits {
+            max_retained_bytes: open_cost + remap_cost - spare,
+            ..defaults
+        };
+        assert!(NativePdfGraph::open(&roomy, limits).is_ok());
+        assert!(matches!(
+            reopen_rewrite(&staged, &roomy, output_budget, limits, &ids),
+            Err(NativeSessionError::Budget)
+        ));
+        let (reopened, remapped) =
+            reopen_rewrite(&staged, &exact, output_budget, limits, &ids).unwrap();
+        assert_eq!(reopened.original_bytes(), exact.as_slice());
+        assert_eq!(remapped.len(), ids.len());
+    }
 
     #[test]
     fn accepted_scene_shares_the_graph_admission_work_budget() {
