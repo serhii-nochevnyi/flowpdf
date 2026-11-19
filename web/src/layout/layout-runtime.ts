@@ -1,7 +1,7 @@
 import * as generatedWasm from '../../generated/flow_wasm.js'
 import { PdfSourceStore } from '../../persistence/pdf-source-store.js'
-import type { PdfNativeEditPanelProps } from '../pdf/pdf-native-edit-panel.js'
-import type { NativePdfWasmBoundary } from '../pdf/pdf-native-edit-protocol.js'
+import type { EditorNativePdfRuntime } from '../editor/editor-app.js'
+import { nativeBytesHex, type NativePdfWasmBoundary } from '../pdf/pdf-native-edit-protocol.js'
 import { NativePdfEditCoordinator, NativePdfWorkerError, type NativePdfWorkerPort } from '../pdf/pdf-native-edit-worker.js'
 import type { EditorAcceptedSnapshot } from '../editor/editor-store.js'
 import type { EditorControllerDependencies } from '../editor/editor-controller.js'
@@ -22,7 +22,7 @@ import {
   type PdfWorkerPort,
   type RevisionAwarePdfExportScheduler,
 } from '../pdf/pdf-worker.js'
-import type { PdfExportRequestDto } from '../pdf/pdf-protocol.js'
+import { PDF_READER_PROTOCOL_VERSION, type PdfExportRequestDto } from '../pdf/pdf-protocol.js'
 import {
   createWorkerPdfReaderScheduler,
   type PdfReaderWorkerPort,
@@ -40,8 +40,10 @@ export type WorkerConstructor = typeof Worker
 export function createNativePdfRuntime(
   workerConstructor?: WorkerConstructor,
   sourceStore = new PdfSourceStore(),
-): Pick<PdfNativeEditPanelProps, 'createCoordinator' | 'sourceStore'> & { dispose(): void } {
+): EditorNativePdfRuntime & { dispose(): void } {
   const coordinators = new Set<NativePdfEditCoordinator>()
+  const pageReads = new Set<() => void>()
+  let pageReadNumber = 0
   let disposed = false
   function createCoordinator() {
     if (disposed) throw new NativePdfWorkerError('FLOW_PDF_NATIVE_WORKER_FAILED')
@@ -91,10 +93,65 @@ export function createNativePdfRuntime(
       initial = undefined
       return coordinator?.snapshot().phase === 'idle' ? coordinator : createCoordinator()
     },
+    async extractPageText(snapshot, pageId, signal) {
+      if (disposed || signal.aborted) return null
+      const firstPage = snapshot.scene.pages.findIndex((page) => page.id === pageId)
+      const page = snapshot.scene.pages[firstPage]
+      if (!page) return null
+      const outputHash = nativeBytesHex(Uint8Array.from(snapshot.outputHash))
+      // @security: A request-local worker can stop parsing immediately and drops its retained scene.
+      const worker = (
+        workerConstructor === undefined
+          ? new Worker(new URL('../pdf/pdf-reader-worker-entry.ts', import.meta.url), { type: 'module' })
+          : new workerConstructor(new URL('../pdf/pdf-reader-worker-entry.ts', import.meta.url), { type: 'module' })
+      ) as unknown as PdfReaderWorkerPort
+      const scheduler = createWorkerPdfReaderScheduler(worker)
+      const stop = () => {
+        if (!pageReads.delete(stop)) return
+        signal.removeEventListener('abort', stop)
+        scheduler.dispose()
+        worker.terminate()
+      }
+      pageReads.add(stop)
+      signal.addEventListener('abort', stop, { once: true })
+      try {
+        const outcome = await scheduler.request({
+          protocolVersion: PDF_READER_PROTOCOL_VERSION,
+          requestId: `native-page-text-${++pageReadNumber}`,
+          bytesHex: snapshot.outputHex,
+          firstPage,
+          pageCount: 1,
+        })
+        if (!pageReads.has(stop) || outcome.kind !== 'published') return null
+        const { scene } = outcome.accepted.result
+        const readPage = scene.pages[0]
+        // @invariant: The reader hashes the input bytes and resolves the page from that PDF's page tree.
+        if (scene.sourceHash !== outputHash || scene.pageCount !== snapshot.scene.pages.length
+          || !readPage || readPage.pageIndex !== firstPage
+          || readPage.sourceObject.objectNumber !== page.object.objectNumber
+          || readPage.sourceObject.generation !== page.object.generation) return null
+        let partial = readPage.partial || scene.report.partial
+        const text: { value: string }[] = []
+        for (const element of readPage.elements) {
+          if (element.kind !== 'text') continue
+          const run = element.value
+          if (run.mapping === 'missing') partial = true
+          if (!run.text.trim()) continue
+          const value = run.mapping === 'missing'
+            ? run.glyphs.map((glyph) => glyph.unicode ?? '\uFFFD').join('')
+            : run.text
+          text.push({ value })
+        }
+        return { outputHash, pageId, text, partial }
+      } finally {
+        stop()
+      }
+    },
     dispose() {
       if (disposed) return
       disposed = true
       initial = undefined
+      for (const stop of pageReads) stop()
       for (const coordinator of coordinators) coordinator.dispose()
       sourceStore.close()
     },
