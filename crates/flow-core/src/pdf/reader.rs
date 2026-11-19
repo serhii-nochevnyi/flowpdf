@@ -1018,6 +1018,13 @@ fn parse_media_box(value: &PdfValue) -> Result<LayoutRect, PdfReadError> {
     })
 }
 
+pub(super) fn single_filter(value: &PdfValue) -> Option<&str> {
+    match value {
+        PdfValue::Array(filters) if filters.len() == 1 => filters[0].as_name(),
+        value => value.as_name(),
+    }
+}
+
 fn decode_stream(
     dictionary: &BTreeMap<String, PdfValue>,
     raw: Vec<u8>,
@@ -1030,13 +1037,7 @@ fn decode_stream(
         }
         return Ok(raw);
     };
-    let filter = match filter {
-        PdfValue::Name(name) => name.as_str(),
-        PdfValue::Array(filters) if filters.len() == 1 => filters[0]
-            .as_name()
-            .ok_or(PdfReadError::FilterUnsupported)?,
-        _ => return Err(PdfReadError::FilterUnsupported),
-    };
+    let filter = single_filter(filter).ok_or(PdfReadError::FilterUnsupported)?;
     if exact && matches!(filter, "DCTDecode" | "DCT") {
         return decode_retained_jpeg(dictionary, &raw, limits);
     }
@@ -1129,7 +1130,6 @@ fn decode_retained_jpeg(
             .get("Interpolate")
             .is_some_and(|value| !matches!(value, PdfValue::Boolean(_)))
         || name("Subtype") != Some("Image")
-        || !matches!(name("Filter"), Some("DCTDecode" | "DCT"))
         || integer("BitsPerComponent") != Some(8)
         || dictionary.keys().any(|key| {
             !matches!(

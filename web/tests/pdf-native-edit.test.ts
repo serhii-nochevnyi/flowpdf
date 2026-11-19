@@ -377,7 +377,7 @@ describe('native PDF edit coordinator', () => {
       : { ...selected, id: hash(53), bounds: [2000, 3000, 4000, 6000] } as const
     const unchangedSibling = { ...sibling, id: hash(54) }
     const unchangedTarget = { ...selected, id: hash(55) }
-    const objects = kind === 'image' ? [changed, unchangedSibling, unchangedTarget] : [unchangedSibling, changed]
+    const objects = kind === 'image' ? [unchangedSibling, unchangedTarget, changed] : [unchangedSibling, changed]
     const outputHash = hash(56)
     const snapshot = {
       ...initial, binding: { ...initial.binding, revision: 1 }, outputHash, outputHex: '04',

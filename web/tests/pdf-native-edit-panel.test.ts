@@ -455,7 +455,7 @@ describe('native object tools', () => {
     const withObjects = (objects: readonly typeof first[]) => ({
       ...before, scene: { ...before.scene, objectPages: [{ page: 0, canAdd: true, refusal: null, objects }] },
     })
-    expect(rebindNativeObject(withObjects([first]), withObjects([inserted, second]), 0, first,
+    expect(rebindNativeObject(withObjects([first]), withObjects([second, inserted]), 0, first,
       { kind: 'addImage', page: 0, bounds: first.bounds, assetHex: '00' })).toBe(second)
     expect(rebindNativeObject(withObjects([first, second]), withObjects([inserted]), 0, second,
       { kind: 'removeObject', target: { page: 0, id: first.id, profile: first.profile } })).toBe(inserted)

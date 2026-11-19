@@ -1,13 +1,14 @@
 import { expect, test, vi } from 'vitest'
 import { page, userEvent } from 'vitest/browser'
 
-import init from '../generated/flow_wasm.js'
+import init, { read_pdf } from '../generated/flow_wasm.js'
 import '../src/styles.css'
 import '../src/editor/editor.css'
 import { PdfSourceStore, hashPdfSourceBytes } from '../persistence/pdf-source-store.js'
 import { mountEditorApp } from '../src/editor/editor-app.js'
 import { createNativePdfRuntime } from '../src/layout/layout-runtime.js'
 import { nativePdfText, type NativePdfMessage } from '../src/pdf/pdf-native-edit-messages.js'
+import { PDF_READER_PROTOCOL_VERSION, type PdfReaderResultDto } from '../src/pdf/pdf-protocol.js'
 import { NATIVE_PDF_LIMITS, nativeHexBytes, type NativePdfObjectPage, type NativePdfGraphic, type NativePdfRect, type NativePdfWorkerRequest } from '../src/pdf/pdf-native-edit-protocol.js'
 
 function objectPdf(transform = '30 0 0 40 100 120', clip = '', blankFirstPage = false) {
@@ -37,6 +38,19 @@ function objectPdf(transform = '30 0 0 40 100 120', clip = '', blankFirstPage = 
 
 const grayPng = Uint8Array.from(atob('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAAAAAA6fptVAAAACklEQVR4nGPoAAAAigCJ/xNBzgAAAABJRU5ErkJggg=='),
   (character) => character.charCodeAt(0))
+
+const replacementPng = Uint8Array.from(atob('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAAAAAA6fptVAAAACklEQVR4nGNwAAAAQgBBKTf07wAAAABJRU5ErkJggg=='),
+  (character) => character.charCodeAt(0))
+
+function imageSamples(bytes: Uint8Array) {
+  const bytesHex = Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('')
+  const response = JSON.parse(read_pdf(JSON.stringify({
+    protocolVersion: PDF_READER_PROTOCOL_VERSION, requestId: 'image-samples', bytesHex, firstPage: 0, pageCount: 2,
+  }))) as { ok: boolean; result?: PdfReaderResultDto }
+  expect(response.ok).toBe(true)
+  return response.result?.scene.pages.map(({ elements }) => elements.flatMap((element) =>
+    element.kind === 'image' ? [element.value.dataHex.toLowerCase()] : []))
+}
 
 function chooseFile(input: Element, file: File) {
   if (!(input instanceof HTMLInputElement)) throw Error('Missing file input')
@@ -240,13 +254,13 @@ for (const locale of ['uk', 'en'] as const) {
       chooseFile(asset(), new File([grayPng], 'gray.png', { type: 'image/png' }))
       await expect.element(objects.getByText(t('object.file.ready'), { exact: false })).toBeVisible()
       const addedImage = image([10000, 20000, 40000, 60000])
-      await accepted('object.add', [addedImage, baseImage, baseGraphic], 0, selector)
+      await accepted('object.add', [baseImage, baseGraphic, addedImage], 2, selector)
 
-      await selector.selectOptions((selector.element() as HTMLSelectElement).options[2]!.value)
+      await selector.selectOptions((selector.element() as HTMLSelectElement).options[1]!.value)
       const originalTarget = (selector.element() as HTMLSelectElement).value
       const draftX = locale === 'uk' ? '101,25' : '101.25'
       await geometry([draftX, '121', '31', '41'])
-      chooseFile(asset(), new File([grayPng], 'replacement.png', { type: 'image/png' }))
+      chooseFile(asset(), new File([replacementPng], 'replacement.png', { type: 'image/png' }))
       await expect.element(objects.getByText(t('object.file.ready'), { exact: false })).toBeVisible()
       droppedCommand = 'replaceImage'
       const beforeUnseen = outputHash()
@@ -273,7 +287,7 @@ for (const locale of ['uk', 'en'] as const) {
       await expect.element(panel.getByRole('status')).toHaveTextContent(t('status.unseen'))
       const recoveredTarget = (selector.element() as HTMLSelectElement).value
       expect(recoveredTarget).not.toBe(originalTarget)
-      expect((selector.element() as HTMLSelectElement).selectedIndex).toBe(2)
+      expect((selector.element() as HTMLSelectElement).selectedIndex).toBe(1)
       await expect.element(objects.getByText('replacement.png', { exact: true })).toBeVisible()
       await expect.element(objects.getByRole('textbox', { name: t('object.x') })).toHaveValue(draftX)
       await expect.element(objects.getByRole('textbox', { name: t('object.y') })).toHaveValue('121')
@@ -281,7 +295,8 @@ for (const locale of ['uk', 'en'] as const) {
       await expect.element(objects.getByRole('textbox', { name: t('object.height') })).toHaveValue('41')
       await expect.element(button('object.replace')).toBeEnabled()
       expect(commandCount()).toBe(beforeReconcile + 1)
-      const replaced = await accepted('object.replace', [addedImage, image([...baseImage.bounds]), baseGraphic], 1, selector)
+      const replaced = await accepted('object.replace', [image([...baseImage.bounds]), baseGraphic, addedImage], 0, selector)
+      expect(imageSamples(nativeHexBytes(replaced.outputHex))).toEqual([['40', '88'], ['555657']])
       expect(replaced.scene.pages[1]?.annotations).toContainEqual(expect.objectContaining({
         kind: 'plainNote', contents: 'Page two note',
       }))
@@ -297,7 +312,7 @@ for (const locale of ['uk', 'en'] as const) {
       expect(await download('download.edited')).toEqual(beforeInvalidAsset)
 
       await geometry([locale === 'uk' ? '105,125' : '105.125', '125', '30', '40'])
-      await accepted('object.move', [addedImage, image([105125, 125000, 135125, 165000]), baseGraphic], 1)
+      await accepted('object.move', [image([105125, 125000, 135125, 165000]), baseGraphic, addedImage], 0)
       const beforeRefusal = await download('download.edited')
       const beforeRefusalHash = outputHash()
       expect((selector.element() as HTMLSelectElement).value).not.toBe(recoveredTarget)
@@ -326,7 +341,7 @@ for (const locale of ['uk', 'en'] as const) {
         await accepted('object.remove', expected, undefined, selector)
       }
 
-      await remove([addedImage, baseGraphic])
+      await remove([baseGraphic, addedImage])
       await profile.selectOptions('line')
       await geometry(['70', '20', '20', '30'])
       await expect.element(objects.getByText(t('object.graphic.line.help'))).toBeVisible()
@@ -341,16 +356,16 @@ for (const locale of ['uk', 'en'] as const) {
       await userEvent.keyboard('2')
       expect(stroke.getAttribute('aria-invalid')).toBe('false')
       const line = graphic('line', [70000, 20000, 90000, 50000])
-      await accepted('object.add', [line, addedImage, baseGraphic], 0)
+      await accepted('object.add', [baseGraphic, addedImage, line], 2, selector)
       await profile.selectOptions('rectangle')
       const rectangle = graphic('rectangle', line.bounds)
-      await accepted('object.replace', [rectangle, addedImage, baseGraphic], 0, button('object.replace'))
+      await accepted('object.replace', [baseGraphic, addedImage, rectangle], 2, button('object.replace'))
       await profile.selectOptions('polygon')
       const polygon = graphic('polygon', rectangle.bounds)
-      await accepted('object.replace', [polygon, addedImage, baseGraphic], 0, button('object.replace'))
+      await accepted('object.replace', [baseGraphic, addedImage, polygon], 2, button('object.replace'))
       await geometry(['75', '22', '20', '30'])
-      await accepted('object.move', [graphic('polygon', [75000, 22000, 95000, 52000]), addedImage, baseGraphic], 0)
-      await remove([addedImage, baseGraphic])
+      await accepted('object.move', [baseGraphic, addedImage, graphic('polygon', [75000, 22000, 95000, 52000])], 2)
+      await remove([baseGraphic, addedImage])
       expect(await download('download.original')).toEqual(source)
       expect(controller.snapshot().accepted).toBe(semantic)
     } finally {

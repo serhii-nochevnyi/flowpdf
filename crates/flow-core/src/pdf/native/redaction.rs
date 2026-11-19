@@ -4,7 +4,7 @@ use std::mem::size_of;
 use miniz_oxide::deflate::compress_to_vec_zlib;
 
 use super::super::reader::{PdfObjectRef, PdfReaderLimits, PdfStream, PdfValue};
-use super::super::scene::{ContentCursor, ContentToken};
+use super::super::scene::{ContentCursor, ContentToken, separated_content_streams};
 use super::graph::{NativeEditError, NativePdfGraph, spend};
 use super::text::{RedactionText, redaction_number};
 use super::verifier::{NativeRedactionGeometry, NativeRedactionMark};
@@ -1341,14 +1341,25 @@ impl<'a> Scan<'a> {
             clip: page.geometry.crop_box,
             marks: &page_marks,
         };
+        let mut saved = Vec::new();
+        let mut spans_streams = false;
+        let mut separated = true;
         if let Some(contents) = node.get("Contents") {
-            if let Some(list) = resolve(graph, contents)?.as_array() {
-                for item in list {
-                    graphics = self.content(reference(item)?, graphics, scope, &mut used)?;
-                }
-            } else {
-                self.content(reference(contents)?, graphics, scope, &mut used)?;
+            let list = resolve(graph, contents)?
+                .as_array()
+                .unwrap_or(std::slice::from_ref(contents));
+            let mut previous = &[][..];
+            for item in list {
+                let id = reference(item)?;
+                let data = &stream(graph, id)?.data;
+                spans_streams |= !saved.is_empty();
+                separated &= separated_content_streams(previous, data);
+                graphics = self.content(id, graphics, &mut saved, scope, &mut used)?;
+                previous = data;
             }
+        }
+        if !saved.is_empty() || (spans_streams && !separated) {
+            return Err(Unsupported);
         }
         if let Some(list) = node.get("Annots") {
             for item in resolve(graph, list)?.as_array().ok_or(Malformed)? {
@@ -1384,6 +1395,7 @@ impl<'a> Scan<'a> {
         &mut self,
         id: Object,
         mut graphics: Graphics,
+        saved: &mut Vec<Graphics>,
         scope: Scope<'a, '_>,
         used: &mut UsedResources,
     ) -> Result<Graphics> {
@@ -1407,7 +1419,6 @@ impl<'a> Scan<'a> {
         let mut removals = blake3::Hasher::new();
         let mut removed = false;
         let mut args = Vec::new();
-        let mut saved = Vec::new();
         let mut path: Option<Path> = None;
         let mut text: Option<TextBlock> = None;
         while let Some((token, offset)) = cursor.next().map_err(|_| Unsupported)? {
@@ -1536,7 +1547,7 @@ impl<'a> Scan<'a> {
             }
             args.clear();
         }
-        if !args.is_empty() || !saved.is_empty() || path.is_some() || text.is_some() {
+        if !args.is_empty() || path.is_some() || text.is_some() {
             return Err(Unsupported);
         }
         let digest = *blake3::hash(source).as_bytes();
@@ -1610,9 +1621,11 @@ impl<'a> Scan<'a> {
             None => scope.resources,
         };
         let mut used = UsedResources::new();
+        let mut saved = Vec::new();
         self.content(
             id,
             Graphics { matrix, ..graphics },
+            &mut saved,
             Scope {
                 resources,
                 clip,
@@ -1620,6 +1633,9 @@ impl<'a> Scan<'a> {
             },
             &mut used,
         )?;
+        if !saved.is_empty() {
+            return Err(Unsupported);
+        }
         self.active_forms.remove(&id);
         same_use(&mut self.edits.forms, id, used)
     }

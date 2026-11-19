@@ -9,8 +9,8 @@ use image::{ImageDecoder, ImageFormat, ImageReader, Limits};
 use serde::{Deserialize, Serialize};
 
 use super::super::{
-    reader::{PdfObjectRef, PdfReaderLimits, PdfStream, PdfValue, jpeg_frame},
-    scene::{ContentCursor, ContentToken, NativePdfNotePage},
+    reader::{PdfObjectRef, PdfReaderLimits, PdfStream, PdfValue, jpeg_frame, single_filter},
+    scene::{ContentCursor, ContentToken, NativePdfNotePage, separated_content_streams},
 };
 use super::{
     NativeBinding, NativePageId, NativeSessionError,
@@ -440,9 +440,10 @@ fn image_profile(image: &PdfStream) -> Result<NativeObjectProfile> {
             .and_then(PdfValue::as_integer)
             != Some(8)
         || (image.dict.contains_key("Filter")
+            && !matches!(name(&image.dict, "Filter"), Some("FlateDecode"))
             && !matches!(
-                name(&image.dict, "Filter"),
-                Some("FlateDecode" | "DCTDecode" | "DCT")
+                image.dict.get("Filter").and_then(single_filter),
+                Some("DCTDecode" | "DCT")
             ))
     {
         return Err(Profile.into());
@@ -644,10 +645,14 @@ impl<'a> Scan<'a> {
         reference: PdfObjectRef,
         resources: Option<&'a Dict>,
         mut state: GraphicsState,
+        stack: &mut Vec<GraphicsState>,
         clip: [f64; 4],
     ) -> Result<GraphicsState> {
         let source = stream(self.graph, reference)?;
-        if matches!(name(&source.dict, "Filter"), Some("DCTDecode" | "DCT")) {
+        if matches!(
+            source.dict.get("Filter").and_then(single_filter),
+            Some("DCTDecode" | "DCT")
+        ) {
             return Err(State.into());
         }
         check_device_colors(self.graph, resources)?;
@@ -666,7 +671,6 @@ impl<'a> Scan<'a> {
                 ..PdfReaderLimits::default()
             },
         );
-        let mut stack = Vec::new();
         let mut args = Vec::new();
         let mut path = Path::default();
         let mut in_text = false;
@@ -758,7 +762,7 @@ impl<'a> Scan<'a> {
                 "cm" => {
                     state.matrix = Matrix(operands(&args, &source.data)?)
                         .checked()?
-                        .then(state.matrix)?
+                        .then(state.matrix)?;
                 }
                 "w" => {
                     let [width] = operands(&args, &source.data)?;
@@ -799,7 +803,7 @@ impl<'a> Scan<'a> {
             }
             args.clear();
         }
-        if !stack.is_empty() || !args.is_empty() || !path.points.is_empty() || in_text {
+        if !args.is_empty() || !path.points.is_empty() || in_text {
             return Err(State.into());
         }
         Ok(state)
@@ -887,16 +891,25 @@ impl<'a> Scan<'a> {
                     None => parent,
                 };
                 self.path.push(frame);
-                let result = self.interpret(target, effective, state, form_clip);
+                let mut stack = Vec::new();
+                let result = self.interpret(target, effective, state, &mut stack, form_clip);
                 self.path.pop();
-                result.map(|_| ())
+                result?;
+                if !stack.is_empty() {
+                    return Err(State.into());
+                }
+                Ok(())
             }
             _ => Err(Profile.into()),
         }
     }
 }
 
-fn scan(graph: &NativePdfGraph, page: &NativePdfNotePage, work: &mut usize) -> Result<Vec<Found>> {
+fn scan(
+    graph: &NativePdfGraph,
+    page: &NativePdfNotePage,
+    work: &mut usize,
+) -> Result<(Vec<Found>, Matrix)> {
     let rect = page.geometry.ok_or(Geometry)?.bounds().map(|n| n as f64);
     if !positive(rect) {
         return Err(Geometry.into());
@@ -917,19 +930,25 @@ fn scan(graph: &NativePdfGraph, page: &NativePdfNotePage, work: &mut usize) -> R
         matrix: Matrix::IDENTITY,
         stroke_width: 1.,
     };
+    let mut stack = Vec::new();
     let slots = contents(graph, page.object)?;
     for (slot, &reference) in slots.iter().enumerate() {
         // @invariant: A preceding slot cannot swallow tokens or join them to the next slot.
-        if slot + 1 < slots.len() {
-            let data = &stream(graph, reference)?.data;
-            if !data.is_empty() && !data.ends_with(b"\n") && !data.ends_with(b"\r") {
+        if let Some(&next) = slots.get(slot + 1) {
+            if !separated_content_streams(
+                &stream(graph, reference)?.data,
+                &stream(graph, next)?.data,
+            ) {
                 return Err(State.into());
             }
         }
         scan.slot = slot;
-        state = scan.interpret(reference, resources, state, rect)?;
+        state = scan.interpret(reference, resources, state, &mut stack, rect)?;
     }
-    Ok(scan.found)
+    if !stack.is_empty() {
+        return Err(State.into());
+    }
+    Ok((scan.found, state.matrix))
 }
 
 pub(super) fn project(
@@ -943,18 +962,19 @@ pub(super) fn project(
     let mut result = Vec::with_capacity(pages.len());
     spend(remaining, pages.len() * 128)?;
     for page in pages {
-        let (found, refusal) = match scan(graph, page, &mut work) {
-            Ok(found) => (found, None),
-            Err(NativeSessionError::Object(reason)) => (Vec::new(), Some(reason)),
-            Err(NativeSessionError::Budget) => (Vec::new(), Some(State)),
+        let (found, page_matrix, refusal) = match scan(graph, page, &mut work) {
+            Ok((found, matrix)) => (found, matrix, None),
+            Err(NativeSessionError::Object(reason)) => (Vec::new(), Matrix::IDENTITY, Some(reason)),
+            Err(NativeSessionError::Budget) => (Vec::new(), Matrix::IDENTITY, Some(State)),
             Err(error) => return Err(error),
         };
         spend(remaining, found.len() * 256)?;
+        let added_slots = 1 + usize::from(page_matrix.0 != Matrix::IDENTITY.0);
         result.push(NativeObjectPage {
             page: page.id,
             can_add: refusal.is_none()
                 && found.len() < MAX_OBJECTS_PER_PAGE
-                && contents(graph, page.object)?.len() < MAX_OBJECTS_PER_PAGE,
+                && contents(graph, page.object)?.len() + added_slots <= MAX_OBJECTS_PER_PAGE,
             objects: found
                 .iter()
                 .map(|item| item.view(page.id, binding, hash))
@@ -1363,7 +1383,7 @@ pub(super) fn stage(
     use NativeSessionError::{Postcondition, TargetUnavailable};
 
     let mut work = graph.remaining_work();
-    let found = scan(graph, page, &mut work)?;
+    let (found, page_matrix) = scan(graph, page, &mut work)?;
     let index = command
         .target()
         .map(|target| -> Result<usize> {
@@ -1381,6 +1401,7 @@ pub(super) fn stage(
     let page_clip = page.geometry.ok_or(Geometry)?.bounds().map(|n| n as f64);
     let clip = item.map_or(page_clip, |item| item.clip);
     let matrix = item.map_or(Matrix::IDENTITY, |item| item.matrix);
+    let restore_page = item.is_none() && page_matrix.0 != Matrix::IDENTITY.0;
     let mut remaining = graph.remaining_retained();
     spend(&mut remaining, command.validate_size()? + 8192)?;
 
@@ -1391,11 +1412,12 @@ pub(super) fn stage(
                 return Err(Profile.into());
             }
             let (source, profile, rect) = graphic_source(graphic)?;
-            let inverse = matrix.inverse()?;
-            (
-                format!("q\n{}\n{source}\nQ", inverse.operator()).into_bytes(),
-                Some((profile, rect)),
-            )
+            let source = if item.is_some() {
+                format!("q\n{}\n{source}\nQ", matrix.inverse()?.operator())
+            } else {
+                format!("q\n{source}\nQ")
+            };
+            (source.into_bytes(), Some((profile, rect)))
         }
         AddImage { asset_hex, .. } | ReplaceImage { asset_hex, .. } => {
             if item.is_some_and(|item| item.signature.profile.kind() != NativeObjectKind::Image) {
@@ -1450,11 +1472,14 @@ pub(super) fn stage(
         replacement = match command {
             AddImage { bounds, .. } => {
                 let [l, b, r, t] = page_space(*bounds);
-                let placement = Matrix([r - l, 0., 0., t - b, l, b]).checked()?;
+                let placement = Matrix([r - l, 0., 0., t - b, l, b]);
                 format!("q\n{}\n/{name} Do\nQ", placement.operator()).into_bytes()
             }
             _ => format!("/{name} Do").into_bytes(),
         };
+    }
+    if restore_page {
+        replacement.splice(..0, b"Q\n".iter().copied());
     }
     let root = if depth == 0 {
         edited_stream(
@@ -1510,7 +1535,11 @@ pub(super) fn stage(
     if let Some(item) = item {
         slots[item.slot] = root;
     } else {
-        slots.insert(0, root);
+        if restore_page {
+            let save = edited_stream(graph, None, b"q", None, &mut remaining)?;
+            slots.insert(0, allocate(graph, PdfValue::Stream(save))?);
+        }
+        slots.push(root);
     }
     let Some(PdfValue::Dictionary(dict)) = graph.objects.get_mut(&page.object) else {
         return Err(TargetUnavailable);
@@ -1527,8 +1556,8 @@ pub(super) fn stage(
     }
     retain_reachable(graph, &mut remaining)?;
 
-    let changed = expected.map(|_| index.unwrap_or(0));
-    let next = scan(graph, page, &mut work)?;
+    let changed = expected.map(|_| index.unwrap_or(found.len()));
+    let (next, _) = scan(graph, page, &mut work)?;
     let next: Vec<_> = next.into_iter().map(|item| item.signature).collect();
     if let Some((profile, rect)) = expected {
         let actual = next
@@ -1575,7 +1604,7 @@ pub(super) fn verify(
     let index = expected.page.0 as usize;
     let page = pages.get(index).ok_or(NativeSessionError::Postcondition)?;
     let mut work = graph.remaining_work();
-    let found = scan(graph, page, &mut work)?;
+    let (found, _) = scan(graph, page, &mut work)?;
     if found
         .iter()
         .map(|item| &item.signature)

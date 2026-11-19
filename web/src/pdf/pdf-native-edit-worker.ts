@@ -208,12 +208,12 @@ function confirmsObjectCommand(
   const before = previous.scene.objectPages?.[page]
   const after = snapshot.scene.objectPages?.[page]
   if (before?.refusal !== null || after?.refusal !== null) return false
-  const selected = target === null ? 0 : before.objects.findIndex((object) =>
+  const selected = target === null ? before.objects.length : before.objects.findIndex((object) =>
     object.profile === target.profile && sameNativeBytes(object.id, target.id))
   if (selected < 0 || (target === null && !before.canAdd)) return false
 
   const removed = command.kind === 'removeObject'
-  const original = before.objects[selected]
+  const original = target === null ? undefined : before.objects[selected]
   const result = after.objects[selected]
   const siblingsBefore = before.objects.filter((_, index) => target === null || index !== selected)
   const siblingsAfter = after.objects.filter((_, index) => removed || index !== selected)

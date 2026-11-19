@@ -1,12 +1,24 @@
 use flow_core::pdf::native::{
-    NativeEditLimits, NativeObjectCommand, NativePdfSession, NativeSessionError,
+    NativeEditLimits, NativeObjectCommand, NativePdfSession, NativeRedactionMark,
+    NativeSessionError,
 };
+use flow_core::pdf::{PdfSceneElement, PdfSceneRequest, open_pdf, read_pdf_scene};
 use serde_json::{Value, json};
 
 fn fixture(contents: &[u8], shared: bool, resources: &str, extras: &[Vec<u8>]) -> Vec<u8> {
+    fixture_with_slots(contents, shared, resources, extras, "5 0 R")
+}
+
+fn fixture_with_slots(
+    contents: &[u8],
+    shared: bool,
+    resources: &str,
+    extras: &[Vec<u8>],
+    slots: &str,
+) -> Vec<u8> {
     let kids = if shared { "3 0 R 4 0 R" } else { "3 0 R" };
     let page = format!(
-        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Contents 5 0 R {resources} >>"
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Contents {slots} {resources} >>"
     );
     let mut objects = vec![
         b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
@@ -109,6 +121,93 @@ fn path_crud_isolates_shared_content_and_roundtrips() {
         objects(&reopened, 1)[0]["bounds"],
         json!([10000, 20000, 40000, 60000])
     );
+    assert_eq!(session.origin_bytes(), source);
+}
+
+#[test]
+fn added_graphic_paints_after_shared_streams_in_initial_graphics_state() {
+    let first = b"1 0 0 1 20 0 cm 0 1 0 rg 0 0 20 20 re f\n";
+    let second = b"5 5 10 10 re f";
+    let source = fixture_with_slots(first, true, "", &[stream("", second)], "[5 0 R 6 0 R]");
+    let mut session = open(&source);
+    let before = objects(&session, 0);
+    let graphic = json!({
+        "shape":"rectangle", "points":[[25000,5000],[35000,15000]],
+        "stroke":null, "fill":[255,0,0], "strokeWidth":0
+    });
+    apply(
+        &mut session,
+        json!({"kind":"addGraphic","page":0,"graphic":graphic}),
+    )
+    .unwrap();
+
+    let reopened = open(session.output_bytes());
+    let edited = objects(&reopened, 0);
+    assert_eq!(edited.as_array().unwrap().len(), 3);
+    assert_eq!(edited[0]["bounds"], before[0]["bounds"]);
+    assert_eq!(edited[1]["bounds"], before[1]["bounds"]);
+    assert_eq!(edited[2]["bounds"], json!([25000, 5000, 35000, 15000]));
+    assert_eq!(objects(&reopened, 1)[1]["bounds"], before[1]["bounds"]);
+    for original in [first.as_slice(), second.as_slice()] {
+        let body = [b"stream\n".as_slice(), original, b"\nendstream"].concat();
+        assert_eq!(
+            reopened
+                .output_bytes()
+                .windows(body.len())
+                .filter(|bytes| *bytes == body.as_slice())
+                .count(),
+            1
+        );
+    }
+}
+
+#[test]
+fn topmost_insertion_keeps_redaction_admission_after_translation_and_scale() {
+    let transform = b"3 0 0 3 12 6 cm\n";
+    let paint = b"0 1 0 rg 2 2 5 5 re f";
+    let source = fixture_with_slots(transform, false, "", &[stream("", paint)], "[5 0 R 6 0 R]");
+    let mut session = open(&source);
+    assert!(session.redaction_admitted());
+    let graphic = json!({
+        "shape":"rectangle", "points":[[50000,50000],[60000,60000]],
+        "stroke":null, "fill":[255,0,0], "strokeWidth":0
+    });
+    apply(
+        &mut session,
+        json!({"kind":"addGraphic","page":0,"graphic":graphic}),
+    )
+    .unwrap();
+    assert!(session.redaction_admitted());
+    let edited = objects(&session, 0);
+    assert_eq!(edited.as_array().unwrap().len(), 2);
+    assert_eq!(edited[0]["bounds"], json!([18000, 12000, 33000, 27000]));
+    assert_eq!(edited[1]["bounds"], json!([50000, 50000, 60000, 60000]));
+    for original in [transform.as_slice(), paint.as_slice()] {
+        let body = [b"stream\n".as_slice(), original, b"\nendstream"].concat();
+        assert!(
+            session
+                .output_bytes()
+                .windows(body.len())
+                .any(|bytes| bytes == body)
+        );
+    }
+    let binding = session.snapshot().binding;
+    let page_id = session.snapshot().page_state.order[0];
+    let geometry = session.redaction_mark_geometry(page_id).unwrap();
+    session
+        .add_redaction_mark(
+            binding,
+            NativeRedactionMark {
+                page_id,
+                geometry,
+                rect: [50_000, 50_000, 60_000, 60_000],
+            },
+        )
+        .unwrap();
+    session.stage_redaction(binding, 2).unwrap();
+    let evidence = session.verify_redaction(binding, 2).unwrap();
+    assert!(evidence.checks_passed(), "{evidence:?}");
+    session.publish_redaction(binding, 2).unwrap();
     assert_eq!(session.origin_bytes(), source);
 }
 
@@ -326,10 +425,10 @@ fn retained_jpeg_move_preserves_encoded_stream_and_rejects_invalid_profiles() {
     image::codecs::jpeg::JpegEncoder::new(&mut jpeg)
         .encode(&[12, 34, 56, 78], 2, 2, image::ExtendedColorType::L8)
         .unwrap();
-    let make_pdf = |width, color, extra, bytes: &[u8]| {
+    let make_pdf = |width, color, filter, extra, bytes: &[u8]| {
         let image = stream(
             &format!(
-                "/Type /XObject /Subtype /Image /ColorSpace /{color} /Width {width} /Height 2 /BitsPerComponent 8 /Filter /DCTDecode {extra}"
+                "/Type /XObject /Subtype /Image /ColorSpace /{color} /Width {width} /Height 2 /BitsPerComponent 8 /Filter {filter} {extra}"
             ),
             bytes,
         );
@@ -340,36 +439,64 @@ fn retained_jpeg_move_preserves_encoded_stream_and_rejects_invalid_profiles() {
             &[image],
         )
     };
-    let source = make_pdf(2, "DeviceGray", "", &jpeg);
-    let mut session = open(&source);
-    let before = objects(&session, 1)[0]["bounds"].clone();
-    let selected = target(&session, 0, 0);
-    apply(
-        &mut session,
-        json!({"kind":"moveObject","target":selected,"transform":[1,0,0,1,5,0]}),
-    )
-    .unwrap();
-    let reopened = open(session.output_bytes());
-    assert_eq!(objects(&reopened, 0)[0]["profile"], "rasterGray8");
-    assert_eq!(
-        objects(&reopened, 0)[0]["bounds"],
-        json!([10000, 5000, 20000, 15000])
-    );
-    assert_eq!(objects(&reopened, 1)[0]["bounds"], before);
-    assert_eq!(
-        session
-            .output_bytes()
-            .windows(jpeg.len())
-            .filter(|bytes| *bytes == jpeg)
-            .count(),
-        1
-    );
+    for filter in ["/DCTDecode", "[/DCTDecode]"] {
+        let source = make_pdf(2, "DeviceGray", filter, "", &jpeg);
+        let reader = open_pdf(&source, Default::default()).unwrap();
+        let scene = read_pdf_scene(
+            &reader,
+            &PdfSceneRequest {
+                first_page: 0,
+                page_count: 1,
+            },
+        )
+        .unwrap();
+        assert!(scene.pages[0].elements.iter().any(|element| matches!(
+            element,
+            PdfSceneElement::Image { value }
+                if value.filter == "DCTDecode" && value.media_type == "image/jpeg"
+        )));
+        let mut session = open(&source);
+        let before = objects(&session, 1)[0]["bounds"].clone();
+        let selected = target(&session, 0, 0);
+        apply(
+            &mut session,
+            json!({"kind":"moveObject","target":selected,"transform":[1,0,0,1,5,0]}),
+        )
+        .unwrap();
+        let reopened = open(session.output_bytes());
+        assert_eq!(objects(&reopened, 0)[0]["profile"], "rasterGray8");
+        assert_eq!(
+            objects(&reopened, 0)[0]["bounds"],
+            json!([10000, 5000, 20000, 15000])
+        );
+        assert_eq!(objects(&reopened, 1)[0]["bounds"], before);
+        assert_eq!(
+            session
+                .output_bytes()
+                .windows(jpeg.len())
+                .filter(|bytes| *bytes == jpeg)
+                .count(),
+            1
+        );
+    }
 
+    let ascii_hex = jpeg
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>()
+        + ">";
     for invalid in [
-        make_pdf(3, "DeviceGray", "", &jpeg),
-        make_pdf(2, "DeviceRGB", "", &jpeg),
-        make_pdf(2, "DeviceGray", "/Mask [0 0]", &jpeg),
-        make_pdf(2, "DeviceGray", "", &jpeg[..12]),
+        make_pdf(
+            2,
+            "DeviceGray",
+            "[/ASCIIHexDecode /DCTDecode]",
+            "",
+            ascii_hex.as_bytes(),
+        ),
+        make_pdf(3, "DeviceGray", "/DCTDecode", "", &jpeg),
+        make_pdf(2, "DeviceRGB", "/DCTDecode", "", &jpeg),
+        make_pdf(2, "DeviceGray", "/DCTDecode", "/Mask [0 0]", &jpeg),
+        make_pdf(2, "DeviceGray", "/DCTDecode", "", &jpeg[..12]),
     ] {
         assert!(
             NativePdfSession::open_scoped(&invalid, NativeEditLimits::default(), [7; 16]).is_err()
