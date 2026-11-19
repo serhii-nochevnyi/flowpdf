@@ -8,6 +8,7 @@ use super::super::scene::{ContentCursor, ContentToken, separated_content_streams
 use super::graph::{NativeEditError, NativePdfGraph, spend};
 use super::text::{RedactionText, redaction_number};
 use super::verifier::{NativeRedactionGeometry, NativeRedactionMark};
+use super::verify_raster;
 
 const POINT: i64 = 1_000;
 const MAX_COORD: i64 = 1_000_000 * POINT;
@@ -1794,6 +1795,10 @@ pub(super) fn scrub(
 
 pub(super) fn admitted(graph: &NativePdfGraph, order: &[u64]) -> bool {
     graph.original_bytes().len() <= super::verify_structure::MAX_INPUT
+        && graph.pages.len() <= MAX_PAGES
+        && verify_raster::within_pixel_budget(
+            (0..graph.pages.len()).map(|index| geometry(graph, index)),
+        )
         && scan_document(graph, order, &[]).is_ok()
 }
 
@@ -1931,9 +1936,9 @@ fn apply(
 #[cfg(test)]
 mod tests {
     use super::super::{
-        NativeEditLimits, tests::redaction_fixture,
-        verifier::NativeVerificationFailure::UnsupportedProfile, verify_raster, verify_text,
-        writer,
+        NativeEditLimits, NativePageCommand, NativePageSide, NativePageTarget, NativePdfSession,
+        tests::redaction_fixture, verifier::NativeVerificationFailure::UnsupportedProfile,
+        verify_text, writer,
     };
     use super::*;
 
@@ -2025,6 +2030,64 @@ mod tests {
             miter_tip([8_000, 0], [-8_000, 500], [125, 0], [1, 1]),
             Ok(None),
         );
+    }
+
+    fn session_with_crop_width(width: i64) -> NativePdfSession {
+        let limits = NativeEditLimits::default();
+        let mut graph =
+            NativePdfGraph::open(&redaction_fixture("10 10 10 10 re f"), limits).unwrap();
+        let Some(PdfValue::Dictionary(page)) = graph.objects.get_mut(&graph.pages[0]) else {
+            unreachable!()
+        };
+        page.insert(
+            "MediaBox".into(),
+            PdfValue::Array([0, 0, 3_000, 3_000].map(PdfValue::Integer).to_vec()),
+        );
+        page.insert(
+            "CropBox".into(),
+            PdfValue::Array([0, 0, width, 2_000].map(PdfValue::Integer).to_vec()),
+        );
+        page.insert("Rotate".into(), PdfValue::Integer(90));
+        NativePdfSession::open_scoped(&writer::rewrite(&graph).unwrap(), limits, [5; 16]).unwrap()
+    }
+
+    #[test]
+    fn redaction_admission_checks_page_and_document_raster_limits() {
+        assert!(!session_with_crop_width(2_001).redaction_admitted());
+
+        let mut session = session_with_crop_width(2_000);
+        let target = NativePageTarget {
+            page: 0,
+            stable_id: session.snapshot().page_state.order[0],
+        };
+        for request_id in 1..=3 {
+            assert!(session.redaction_admitted(), "{request_id} pages");
+            session
+                .apply_page(
+                    session.snapshot().binding,
+                    request_id,
+                    &NativePageCommand::InsertBlankPage {
+                        target,
+                        side: NativePageSide::After,
+                    },
+                )
+                .unwrap();
+        }
+        assert_eq!(session.snapshot().page_state.order.len(), 4);
+        assert!(!session.redaction_admitted());
+        session
+            .apply_page(
+                session.snapshot().binding,
+                4,
+                &NativePageCommand::DeletePage {
+                    target: NativePageTarget {
+                        page: 1,
+                        stable_id: session.snapshot().page_state.order[1],
+                    },
+                },
+            )
+            .unwrap();
+        assert!(session.redaction_admitted());
     }
 
     #[test]
