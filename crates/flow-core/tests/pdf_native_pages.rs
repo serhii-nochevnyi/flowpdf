@@ -419,6 +419,60 @@ fn trailer_owned_navigation_blocks_only_its_target() {
 }
 
 #[test]
+fn retained_references_outside_navigation_block_only_the_target_page() {
+    for (tree_entry, page_entry) in [
+        ("/FlowPDFRetained [3 0 R]", ""),
+        ("", "/FlowPDFRetained 6 0 R"),
+    ] {
+        let bytes = build_pdf(&[
+            (0, "<< /Type /Catalog /Pages 2 0 R >>"),
+            (
+                0,
+                &format!(
+                    "<< /Type /Pages /Kids [3 0 R 4 0 R 5 0 R] /Count 3 /MediaBox [0 0 300 500] {tree_entry} >>"
+                ),
+            ),
+            (0, "<< /Type /Page /Parent 2 0 R >>"),
+            (0, "<< /Type /Page /Parent 2 0 R >>"),
+            (0, &format!("<< /Type /Page /Parent 2 0 R {page_entry} >>")),
+            (0, "<< /References [3 0 R] >>"),
+        ]);
+        let mut session =
+            NativePdfSession::open_scoped(&bytes, NativeEditLimits::default(), [3; 16]).unwrap();
+        let prior = session.snapshot().clone();
+        let capabilities = prior.page_state.restrictions.as_ref().unwrap();
+        assert!(capabilities.pages[0].delete.is_some());
+        assert!(capabilities.pages[1].delete.is_none());
+
+        assert_eq!(
+            session
+                .apply_page(prior.binding, 1, &command("deletePage", 0, &prior))
+                .unwrap_err()
+                .code(),
+            "FLOW_PDF_NATIVE_UNSUPPORTED"
+        );
+        assert_eq!(session.output_bytes(), bytes);
+        assert_eq!(session.snapshot().binding, prior.binding);
+        assert_eq!(session.snapshot().page_state, prior.page_state);
+
+        session
+            .apply_page(prior.binding, 2, &command("deletePage", 1, &prior))
+            .unwrap();
+        let after = &session.snapshot().page_state;
+        assert_eq!(
+            after.order,
+            [prior.page_state.order[0], prior.page_state.order[2]]
+        );
+        assert!(
+            after.restrictions.as_ref().unwrap().pages[0]
+                .delete
+                .is_some()
+        );
+        assert!(String::from_utf8_lossy(session.output_bytes()).contains("/FlowPDFRetained"));
+    }
+}
+
+#[test]
 fn retained_annotation_references_block_only_the_link_target() {
     for (annots, retained) in [
         ("[6 0 R]", ""),
@@ -744,27 +798,25 @@ fn chapter_outline_blocks_delete_but_leaf_outline_can_be_removed() {
     );
 }
 
-#[test]
-fn many_outline_entries_do_not_block_unreferenced_pages() {
-    const PAGE_COUNT: usize = 300;
-    const BOOKMARK_COUNT: usize = 3400;
-    let outline = PAGE_COUNT + 3;
+fn outline_pdf(page_count: usize, targets: &[usize]) -> Vec<u8> {
+    let bookmark_count = targets.len();
+    let outline = page_count + 3;
     let first = outline + 1;
-    let last = outline + BOOKMARK_COUNT;
+    let last = outline + bookmark_count;
     let kids = (3..outline)
         .map(|page| format!("{page} 0 R "))
         .collect::<String>();
     let mut objects = vec![
         format!("<< /Type /Catalog /Pages 2 0 R /Outlines {outline} 0 R >>"),
         format!(
-            "<< /Type /Pages /Kids [{kids}] /Count {PAGE_COUNT} /MediaBox [0 0 300 500] /Resources <<>> >>"
+            "<< /Type /Pages /Kids [{kids}] /Count {page_count} /MediaBox [0 0 300 500] /Resources <<>> >>"
         ),
     ];
-    objects.extend((0..PAGE_COUNT).map(|_| "<< /Type /Page /Parent 2 0 R >>".to_owned()));
+    objects.extend((0..page_count).map(|_| "<< /Type /Page /Parent 2 0 R >>".to_owned()));
     objects.push(format!(
-        "<< /Type /Outlines /First {first} 0 R /Last {last} 0 R /Count {BOOKMARK_COUNT} >>"
+        "<< /Type /Outlines /First {first} 0 R /Last {last} 0 R /Count {bookmark_count} >>"
     ));
-    for entry in first..=last {
+    for (entry, &target) in (first..=last).zip(targets) {
         let prev = if entry > first {
             format!("/Prev {} 0 R ", entry - 1)
         } else {
@@ -776,11 +828,18 @@ fn many_outline_entries_do_not_block_unreferenced_pages() {
             String::new()
         };
         objects.push(format!(
-            "<< /Title (Reference) /Parent {outline} 0 R {prev}{next}/Dest [3 0 R /Fit] >>"
+            "<< /Title (Reference {target}) /Parent {outline} 0 R {prev}{next}/Dest [{} 0 R /Fit] >>",
+            target + 3
         ));
     }
     let refs: Vec<_> = objects.iter().map(|value| (0, value.as_str())).collect();
-    let bytes = build_pdf(&refs);
+    build_pdf(&refs)
+}
+
+#[test]
+fn many_outline_entries_do_not_block_unreferenced_pages() {
+    const PAGE_COUNT: usize = 300;
+    let bytes = outline_pdf(PAGE_COUNT, &[0; 3400]);
     let mut session =
         NativePdfSession::open_scoped(&bytes, NativeEditLimits::default(), [3; 16]).unwrap();
     let prior = session.snapshot().clone();
@@ -795,6 +854,47 @@ fn many_outline_entries_do_not_block_unreferenced_pages() {
         )
         .unwrap();
     assert_eq!(session.snapshot().page_state.order.len(), PAGE_COUNT - 1);
+}
+
+#[test]
+fn bookmarks_spread_across_pages_fit_the_default_deletion_budget() {
+    const PAGE_COUNT: usize = 600;
+    const TARGET: usize = 299;
+    let targets: Vec<_> = (0..PAGE_COUNT - 1).flat_map(|page| [page, page]).collect();
+    let bytes = outline_pdf(PAGE_COUNT, &targets);
+    let mut session =
+        NativePdfSession::open_scoped(&bytes, NativeEditLimits::default(), [3; 16]).unwrap();
+    let prior = session.snapshot().clone();
+    assert!(
+        prior
+            .page_state
+            .restrictions
+            .as_ref()
+            .is_none_or(|caps| caps.pages[TARGET].delete.is_none()
+                && caps.pages[PAGE_COUNT - 1].delete.is_none())
+    );
+    session
+        .apply_page(prior.binding, 1, &command("deletePage", TARGET, &prior))
+        .unwrap();
+    let after = session.snapshot().clone();
+    let mut expected = prior.page_state.order;
+    expected.remove(TARGET);
+    assert_eq!(after.page_state.order, expected);
+    let output = String::from_utf8_lossy(session.output_bytes());
+    assert_eq!(output.matches("/Title").count(), targets.len() - 2);
+
+    let last_page = PAGE_COUNT - 2;
+    session
+        .apply_page(after.binding, 2, &command("deletePage", last_page, &after))
+        .unwrap();
+    expected.pop();
+    assert_eq!(session.snapshot().page_state.order, expected);
+    assert_eq!(
+        String::from_utf8_lossy(session.output_bytes())
+            .matches("/Title")
+            .count(),
+        targets.len() - 2
+    );
 }
 
 #[test]
@@ -1180,4 +1280,164 @@ fn owned_checkbox_copies_remain_independently_editable_after_page_deletion() {
     .unwrap();
     pdf.apply_field(pdf.snapshot().binding, 5, &toggle).unwrap();
     assert_eq!(pdf.snapshot().fields[0].checked, Some(false));
+}
+
+#[test]
+fn indirect_page_tree_children_fit_the_default_deletion_budget() {
+    const PAGE_COUNT: usize = 800;
+    let kids_ref = PAGE_COUNT + 3;
+    let kids = (3..kids_ref)
+        .map(|page| format!("{page} 0 R "))
+        .collect::<String>();
+    let mut objects = vec![
+        "<< /Type /Catalog /Pages 2 0 R >>".to_owned(),
+        format!(
+            "<< /Type /Pages /Kids {kids_ref} 0 R /Count {PAGE_COUNT} /MediaBox [0 0 300 500] >>"
+        ),
+    ];
+    objects.extend((0..PAGE_COUNT).map(|_| "<< /Type /Page /Parent 2 0 R >>".to_owned()));
+    objects.push(format!("[{kids}]"));
+    let refs: Vec<_> = objects.iter().map(|value| (0, value.as_str())).collect();
+
+    let bytes = build_pdf(&refs);
+    let mut session =
+        NativePdfSession::open_scoped(&bytes, NativeEditLimits::default(), [3; 16]).unwrap();
+    let prior = session.snapshot().clone();
+    session
+        .apply_page(prior.binding, 1, &command("deletePage", 399, &prior))
+        .unwrap();
+    let mut expected = prior.page_state.order;
+    expected.remove(399);
+    assert_eq!(session.snapshot().page_state.order, expected);
+}
+
+#[test]
+fn indirect_page_tree_child_array_retained_by_trailer_prevents_deletion() {
+    let bytes = build_pdf_with_trailer(
+        &[
+            (0, "<< /Type /Catalog /Pages 2 0 R >>"),
+            (
+                0,
+                "<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 /MediaBox [0 0 300 500] >>",
+            ),
+            (0, "<< /Type /Pages /Parent 2 0 R /Kids 6 0 R /Count 1 >>"),
+            (0, "<< /Type /Page /Parent 2 0 R >>"),
+            (0, "<< /Type /Page /Parent 3 0 R >>"),
+            (0, "[5 0 R]"),
+        ],
+        " /RetainedKids 6 0 R",
+    );
+    let mut session =
+        NativePdfSession::open_scoped(&bytes, NativeEditLimits::default(), [3; 16]).unwrap();
+    let prior = session.snapshot().clone();
+    assert!(
+        prior.page_state.restrictions.as_ref().unwrap().pages[0]
+            .delete
+            .is_some()
+    );
+    assert!(
+        session
+            .apply_page(prior.binding, 1, &command("deletePage", 0, &prior))
+            .is_err()
+    );
+    assert_eq!(session.output_bytes(), bytes);
+    session
+        .apply_page(prior.binding, 2, &command("deletePage", 1, &prior))
+        .unwrap();
+    assert_eq!(
+        session.snapshot().page_state.order,
+        prior.page_state.order[..1]
+    );
+}
+
+#[test]
+fn indirect_page_tree_replacement_preserves_surviving_sibling_references() {
+    let bytes = build_pdf(&[
+        (0, "<< /Type /Catalog /Pages 2 0 R >>"),
+        (
+            0,
+            "<< /Type /Pages /Kids 6 0 R /Count 3 /MediaBox [0 0 300 500] >>",
+        ),
+        (0, "<< /Type /Page /Parent 2 0 R >>"),
+        (0, "<< /Type /Page /Parent 2 0 R /RetainedPage 3 0 R >>"),
+        (0, "<< /Type /Page /Parent 2 0 R >>"),
+        (0, "7 0 R"),
+        (0, "[3 0 R 4 0 R 5 0 R]"),
+    ]);
+    let mut session =
+        NativePdfSession::open_scoped(&bytes, NativeEditLimits::default(), [3; 16]).unwrap();
+    let prior = session.snapshot().clone();
+    let capabilities = &prior.page_state.restrictions.as_ref().unwrap().pages;
+    assert!(capabilities[0].delete.is_some());
+    assert!(capabilities[2].delete.is_none());
+    assert!(
+        session
+            .apply_page(prior.binding, 1, &command("deletePage", 0, &prior))
+            .is_err()
+    );
+    assert_eq!(session.output_bytes(), bytes);
+    session
+        .apply_page(prior.binding, 2, &command("deletePage", 2, &prior))
+        .unwrap();
+    assert_eq!(
+        session.snapshot().page_state.order,
+        prior.page_state.order[..2]
+    );
+}
+
+#[test]
+fn indexed_links_across_pages_fit_the_default_delete_projection_budget() {
+    const INDEX_PAGES: usize = 12;
+    const LINKS_PER_INDEX: usize = 128;
+    const LINKS: usize = INDEX_PAGES * LINKS_PER_INDEX;
+    const PAGE_COUNT: usize = INDEX_PAGES + LINKS;
+    const FIRST_LINK: usize = PAGE_COUNT + 3;
+    let kids = (3..FIRST_LINK)
+        .map(|object| format!("{object} 0 R "))
+        .collect::<String>();
+    let mut objects = vec![
+        "<< /Type /Catalog /Pages 2 0 R >>".to_owned(),
+        format!("<< /Type /Pages /Kids [{kids}] /Count {PAGE_COUNT} /MediaBox [0 0 300 500] >>"),
+    ];
+    for index in 0..INDEX_PAGES {
+        let start = FIRST_LINK + index * LINKS_PER_INDEX;
+        let annots = (start..start + LINKS_PER_INDEX)
+            .map(|object| format!("{object} 0 R "))
+            .collect::<String>();
+        objects.push(format!(
+            "<< /Type /Page /Parent 2 0 R /Annots [{annots}] >>"
+        ));
+    }
+    objects.extend((0..LINKS).map(|_| "<< /Type /Page /Parent 2 0 R >>".to_owned()));
+    for target in INDEX_PAGES + 3..FIRST_LINK {
+        objects.push(format!(
+            "<< /Type /Annot /Subtype /Link /Rect [0 0 20 20] /Dest [{target} 0 R /Fit] >>"
+        ));
+    }
+    let refs: Vec<_> = objects.iter().map(|value| (0, value.as_str())).collect();
+    let bytes = build_pdf(&refs);
+    let mut session =
+        NativePdfSession::open_scoped(&bytes, NativeEditLimits::default(), [3; 16]).unwrap();
+    let prior = session.snapshot().clone();
+    assert!(
+        prior
+            .page_state
+            .restrictions
+            .as_ref()
+            .is_none_or(|restrictions| { restrictions.pages[INDEX_PAGES].delete.is_none() })
+    );
+    session
+        .apply_page(
+            prior.binding,
+            1,
+            &command("deletePage", INDEX_PAGES, &prior),
+        )
+        .unwrap();
+    assert_eq!(session.snapshot().page_state.order.len(), PAGE_COUNT - 1);
+    assert_eq!(
+        String::from_utf8_lossy(session.output_bytes())
+            .matches("/Subtype /Link")
+            .count(),
+        LINKS - 1
+    );
 }
