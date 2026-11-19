@@ -9,7 +9,10 @@ use image::{ImageDecoder, ImageFormat, ImageReader, Limits};
 use serde::{Deserialize, Serialize};
 
 use super::super::{
-    reader::{PdfObjectRef, PdfReaderLimits, PdfStream, PdfValue, jpeg_frame, single_filter},
+    reader::{
+        PdfObjectRef, PdfReaderLimits, PdfStream, PdfValue, jpeg_decode_peak, jpeg_frame,
+        single_filter,
+    },
     scene::{ContentCursor, ContentToken, NativePdfNotePage, separated_content_streams},
 };
 use super::{
@@ -1099,7 +1102,7 @@ fn image_source(hex: &str, graph: &NativePdfGraph, remaining: &mut usize) -> Res
     } else {
         None
     };
-    let (width, height) = if let Some((width, height, _)) = jpeg {
+    let (width, height) = if let Some((width, height, _, _)) = jpeg {
         (width, height)
     } else {
         let dimensions = bytes
@@ -1125,11 +1128,23 @@ fn image_source(hex: &str, graph: &NativePdfGraph, remaining: &mut usize) -> Res
         .max_decoded_stream_bytes
         .min(graph.remaining_decoded());
     let minimum_samples =
-        pixels * jpeg.map_or(1, |(_, _, color)| u64::from(color.bytes_per_pixel()));
+        pixels * jpeg.map_or(1, |(_, _, color, _)| u64::from(color.bytes_per_pixel()));
     if minimum_samples > decoded_limit as u64 {
         return Err(NativeSessionError::Budget);
     }
-    if format == ImageFormat::Png {
+    if let Some((_, _, _, components)) = jpeg {
+        let peak = jpeg_decode_peak(
+            bytes.len(),
+            width as usize,
+            height as usize,
+            components,
+            minimum_samples as usize,
+        )
+        .ok_or(NativeSessionError::Budget)?;
+        if peak > *remaining {
+            return Err(NativeSessionError::Budget);
+        }
+    } else {
         check_png_color_chunks(&bytes[8..])?;
     }
     let mut limits = Limits::default();
@@ -1142,7 +1157,7 @@ fn image_source(hex: &str, graph: &NativePdfGraph, remaining: &mut usize) -> Res
     let color = decoder.color_type();
     if decoder.dimensions() != (width, height)
         || !matches!(color, image::ColorType::L8 | image::ColorType::Rgb8)
-        || jpeg.is_some_and(|frame| frame != (width, height, color))
+        || jpeg.is_some_and(|(_, _, frame_color, _)| frame_color != color)
     {
         return Err(Asset.into());
     }
@@ -1150,7 +1165,12 @@ fn image_source(hex: &str, graph: &NativePdfGraph, remaining: &mut usize) -> Res
     if samples > decoded_limit {
         return Err(NativeSessionError::Budget);
     }
-    spend(remaining, samples * 3 + 4096)?;
+    if jpeg.is_some() {
+        // @invariant: JPEG scratch is temporary and the command covers the encoded asset.
+        spend(remaining, samples)?;
+    } else {
+        spend(remaining, samples * 3 + 4096)?;
+    }
     let mut data = vec![0; samples];
     decoder.read_image(&mut data).map_err(|_| Asset)?;
     let (filter, encoded) = match format {
