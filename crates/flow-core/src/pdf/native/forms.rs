@@ -751,7 +751,13 @@ fn display_name(
     data: &Dict,
     work: &mut usize,
 ) -> Option<String> {
-    let label = if let Some(label) = data.get("T") {
+    let widget_label = data
+        .get("T")
+        .map(|label| graph.resolve_metered(label, work))
+        .transpose()
+        .ok()?
+        .filter(|label| !matches!(label, Value::Null));
+    let label = if let Some(label) = widget_label {
         label
     } else {
         let parent = data.get("Parent")?.as_reference()?;
@@ -770,9 +776,9 @@ fn display_name(
         {
             return None;
         }
-        field.get("T")?
+        graph.resolve_metered(field.get("T")?, work).ok()?
     };
-    let bytes = graph.resolve_metered(label, work).ok()?.as_bytes()?;
+    let bytes = label.as_bytes()?;
     let name = if bytes.starts_with(&[0xfe, 0xff]) || bytes.starts_with(&[0xef, 0xbb, 0xbf]) {
         decode(bytes, MAX_NAME)?
     } else {

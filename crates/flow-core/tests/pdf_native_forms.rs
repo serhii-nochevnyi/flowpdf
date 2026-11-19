@@ -203,16 +203,18 @@ fn read_only_appearance_retains_verified_name_without_a_setter() {
 #[test]
 fn named_read_only_widgets_keep_their_labels_after_a_page_rewrite() {
     let form = "/Type /XObject /Subtype /Form /BBox [0 0 20 20] /Resources <<>>";
-    for (merged_name, parent_name, expected_names, refusal) in [
+    for (merged_name, parent_name, widget_label_entry, expected_names, refusal) in [
         (
             "(consent)",
             "(approval)",
+            "",
             ["consent", "approval"],
             NativeFieldRefusal::Profile,
         ),
         (
             "<436166E9>",
             "<FEFF04170433043E04340430>",
+            "/T null",
             ["Café", "Згода"],
             NativeFieldRefusal::Reference,
         ),
@@ -224,7 +226,7 @@ fn named_read_only_widgets_keep_their_labels_after_a_page_rewrite() {
             b"<< /Fields [5 0 R 6 0 R] >>".to_vec(),
             format!("<< /Type /Annot /Subtype /Widget /FT /Btn /T {merged_name} /Ff 1 /V /Off /P 3 0 R /Rect [10 10 30 30] /AP << /N << /Off 8 0 R /Yes 9 0 R >> >> /AS /Off >>").into_bytes(),
             format!("<< /FT /Btn /T {parent_name} /Ff 1 /V /Off /Kids [7 0 R] >>").into_bytes(),
-            b"<< /Type /Annot /Subtype /Widget /Parent 6 0 R /P 3 0 R /Rect [40 10 60 30] /AP << /N << /Off 8 0 R /Yes 9 0 R >> >> /AS /Off >>".to_vec(),
+            format!("<< /Type /Annot /Subtype /Widget /Parent 6 0 R /P 3 0 R /Rect [40 10 60 30] /AP << /N << /Off 8 0 R /Yes 9 0 R >> >> /AS /Off {widget_label_entry} >>").into_bytes(),
             stream(form, b"q 1 g 0 0 20 20 re f 0 G 1 w 1 1 18 18 re S\nQ\n"),
             stream(form, b"q 1 g 0 0 20 20 re f 0 G 1 w 1 1 18 18 re S\n2 w 2 2 m 18 18 l 2 18 m 18 2 l S\nQ\n"),
         ]);
@@ -242,14 +244,16 @@ fn named_read_only_widgets_keep_their_labels_after_a_page_rewrite() {
             }
         };
         assert_fields(&pdf);
-        let field = pdf.snapshot().fields[0].id;
-        assert_eq!(
-            apply(
-                &mut pdf,
-                json!({"kind":"setFieldChecked","field":field,"checked":true})
-            ),
-            Err(refusal.code())
-        );
+        for index in 0..expected_names.len() {
+            let field = pdf.snapshot().fields[index].id;
+            assert_eq!(
+                apply(
+                    &mut pdf,
+                    json!({"kind":"setFieldChecked","field":field,"checked":true})
+                ),
+                Err(refusal.code())
+            );
+        }
         assert_eq!(pdf.output_bytes(), bytes);
 
         let snapshot = pdf.snapshot();
