@@ -562,13 +562,13 @@ struct Admitted {
     rect: [i64; 4],
 }
 
-fn recognize(
+fn recognize_identity(
     graph: &NativePdfGraph,
     form: &Form,
     page: &NativePdfNotePage,
     widget: Ref,
     work: &mut usize,
-) -> FieldResult<Admitted> {
+) -> FieldResult<(Ref, String)> {
     let widget_data = dict(graph, widget).map_err(|_| Reference)?;
     let field = widget_data
         .get("Parent")
@@ -585,6 +585,7 @@ fn recognize(
     ) || fields
         .get("Ff")
         .is_some_and(|flags| !matches!(flags.as_integer(), Some(0 | 2)))
+        || field != widget && widget_data.contains_key("T")
     {
         return Err(Profile);
     }
@@ -628,6 +629,18 @@ fn recognize(
         .and_then(|bytes| decode(bytes, MAX_NAME))
         .filter(|name| form.names.get(name) == Some(&field))
         .ok_or(Reference)?;
+    Ok((field, field_name))
+}
+
+fn recognize_appearance(
+    graph: &NativePdfGraph,
+    form: &Form,
+    page: &NativePdfNotePage,
+    widget: Ref,
+    (field, field_name): (Ref, String),
+) -> FieldResult<Admitted> {
+    let widget_data = dict(graph, widget).map_err(|_| Reference)?;
+    let fields = dict(graph, field).map_err(|_| Reference)?;
     if fields.get("Q").is_some_and(|v| v.as_integer() != Some(0))
         || fields.contains_key("MaxLen")
         || ["MK", "OC", "Border", "BS"]
@@ -637,7 +650,7 @@ fn recognize(
             .get("F")
             .is_some_and(|v| !matches!(v.as_integer(), Some(0 | 4)))
         || field != widget
-            && ["V", "DV", "FT", "T", "DA", "Ff", "Q", "MaxLen"]
+            && ["V", "DV", "FT", "DA", "Ff", "Q", "MaxLen"]
                 .iter()
                 .any(|key| widget_data.contains_key(*key))
     {
@@ -774,16 +787,21 @@ pub(super) fn project(
             spend(&mut work, form.fields.len() + page.annotations.len())?;
             spend(&mut work, data.get("AP").map_or(0, |_| MAX_TEXT))?;
         }
-        let admitted = form
-            .as_ref()
-            .map_err(|&error| error)
-            .and_then(|form| recognize(graph, form, page, object, &mut work));
+        let mut readable_name = None;
+        let admitted = form.as_ref().map_err(|&error| error).and_then(|form| {
+            let identity = recognize_identity(graph, form, page, object, &mut work)?;
+            readable_name = Some(identity.1.clone());
+            recognize_appearance(graph, form, page, object, identity)
+        });
+        if let Some(name) = &readable_name {
+            spend(remaining, name.len())?;
+        }
         let mut view = NativeFieldView {
             id: id(binding, object),
             object,
             page: page.id.0,
             kind: None,
-            name: None,
+            name: readable_name,
             rect: data
                 .get("Rect")
                 .and_then(rect)
@@ -794,9 +812,8 @@ pub(super) fn project(
             refusal: admitted.as_ref().err().copied(),
         };
         if let Ok(admitted) = admitted {
-            spend(remaining, admitted.name.len() + MAX_TEXT)?;
+            spend(remaining, MAX_TEXT)?;
             view.kind = Some(admitted.value.kind());
-            view.name = Some(admitted.name);
             match admitted.value {
                 FieldValue::Text(value) => view.value = Some(value),
                 FieldValue::Checkbox { checked, .. } => view.checked = Some(checked),
@@ -1040,7 +1057,8 @@ pub(super) fn stage(
         graph.charge_page_work(old_page.annotations.len() + form.fields.len())?;
         let mut work = graph.remaining_work();
         let budget = work;
-        let admitted = recognize(graph, &form, old_page, view.object, &mut work)?;
+        let identity = recognize_identity(graph, &form, old_page, view.object, &mut work)?;
+        let admitted = recognize_appearance(graph, &form, old_page, view.object, identity)?;
         graph.charge_page_work(budget - work)?;
         graph.reserve_page_copy(admitted.field)?;
         if admitted.field != view.object {
