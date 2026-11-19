@@ -765,7 +765,13 @@ impl PdfReader {
                 let contents = match dictionary.get("Contents") {
                     None => Vec::new(),
                     Some(PdfValue::Reference(reference)) => {
-                        let (mut cursor, _) = self.object_cursor(*reference, depth + 2, None)?;
+                        let (mut cursor, _) = self.object_cursor(*reference, 0, None)?;
+                        cursor.skip_space();
+                        if cursor.bytes.get(cursor.position) == Some(&b'[')
+                            && depth + 2 > self.limits.max_nesting
+                        {
+                            return Err(PdfReadError::NestingLimit);
+                        }
                         match cursor.parse_value(0)? {
                             array @ PdfValue::Array(_) => {
                                 if !cursor.consume_keyword(b"endobj") {
