@@ -134,6 +134,7 @@ export interface NativePdfCoordinatorState {
   readonly pendingRequestId: number | null
   readonly code: string | null
   readonly reopenOriginal: boolean
+  readonly reopenAccepted: boolean
 }
 
 type CommandRequest = Extract<NativePdfRequest, { operation: 'command' }>
@@ -460,7 +461,7 @@ function confirmsCommand(request: CommandRequest, previous: NativePdfVerifiedSna
 
 export class NativePdfEditCoordinator {
   private state: NativePdfCoordinatorState = Object.freeze({
-    phase: 'idle', accepted: null, pendingRequestId: null, code: null, reopenOriginal: false,
+    phase: 'idle', accepted: null, pendingRequestId: null, code: null, reopenOriginal: false, reopenAccepted: false,
     redaction: null, showingPriorAccepted: false,
   })
   private readonly listeners = new Set<() => void>()
@@ -644,7 +645,7 @@ export class NativePdfEditCoordinator {
       throw new NativePdfWorkerError('FLOW_PDF_NATIVE_RECONCILIATION_UNAVAILABLE')
     }
     const { protocolVersion, requestId, binding, originStoreHash } = command
-    this.update('reconciling', requestId)
+    this.update('reconciling', requestId, null, previous, this.state.redaction, this.state.reopenAccepted ? 'accepted' : null)
     try {
       const reply = assertSuccess(await this.send({ operation: 'snapshot', protocolVersion, requestId, binding, originStoreHash }))
       this.requireLive(requestId)
@@ -669,7 +670,9 @@ export class NativePdfEditCoordinator {
       return Object.freeze({ status: reply.status, snapshot: current })
     } catch (cause: unknown) {
       const error = errorFor(cause, requestId)
-      if (this.snapshot().phase === 'reconciling') this.update('reconciliationRequired', requestId, error.code)
+      if (this.snapshot().phase === 'reconciling') {
+        this.update('reconciliationRequired', requestId, error.code, previous, this.state.redaction, 'accepted')
+      }
       throw error
     }
   }
@@ -812,7 +815,7 @@ export class NativePdfEditCoordinator {
     readonly status: 'accepted' | 'unseen'; readonly snapshot: NativePdfVerifiedSnapshot
   }> {
     const requestId = job.request.requestId
-    this.update('reconciling', requestId, null, job.previous, this.state.redaction, this.state.reopenOriginal)
+    this.update('reconciling', requestId, null, job.previous, this.state.redaction, this.state.reopenOriginal ? 'original' : null)
     try {
       if (job.request.action.kind !== 'stage') {
         const { redaction } = await this.redactionStep(job, job.request.action)
@@ -840,7 +843,7 @@ export class NativePdfEditCoordinator {
       const error = errorFor(cause, requestId)
       if (this.redactionJob === job) {
         if (error.code === REPLY_LOST) {
-          this.update('reconciliationRequired', requestId, error.code, job.previous, this.state.redaction, true)
+          this.update('reconciliationRequired', requestId, error.code, job.previous, this.state.redaction, 'original')
         } else {
           this.invalidate(error.code)
         }
@@ -1005,12 +1008,12 @@ export class NativePdfEditCoordinator {
     code: string | null = null,
     accepted = this.state.accepted,
     redaction = accepted === this.state.accepted ? this.state.redaction : null,
-    allowReopen = phase === 'invalidated',
+    reopen: 'original' | 'accepted' | null = phase === 'invalidated' ? 'original' : null,
   ): void {
     const showingPriorAccepted = accepted !== null && (phase === 'invalidated' || this.redactionJob?.request.action.kind === 'stage'
       || redaction?.action === 'cancel' || redaction?.verification != null && !redaction.published)
     this.state = Object.freeze({ phase, pendingRequestId, code, accepted, redaction, showingPriorAccepted,
-      reopenOriginal: allowReopen && this.original !== null })
+      reopenOriginal: reopen === 'original' && this.original !== null, reopenAccepted: reopen === 'accepted' })
     for (const listener of this.listeners) {
       try {
         listener()

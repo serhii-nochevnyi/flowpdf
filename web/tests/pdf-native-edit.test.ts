@@ -1,5 +1,6 @@
 import * as wasm from '../generated/flow_wasm.js'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { nativeCropBounds } from '../src/pdf/pdf-native-edit-panel.js'
 import {
   NATIVE_PDF_LIMITS,
   nativeBytesHex,
@@ -627,6 +628,82 @@ describe('native PDF edit coordinator', () => {
     lane.coordinator.dispose()
   })
 
+  it.each(['refused', 'lost'] as const)('reopens verified bytes after a %s ordinary readback without replaying edits', async (result) => {
+    vi.useFakeTimers()
+    const lane = fakePort(20)
+    const sent = vi.spyOn(lane.worker, 'postMessage')
+    const initial = await opened(lane)
+    const saved = lane.coordinator.command(note('verified edit'))
+    const savedDispatch = await lane.take()
+    const applied = addReply(savedDispatch.request, initial)
+    const bytes = nativeHexBytes(applied.snapshot.outputHex)
+    const outputHash = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes)))
+    lane.deliver(savedDispatch, { ...applied, snapshot: {
+      ...applied.snapshot, outputHash, scene: { ...applied.snapshot.scene, outputHash },
+    } })
+    const accepted = await saved
+
+    const lost = expect(lane.coordinator.command(note('uncertain edit'))).rejects.toMatchObject({ code: 'FLOW_PDF_NATIVE_REPLY_LOST' })
+    const queued = expect(lane.coordinator.command(note('queued edit'))).rejects.toMatchObject({ code: 'FLOW_PDF_NATIVE_WORKER_FAILED' })
+    const edit = await lane.take()
+    const unverified = addReply(edit.request, accepted)
+    await vi.advanceTimersByTimeAsync(20)
+    await lost
+    expect(lane.coordinator.snapshot()).toMatchObject({ phase: 'reconciliationRequired', reopenAccepted: false })
+
+    const code = result === 'refused' ? 'FLOW_PDF_NATIVE_REVISION_MISMATCH' : 'FLOW_PDF_NATIVE_REPLY_LOST'
+    const readback = expect(lane.coordinator.reconcile()).rejects.toMatchObject({ code })
+    const lookup = await lane.take()
+    expect(lookup.request).toMatchObject({ operation: 'snapshot', requestId: edit.request.requestId, binding: accepted.binding })
+    if (result === 'refused') {
+      lane.deliver(lookup, { ...unverified, operation: 'snapshot', status: 'failed', snapshot: null, code })
+    } else {
+      await vi.advanceTimersByTimeAsync(20)
+    }
+    await readback
+    lane.deliver(edit, unverified)
+    lane.deliver(lookup, { ...unverified, operation: 'snapshot', status: 'accepted' })
+    expect(lane.coordinator.snapshot()).toMatchObject({
+      phase: 'reconciliationRequired', pendingRequestId: edit.request.requestId, reopenAccepted: true, reopenOriginal: false,
+    })
+    expect(lane.coordinator.snapshot().accepted).toBe(accepted)
+    expect(lane.coordinator.outputBytes()).toEqual(bytes)
+    await expect(lane.coordinator.command(note('blocked edit'))).rejects.toMatchObject({ code: 'FLOW_PDF_NATIVE_RECONCILIATION_REQUIRED' })
+    expect(sent.mock.calls.map(([message]) => message.request.operation)).toEqual(['open', 'command', 'command', 'snapshot'])
+
+    const replacement = fakePort()
+    const originStoreHash = nativeBytesHex(Uint8Array.from(accepted.outputHash))
+    const reopening = replacement.coordinator.open({ bytes: lane.coordinator.outputBytes()!, originStoreHash })
+    const open = await replacement.take()
+    expect(open.request).toMatchObject({ operation: 'open', originStoreHash, bytesHex: accepted.outputHex })
+    const openedReply = openReply(open.request)
+    replacement.deliver(open, { ...openedReply, snapshot: {
+      ...openedReply.snapshot, scene: { ...openedReply.snapshot.scene, pages: accepted.scene.pages },
+    } })
+    const reopened = await reopening
+    lane.coordinator.dispose()
+    await queued
+    expect(lane.sent).toEqual([])
+    expect(replacement.sent).toEqual([])
+    expect(replacement.coordinator.snapshot()).toMatchObject({ phase: 'ready', reopenAccepted: false })
+
+    const next = note('new intent')
+    const editing = replacement.coordinator.command(next)
+    const nextDispatch = await replacement.take()
+    expect(nextDispatch.request).toMatchObject({ operation: 'command', binding: reopened.binding, command: next })
+    const edited = addReply(nextDispatch.request, reopened)
+    const page = edited.snapshot.scene.pages[0]!
+    const [previous, added] = page.annotations
+    if (!previous || added?.kind !== 'plainNote') throw new Error('expected two notes')
+    replacement.deliver(nextDispatch, { ...edited, snapshot: {
+      ...edited.snapshot, scene: { ...edited.snapshot.scene, pages: [{
+        ...page, annotations: [previous, { ...added, id: 2, object: { objectNumber: 5, generation: 0 } }],
+      }] },
+    } })
+    await expect(editing).resolves.toMatchObject({ binding: { revision: 1 } })
+    replacement.coordinator.dispose()
+  })
+
   it.each(['unseen', 'evicted'] as const)('reconciles %s history without replaying the uncertain command', async (status) => {
     vi.useFakeTimers()
     const lane = fakePort(20)
@@ -937,6 +1014,50 @@ async function closeRedactionFixture(lane: ReturnType<typeof fakePort>) {
 }
 
 describe('native redaction quarantine', () => {
+  it.each([0, 90] as const)('uses the exact fractional crop for marks on a %i° page', async (rotation) => {
+    await initializeWasm()
+    const lane = fakePort(30_000, wasm.verify_native_pdf_response)
+    const bytes = new TextEncoder().encode(fixturePdf([
+      '<< /Type /Catalog /Pages 2 0 R >>',
+      '<< /Type /Pages /Kids [3 0 R] /Count 1 >>',
+      `<< /Type /Page /Parent 2 0 R /MediaBox [-10 -10 110 110] /CropBox [0.125 -0.375 100.625 50.125] /Rotate ${rotation} >>`,
+    ]))
+    const originStoreHash = nativeBytesHex(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes)))
+    const opening = lane.coordinator.open({ bytes, originStoreHash })
+    const open = await lane.take()
+    lane.deliver(open, JSON.parse(wasm.native_pdf_open(JSON.stringify(open.request))))
+    const accepted = await opening
+    const pageId = accepted.pageState.order[0]!
+    expect(accepted.scene.pages[0]?.geometry).toEqual({ bounds: [1, 0, 100, 50], rotation })
+    expect(accepted.redactionAdmission).toBe('supported')
+
+    const reading = lane.coordinator.previewPage(pageId, new AbortController().signal)
+    const previewRequest = await lane.take()
+    lane.deliver(previewRequest, JSON.parse(wasm.native_pdf_preview(JSON.stringify(previewRequest.request))))
+    const preview = await reading
+    expect(preview).toMatchObject({ cropBox: [125, -375, 100_625, 50_125], rotation })
+    if (!preview) throw new Error('expected a verified preview')
+
+    const origin = nativeCropBounds(['0', '0', '.5', '.5'], preview.cropBox)
+    const edge = nativeCropBounds(['100', '50', '.5', '.5'], preview.cropBox)
+    if (!origin || !edge) throw new Error('expected two in-crop marks')
+    for (const [index, rect] of [origin, edge].entries()) {
+      const marking = lane.coordinator.markRedaction({ kind: 'addMark', pageId, rect }, index + 1)
+      await deliverWasmRedaction(lane, 'addMark')
+      await expect(marking).resolves.toMatchObject({ markCount: index + 1, published: false })
+    }
+    const outside = [edge[0], edge[1], edge[2] + 1, edge[3]] as const
+    const refused = expect(lane.coordinator.markRedaction({ kind: 'addMark', pageId, rect: outside }, 3))
+      .rejects.toMatchObject({ code: 'FLOW_PDF_NATIVE_REDACTION_MARK_INVALID' })
+    await deliverWasmRedaction(lane, 'addMark')
+    await refused
+    expect(lane.coordinator.snapshot().accepted).toBe(accepted)
+    const clearing = lane.coordinator.markRedaction({ kind: 'clearMarks' }, 0)
+    await deliverWasmRedaction(lane, 'clearMarks')
+    await clearing
+    await closeRedactionFixture(lane)
+  })
+
   afterEach(() => { vi.useRealTimers() })
 
   it.each(['direct', 'retried'] as const)('requires recovery when the first mark disagrees through a %s status reply', async (mode) => {
