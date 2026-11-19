@@ -478,6 +478,11 @@ impl NativePdfSession {
             if record.digest.is_some() {
                 return Err(NativeSessionError::RequestConflict);
             }
+            if record.receipt.binding != self.snapshot.binding
+                || record.receipt.output_hash != self.snapshot.output_hash
+            {
+                return Err(NativeSessionError::RevisionMismatch);
+            }
             return Ok(Some(record.receipt));
         }
         self.check_current_binding(binding)?;
@@ -692,6 +697,9 @@ impl NativePdfSession {
             .take()
             .and_then(|candidate| candidate.into_verified(context, &self.redaction_marks))
             .ok_or(NativeSessionError::RedactionUnverified)?;
+        let source_spare = verified.bytes.capacity() - verified.bytes.len();
+        let retained_refund =
+            self.snapshot.limits.max_retained_bytes - limits.max_retained_bytes - source_spare;
         reopened.source = verified.bytes;
         let previous = std::mem::replace(&mut self.graph, reopened);
         self.redaction_admission.take();
@@ -706,8 +714,7 @@ impl NativePdfSession {
         self.snapshot.page_state = state;
         self.snapshot.fields = fields;
         self.accepted_redaction_evidence = Some(verified.evidence);
-        self.remaining_retained =
-            self.snapshot.limits.max_retained_bytes - limits.max_retained_bytes + scene_remaining;
+        self.remaining_retained = retained_refund + scene_remaining;
         self.reset_marks();
         if self.records.len() == NATIVE_REQUEST_HISTORY {
             self.records.pop_front();
@@ -1636,6 +1643,71 @@ mod tests {
             reopen_rewrite(&staged, &exact, output_budget, limits, &ids).unwrap();
         assert_eq!(reopened.original_bytes(), exact.as_slice());
         assert_eq!(remapped.len(), ids.len());
+    }
+
+    #[test]
+    fn redaction_publication_charges_spare_capacity_to_the_accepted_session() {
+        let source = super::super::tests::redaction_fixture("10 10 10 10 re f 40 40 10 10 re f");
+        let verified_session = |max_output_bytes| {
+            let limits = NativeEditLimits {
+                max_retained_bytes: 64 * 1024,
+                max_output_bytes,
+                ..NativeEditLimits::default()
+            };
+            let mut session = NativePdfSession::open_scoped(&source, limits, [1; 16]).unwrap();
+            let binding = session.snapshot.binding;
+            let page_id = session.snapshot.page_state.order[0];
+            let mark = NativeRedactionMark {
+                page_id,
+                geometry: session.redaction_mark_geometry(page_id).unwrap(),
+                rect: [12_000, 12_000, 13_000, 13_000],
+            };
+            session.add_redaction_mark(binding, mark).unwrap();
+            session.stage_redaction(binding, 1).unwrap();
+            let evidence = session.verify_redaction(binding, 1).unwrap();
+            assert!(evidence.checks_passed(), "{evidence:?}");
+            session
+        };
+
+        let mut roomy = verified_session(1024);
+        let binding = roomy.snapshot.binding;
+        let identity = roomy.redaction_candidate_status().unwrap().identity;
+        let candidate = roomy.candidate.as_ref().unwrap();
+        let expected_bytes = candidate
+            .verified_bytes(roomy.redaction_context(1), roomy.redaction_marks())
+            .unwrap()
+            .to_vec();
+        let mark = roomy.redaction_marks()[0];
+        let available = roomy.remaining_retained;
+        let publish_reserve = roomy.mark_bytes() + candidate.retained();
+        roomy.remaining_retained = publish_reserve - 1;
+        assert_eq!(
+            roomy.publish_redaction(binding, 1),
+            Err(NativeSessionError::Budget)
+        );
+        assert_eq!(roomy.snapshot.binding, binding);
+        assert_eq!(roomy.snapshot.output_hash, binding.origin_hash);
+        assert_eq!(roomy.output_bytes(), source);
+        assert_eq!(roomy.redaction_marks(), &[mark]);
+        assert_eq!(
+            roomy.redaction_candidate_status().unwrap().identity,
+            identity
+        );
+        assert!(roomy.accepted_redaction_evidence().is_none());
+        roomy.remaining_retained = available;
+
+        let receipt = roomy.publish_redaction(binding, 1).unwrap();
+        assert_eq!(receipt.output_hash, identity.candidate_hash);
+        assert_eq!(roomy.output_bytes(), expected_bytes);
+        assert_eq!(roomy.origin_bytes(), source);
+
+        let mut exact = verified_session(expected_bytes.len());
+        exact.publish_redaction(exact.snapshot.binding, 1).unwrap();
+        assert_eq!(exact.output_bytes(), expected_bytes);
+        assert_eq!(exact.graph.source.capacity(), expected_bytes.len());
+        let spare = roomy.graph.source.capacity() - exact.graph.source.capacity();
+        assert!(spare > 0);
+        assert_eq!(roomy.remaining_retained + spare, exact.remaining_retained);
     }
 
     #[test]
