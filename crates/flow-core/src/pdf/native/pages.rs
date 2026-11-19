@@ -221,11 +221,11 @@ pub(super) fn restrictions(
     let catalog_values = dict(graph, catalog)?;
     let mut work = graph.remaining_work();
     let named_targets = named_destination_pages(graph, catalog_values, &mut work);
-    let incoming_links = incoming_link_index(graph, &mut work)?;
     let outlines = outline_index(graph, &mut work);
     if matches!(outlines, Err(Budget)) {
         return Err(Budget);
     }
+    let incoming_links = incoming_link_index(graph, outlines.as_ref().ok(), &mut work)?;
     let mut copyable_field_count = None;
     let pages: Vec<_> = projected
         .iter()
@@ -932,6 +932,7 @@ fn link_destinations_survive(
     graph: &NativePdfGraph,
     target: Ref,
     cleanup: &LinkCleanup,
+    outlines: Option<&OutlineIndex>,
     trailer_refs: &BTreeSet<Ref>,
     work: &mut usize,
 ) -> Result<bool, NativeEditError> {
@@ -940,6 +941,12 @@ fn link_destinations_survive(
         Err(Budget) => return Err(Budget),
         Err(_) => return Ok(true),
     };
+    if let Some(groups) = outlines.and_then(|outlines| outlines.removable.get(&target)) {
+        for drops in groups.values() {
+            spend(work, drops.len())?;
+            removed.extend(drops);
+        }
+    }
     if removed
         .iter()
         .any(|reference| trailer_refs.contains(reference))
@@ -978,6 +985,7 @@ fn link_destinations_survive(
 
 fn incoming_link_index(
     graph: &NativePdfGraph,
+    outlines: Option<&OutlineIndex>,
     work: &mut usize,
 ) -> Result<IncomingLinkIndex, NativeEditError> {
     let mut trailer_refs = Vec::new();
@@ -1045,7 +1053,7 @@ fn incoming_link_index(
     }
     for (&target, cleanup) in &index.removable {
         if !index.blocked.contains(&target)
-            && link_destinations_survive(graph, target, cleanup, &trailer_refs, work)?
+            && link_destinations_survive(graph, target, cleanup, outlines, &trailer_refs, work)?
         {
             index.blocked.insert(target);
         }
@@ -1097,7 +1105,8 @@ fn remove_page_dependencies(
         mut removed,
         fields: fields_to_remove,
     } = page_owned_removals(graph, page, &mut work)?;
-    let links = incoming_link_index(graph, &mut work)?;
+    let outlines = outline_index(graph, &mut work)?;
+    let links = incoming_link_index(graph, Some(&outlines), &mut work)?;
     let cleanup = links.cleanup_for(page)?;
     graph.charge_page_work(budget - work)?;
     if let Some(cleanup) = cleanup {
@@ -1115,7 +1124,7 @@ fn remove_page_dependencies(
         fields.retain(|field| !fields_to_remove.contains(field));
         replace_form_fields(graph, form, fields)?;
     }
-    remove_outline_destinations(graph, page, &mut removed)?;
+    remove_outline_destinations(graph, &outlines, page, &mut removed)?;
     Ok(removed)
 }
 
@@ -1384,12 +1393,12 @@ fn outline_index(
 
 fn remove_outline_destinations(
     graph: &mut NativePdfGraph,
+    index: &OutlineIndex,
     page: Ref,
     removed: &mut BTreeSet<Ref>,
 ) -> Result<(), NativeEditError> {
     let budget = graph.remaining_work();
     let mut work = budget;
-    let index = outline_index(graph, &mut work)?;
     let counts = index.count_changes(graph, page, &mut work)?;
     if let Some(groups) = index.removable.get(&page) {
         for (&parent, drops) in groups {

@@ -471,6 +471,45 @@ fn deleting_page_removes_both_links_with_a_shared_destination() {
 }
 
 #[test]
+fn deleting_page_removes_a_link_and_bookmark_with_a_shared_destination() {
+    let bytes = build_pdf(&[
+        (0, "<< /Type /Catalog /Pages 2 0 R /Outlines 7 0 R >>"),
+        (
+            0,
+            "<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 /MediaBox [0 0 300 500] /Resources <<>> >>",
+        ),
+        (0, "<< /Type /Page /Parent 2 0 R >>"),
+        (0, "<< /Type /Page /Parent 2 0 R /Annots [5 0 R] >>"),
+        (
+            0,
+            "<< /Type /Annot /Subtype /Link /P 4 0 R /Rect [20 30 50 60] /Dest 6 0 R >>",
+        ),
+        (0, "[3 0 R /Fit]"),
+        (0, "<< /Type /Outlines /First 8 0 R /Last 8 0 R /Count 1 >>"),
+        (0, "<< /Title (Chapter) /Parent 7 0 R /Dest 6 0 R >>"),
+    ]);
+    let mut session =
+        NativePdfSession::open_scoped(&bytes, NativeEditLimits::default(), [3; 16]).unwrap();
+    let prior = session.snapshot().clone();
+    assert!(
+        prior
+            .page_state
+            .restrictions
+            .as_ref()
+            .is_none_or(|caps| caps.pages[0].delete.is_none())
+    );
+    session
+        .apply_page(prior.binding, 1, &command("deletePage", 0, &prior))
+        .unwrap();
+    assert_eq!(
+        session.snapshot().page_state.order,
+        [prior.page_state.order[1]]
+    );
+    assert!(session.snapshot().scene.pages[0].annotations.is_empty());
+    assert!(!String::from_utf8_lossy(session.output_bytes()).contains("/Dest"));
+}
+
+#[test]
 fn page_widget_operations_share_calculation_order_admission() {
     for (order, available) in [("[]", true), ("[5 0 R]", false)] {
         let bytes = build_pdf(&[
