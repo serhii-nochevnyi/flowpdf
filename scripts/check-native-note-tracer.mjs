@@ -48,7 +48,7 @@ const reviewedBrowserHarness = [
   ['web/tests/pdf-native-objects.browser.test.ts', '5af47f1df548e19b4eb545797bbf7de339406133c31428a406cbb7ce736e1612'],
   ['web/tests/pdf-native-pages.browser.test.ts', '4d1e7b9af40bb99abcbbb8eb6ef275bcc32384141c233d914e4e91887fe783f5'],
   ['web/tests/pdf-native-forms.browser.test.ts', 'e3a8b28119e3a4d78215bd5694c1c740c6d8855d50bcc8dfdbc8d0319afacbcd'],
-  ['web/tests/pdf-native-redaction.browser.test.ts', '4ca3822bc56c8c764ee5d716523dc623121720cd4e0c5152281bbe3ea0a4b7bc'],
+  ['web/tests/pdf-native-redaction.browser.test.ts', 'f03b3854ae1f8b6459c400fc67dc5f43dc7185737eeb9eb3f7439ef104e0fb10'],
 ]
 const expandedSteps = [
   'Run bilingual Chromium text replacement tracer',

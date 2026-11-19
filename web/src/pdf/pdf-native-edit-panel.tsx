@@ -767,6 +767,7 @@ export function PdfNativeEditPanel({
   const focusAfterRender = useRef<string | HTMLElement | { pageAction: HTMLElement | null } | { fieldAction: HTMLElement | null } | null>(null)
   const dialog = useRef<HTMLDialogElement>(null)
   const cancelConfirmation = useRef<HTMLButtonElement>(null)
+  const reopenOriginal = useRef<HTMLButtonElement>(null)
   const removeTrigger = useRef<HTMLButtonElement | null>(null)
 
   useEffect(() => {
@@ -920,6 +921,10 @@ export function PdfNativeEditPanel({
 
   useLayoutEffect(() => {
     const element = dialog.current
+    if (invalidated && confirm && 'redaction' in confirm) {
+      setConfirm(null)
+      return
+    }
     if (confirm !== null && element && !element.open) {
       element.showModal()
       cancelConfirmation.current?.focus()
@@ -927,13 +932,14 @@ export function PdfNativeEditPanel({
     if (confirm === null && element?.open) {
       element.close()
       const trigger = removeTrigger.current
-      if (trigger?.isConnected && !trigger.matches(':disabled')) trigger.focus()
+      if (invalidated && reopenOriginal.current) reopenOriginal.current.focus()
+      else if (trigger?.isConnected && !trigger.matches(':disabled')) trigger.focus()
       else if (!locked.current) {
         const selector = trigger?.id === `${id}-field-remove` ? `${id}-field-selector` : pageSelectorId
         document.getElementById(selector)?.focus()
       }
     }
-  }, [confirm, pageSelectorId])
+  }, [confirm, invalidated, pageSelectorId])
 
   useLayoutEffect(() => {
     const target = focusAfterRender.current
@@ -1868,7 +1874,7 @@ export function PdfNativeEditPanel({
                 setError(['error.download'])
               }
             }}>{t(preRedactionOutput && revision > 0 ? 'redaction.downloadPrior' : 'download.edited')}</button>}
-          {invalidated && accepted && <button type="button" disabled={busy !== null} onClick={() => {
+          {invalidated && accepted && <button type="button" ref={reopenOriginal} disabled={busy !== null} onClick={() => {
             const origin = accepted.snapshot.originStoreHash
             void open(accepted.filename, async () => {
               const original = await sourceStore.get(origin)
@@ -2442,7 +2448,7 @@ export function PdfNativeEditPanel({
             <button type="button" ref={cancelConfirmation} onClick={() => setConfirm(null)}>{t(redactionConfirmation ? 'redaction.keep'
               : deletingPage ? 'page.keep' : removingField ? 'field.keep' : 'note.remove.cancel')}</button>
             <button type="button" className="native-destructive"
-              disabled={redactionConfirmation?.redaction === 'stage' && !markControls} onClick={() => {
+              disabled={redactionConfirmation !== null && (clearingMarks ? !markCleanup : !markControls)} onClick={() => {
               if (confirm === null) return
               setConfirm(null)
               if ('redaction' in confirm) {
