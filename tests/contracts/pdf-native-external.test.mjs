@@ -2,8 +2,8 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { test } from 'node:test'
 import {
-  compareRaster, compareWidgetRegion, decodePpm, externalExitCode, matchesWidgetBounds, nativeSession,
-  operationOutput, probeVersion,
+  checkStructure, compareRaster, compareWidgetRegion, decodePpm, externalExitCode, matchesWidgetBounds,
+  nativeSession, operationOutput, pdfStructure, probeVersion,
 } from '../../scripts/verify-pdf-native-external.mjs'
 
 const fixture = (name) => readFileSync(new URL(`../../fixtures/pdf-native/${name}`, import.meta.url))
@@ -156,4 +156,74 @@ test('widget Forms need a finite full-size local box and an identity matrix', ()
   }
   assert.equal(matchesWidgetBounds(rect, [0, 0, 48, 20], [1, 0, 0, 1, 1, 0]), false)
   assert.equal(matchesWidgetBounds([64, 12, 16, 32], [0, 0, -48, 20]), false)
+})
+
+function structuralReadback(pages) {
+  const objects = {
+    trailer: { value: { '/Root': '1 0 R' } },
+    'obj:1 0 R': { value: {} },
+  }
+  const json = { qpdf: [{ jsonversion: 2 }, objects], pages: [] }
+  for (const { page, cropBoxPt, rotation } of pages) {
+    const object = `${page + 1} 0 R`
+    objects[`obj:${object}`] = { value: { '/CropBox': cropBoxPt, '/Rotate': rotation } }
+    json.pages.push({ object, contents: [] })
+  }
+  return { json, objects }
+}
+
+test('widget readback compares PDF field types and requires the Off and Yes appearance keys', () => {
+  const [source] = editFamilies.operations
+  const operation = { pages: source.pages.slice(0, 1), fieldReadback: source.fieldReadback,
+    noteReadback: [], removed: [] }
+  const { json, objects } = structuralReadback(operation.pages)
+  objects['obj:1 0 R'].value['/AcroForm'] = { '/Fields': ['10 0 R', '11 0 R'] }
+  objects['obj:2 0 R'].value['/Annots'] = ['10 0 R', '11 0 R']
+  const textWidget = {
+    '/Subtype': '/Widget', '/P': '2 0 R', '/Rect': [16, 12, 64, 32], '/FT': '/Tx',
+    '/T': 'u:recipient', '/V': 'u:', '/DV': 'u:', '/AP': { '/N': '12 0 R' },
+  }
+  const appearance = { '/Off': '13 0 R', '/Yes': '14 0 R' }
+  const checkbox = {
+    '/Subtype': '/Widget', '/P': '2 0 R', '/Rect': [80, 12, 100, 32], '/FT': '/Btn',
+    '/T': 'u:accepted', '/V': '/Off', '/DV': '/Off', '/AS': '/Off', '/AP': { '/N': appearance },
+  }
+  objects['obj:10 0 R'] = { value: textWidget }
+  objects['obj:11 0 R'] = { value: checkbox }
+  for (const [ref, width] of [['12 0 R', 48], ['13 0 R', 20], ['14 0 R', 20]]) {
+    objects[`obj:${ref}`] = { stream: { dict: { '/Subtype': '/Form', '/BBox': [0, 0, width, 20] } } }
+  }
+  const check = (expected = operation) => checkStructure(pdfStructure(json), null, expected)
+  check()
+  for (const widget of [textWidget, checkbox]) {
+    const fieldType = widget['/FT']
+    widget['/FT'] = '/Ch'
+    assert.throws(() => check(), /field-structure/)
+    widget['/FT'] = fieldType
+  }
+  appearance['/On'] = appearance['/Yes']
+  delete appearance['/Yes']
+  assert.throws(() => check(), /widget-appearance-state/)
+  appearance['/Yes'] = appearance['/On']
+  assert.throws(() => check(), /widget-appearance-state/)
+  delete appearance['/On']
+  checkbox['/AS'] = checkbox['/V'] = '/Yes'
+  const [textField, checkboxField] = operation.fieldReadback
+  check({ ...operation, fieldReadback: [textField, { ...checkboxField, value: 'Yes', appearanceState: 'Yes' }] })
+})
+
+test('deleting a destination page requires removing its inbound link annotation', () => {
+  const operation = editFamilies.operations.find(({ operation }) => operation === 'deletePage')
+  const { json, objects } = structuralReadback(operation.pages)
+  const page = objects['obj:2 0 R'].value
+  const check = (expected = operation) => checkStructure(pdfStructure(json), null, expected)
+  check()
+  page['/Annots'] = ['10 0 R']
+  const link = { '/Subtype': '/Link', '/Rect': [120, 12, 144, 32], '/Dest': ['3 0 R', '/Fit'] }
+  objects['obj:10 0 R'] = { value: link }
+  check({ ...operation, destinations: [{ kind: 'link', page: 1, target: 2 }] })
+  delete link['/Dest']
+  assert.throws(() => check(), /destination-structure/)
+  delete page['/Annots']
+  check()
 })
