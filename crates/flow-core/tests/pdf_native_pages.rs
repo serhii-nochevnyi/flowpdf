@@ -1252,12 +1252,12 @@ fn duplicate_skips_copy_name_reserved_by_an_indirect_read_only_field() {
             "<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 /MediaBox [0 0 300 500] /Resources <<>> >>",
         ),
         (0, "<< /Type /Page /Parent 2 0 R /Annots [5 0 R] >>"),
-        (0, "<< /Type /Page /Parent 2 0 R /Annots [7 0 R] >>"),
+        (0, "<< /Type /Page /Parent 2 0 R /Annots [7 0 R 9 0 R] >>"),
         (
             0,
             "<< /Type /Annot /Subtype /Widget /P 3 0 R /Rect [40 60 80 90] /FT /Btn /T (approval) /V /Off /AS /Off >>",
         ),
-        (0, "<< /Fields [5 0 R 7 0 R] >>"),
+        (0, "<< /Fields [5 0 R 7 0 R 9 0 R] >>"),
         (
             0,
             "<< /Type /Annot /Subtype /Widget /P 4 0 R /Rect [40 60 80 90] /FT /Tx /Ff 1 /T 8 0 R /V (data) >>",
@@ -1265,6 +1265,10 @@ fn duplicate_skips_copy_name_reserved_by_an_indirect_read_only_field() {
         (
             0,
             "<FEFF0046006C006F00770050004400460043006F007000790035005F0030>",
+        ),
+        (
+            0,
+            "<< /Type /Annot /Subtype /Widget /P 4 0 R /Rect [40 100 80 130] /FT /Tx /Ff 1 /T (aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa) /V (data) >>",
         ),
     ]);
     let mut session =
@@ -1280,12 +1284,16 @@ fn duplicate_skips_copy_name_reserved_by_an_indirect_read_only_field() {
     let duplicate = command("duplicatePage", 0, prior);
     session.apply_page(prior.binding, 1, &duplicate).unwrap();
     let fields = &session.snapshot().fields;
-    assert_eq!(fields.len(), 3);
+    assert_eq!(fields.len(), 4);
     let copy = fields.iter().find(|field| field.page == 1).unwrap();
     assert_eq!(copy.name.as_deref(), Some("FlowPDFCopy5_1"));
-    let read_only = fields.iter().find(|field| field.page == 2).unwrap();
-    assert_eq!(read_only.name.as_deref(), Some("FlowPDFCopy5_0"));
+    let read_only = fields
+        .iter()
+        .find(|field| field.page == 2 && field.name.as_deref() == Some("FlowPDFCopy5_0"))
+        .unwrap();
     assert!(!read_only.can_edit_appearance);
+    let output = String::from_utf8_lossy(session.output_bytes());
+    assert!(output.contains(&format!("/T <{}>", "61".repeat(65))));
 }
 
 #[test]

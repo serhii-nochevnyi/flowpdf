@@ -192,7 +192,7 @@ fn dictionary<const N: usize>(entries: [(&str, Value); N]) -> Dict {
 }
 
 fn decode(bytes: &[u8], limit: usize) -> Option<String> {
-    if bytes.len() > 2 * limit + 2 {
+    if bytes.len() > limit.saturating_mul(2).saturating_add(2) {
         return None;
     }
     let value = if let Some(utf16) = bytes.strip_prefix(&[0xfe, 0xff]) {
@@ -419,6 +419,9 @@ fn load_form(graph: &NativePdfGraph, work: &mut usize) -> FieldResult<Form> {
         }
     }
     let names = field_names(graph, &fields, work).map_err(|_| Reference)?;
+    if names.keys().any(|name| name.len() > MAX_NAME) {
+        return Err(Reference);
+    }
     Ok(Form {
         owner: Some(owner),
         fields,
@@ -769,7 +772,7 @@ fn display_name(
         }
         graph.resolve_metered(field.get("T")?, work).ok()?
     };
-    decode_field_name(label)
+    decode_field_name(label.as_bytes()?, MAX_NAME)
 }
 
 pub(super) fn field_names(
@@ -789,8 +792,9 @@ pub(super) fn field_names(
             return Err(Unsupported);
         }
         let label = graph.resolve_metered(values.get("T").ok_or(Unsupported)?, work)?;
-        spend(work, label.as_bytes().ok_or(Unsupported)?.len())?;
-        let name = decode_field_name(label).ok_or(Unsupported)?;
+        let bytes = label.as_bytes().ok_or(Unsupported)?;
+        spend(work, bytes.len())?;
+        let name = decode_field_name(bytes, usize::MAX).ok_or(Unsupported)?;
         if names.insert(name, field).is_some() {
             return Err(Unsupported);
         }
@@ -798,18 +802,16 @@ pub(super) fn field_names(
     Ok(names)
 }
 
-fn decode_field_name(label: &Value) -> Option<String> {
-    let bytes = label.as_bytes()?;
+fn decode_field_name(bytes: &[u8], limit: usize) -> Option<String> {
     let name = if bytes.starts_with(&[0xfe, 0xff]) || bytes.starts_with(&[0xef, 0xbb, 0xbf]) {
-        decode(bytes, MAX_NAME)?
+        decode(bytes, limit)?
     } else {
-        if bytes.len() > MAX_NAME {
+        if bytes.len() > limit {
             return None;
         }
         decode_pdf_doc_encoding(bytes).ok()?
     };
-    (!name.is_empty() && name.len() <= MAX_NAME && !name.chars().any(char::is_control))
-        .then_some(name)
+    (!name.is_empty() && name.len() <= limit && !name.chars().any(char::is_control)).then_some(name)
 }
 
 pub(super) fn project(
