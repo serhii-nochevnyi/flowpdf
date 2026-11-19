@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use ttf_parser::{Face, GlyphId, Rect as GlyphBox, Tag};
 
 use super::super::reader::{PdfObjectRef, PdfReaderLimits, PdfValue};
-use super::super::scene::{ContentCursor, ContentToken};
+use super::super::scene::{ContentCursor, ContentToken, separated_content_streams};
 use super::verifier::{
     MAX_COORD, NativeRedactionMark, NativeRedactionPageEvidence,
     NativeVerificationFailure::{Budget, Structure, TextMismatch, UnsupportedProfile},
@@ -132,16 +132,28 @@ impl<'a> Extraction<'a> {
     ) -> VerifyResult<Vec<Run>> {
         let mut output = Vec::new();
         let mut matrix = Matrix::IDENTITY;
+        let mut stack = Vec::new();
+        let mut spans_streams = false;
+        let mut separated = true;
+        let mut previous = &[][..];
         for &stream in &page.contents {
+            let data = &doc.stream(stream)?.data;
+            spans_streams |= !stack.is_empty();
+            separated &= separated_content_streams(previous, data);
             matrix = self.stream(
                 doc,
                 stream,
                 page.resources,
                 matrix,
+                &mut stack,
                 page.geometry.crop_box,
                 0,
                 &mut output,
             )?;
+            previous = data;
+        }
+        if !stack.is_empty() || (spans_streams && !separated) {
+            return Err(UnsupportedProfile);
         }
         Ok(output)
     }
@@ -153,6 +165,7 @@ impl<'a> Extraction<'a> {
         id: PdfObjectRef,
         resources: Option<&'a Dict>,
         mut matrix: Matrix,
+        stack: &mut Vec<Matrix>,
         clip: Rect,
         depth: usize,
         output: &mut Vec<Run>,
@@ -165,7 +178,6 @@ impl<'a> Extraction<'a> {
         self.stream_digests
             .entry(id)
             .or_insert_with(|| *blake3::hash(&stream.data).as_bytes());
-        let mut stack = Vec::new();
         let mut text = None;
         let mut operation = 0;
         let mut available = self.work;
@@ -211,7 +223,20 @@ impl<'a> Extraction<'a> {
                     if name(dict, "Subtype") == Some("Form") {
                         let (matrix, form_clip, resources) =
                             form(doc, dict, resources, matrix, clip)?;
-                        self.stream(doc, target, resources, matrix, form_clip, depth + 1, output)?;
+                        let mut form_stack = Vec::new();
+                        self.stream(
+                            doc,
+                            target,
+                            resources,
+                            matrix,
+                            &mut form_stack,
+                            form_clip,
+                            depth + 1,
+                            output,
+                        )?;
+                        if !form_stack.is_empty() {
+                            return Err(UnsupportedProfile);
+                        }
                     }
                 }
                 "g" | "G" | "rg" | "RG" | "k" | "K" | "w" | "m" | "l" | "re" | "h" | "f" | "F"
@@ -220,7 +245,7 @@ impl<'a> Extraction<'a> {
             }
             Ok(())
         })?;
-        if text.is_some() || !stack.is_empty() {
+        if text.is_some() {
             return Err(UnsupportedProfile);
         }
         Ok(matrix)

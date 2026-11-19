@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use ttf_parser::OutlineBuilder;
 
 use super::super::reader::{PdfObjectRef, PdfValue};
-use super::super::scene::ContentToken;
+use super::super::scene::{ContentToken, separated_content_streams};
 use super::verifier::{
     MAX_COORD, NativeRedactionGeometry, NativeRedactionMark, NativeRedactionPageEvidence,
     NativeVerificationFailure::{Budget, RasterMismatch, Structure, UnsupportedProfile},
@@ -271,8 +271,28 @@ impl<'a> Interpreter<'a> {
         let mut paints = Vec::new();
         let mut graphics = Graphics::default();
         let crop = page.geometry.crop_box;
+        let mut saved = Vec::new();
+        let mut spans_streams = false;
+        let mut separated = true;
+        let mut previous = &[][..];
         for &id in &page.contents {
-            graphics = self.stream(document, id, page.resources, graphics, crop, 0, &mut paints)?;
+            let data = &document.stream(id)?.data;
+            spans_streams |= !saved.is_empty();
+            separated &= separated_content_streams(previous, data);
+            graphics = self.stream(
+                document,
+                id,
+                page.resources,
+                graphics,
+                &mut saved,
+                crop,
+                0,
+                &mut paints,
+            )?;
+            previous = data;
+        }
+        if !saved.is_empty() || (spans_streams && !separated) {
+            return Err(UnsupportedProfile);
         }
         for &(id, bounds, contents) in &page.annotations {
             spend(&mut self.parse_work, contents.len() + 1)?;
@@ -305,6 +325,7 @@ impl<'a> Interpreter<'a> {
         id: PdfObjectRef,
         resources: Option<&'a Dict>,
         mut graphics: Graphics,
+        saved: &mut Vec<Graphics>,
         clip: Rect,
         depth: usize,
         paints: &mut Vec<Paint<'a>>,
@@ -317,7 +338,6 @@ impl<'a> Interpreter<'a> {
         self.stream_hashes
             .entry(id)
             .or_insert_with(|| *blake3::hash(data).as_bytes());
-        let mut saved = Vec::new();
         let mut path = Path::default();
         let mut text = None;
         let mut operation = 0;
@@ -484,15 +504,20 @@ impl<'a> Interpreter<'a> {
                         Some("Form") => {
                             let (matrix, nested_clip, resources) =
                                 form(document, &stream.dict, resources, graphics.matrix, clip)?;
+                            let mut form_stack = Vec::new();
                             self.stream(
                                 document,
                                 object,
                                 resources,
                                 Graphics { matrix, ..graphics },
+                                &mut form_stack,
                                 nested_clip,
                                 depth + 1,
                                 paints,
                             )?;
+                            if !form_stack.is_empty() {
+                                return Err(UnsupportedProfile);
+                            }
                         }
                         _ => return Err(UnsupportedProfile),
                     }
@@ -501,7 +526,7 @@ impl<'a> Interpreter<'a> {
             }
             Ok(())
         })?;
-        if !saved.is_empty() || !path.points.is_empty() || text.is_some() {
+        if !path.points.is_empty() || text.is_some() {
             return Err(UnsupportedProfile);
         }
         Ok(graphics)

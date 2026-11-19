@@ -1783,6 +1783,12 @@ fn hex_encode(bytes: &[u8]) -> String {
     output
 }
 
+pub(super) fn separated_content_streams(previous: &[u8], next: &[u8]) -> bool {
+    previous.is_empty()
+        || matches!(previous.last(), Some(b'\n' | b'\r'))
+        || matches!(next.first(), Some(b'\n' | b'\r'))
+}
+
 pub(super) struct ContentCursor<'a> {
     bytes: &'a [u8],
     position: usize,

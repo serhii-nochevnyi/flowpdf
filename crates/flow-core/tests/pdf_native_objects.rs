@@ -162,8 +162,10 @@ fn added_graphic_paints_after_shared_streams_in_initial_graphics_state() {
 }
 
 #[test]
-fn topmost_insertion_keeps_redaction_admission_for_supported_paint() {
-    let source = fixture(b"1 0 0 1 12 0 cm 0 1 0 rg 10 10 10 10 re f", false, "", &[]);
+fn topmost_insertion_keeps_redaction_admission_after_translation_and_scale() {
+    let transform = b"3 0 0 3 12 6 cm\n";
+    let paint = b"0 1 0 rg 2 2 5 5 re f";
+    let source = fixture_with_slots(transform, false, "", &[stream("", paint)], "[5 0 R 6 0 R]");
     let mut session = open(&source);
     assert!(session.redaction_admitted());
     let graphic = json!({
@@ -176,6 +178,19 @@ fn topmost_insertion_keeps_redaction_admission_for_supported_paint() {
     )
     .unwrap();
     assert!(session.redaction_admitted());
+    let edited = objects(&session, 0);
+    assert_eq!(edited.as_array().unwrap().len(), 2);
+    assert_eq!(edited[0]["bounds"], json!([18000, 12000, 33000, 27000]));
+    assert_eq!(edited[1]["bounds"], json!([50000, 50000, 60000, 60000]));
+    for original in [transform.as_slice(), paint.as_slice()] {
+        let body = [b"stream\n".as_slice(), original, b"\nendstream"].concat();
+        assert!(
+            session
+                .output_bytes()
+                .windows(body.len())
+                .any(|bytes| bytes == body)
+        );
+    }
     let binding = session.snapshot().binding;
     let page_id = session.snapshot().page_state.order[0];
     let geometry = session.redaction_mark_geometry(page_id).unwrap();

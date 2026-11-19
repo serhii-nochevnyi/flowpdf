@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use super::super::{
     reader::{PdfObjectRef, PdfReaderLimits, PdfStream, PdfValue, jpeg_frame, single_filter},
-    scene::{ContentCursor, ContentToken, NativePdfNotePage},
+    scene::{ContentCursor, ContentToken, NativePdfNotePage, separated_content_streams},
 };
 use super::{
     NativeBinding, NativePageId, NativeSessionError,
@@ -935,13 +935,10 @@ fn scan(
     for (slot, &reference) in slots.iter().enumerate() {
         // @invariant: A preceding slot cannot swallow tokens or join them to the next slot.
         if let Some(&next) = slots.get(slot + 1) {
-            let data = &stream(graph, reference)?.data;
-            if !data.is_empty()
-                && !data.ends_with(b"\n")
-                && !data.ends_with(b"\r")
-                && !stream(graph, next)?.data.starts_with(b"\n")
-                && !stream(graph, next)?.data.starts_with(b"\r")
-            {
+            if !separated_content_streams(
+                &stream(graph, reference)?.data,
+                &stream(graph, next)?.data,
+            ) {
                 return Err(State.into());
             }
         }
@@ -972,12 +969,12 @@ pub(super) fn project(
             Err(error) => return Err(error),
         };
         spend(remaining, found.len() * 256)?;
+        let added_slots = 1 + usize::from(page_matrix.0 != Matrix::IDENTITY.0);
         result.push(NativeObjectPage {
             page: page.id,
             can_add: refusal.is_none()
-                && page_matrix.inverse().is_ok()
                 && found.len() < MAX_OBJECTS_PER_PAGE
-                && contents(graph, page.object)?.len() < MAX_OBJECTS_PER_PAGE,
+                && contents(graph, page.object)?.len() + added_slots <= MAX_OBJECTS_PER_PAGE,
             objects: found
                 .iter()
                 .map(|item| item.view(page.id, binding, hash))
@@ -1403,7 +1400,8 @@ pub(super) fn stage(
     let item = index.map(|i| &found[i]);
     let page_clip = page.geometry.ok_or(Geometry)?.bounds().map(|n| n as f64);
     let clip = item.map_or(page_clip, |item| item.clip);
-    let matrix = item.map_or(page_matrix, |item| item.matrix);
+    let matrix = item.map_or(Matrix::IDENTITY, |item| item.matrix);
+    let restore_page = item.is_none() && page_matrix.0 != Matrix::IDENTITY.0;
     let mut remaining = graph.remaining_retained();
     spend(&mut remaining, command.validate_size()? + 8192)?;
 
@@ -1414,11 +1412,12 @@ pub(super) fn stage(
                 return Err(Profile.into());
             }
             let (source, profile, rect) = graphic_source(graphic)?;
-            let inverse = matrix.inverse()?;
-            (
-                format!("q\n{}\n{source}\nQ", inverse.operator()).into_bytes(),
-                Some((profile, rect)),
-            )
+            let source = if item.is_some() {
+                format!("q\n{}\n{source}\nQ", matrix.inverse()?.operator())
+            } else {
+                format!("q\n{source}\nQ")
+            };
+            (source.into_bytes(), Some((profile, rect)))
         }
         AddImage { asset_hex, .. } | ReplaceImage { asset_hex, .. } => {
             if item.is_some_and(|item| item.signature.profile.kind() != NativeObjectKind::Image) {
@@ -1473,11 +1472,14 @@ pub(super) fn stage(
         replacement = match command {
             AddImage { bounds, .. } => {
                 let [l, b, r, t] = page_space(*bounds);
-                let placement = Matrix([r - l, 0., 0., t - b, l, b]).then(matrix.inverse()?)?;
+                let placement = Matrix([r - l, 0., 0., t - b, l, b]);
                 format!("q\n{}\n/{name} Do\nQ", placement.operator()).into_bytes()
             }
             _ => format!("/{name} Do").into_bytes(),
         };
+    }
+    if restore_page {
+        replacement.splice(..0, b"Q\n".iter().copied());
     }
     let root = if depth == 0 {
         edited_stream(
@@ -1533,6 +1535,10 @@ pub(super) fn stage(
     if let Some(item) = item {
         slots[item.slot] = root;
     } else {
+        if restore_page {
+            let save = edited_stream(graph, None, b"q", None, &mut remaining)?;
+            slots.insert(0, allocate(graph, PdfValue::Stream(save))?);
+        }
         slots.push(root);
     }
     let Some(PdfValue::Dictionary(dict)) = graph.objects.get_mut(&page.object) else {
