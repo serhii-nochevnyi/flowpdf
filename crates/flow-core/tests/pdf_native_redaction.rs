@@ -1,7 +1,9 @@
+use flow_core::pdf::PdfReadError;
 use flow_core::pdf::native::{
-    NativeEditError, NativeEditLimits, NativeNoteCommand, NativePdfSession,
-    NativeRedactionGeometry, NativeRedactionMark, NativeRedactionStage, NativeRequestLookup,
-    NativeSessionError, NativeVerificationStatus,
+    NativeEditError, NativeEditLimits, NativeNoteCommand, NativePdfSession, NativeRedactionContext,
+    NativeRedactionGeometry, NativeRedactionMark, NativeRedactionPolicy, NativeRedactionStage,
+    NativeRequestLookup, NativeSessionError, NativeVerificationFailure, NativeVerificationStatus,
+    verify_native_redaction,
 };
 use miniz_oxide::deflate::compress_to_vec_zlib;
 
@@ -93,6 +95,112 @@ fn assert_accepted(session: &NativePdfSession, bytes: &[u8], revision: u64, orig
         *blake3::hash(bytes).as_bytes()
     );
     assert!(session.redacted_output_bytes().is_none());
+}
+
+fn grayscale_jpeg() -> Vec<u8> {
+    let mut jpeg = Vec::new();
+    image::codecs::jpeg::JpegEncoder::new(&mut jpeg)
+        .encode(&[208, 80], 2, 1, image::ExtendedColorType::L8)
+        .unwrap();
+    jpeg
+}
+
+fn jpeg_pdf(filter: &str, data: &[u8]) -> Vec<u8> {
+    pdf(
+        vec![
+            b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+            b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] /Contents 4 0 R /Resources << /XObject << /Photo 5 0 R >> >> >>".to_vec(),
+            stream("", b"q 20 0 0 10 10 30 cm /Photo Do Q"),
+            stream(
+                &format!("/Type /XObject /Subtype /Image /Width 2 /Height 1 /ColorSpace /DeviceGray /BitsPerComponent 8 /Filter {filter}"),
+                data,
+            ),
+        ],
+        "",
+    )
+}
+
+#[test]
+fn jpeg_filter_forms_publish_the_verified_scrubbed_samples() {
+    let jpeg = grayscale_jpeg();
+    let samples = image::load_from_memory_with_format(&jpeg, image::ImageFormat::Jpeg)
+        .unwrap()
+        .into_luma8()
+        .into_raw();
+    for filter in ["/DCTDecode", "[/DCTDecode]"] {
+        let source = jpeg_pdf(filter, &jpeg);
+        let mut session = open(&source);
+        let binding = session.snapshot().binding;
+        assert!(session.redaction_admitted(), "{filter}");
+        add(&mut session, 0, [14_000, 32_000, 15_000, 33_000]);
+        let NativeRedactionStage::Pending(candidate) = session.stage_redaction(binding, 1).unwrap()
+        else {
+            panic!("expected pending redaction for {filter}");
+        };
+        let evidence = session.verify_redaction(binding, 1).unwrap();
+        assert!(evidence.checks_passed(), "{filter}: {evidence:?}");
+        assert_accepted(&session, &source, 0, &source);
+
+        let receipt = session.publish_redaction(binding, 1).unwrap();
+        let published = session.redacted_output_bytes().unwrap();
+        assert_eq!(receipt.output_hash, candidate.candidate_hash);
+        assert_eq!(published, session.output_bytes());
+        assert_eq!(
+            blake3::hash(published).as_bytes(),
+            &candidate.candidate_hash
+        );
+        let scrubbed_stream = [b"stream\n\0".as_slice(), &[samples[1]], b"\nendstream"].concat();
+        assert!(
+            published
+                .windows(scrubbed_stream.len())
+                .any(|bytes| bytes == scrubbed_stream)
+        );
+        assert!(!published.windows(jpeg.len()).any(|bytes| bytes == jpeg));
+    }
+}
+
+#[test]
+fn jpeg_filter_chains_and_jpeg_candidates_are_refused() {
+    let jpeg = grayscale_jpeg();
+    let mut ascii_hex = jpeg
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    ascii_hex.push('>');
+    let chained = jpeg_pdf("[/ASCIIHexDecode /DCTDecode]", ascii_hex.as_bytes());
+    assert!(matches!(
+        NativePdfSession::open_scoped(&chained, NativeEditLimits::default(), [5; 16]),
+        Err(NativeSessionError::Graph(NativeEditError::Reader(
+            PdfReadError::FilterUnsupported
+        )))
+    ));
+
+    let source = jpeg_pdf("/DCTDecode", &jpeg);
+    let session = open(&source);
+    let base = session.snapshot();
+    let marks = [mark(&session, 0, [14_000, 32_000, 15_000, 33_000])];
+    let context = NativeRedactionContext {
+        binding: base.binding,
+        request_id: 1,
+        accepted_hash: base.output_hash,
+        page_order: &base.page_state.order,
+    };
+    for filter in ["/DCTDecode", "[/DCTDecode]"] {
+        let candidate = jpeg_pdf(filter, &jpeg);
+        let policy = NativeRedactionPolicy {
+            binding: base.binding,
+            request_id: 1,
+            candidate_hash: *blake3::hash(&candidate).as_bytes(),
+            marks: &marks,
+        };
+        let evidence = verify_native_redaction(&source, &source, &candidate, context, policy);
+        assert_eq!(
+            evidence.structure().failure(),
+            Some(NativeVerificationFailure::UnsupportedProfile),
+            "{filter}"
+        );
+    }
 }
 
 #[test]

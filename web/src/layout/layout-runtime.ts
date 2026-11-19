@@ -57,21 +57,32 @@ export function createNativePdfRuntime(
     } catch {
       throw new NativePdfWorkerError('FLOW_PDF_NATIVE_WORKER_STARTUP')
     }
-    const coordinator = new NativePdfEditCoordinator(
-      worker as unknown as NativePdfWorkerPort, verify_native_pdf_response,
-    )
-    coordinators.add(coordinator)
-    coordinator.subscribe(() => {
-      if (coordinator.snapshot().phase === 'invalidated') coordinators.delete(coordinator)
-    })
-    return coordinator
+    let coordinator: NativePdfEditCoordinator | undefined
+    try {
+      const acquired = new NativePdfEditCoordinator(
+        worker as unknown as NativePdfWorkerPort, verify_native_pdf_response,
+      )
+      coordinator = acquired
+      acquired.subscribe(() => {
+        if (acquired.snapshot().phase === 'invalidated') coordinators.delete(acquired)
+      })
+      coordinators.add(acquired)
+      return acquired
+    } catch (error) {
+      if (coordinator === undefined) worker.terminate()
+      else coordinator.dispose()
+      throw error
+    }
   }
 
   let initial: NativePdfEditCoordinator | undefined
   try {
     initial = createCoordinator()
   } catch (error) {
-    if (!(error instanceof NativePdfWorkerError)) throw error
+    if (!(error instanceof NativePdfWorkerError)) {
+      sourceStore.close()
+      throw error
+    }
   }
   return {
     sourceStore,
@@ -108,39 +119,6 @@ export function createDefaultWorkerRuntime(
   fontCatalog: RuntimeFontCatalog,
   workerConstructor?: WorkerConstructor,
 ): DefaultWorkerRuntime {
-  const layoutWorker = (
-    workerConstructor === undefined
-      ? new Worker(new URL('./layout-worker-entry.ts', import.meta.url), { type: 'module' })
-      : new workerConstructor(new URL('./layout-worker-entry.ts', import.meta.url), { type: 'module' })
-  ) as unknown as LayoutWorkerPort
-  const pdfWorker = (
-    workerConstructor === undefined
-      ? new Worker(new URL('../pdf/pdf-worker-entry.ts', import.meta.url), { type: 'module' })
-      : new workerConstructor(new URL('../pdf/pdf-worker-entry.ts', import.meta.url), { type: 'module' })
-  ) as unknown as PdfWorkerPort
-  const pdfReaderWorker = (
-    workerConstructor === undefined
-      ? new Worker(new URL('../pdf/pdf-reader-worker-entry.ts', import.meta.url), { type: 'module' })
-      : new workerConstructor(new URL('../pdf/pdf-reader-worker-entry.ts', import.meta.url), { type: 'module' })
-  ) as unknown as PdfReaderWorkerPort
-  const pdfReconstructionReaderWorker = (
-    workerConstructor === undefined
-      ? new Worker(new URL('../pdf/pdf-reader-worker-entry.ts', import.meta.url), { type: 'module' })
-      : new workerConstructor(new URL('../pdf/pdf-reader-worker-entry.ts', import.meta.url), { type: 'module' })
-  ) as unknown as PdfReaderWorkerPort
-  const pdfReconstructionWorker = (
-    workerConstructor === undefined
-      ? new Worker(new URL('../pdf/pdf-reconstruction-worker-entry.ts', import.meta.url), { type: 'module' })
-      : new workerConstructor(new URL('../pdf/pdf-reconstruction-worker-entry.ts', import.meta.url), { type: 'module' })
-  ) as unknown as PdfReconstructionWorkerPort
-  const layoutScheduler = createWorkerLayoutScheduler(layoutWorker)
-  const pdfExportScheduler = createWorkerPdfExportScheduler(pdfWorker)
-  const pdfReaderScheduler = createWorkerPdfReaderScheduler(pdfReaderWorker)
-  const pdfReconstructionReaderScheduler = createWorkerPdfReaderScheduler(pdfReconstructionReaderWorker)
-  const pdfReconstructionScheduler = createWorkerPdfReconstructionScheduler(
-    pdfReconstructionWorker,
-  )
-  const nativePdf = createNativePdfRuntime(workerConstructor)
   let layoutRequestNumber = 0
   const layoutRequestFactory = (accepted: EditorAcceptedSnapshot): LayoutRequestDto => {
     layoutRequestNumber += 1
@@ -191,28 +169,71 @@ export function createDefaultWorkerRuntime(
       fontFaces: fontCatalog.faces.map((face) => face.manifest),
     })
   }
-  return {
-    fontCatalog,
-    nativePdf,
-    layoutScheduler,
-    pdfExportScheduler,
-    pdfReaderScheduler,
-    pdfReconstructionReaderScheduler,
-    pdfReconstructionScheduler,
-    layoutRequestFactory,
-    pdfExportRequestFactory,
-    dispose() {
-      nativePdf.dispose()
-      layoutScheduler.dispose()
-      pdfExportScheduler.dispose()
-      pdfReaderScheduler.dispose()
-      pdfReconstructionReaderScheduler.dispose()
-      pdfReconstructionScheduler.dispose()
-      layoutWorker.terminate()
-      pdfWorker.terminate()
-      pdfReaderWorker.terminate()
-      pdfReconstructionReaderWorker.terminate()
-      pdfReconstructionWorker.terminate()
-    },
+
+  const cleanup: (() => void)[] = []
+  function dispose() {
+    for (const release of cleanup.splice(0).reverse()) release()
+  }
+
+  try {
+    const layoutWorker = (
+      workerConstructor === undefined
+        ? new Worker(new URL('./layout-worker-entry.ts', import.meta.url), { type: 'module' })
+        : new workerConstructor(new URL('./layout-worker-entry.ts', import.meta.url), { type: 'module' })
+    ) as unknown as LayoutWorkerPort
+    cleanup.push(() => layoutWorker.terminate())
+    const pdfWorker = (
+      workerConstructor === undefined
+        ? new Worker(new URL('../pdf/pdf-worker-entry.ts', import.meta.url), { type: 'module' })
+        : new workerConstructor(new URL('../pdf/pdf-worker-entry.ts', import.meta.url), { type: 'module' })
+    ) as unknown as PdfWorkerPort
+    cleanup.push(() => pdfWorker.terminate())
+    const pdfReaderWorker = (
+      workerConstructor === undefined
+        ? new Worker(new URL('../pdf/pdf-reader-worker-entry.ts', import.meta.url), { type: 'module' })
+        : new workerConstructor(new URL('../pdf/pdf-reader-worker-entry.ts', import.meta.url), { type: 'module' })
+    ) as unknown as PdfReaderWorkerPort
+    cleanup.push(() => pdfReaderWorker.terminate())
+    const pdfReconstructionReaderWorker = (
+      workerConstructor === undefined
+        ? new Worker(new URL('../pdf/pdf-reader-worker-entry.ts', import.meta.url), { type: 'module' })
+        : new workerConstructor(new URL('../pdf/pdf-reader-worker-entry.ts', import.meta.url), { type: 'module' })
+    ) as unknown as PdfReaderWorkerPort
+    cleanup.push(() => pdfReconstructionReaderWorker.terminate())
+    const pdfReconstructionWorker = (
+      workerConstructor === undefined
+        ? new Worker(new URL('../pdf/pdf-reconstruction-worker-entry.ts', import.meta.url), { type: 'module' })
+        : new workerConstructor(new URL('../pdf/pdf-reconstruction-worker-entry.ts', import.meta.url), { type: 'module' })
+    ) as unknown as PdfReconstructionWorkerPort
+    cleanup.push(() => pdfReconstructionWorker.terminate())
+    const layoutScheduler = createWorkerLayoutScheduler(layoutWorker)
+    cleanup.push(() => layoutScheduler.dispose())
+    const pdfExportScheduler = createWorkerPdfExportScheduler(pdfWorker)
+    cleanup.push(() => pdfExportScheduler.dispose())
+    const pdfReaderScheduler = createWorkerPdfReaderScheduler(pdfReaderWorker)
+    cleanup.push(() => pdfReaderScheduler.dispose())
+    const pdfReconstructionReaderScheduler = createWorkerPdfReaderScheduler(pdfReconstructionReaderWorker)
+    cleanup.push(() => pdfReconstructionReaderScheduler.dispose())
+    const pdfReconstructionScheduler = createWorkerPdfReconstructionScheduler(
+      pdfReconstructionWorker,
+    )
+    cleanup.push(() => pdfReconstructionScheduler.dispose())
+    const nativePdf = createNativePdfRuntime(workerConstructor)
+    cleanup.push(() => nativePdf.dispose())
+    return {
+      fontCatalog,
+      nativePdf,
+      layoutScheduler,
+      pdfExportScheduler,
+      pdfReaderScheduler,
+      pdfReconstructionReaderScheduler,
+      pdfReconstructionScheduler,
+      layoutRequestFactory,
+      pdfExportRequestFactory,
+      dispose,
+    }
+  } catch (error) {
+    dispose()
+    throw error
   }
 }

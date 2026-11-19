@@ -3,7 +3,7 @@ use std::mem::size_of;
 
 use miniz_oxide::deflate::compress_to_vec_zlib;
 
-use super::super::reader::{PdfObjectRef, PdfReaderLimits, PdfStream, PdfValue};
+use super::super::reader::{PdfObjectRef, PdfReaderLimits, PdfStream, PdfValue, single_filter};
 use super::super::scene::{ContentCursor, ContentToken, separated_content_streams};
 use super::graph::{NativeEditError, NativePdfGraph, spend};
 use super::text::{RedactionText, redaction_number};
@@ -475,11 +475,13 @@ impl<'a> Inventory<'a> {
         }) {
             return Err(Unsupported);
         }
-        match name(dict, "Filter") {
-            None if !dict.contains_key("Filter") => {}
-            Some("FlateDecode" | "Fl") => {}
-            Some("DCTDecode" | "DCT")
-                if role == XObject && name(dict, "Subtype") == Some("Image") => {}
+        match dict.get("Filter") {
+            None => {}
+            Some(filter) if matches!(filter.as_name(), Some("FlateDecode" | "Fl")) => {}
+            Some(filter)
+                if role == XObject
+                    && name(dict, "Subtype") == Some("Image")
+                    && matches!(single_filter(filter), Some("DCTDecode" | "DCT")) => {}
             _ => return Err(Unsupported),
         }
         let length = get(dict, "Length")?;

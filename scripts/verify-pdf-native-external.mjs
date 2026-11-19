@@ -399,7 +399,7 @@ function pdfString(value) {
   return undefined
 }
 
-function pdfStructure(json) {
+export function pdfStructure(json) {
   const [{ jsonversion }, objects] = json.qpdf
   requireMatch(jsonversion === 2 && json.pages.length <= 16, 'structure-format')
   const resolveObject = (value) => {
@@ -435,7 +435,8 @@ function pdfStructure(json) {
         const normal = resolveObject(annot['/AP'])?.['/N']
         const state = annot['/AS']
         const appearance = resolveObject(normal)
-        if (state) requireMatch(Object.hasOwn(appearance ?? {}, state) && Object.hasOwn(appearance, '/Off') &&
+        if (state) requireMatch((state === '/Off' || state === '/Yes') &&
+          Object.hasOwn(appearance ?? {}, '/Off') && Object.hasOwn(appearance, '/Yes') &&
           Object.keys(appearance).length === 2, 'widget-appearance-state')
         const streams = state ? Object.values(appearance) : [normal]
         for (const stream of streams) {
@@ -445,11 +446,12 @@ function pdfStructure(json) {
             matchesWidgetBounds(rectPt, resolveObject(form['/BBox']),
               matrix === undefined ? undefined : resolveObject(matrix) ?? null), 'widget-appearance')
         }
-        fields.push({ page, rectPt, name: pdfString(annot['/T']), value: pdfString(annot['/V']),
+        fields.push({ page, rectPt, fieldType: resolveObject(annot['/FT']),
+          name: pdfString(annot['/T']), value: pdfString(annot['/V']),
           defaultValue: pdfString(annot['/DV']), ...(state ? { appearanceState: pdfString(state) } : {}) })
       } else if (subtype === '/Link') {
         const destination = resolveObject(annot['/Dest'])
-        if (destination) links.push({ kind: 'link', page, target: pageNumber(destination[0]) })
+        links.push({ kind: 'link', page, target: Array.isArray(destination) ? pageNumber(destination[0]) : null })
       } else {
         requireMatch(false, 'unexpected-annotation')
       }
@@ -481,12 +483,15 @@ function sameRecords(actual, expected) {
   return same(normalize(actual), normalize(expected))
 }
 
-function checkStructure(actual, source, operation, rawStream, showObject, inputPath, outputPath) {
+export function checkStructure(actual, source, operation, rawStream, showObject, inputPath, outputPath) {
   const pages = operation.pages.map(({ page, cropBoxPt, rotation }) => ({ page, cropBoxPt, rotation }))
   requireMatch(same(actual.pages.map(({ page, cropBoxPt, rotation }) => ({ page, cropBoxPt, rotation })), pages),
     'page-structure')
   requireMatch(sameRecords(actual.notes, operation.noteReadback), 'note-structure')
-  requireMatch(sameRecords(actual.fields, operation.fieldReadback ?? []), 'field-structure')
+  const fields = (operation.fieldReadback ?? []).map((field) => ({
+    ...field, fieldType: Object.hasOwn(field, 'appearanceState') ? '/Btn' : '/Tx',
+  }))
+  requireMatch(sameRecords(actual.fields, fields), 'field-structure')
   requireMatch(sameRecords(actual.destinations, operation.destinations ?? []), 'destination-structure')
   const hasDecoy = Object.values(actual.objects).some(({ value }) => Object.hasOwn(value ?? {}, '/UnreachableDecoy'))
   if (operation.retained?.includes('UnreachableDecoy')) requireMatch(hasDecoy, 'source-decoy')
