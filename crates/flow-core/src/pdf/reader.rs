@@ -1184,12 +1184,7 @@ fn decode_stream(
     }
 }
 
-pub(super) fn jpeg_frame(bytes: &[u8]) -> Option<(u32, u32, ColorType)> {
-    let (width, height, color, _) = jpeg_frame_details(bytes)?;
-    Some((width, height, color))
-}
-
-fn jpeg_frame_details(bytes: &[u8]) -> Option<(u32, u32, ColorType, &[u8])> {
+pub(super) fn jpeg_frame(bytes: &[u8]) -> Option<(u32, u32, ColorType, &[u8])> {
     let mut segments = bytes
         .strip_prefix(&[0xff, 0xd8])?
         .strip_suffix(&[0xff, 0xd9])?;
@@ -1260,7 +1255,7 @@ fn decode_retained_jpeg(
     {
         return Err(PdfReadError::FilterUnsupported);
     }
-    let (width, height, color, components) = jpeg_frame_details(raw).ok_or(PdfReadError::Syntax)?;
+    let (width, height, color, components) = jpeg_frame(raw).ok_or(PdfReadError::Syntax)?;
     let expected_color = match name("ColorSpace") {
         Some("DeviceGray") => ColorType::L8,
         Some("DeviceRGB") => ColorType::Rgb8,
@@ -1283,7 +1278,7 @@ fn decode_retained_jpeg(
     if samples > limits.max_decoded_stream_bytes {
         return Err(PdfReadError::DecodedStreamLimit);
     }
-    let peak = retained_jpeg_peak(
+    let peak = jpeg_decode_peak(
         raw.len(),
         width as usize,
         height as usize,
@@ -1313,7 +1308,7 @@ fn decode_retained_jpeg(
 }
 
 // @security: Bound the pinned JPEG decoder's progressive and multi-scan allocations.
-fn retained_jpeg_peak(
+pub(super) fn jpeg_decode_peak(
     encoded: usize,
     width: usize,
     height: usize,
@@ -1966,8 +1961,8 @@ mod retained_reader_tests {
             Err(PdfReadError::DecodedStreamLimit)
         );
         limits.max_decoded_stream_bytes = 4;
-        let (_, _, _, components) = jpeg_frame_details(&bytes).unwrap();
-        let peak = retained_jpeg_peak(bytes.len(), 2, 2, components, 4).unwrap();
+        let (_, _, _, components) = jpeg_frame(&bytes).unwrap();
+        let peak = jpeg_decode_peak(bytes.len(), 2, 2, components, 4).unwrap();
         assert_eq!(
             decode_stream(&dictionary, bytes.clone(), &limits, Some(peak - 1)),
             Err(PdfReadError::DecodedStreamLimit)
