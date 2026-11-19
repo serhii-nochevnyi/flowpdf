@@ -598,7 +598,7 @@ impl Paint<'_> {
         if let (Some((_, evenodd)), Some(fill)) = (vector.fill, &vector.fill_path) {
             hit |= fill.fill_intersects_rect(mark, evenodd, work)?;
         }
-        // Check every stroke component so ambiguous contact propagates after a definite hit.
+        // @invariant: Ambiguous contact in any stroke component overrides a definite hit.
         for stencil in &vector.stroke_paths {
             spend(work, stencil.edges * 5 + 1)?;
             hit |= stencil.stroke_intersects_rect(mark)?;
