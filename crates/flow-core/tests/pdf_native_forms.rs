@@ -203,19 +203,36 @@ fn read_only_appearance_retains_verified_name_without_a_setter() {
 #[test]
 fn named_read_only_widgets_keep_their_labels_after_a_page_rewrite() {
     let form = "/Type /XObject /Subtype /Form /BBox [0 0 20 20] /Resources <<>>";
+    let max_label = format!("<{}>", "E9".repeat(32));
+    let oversized_label = format!("<{}>", "E9".repeat(33));
+    let expected_max_label = "é".repeat(32);
     for (merged_name, parent_name, widget_label_entry, expected_names, refusal) in [
         (
             "(consent)",
             "(approval)",
             "",
-            ["consent", "approval"],
+            [Some("consent"), Some("approval")],
             NativeFieldRefusal::Profile,
+        ),
+        (
+            "(Consent form)",
+            "<FEFF04170433043E04340430>",
+            "",
+            [Some("Consent form"), Some("Згода")],
+            NativeFieldRefusal::Reference,
         ),
         (
             "<436166E9>",
             "<FEFF04170433043E04340430>",
             "/T null",
-            ["Café", "Згода"],
+            [Some("Café"), Some("Згода")],
+            NativeFieldRefusal::Reference,
+        ),
+        (
+            max_label.as_str(),
+            oversized_label.as_str(),
+            "",
+            [Some(expected_max_label.as_str()), None],
             NativeFieldRefusal::Reference,
         ),
     ] {
@@ -235,7 +252,7 @@ fn named_read_only_widgets_keep_their_labels_after_a_page_rewrite() {
             let fields = &pdf.snapshot().fields;
             assert_eq!(fields.len(), expected_names.len());
             for (field, name) in fields.iter().zip(expected_names) {
-                assert_eq!(field.name.as_deref(), Some(name));
+                assert_eq!(field.name.as_deref(), name);
                 assert_eq!(field.refusal, Some(refusal));
                 assert!(!field.can_edit_appearance);
                 assert_eq!(field.kind, None);

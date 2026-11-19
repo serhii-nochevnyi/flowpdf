@@ -552,12 +552,18 @@ export function isNativePageCommand(value: unknown): value is NativePdfPageComma
   }
 }
 
-function editableFieldName(value: unknown): value is string {
-  return typeof value === 'string' && value.length > 0 && value.length <= 64 && !/[^A-Za-z0-9_-]/u.test(value)
-}
+const maxFieldNameBytes = 64
 
 function fieldText(value: unknown, limit = 1024): value is string {
   return fitsNativeJson(value, limit) && !/[\u0000-\u001f\u007f-\u009f\uD800-\uDFFF]/u.test(value)
+}
+
+function editableFieldName(value: unknown): value is string {
+  return typeof value === 'string' && value.length > 0 && value.length <= maxFieldNameBytes && !/[^A-Za-z0-9_-]/u.test(value)
+}
+
+function fieldDisplayName(value: unknown): value is string {
+  return fieldText(value, maxFieldNameBytes) && value.length > 0
 }
 
 function fieldRect(value: unknown): value is NativePdfRect {
@@ -747,7 +753,7 @@ function fieldViews(value: unknown, count: number): boolean {
         && (field.kind === 'text' ? fieldText(field.value) && field.checked === null
           : field.kind === 'checkbox' && field.value === null && typeof field.checked === 'boolean')
       : field.canEditAppearance === false && (field.rect === null || fieldRect(field.rect))
-        && field.kind === null && (field.name === null || (fieldText(field.name, 64) && field.name.length > 0))
+        && field.kind === null && (field.name === null || fieldDisplayName(field.name))
         && field.value === null && field.checked === null
         && typeof field.refusal === 'string' && fieldRefusalCodes.has(field.refusal)))
 }

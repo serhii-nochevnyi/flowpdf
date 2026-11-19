@@ -240,21 +240,31 @@ function sameFieldObject(left: NativePdfFieldView, right: NativePdfFieldView) {
   return left.object.objectNumber === right.object.objectNumber && left.object.generation === right.object.generation
 }
 
+function sameFieldRect(left: NativePdfFieldView, right: NativePdfFieldView) {
+  return left.rect && right.rect ? sameNativeBytes(left.rect, right.rect) : left.rect === right.rect
+}
+
+function rebindReadOnlyField(prior: NativePdfFieldView, fields: readonly NativePdfFieldView[], page: number) {
+  const matches = fields.filter((field) => !field.canEditAppearance && field.page === page
+    && field.name === prior.name && field.refusal === prior.refusal && sameFieldRect(prior, field))
+  const [match] = matches
+  return matches.length === 1 && match && sameFieldObject(prior, match) ? match : undefined
+}
+
 export function rebindNativeField(
   prior: NativePdfFieldView, fields: readonly NativePdfFieldView[], page: number,
   previousFields?: readonly NativePdfFieldView[],
 ): NativePdfFieldView | undefined {
-  const matches = fields.filter((field) => field.page === page
-    && field.name === prior.name && field.kind === prior.kind && field.value === prior.value
-    && field.checked === prior.checked && field.canEditAppearance === prior.canEditAppearance
-    && field.refusal === prior.refusal && (prior.rect && field.rect
-      ? sameNativeBytes(prior.rect, field.rect) : prior.rect === field.rect))
+  if (!prior.canEditAppearance) return undefined
+  const sameEditableName = (field: NativePdfFieldView) => field.canEditAppearance && field.name === prior.name
+  const matches = fields.filter((field) => field.page === page && sameEditableName(field)
+    && field.kind === prior.kind && field.value === prior.value && field.checked === prior.checked
+    && field.refusal === prior.refusal && sameFieldRect(prior, field))
   const [match] = matches
   if (matches.length !== 1 || !match) return undefined
-  if (!previousFields || !prior.canEditAppearance || !prior.name || !prior.kind || !prior.rect) {
+  if (!previousFields || !prior.name || !prior.kind || !prior.rect) {
     return sameFieldObject(prior, match) ? match : undefined
   }
-  const sameEditableName = (field: NativePdfFieldView) => field.canEditAppearance && field.name === prior.name
   const previous = previousFields.filter((field) => field.page === prior.page && sameEditableName(field))
   return previous.length === 1 && sameNativeBytes(previous[0]!.id, prior.id)
     && fields.filter((field) => field.page === page && sameEditableName(field)).length === 1
@@ -1368,7 +1378,7 @@ export function PdfNativeEditPanel({
 
   function chooseField(field: NativePdfFieldView | null) {
     const drafts = savedFieldDrafts.current
-    if (fieldDraft) {
+    if (fieldDraft && (!selectedField || selectedField.canEditAppearance)) {
       drafts.set(selectedField ? fieldKey(selectedField) : '', {
         field: selectedField ?? null, draft: fieldDraft, feedback: fieldFeedback,
       })
@@ -1414,7 +1424,7 @@ export function PdfNativeEditPanel({
   ) {
     const previousFields = before.fields ?? []
     const nextFields = result.fields ?? []
-    const rebind = (field: NativePdfFieldView) => {
+    const rebindDraftField = (field: NativePdfFieldView) => {
       const index = retained.get(field.page)
       return index === undefined ? undefined : rebindNativeField(field, nextFields, index, previousFields)
     }
@@ -1427,7 +1437,7 @@ export function PdfNativeEditPanel({
     const drafts = [...savedFieldDrafts.current.values()]
     savedFieldDrafts.current.clear()
     for (const saved of drafts) {
-      const field = saved.field && rebind(saved.field)
+      const field = saved.field && rebindDraftField(saved.field)
       if (field === undefined) continue
       const draft = rebindDraft(saved.draft, field)
       if (draft) savedFieldDrafts.current.set(field ? fieldKey(field) : '', { ...saved, field, draft })
@@ -1450,7 +1460,12 @@ export function PdfNativeEditPanel({
       setFieldDraft(nextDraft)
       return
     }
-    const rebound = selectedField && command?.kind !== 'removeField' ? rebind(selectedField) : undefined
+    const selectedPage = selectedField && retained.get(selectedField.page)
+    const rebound = selectedField && selectedPage !== undefined && command?.kind !== 'removeField'
+      ? selectedField.canEditAppearance
+        ? rebindNativeField(selectedField, nextFields, selectedPage, previousFields)
+        : rebindReadOnlyField(selectedField, nextFields, selectedPage)
+      : undefined
     setFieldSelection(rebound ?? null)
     if (selectedField && !rebound) {
       const saved = savedFieldDrafts.current.get('')

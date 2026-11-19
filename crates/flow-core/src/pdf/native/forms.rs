@@ -217,6 +217,14 @@ fn decode(bytes: &[u8], limit: usize) -> Option<String> {
     (value.len() <= limit).then_some(value)
 }
 
+fn editable_name(field: &Dict) -> Option<String> {
+    field
+        .get("T")
+        .and_then(Value::as_bytes)
+        .and_then(|bytes| decode(bytes, MAX_NAME))
+        .filter(|name| valid_name(name))
+}
+
 fn text_string(value: &str) -> Value {
     let mut bytes = vec![0xfe, 0xff];
     bytes.extend(value.encode_utf16().flat_map(u16::to_be_bytes));
@@ -415,12 +423,7 @@ fn load_form(graph: &NativePdfGraph, work: &mut usize) -> FieldResult<Form> {
         {
             return Err(Reference);
         }
-        let field_name = values
-            .get("T")
-            .and_then(Value::as_bytes)
-            .and_then(|bytes| decode(bytes, MAX_NAME))
-            .filter(|name| valid_name(name))
-            .ok_or(Reference)?;
+        let field_name = editable_name(values).ok_or(Reference)?;
         if names.insert(field_name, field).is_some() {
             return Err(Reference);
         }
@@ -623,10 +626,7 @@ fn recognize_identity(
             }
         }
     }
-    let field_name = fields
-        .get("T")
-        .and_then(Value::as_bytes)
-        .and_then(|bytes| decode(bytes, MAX_NAME))
+    let field_name = editable_name(fields)
         .filter(|name| form.names.get(name) == Some(&field))
         .ok_or(Reference)?;
     Ok((field, field_name))

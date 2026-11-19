@@ -643,6 +643,13 @@ describe('native field drafts', () => {
     expect(rebindNativeField(before, [{ ...after, canEditAppearance: false }], 0, [sibling, before])).toBeUndefined()
   })
 
+  it('excludes display-only fields from draft rebinding', () => {
+    const revised = { ...readOnlyField, id: hash.map(() => 43), page: 1 }
+    expect(rebindNativeField(readOnlyField, [revised], 1, [readOnlyField])).toBeUndefined()
+    const sameName = { ...revised, name: field.name }
+    expect(rebindNativeField(field, [sameName], 1, [field])).toBeUndefined()
+  })
+
   it('decodes and displays distinct read-only widget labels and refusal reasons', () => {
     const widgets = [
       readOnlyField,
