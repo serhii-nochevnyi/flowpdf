@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest'
 import {
   NativeNoteDraftRecovery,
   PdfNativeEditPanel,
+  nativeCropBounds,
   nativeDownloadName,
   nativeObjectBounds,
   nativeFieldBounds,
@@ -16,6 +17,8 @@ import {
   nativeNoteDraftAfterAcceptance,
   nativeNoteRect,
   nativeNoteTextError,
+  nativeRedactionOffsets,
+  nativeRedactionOverlay,
   nativeReplacementError,
   rebindNativeTextDrafts,
   verifiedRedactionCandidate,
@@ -130,6 +133,37 @@ describe('exact redacted output', () => {
       expect(markup).not.toContain(nativePdfText(locale, 'redaction.success'))
     })
   }
+})
+
+describe('redaction mark geometry', () => {
+  const cropBox = [125, -375, 100_625, 50_125] as const
+
+  it('round trips zero offsets and fractional edges with the verified crop', () => {
+    const origin = nativeCropBounds(['0', '0', '.5', '0,5'], cropBox)!
+    const edge = nativeCropBounds(['100', '50', '.5', '.5'], cropBox)!
+    expect(origin).toEqual([125, -375, 625, 125])
+    expect(edge).toEqual([100_125, 49_625, 100_625, 50_125])
+    expect(nativeRedactionOffsets(origin, cropBox)).toEqual([0, 0, 500, 500])
+    expect(nativeRedactionOffsets(edge, cropBox)).toEqual([100_000, 50_000, 500, 500])
+    expect(nativeCropBounds(['100', '50', '.501', '.5'], cropBox)).toBeNull()
+    expect(nativeCropBounds(['100', '50', '.5', '.501'], cropBox)).toBeNull()
+  })
+
+  it.each([0, 90] as const)('places exact crop corners on the preview at %i°', (rotation) => {
+    const origin = nativeCropBounds(['0', '0', '.5', '.5'], cropBox)!
+    const edge = nativeCropBounds(['100', '50', '.5', '.5'], cropBox)!
+    const first = nativeRedactionOverlay({ cropBox, rotation }, origin)
+    const last = nativeRedactionOverlay({ cropBox, rotation }, edge)
+    const percent = (value: string) => Number.parseFloat(value)
+    const width = rotation === 0 ? 100 * 500 / 100_500 : 100 * 500 / 50_500
+    const height = rotation === 0 ? 100 * 500 / 50_500 : 100 * 500 / 100_500
+    expect(first.left).toBe('0%')
+    expect(percent(first.top)).toBeCloseTo(rotation === 0 ? 100 - height : 0)
+    expect(percent(first.width)).toBeCloseTo(width)
+    expect(percent(first.height)).toBeCloseTo(height)
+    expect(percent(last.left) + percent(last.width)).toBeCloseTo(100)
+    expect(percent(last.top)).toBeCloseTo(rotation === 0 ? 0 : 100 - height)
+  })
 })
 
 describe('text draft readback', () => {
