@@ -168,23 +168,9 @@ impl Document {
                 continue;
             }
             documents.tree_entry::<(PdfObjectRef, Role, PdfValue)>()?;
-            let (value, mut cost, tokens) = {
-                let _codec_state = workspace.reserve(size_of::<DecompressorOxide>())?;
-                // @security: Leave headroom for codec buffers beyond the retained reader's output.
-                let available = workspace.remaining();
-                let (value, cost, tokens) = reader
-                    .retained_object(
-                        id,
-                        retained.min(available / 2),
-                        decoded.min(available / 16),
-                        work,
-                    )
-                    .map_err(read_error)?;
-                (value, cost, tokens)
-            };
-            if let PdfValue::Stream(stream) = &value {
-                cost += stream.data.capacity() - stream.data.len();
-            }
+            let (value, cost, tokens) = reader
+                .retained_object(id, retained.min(workspace.remaining()), decoded, work)
+                .map_err(read_error)?;
             documents.grow(cost)?;
             spend(&mut retained, cost)?;
             spend(&mut work, tokens)?;
@@ -1151,6 +1137,55 @@ pub(super) fn reject_comments(mut bytes: &[u8]) -> VerifyResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ordinary_object_boundary_reports_workspace_budget() {
+        let mut source = b"%PDF-1.7\n".to_vec();
+        let mut offsets = Vec::new();
+        for object in [
+            "1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n",
+            "2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n",
+            "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] >>\nendobj\n",
+        ] {
+            offsets.push(source.len());
+            source.extend_from_slice(object.as_bytes());
+        }
+        let xref = source.len();
+        source.extend_from_slice(b"xref\n0 4\n0000000000 65535 f \n");
+        for offset in offsets {
+            source.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+        }
+        source.extend_from_slice(
+            format!("trailer\n<< /Size 4 /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n").as_bytes(),
+        );
+        let reader = open_pdf_retained(&source, PdfReaderLimits::default(), MAX_RETAINED).unwrap();
+        let root = PdfObjectRef {
+            object_number: 1,
+            generation: 0,
+        };
+        let (_, catalog_bytes, _) = reader
+            .retained_object(root, MAX_RETAINED, MAX_DECODED, MAX_WORK)
+            .unwrap();
+        let overhead = Workspace::new(MAX_RETAINED);
+        let mut reservation = overhead
+            .reserve(128 + source.len() + reader.retained_cost)
+            .unwrap();
+        reservation
+            .grow(4 * size_of::<(PdfObjectRef, Role)>())
+            .unwrap();
+        reservation
+            .tree_entry::<(PdfObjectRef, Role, PdfValue)>()
+            .unwrap();
+        let allowance = MAX_RETAINED - overhead.remaining() + catalog_bytes - 1;
+        let workspace = Workspace::new(allowance);
+        let mut documents = workspace.scope();
+        assert!(matches!(
+            Document::open(&source, Side::Accepted, &workspace, &mut documents),
+            Err(Budget)
+        ));
+        drop(documents);
+        assert_eq!(workspace.remaining(), allowance);
+    }
 
     #[test]
     fn exact_flate_reserves_and_releases_comparison_scratch() {

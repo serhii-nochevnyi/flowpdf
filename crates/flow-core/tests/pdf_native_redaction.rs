@@ -125,6 +125,41 @@ fn jpeg_pdf(filter: &str, data: &[u8]) -> Vec<u8> {
 }
 
 #[test]
+fn ordinary_rgb_scan_readback() {
+    let samples = [208, 140, 80].repeat(1_600 * 1_200);
+    let source = pdf(
+        vec![
+            b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+            b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] /Contents 4 0 R /Resources << /XObject << /Photo 5 0 R >> >> >>".to_vec(),
+            stream("", b"q 80 0 0 60 10 20 cm /Photo Do Q"),
+            flate(
+                "/Type /XObject /Subtype /Image /Width 1600 /Height 1200 /ColorSpace /DeviceRGB /BitsPerComponent 8",
+                &samples,
+            ),
+        ],
+        "",
+    );
+    let mut session = open(&source);
+    let binding = session.snapshot().binding;
+    add(&mut session, 0, [14_000, 32_000, 15_000, 33_000]);
+    let NativeRedactionStage::Pending(candidate) = session.stage_redaction(binding, 1).unwrap()
+    else {
+        panic!("expected pending redaction");
+    };
+    let evidence = session.verify_redaction(binding, 1).unwrap();
+    assert!(evidence.checks_passed(), "{evidence:?}");
+    assert_accepted(&session, &source, 0, &source);
+
+    let receipt = session.publish_redaction(binding, 1).unwrap();
+    assert_eq!(receipt.output_hash, candidate.candidate_hash);
+    assert_eq!(
+        session.redacted_output_bytes(),
+        Some(session.output_bytes())
+    );
+}
+
+#[test]
 fn jpeg_filter_forms_publish_the_verified_scrubbed_samples() {
     let jpeg = grayscale_jpeg();
     let samples = image::load_from_memory_with_format(&jpeg, image::ImageFormat::Jpeg)
