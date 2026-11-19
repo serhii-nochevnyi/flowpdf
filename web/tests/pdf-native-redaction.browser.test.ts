@@ -455,6 +455,7 @@ for (const locale of ['en', 'uk'] as const) {
       const checkResult = button('session.reconcile')
       await expect.element(checkResult, { timeout: 6_000 }).toBeVisible()
       const previewCount = lane.control.previewPages.length
+      await expect.element(pageSelect).toBeEnabled()
       const pageSelector = pageSelect.element()
       pageSelector.focus()
       expect(document.activeElement).toBe(pageSelector)
