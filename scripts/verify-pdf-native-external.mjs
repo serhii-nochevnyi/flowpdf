@@ -171,7 +171,8 @@ export function compareRaster(page, policy, actual, source, glyphReference) {
   const { widthPx: width, heightPx: height, rotation } = page
   const rule = page.raster ?? page
   const size = width * height * 3
-  if (!Number.isSafeInteger(size) || size <= 0 || size > byteLimit || actual.length !== size) return false
+  if (![width, height].every((dimension) => Number.isSafeInteger(dimension) && dimension > 0) ||
+    size > byteLimit || actual.length !== size) return false
   if (rule.comparison === 'equal-to-source' || rule.comparison === 'source-only') return actual.equals(source)
   if (rule.comparison === 'source-transformed') {
     if (source?.length !== size) return false
@@ -184,8 +185,9 @@ export function compareRaster(page, policy, actual, source, glyphReference) {
     }
     return true
   }
-  if (rotation !== 0 || !['analytic-full-page', 'source-with-patches'].includes(rule.comparison)) return false
   const analytic = rule.comparison === 'analytic-full-page'
+  const blank = analytic && rule.fills.length === 0
+  if ((!analytic && rule.comparison !== 'source-with-patches') || (!blank && rotation !== 0)) return false
   if (!analytic && source?.length !== size) return false
   const expected = analytic ? Buffer.alloc(size) : Buffer.from(source)
   const paints = (analytic ? rule.fills : rule.patches).map((paint) => ({
@@ -202,6 +204,7 @@ export function compareRaster(page, policy, actual, source, glyphReference) {
     }
   }
   if (analytic && digest(expected) !== rule.sha256Rgb8) return false
+  if (blank) return actual.equals(expected)
   for (let y = 0; y < height; y++) {
     for (let x = 0; x < width; x++) {
       const glyph = paints.find(({ glyphRun, bounds: [x0, y0, x1, y1] }) =>
@@ -241,18 +244,21 @@ async function loadNative() {
   }
 }
 
-function nativeSession(wasm, input) {
+export function nativeSession(wasm, input) {
   const originStoreHash = digest(input)
   let requestId = 0
   let snapshot
   function exchange(operation, payload, retry = false) {
+    const binding = snapshot?.binding
     const response = wasm[`native_pdf_${operation}`](JSON.stringify({
       protocolVersion: 1, requestId: retry ? requestId : ++requestId, operation,
-      originStoreHash, ...(snapshot ? { binding: snapshot.binding } : {}), ...payload,
+      originStoreHash, ...(binding ? { binding } : {}), ...payload,
     }))
-    requireMatch(wasm.verify_native_pdf_response(response), 'native-response')
+    requireMatch(operation === 'snapshot' ? wasm.verify_native_pdf_worker_response(response) :
+      wasm.verify_native_pdf_response(response), 'native-response')
     const reply = JSON.parse(response)
     requireMatch(reply.operation === operation && reply.requestId === requestId &&
+      (operation !== 'snapshot' || same(reply.binding, binding)) &&
       (!reply.snapshot || reply.snapshot.originStoreHash === originStoreHash), 'native-response-binding')
     if (reply.snapshot) snapshot = reply.snapshot
     return reply
@@ -264,6 +270,7 @@ function nativeSession(wasm, input) {
     current: () => snapshot,
     command: (command) => exchange('command', { command, outputHash: snapshot.outputHash }),
     redact: (action, retry = false) => exchange('redaction', { action, acceptedHash: snapshot.outputHash }, retry),
+    readback: () => exchange('snapshot', {}, true),
     close() {
       if (snapshot) requireMatch(exchange('close', {}).status === 'closed', 'native-close')
     },
@@ -337,15 +344,21 @@ function redact(session, operation) {
   return published
 }
 
-function operationOutput(session, fixture, operation) {
+export function operationOutput(session, fixture, operation) {
   const { id, input } = fixture
   const { operation: name, outcome, request, noteReadback } = operation
   if (id === 'refused') {
-    requireMatch(session.opened.code === outcome && !session.current(), 'native-refusal')
+    requireMatch(session.opened.status === 'failed' && session.opened.code === outcome &&
+      !session.opened.snapshot && !session.current(), 'native-refusal')
     return input
   }
   requireInput(session.current(), 'native-fixture-admission')
   if (name === 'preserve') return exactSnapshot(session.current())
+  for (const { operation: setup, ...parameters } of request?.after ?? []) {
+    const result = session.command(familyCommand(setup, parameters, session.current()))
+    requireInput(result.status === 'applied', 'native-operation-setup')
+  }
+  const base = session.current()
   let reply
   if (id === 'notes-preservation') {
     const note = session.current().scene.pages.flatMap(({ annotations }) => annotations)
@@ -361,15 +374,17 @@ function operationOutput(session, fixture, operation) {
   } else if (name.startsWith('redact')) {
     reply = redact(session, operation)
   } else {
-    for (const { operation: setup, ...parameters } of request.after ?? []) {
-      const result = session.command(familyCommand(setup, parameters, session.current()))
-      requireInput(result.status === 'applied', 'native-operation-setup')
-    }
-    reply = session.command(familyCommand(name, request, session.current()))
+    reply = session.command(familyCommand(name, request, base))
   }
   if (outcome !== 'admitted') {
-    requireMatch(reply.code === outcome && !reply.snapshot, 'native-refusal')
-    return exactSnapshot(session.current())
+    requireMatch(reply.status === 'failed' && reply.code === outcome && !reply.snapshot &&
+      !reply.redaction && !reply.preview, 'native-refusal')
+    const { status, snapshot } = session.readback()
+    requireMatch(status === 'unseen' && snapshot?.binding.revision === base.binding.revision &&
+      same(snapshot.outputHash, base.outputHash), 'native-refusal-readback')
+    const output = exactSnapshot(snapshot)
+    requireMatch(output.equals(exactSnapshot(base)), 'native-refusal-readback')
+    return output
   }
   requireInput(['applied', 'published'].includes(reply.status), 'native-operation-unavailable')
   const output = exactSnapshot(reply.snapshot)

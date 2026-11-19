@@ -1,8 +1,13 @@
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import { test } from 'node:test'
 import {
-  compareRaster, compareWidgetRegion, decodePpm, externalExitCode, matchesWidgetBounds, probeVersion,
+  compareRaster, compareWidgetRegion, decodePpm, externalExitCode, matchesWidgetBounds, nativeSession,
+  operationOutput, probeVersion,
 } from '../../scripts/verify-pdf-native-external.mjs'
+
+const fixture = (name) => readFileSync(new URL(`../../fixtures/pdf-native/${name}`, import.meta.url))
+const editFamilies = JSON.parse(fixture('edit-families.expected.json'))
 
 test('strict external rejects unavailable or failed checks', () => {
   assert.equal(externalExitCode('unavailable', true), 2)
@@ -25,6 +30,90 @@ test('raster parsing and comparison cover the entire page including controls', (
   assert.equal(compareRaster(page, policy, expected, source), true)
   assert.equal(compareRaster(page, policy, Buffer.alloc(6), source), false)
   assert.equal(compareRaster(page, policy, source, source), false)
+  assert.equal(compareRaster({ ...page, rotation: 90 }, policy, expected, source), false)
+})
+
+test('the declared rotated blank page requires exact dimensions, digest and pixels', () => {
+  const page = editFamilies.operations.find(({ operation }) => operation === 'insertBlankPage')
+    .pages.find(({ sourcePage }) => sourcePage === null)
+  const { widthPx, heightPx, raster } = page
+  assert.equal(page.rotation, 90)
+  assert.deepEqual(raster.fills, [])
+  const white = Buffer.alloc(widthPx * heightPx * 3, 255)
+  const ppm = Buffer.concat([Buffer.from(`P6\n${widthPx} ${heightPx}\n255\n`), white])
+  assert.throws(() => decodePpm(ppm, heightPx, widthPx), /raster-format/)
+  const pixels = decodePpm(ppm, widthPx, heightPx)
+  assert.equal(compareRaster(page, editFamilies.raster, pixels), true)
+  assert.equal(compareRaster({ ...page, raster: { ...raster, sha256Rgb8: '0'.repeat(64) } },
+    editFamilies.raster, pixels), false)
+  assert.equal(compareRaster({ ...page, raster: { ...raster,
+    fills: [{ rectPt: page.cropBoxPt, rgb: [255, 255, 255] }] } }, editFamilies.raster, pixels), false)
+  pixels[pixels.length - 1] = 254
+  assert.equal(compareRaster(page, editFamilies.raster, pixels), false)
+})
+
+test('a refused edit confirms the live state against the base after setup', () => {
+  const input = fixture('edit-families.pdf')
+  const baseBytes = fixture('notes-preservation.pdf')
+  const operation = editFamilies.operations.find(({ operation }) => operation === 'deleteFinalPage')
+
+  for (const change of [{}, { binding: { revision: 3 } }, { outputHash: [3] }, { outputHex: input.toString('hex') }]) {
+    let commands = 0
+    let liveChecks = 0
+    let base
+    const respond = (handler) => (json) => {
+      const { operation, requestId, originStoreHash, binding, ...payload } = JSON.parse(json)
+      return JSON.stringify({ operation, requestId, binding, ...handler(originStoreHash, binding, payload, requestId) })
+    }
+    const snapshot = (originStoreHash, revision, bytes) => ({
+      originStoreHash, binding: { revision }, outputHash: [revision], outputHex: bytes.toString('hex'),
+      scene: {}, pageState: { order: [1, 2, 3].slice(revision) },
+    })
+    const wasm = {
+      native_pdf_open: respond((originStoreHash) => ({ status: 'opened', snapshot: snapshot(originStoreHash, 0, input) })),
+      native_pdf_command: respond((originStoreHash, binding, { command, outputHash }) => {
+        assert.equal(binding.revision, commands)
+        assert.deepEqual(outputHash, [commands])
+        assert.equal(command.kind, 'deletePage')
+        commands++
+        if (commands < 3) {
+          base = snapshot(originStoreHash, commands, baseBytes)
+          return { status: 'applied', snapshot: base }
+        }
+        return { status: 'failed', code: operation.outcome, snapshot: null }
+      }),
+      native_pdf_snapshot: respond((originStoreHash, binding, _payload, requestId) => {
+        assert.equal(commands, 3)
+        assert.equal(requestId, 4)
+        assert.equal(originStoreHash, base.originStoreHash)
+        assert.deepEqual(binding, base.binding)
+        return { status: 'unseen', snapshot: { ...base, ...change } }
+      }),
+      verify_native_pdf_response: (json) => JSON.parse(json).operation !== 'snapshot',
+      verify_native_pdf_worker_response: (json) => {
+        liveChecks++
+        return JSON.parse(json).operation === 'snapshot'
+      },
+    }
+    const session = nativeSession(wasm, input)
+    const run = () => operationOutput(session, { id: 'edit-families', input }, operation)
+    if (Object.keys(change).length) assert.throws(run, /native-refusal-readback/)
+    else assert.deepEqual(run(), baseBytes)
+    assert.equal(liveChecks, 1)
+  }
+})
+
+test('a refused open retains the source without requesting a session snapshot', () => {
+  const input = fixture('refused.pdf')
+  const outcome = 'FLOW_PDF_NATIVE_UNSUPPORTED'
+  const session = nativeSession({
+    native_pdf_open: (json) => {
+      const { operation, requestId } = JSON.parse(json)
+      return JSON.stringify({ operation, requestId, status: 'failed', code: outcome, snapshot: null })
+    },
+    verify_native_pdf_response: () => true,
+  }, input)
+  assert.equal(operationOutput(session, { id: 'refused', input }, { outcome }), input)
 })
 
 
