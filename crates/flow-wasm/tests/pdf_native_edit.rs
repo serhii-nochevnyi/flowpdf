@@ -268,6 +268,26 @@ fn preview_request(request_id: u64, snapshot: &Value, page_id: Value) -> Value {
 }
 
 #[test]
+fn letter_page_preview_uses_default_worker_budget() {
+    let opened = call(native_pdf_open, open_request(pdf(612).as_bytes()));
+    let base = &opened["snapshot"];
+    assert_eq!(base["redactionAdmission"], "supported");
+    let page = base["pageState"]["order"][0].clone();
+    let preview = call(native_pdf_preview, preview_request(2, base, page));
+    assert_eq!(preview["status"], "preview", "{preview}");
+    let raster = &preview["preview"];
+    assert_eq!(raster["width"], 1224);
+    assert_eq!(raster["height"], 1584);
+    let rgb = raster["rgbHex"].as_str().unwrap();
+    assert_eq!(rgb.len(), 1224 * 1584 * 6);
+    assert!(rgb.bytes().all(|digit| digit == b'f'));
+    assert_eq!(
+        call(native_pdf_close, bound("close", 3, base))["status"],
+        "closed"
+    );
+}
+
+#[test]
 fn page_preview_binds_the_rotated_crop_and_current_accepted_revision() {
     let artwork = "1 0 0 rg 3 5 3 3 re f\n\
                    0 1 0 RG 0.04 w 3.5 9.06 m 5.5 9.06 l S\n\
