@@ -1349,3 +1349,38 @@ fn indirect_page_tree_child_array_retained_by_trailer_prevents_deletion() {
         prior.page_state.order[..1]
     );
 }
+
+#[test]
+fn indirect_page_tree_replacement_preserves_surviving_sibling_references() {
+    let bytes = build_pdf(&[
+        (0, "<< /Type /Catalog /Pages 2 0 R >>"),
+        (
+            0,
+            "<< /Type /Pages /Kids 6 0 R /Count 3 /MediaBox [0 0 300 500] >>",
+        ),
+        (0, "<< /Type /Page /Parent 2 0 R >>"),
+        (0, "<< /Type /Page /Parent 2 0 R /RetainedPage 3 0 R >>"),
+        (0, "<< /Type /Page /Parent 2 0 R >>"),
+        (0, "7 0 R"),
+        (0, "[3 0 R 4 0 R 5 0 R]"),
+    ]);
+    let mut session =
+        NativePdfSession::open_scoped(&bytes, NativeEditLimits::default(), [3; 16]).unwrap();
+    let prior = session.snapshot().clone();
+    let capabilities = &prior.page_state.restrictions.as_ref().unwrap().pages;
+    assert!(capabilities[0].delete.is_some());
+    assert!(capabilities[2].delete.is_none());
+    assert!(
+        session
+            .apply_page(prior.binding, 1, &command("deletePage", 0, &prior))
+            .is_err()
+    );
+    assert_eq!(session.output_bytes(), bytes);
+    session
+        .apply_page(prior.binding, 2, &command("deletePage", 2, &prior))
+        .unwrap();
+    assert_eq!(
+        session.snapshot().page_state.order,
+        prior.page_state.order[..2]
+    );
+}

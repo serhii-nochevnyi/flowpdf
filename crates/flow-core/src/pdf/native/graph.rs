@@ -94,6 +94,12 @@ pub struct PlainTextNote {
     pub rect: [i64; 4],
 }
 
+#[derive(Default)]
+pub(super) struct PageTreeEdges<'a> {
+    pub removed: Option<(PdfObjectRef, PdfObjectRef)>,
+    pub retained_children: Option<(PdfObjectRef, &'a BTreeSet<PdfObjectRef>)>,
+}
+
 // @invariant: Source bytes stay immutable and object identities include generations.
 pub struct NativePdfGraph {
     pub(super) source: Vec<u8>,
@@ -545,7 +551,7 @@ impl NativePdfGraph {
         &self,
         removed: &BTreeSet<PdfObjectRef>,
         replacements: &BTreeMap<PdfObjectRef, BTreeMap<String, PdfValue>>,
-        removed_child_edge: Option<(PdfObjectRef, PdfObjectRef)>,
+        page_tree_edges: PageTreeEdges<'_>,
         trailer: &BTreeSet<PdfObjectRef>,
         work: &mut usize,
         mut retained: usize,
@@ -579,12 +585,19 @@ impl NativePdfGraph {
                 spend(work, owners.len())?;
                 for &owner in owners {
                     if !replacements.contains_key(&owner)
-                        && removed_child_edge != Some((owner, target))
+                        && page_tree_edges.removed != Some((owner, target))
                     {
                         spend(&mut retained, 128)?;
                         pending.push(owner);
                     }
                 }
+            }
+            if let Some((parent, children)) = page_tree_edges.retained_children
+                && !removed.contains(&target)
+                && children.contains(&target)
+            {
+                spend(&mut retained, 128)?;
+                pending.push(parent);
             }
             if let Some(owners) = replacement_owners.get(&target) {
                 for &owner in owners {
@@ -1130,7 +1143,14 @@ mod tests {
         let retained = graph.remaining_retained();
 
         assert_eq!(
-            graph.check_page_removals(&removed, &replacements, None, &trailer, &mut work, retained),
+            graph.check_page_removals(
+                &removed,
+                &replacements,
+                PageTreeEdges::default(),
+                &trailer,
+                &mut work,
+                retained
+            ),
             Ok(())
         );
         replacements.insert(
@@ -1138,11 +1158,25 @@ mod tests {
             BTreeMap::from([("Retained".into(), PdfValue::Reference(detached))]),
         );
         assert_eq!(
-            graph.check_page_removals(&removed, &replacements, None, &trailer, &mut work, retained),
+            graph.check_page_removals(
+                &removed,
+                &replacements,
+                PageTreeEdges::default(),
+                &trailer,
+                &mut work,
+                retained
+            ),
             Err(NativeEditError::Unsupported)
         );
         assert_eq!(
-            graph.check_page_removals(&removed, &replacements, None, &trailer, &mut 0, retained),
+            graph.check_page_removals(
+                &removed,
+                &replacements,
+                PageTreeEdges::default(),
+                &trailer,
+                &mut 0,
+                retained
+            ),
             Err(NativeEditError::Budget)
         );
     }

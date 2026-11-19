@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use super::super::reader::{PdfObjectRef, PdfValue};
 use super::super::scene::NativePdfNotePage;
-use super::graph::{NativeEditError, NativePdfGraph, collect_refs, spend};
+use super::graph::{NativeEditError, NativePdfGraph, PageTreeEdges, collect_refs, spend};
 use super::session::NativeSessionError;
 
 type Dict = BTreeMap<String, PdfValue>;
@@ -1092,6 +1092,7 @@ impl PageDeletion {
 
 struct PageParentReferences {
     outside_kids: BTreeMap<Ref, BTreeSet<Ref>>,
+    indirect_kids: BTreeMap<Ref, BTreeSet<Ref>>,
     retained: usize,
 }
 
@@ -1099,6 +1100,7 @@ impl PageParentReferences {
     fn new(graph: &NativePdfGraph) -> Self {
         Self {
             outside_kids: BTreeMap::new(),
+            indirect_kids: BTreeMap::new(),
             retained: graph.remaining_retained(),
         }
     }
@@ -1127,6 +1129,27 @@ impl PageParentReferences {
             }
         };
         Ok(refs.contains(&target))
+    }
+
+    fn indirect_children(
+        &mut self,
+        graph: &NativePdfGraph,
+        array: Ref,
+        work: &mut usize,
+    ) -> Result<&BTreeSet<Ref>, NativeEditError> {
+        use std::collections::btree_map::Entry;
+
+        Ok(match self.indirect_kids.entry(array) {
+            Entry::Occupied(entry) => entry.into_mut(),
+            Entry::Vacant(entry) => {
+                spend(&mut self.retained, 128)?;
+                let array = graph.objects.get(&array).ok_or(Malformed)?;
+                let resolved = graph.resolve_metered(array, work)?;
+                let mut children = Vec::new();
+                collect_refs(resolved, &mut children, work, &mut self.retained)?;
+                entry.insert(children.into_iter().collect())
+            }
+        })
     }
 }
 
@@ -1170,21 +1193,30 @@ fn deletion_preflight(
         set_form_fields(plan.edit(graph, form, work)?, direct, keep)?;
     }
     plan_outline_cleanup(graph, outlines, page, &mut plan, work)?;
-    let removed_child_edge = if !plan.replacements.contains_key(&parent) {
+    let page_tree_edges = if !plan.replacements.contains_key(&parent) {
         let target = kids.as_reference().unwrap_or(page);
-        (!parent_refs.retains_reference(parent, parent_values, target, work)?)
-            .then_some((parent, target))
+        let removed = (!parent_refs.retains_reference(parent, parent_values, target, work)?)
+            .then_some((parent, target));
+        let retained_children = if let Some(array) = kids.as_reference() {
+            Some((parent, parent_refs.indirect_children(graph, array, work)?))
+        } else {
+            None
+        };
+        PageTreeEdges {
+            removed,
+            retained_children,
+        }
     } else {
         let mut children = array_refs(graph, kids, work)?;
         children.retain(|&child| child != page);
         plan.edit(graph, parent, work)?
             .insert("Kids".into(), refs(children));
-        None
+        PageTreeEdges::default()
     };
     graph.check_page_removals(
         &plan.removed,
         &plan.replacements,
-        removed_child_edge,
+        page_tree_edges,
         trailer,
         work,
         plan.retained,
