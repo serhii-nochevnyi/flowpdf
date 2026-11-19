@@ -1384,3 +1384,60 @@ fn indirect_page_tree_replacement_preserves_surviving_sibling_references() {
         prior.page_state.order[..2]
     );
 }
+
+#[test]
+fn indexed_links_across_pages_fit_the_default_delete_projection_budget() {
+    const INDEX_PAGES: usize = 12;
+    const LINKS_PER_INDEX: usize = 128;
+    const LINKS: usize = INDEX_PAGES * LINKS_PER_INDEX;
+    const PAGE_COUNT: usize = INDEX_PAGES + LINKS;
+    const FIRST_LINK: usize = PAGE_COUNT + 3;
+    let kids = (3..FIRST_LINK)
+        .map(|object| format!("{object} 0 R "))
+        .collect::<String>();
+    let mut objects = vec![
+        "<< /Type /Catalog /Pages 2 0 R >>".to_owned(),
+        format!("<< /Type /Pages /Kids [{kids}] /Count {PAGE_COUNT} /MediaBox [0 0 300 500] >>"),
+    ];
+    for index in 0..INDEX_PAGES {
+        let start = FIRST_LINK + index * LINKS_PER_INDEX;
+        let annots = (start..start + LINKS_PER_INDEX)
+            .map(|object| format!("{object} 0 R "))
+            .collect::<String>();
+        objects.push(format!(
+            "<< /Type /Page /Parent 2 0 R /Annots [{annots}] >>"
+        ));
+    }
+    objects.extend((0..LINKS).map(|_| "<< /Type /Page /Parent 2 0 R >>".to_owned()));
+    for target in INDEX_PAGES + 3..FIRST_LINK {
+        objects.push(format!(
+            "<< /Type /Annot /Subtype /Link /Rect [0 0 20 20] /Dest [{target} 0 R /Fit] >>"
+        ));
+    }
+    let refs: Vec<_> = objects.iter().map(|value| (0, value.as_str())).collect();
+    let bytes = build_pdf(&refs);
+    let mut session =
+        NativePdfSession::open_scoped(&bytes, NativeEditLimits::default(), [3; 16]).unwrap();
+    let prior = session.snapshot().clone();
+    assert!(
+        prior
+            .page_state
+            .restrictions
+            .as_ref()
+            .is_none_or(|restrictions| { restrictions.pages[INDEX_PAGES].delete.is_none() })
+    );
+    session
+        .apply_page(
+            prior.binding,
+            1,
+            &command("deletePage", INDEX_PAGES, &prior),
+        )
+        .unwrap();
+    assert_eq!(session.snapshot().page_state.order.len(), PAGE_COUNT - 1);
+    assert_eq!(
+        String::from_utf8_lossy(session.output_bytes())
+            .matches("/Subtype /Link")
+            .count(),
+        LINKS - 1
+    );
+}

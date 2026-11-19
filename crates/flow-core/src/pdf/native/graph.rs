@@ -98,6 +98,7 @@ pub struct PlainTextNote {
 pub(super) struct PageTreeEdges<'a> {
     pub removed: Option<(PdfObjectRef, PdfObjectRef)>,
     pub retained_children: Option<(PdfObjectRef, &'a BTreeSet<PdfObjectRef>)>,
+    pub removed_links: Option<&'a BTreeSet<(PdfObjectRef, PdfObjectRef)>>,
 }
 
 // @invariant: Source bytes stay immutable and object identities include generations.
@@ -586,6 +587,9 @@ impl NativePdfGraph {
                 for &owner in owners {
                     if !replacements.contains_key(&owner)
                         && page_tree_edges.removed != Some((owner, target))
+                        && !page_tree_edges
+                            .removed_links
+                            .is_some_and(|edges| edges.contains(&(owner, target)))
                     {
                         spend(&mut retained, 128)?;
                         pending.push(owner);

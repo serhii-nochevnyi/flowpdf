@@ -271,6 +271,7 @@ pub(super) fn restrictions(
                             &trailer,
                             &mut parent_refs,
                             &mut work,
+                            false,
                         )
                     }) {
                     Ok(_) => None,
@@ -1161,6 +1162,7 @@ fn deletion_preflight(
     trailer: &BTreeSet<Ref>,
     parent_refs: &mut PageParentReferences,
     work: &mut usize,
+    materialize_links: bool,
 ) -> Result<PageDeletion, NativeEditError> {
     let cleanup = links.cleanup_for(page)?;
     if outlines.blocked.contains(&page) {
@@ -1175,16 +1177,6 @@ fn deletion_preflight(
     let parent = reference(dict(graph, page)?, "Parent")?;
     let parent_values = dict(graph, parent)?;
     let kids = parent_values.get("Kids").ok_or(Malformed)?;
-    if let Some(cleanup) = cleanup {
-        for (&source, drops) in cleanup {
-            let annots = dict(graph, source)?.get("Annots").ok_or(Malformed)?;
-            let mut keep = array_refs(graph, annots, work)?;
-            keep.retain(|annot| !drops.contains(annot));
-            plan.edit(graph, source, work)?
-                .insert("Annots".into(), refs(keep));
-            plan.removed.extend(drops);
-        }
-    }
     if !fields.is_empty() {
         let (form, mut keep) = form_fields(graph)?;
         spend(work, keep.len())?;
@@ -1193,7 +1185,26 @@ fn deletion_preflight(
         set_form_fields(plan.edit(graph, form, work)?, direct, keep)?;
     }
     plan_outline_cleanup(graph, outlines, page, &mut plan, work)?;
-    let page_tree_edges = if !plan.replacements.contains_key(&parent) {
+    let mut removed_link_edges = BTreeSet::new();
+    if let Some(cleanup) = cleanup {
+        for (&source, drops) in cleanup {
+            let annots = dict(graph, source)?.get("Annots").ok_or(Malformed)?;
+            if materialize_links || plan.replacements.contains_key(&source) {
+                let mut keep = array_refs(graph, annots, work)?;
+                keep.retain(|annot| !drops.contains(annot));
+                plan.edit(graph, source, work)?
+                    .insert("Annots".into(), refs(keep));
+            } else {
+                // @invariant: The link index admits only edges exclusive to this annotation array.
+                let container = annots.as_reference().unwrap_or(source);
+                spend(work, drops.len())?;
+                spend(&mut plan.retained, drops.len().saturating_mul(64))?;
+                removed_link_edges.extend(drops.iter().map(|&annot| (container, annot)));
+            }
+            plan.removed.extend(drops);
+        }
+    }
+    let mut page_tree_edges = if !plan.replacements.contains_key(&parent) {
         let target = kids.as_reference().unwrap_or(page);
         let removed = (!parent_refs.retains_reference(parent, parent_values, target, work)?)
             .then_some((parent, target));
@@ -1205,6 +1216,7 @@ fn deletion_preflight(
         PageTreeEdges {
             removed,
             retained_children,
+            removed_links: None,
         }
     } else {
         let mut children = array_refs(graph, kids, work)?;
@@ -1213,6 +1225,7 @@ fn deletion_preflight(
             .insert("Kids".into(), refs(children));
         PageTreeEdges::default()
     };
+    page_tree_edges.removed_links = (!removed_link_edges.is_empty()).then_some(&removed_link_edges);
     graph.check_page_removals(
         &plan.removed,
         &plan.replacements,
@@ -1346,6 +1359,7 @@ pub(super) fn stage(
                 &trailer,
                 &mut PageParentReferences::new(graph),
                 &mut work,
+                true,
             )?;
             let children = if plan.replacements.contains_key(&parent) {
                 None
