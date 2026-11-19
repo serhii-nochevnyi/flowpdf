@@ -1,6 +1,7 @@
 use flow_wasm::{
-    native_pdf_close, native_pdf_command, native_pdf_open, native_pdf_preview, native_pdf_redaction,
-    native_pdf_snapshot, verify_native_pdf_response,
+    native_pdf_close, native_pdf_command, native_pdf_open, native_pdf_preview,
+    native_pdf_redaction, native_pdf_snapshot, verify_native_pdf_response,
+    verify_native_pdf_worker_response,
 };
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -34,7 +35,7 @@ fn fixture_pdf(objects: &[&str]) -> String {
 
 fn call(export: fn(String) -> String, request: Value) -> Value {
     let response = export(request.to_string());
-    assert!(verify_native_pdf_response(response.clone()));
+    assert!(verify_native_pdf_worker_response(response.clone()));
     serde_json::from_str(&response).unwrap()
 }
 
@@ -108,11 +109,11 @@ fn verifies_original_storage_digest_and_stable_note_identity() {
         "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
         "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 400] /Annots [4 0 R 5 0 R] >>",
         "<< /Type /Annot /Subtype /Text /P 3 0 R /Contents (First) /Rect [1 2 3 4] >>",
-        "<< /Type /Annot /Subtype /Text /P 3 0 R /Contents (Original) /Rect [1 2 3 4] >>",
+        "<< /Type /Annot /Subtype /Text /P 3 0 R /Contents (Second) /Rect [5 6 7 8] >>",
     ]);
     let request = open_request(source.as_bytes());
     let opened = native_pdf_open(request.to_string());
-    assert!(verify_native_pdf_response(opened.clone()));
+    assert!(verify_native_pdf_worker_response(opened.clone()));
     let origin = request["originStoreHash"].as_str().unwrap();
     assert!(!verify_native_pdf_response(rehash_with_replacement(
         &opened,
@@ -121,39 +122,80 @@ fn verifies_original_storage_digest_and_stable_note_identity() {
     )));
     let response: Value = serde_json::from_str(&opened).unwrap();
     let base = &response["snapshot"];
-    let original_note = &base["scene"]["pages"][0]["annotations"][1];
-    assert_eq!(original_note["kind"], "plainNote");
-    let id = original_note["id"].as_u64().unwrap();
+    let original = base["scene"]["pages"][0]["annotations"].as_array().unwrap();
+    let ids = [0, 1].map(|index| {
+        assert_eq!(original[index]["kind"], "plainNote");
+        original[index]["id"].as_u64().unwrap()
+    });
+    assert_ne!(ids[0], ids[1]);
 
-    let mut edit = bound("command", 2, base);
-    edit["outputHash"] = base["outputHash"].clone();
-    edit["command"] = json!({"kind":"edit","note":id,"contents":"Revised"});
-    let applied = native_pdf_command(edit.to_string());
-    assert!(verify_native_pdf_response(applied.clone()));
+    let mut current = base.clone();
+    let mut previous_reply = opened;
+    for (request_id, target, expected) in [
+        (2, 1, ["First", "Revised second"]),
+        (3, 0, ["Revised first", "Revised second"]),
+    ] {
+        let mut edit = bound("command", request_id, &current);
+        edit["outputHash"] = current["outputHash"].clone();
+        edit["command"] = json!({"kind":"edit","note":ids[target],"contents":expected[target]});
+        let applied = native_pdf_command(edit.to_string());
+        assert!(verify_native_pdf_worker_response(applied.clone()));
+        assert!(!verify_native_pdf_worker_response(previous_reply));
+        let response: Value = serde_json::from_str(&applied).unwrap();
+        assert_eq!(response["status"], "applied");
+        let reopened = &response["snapshot"]["scene"]["pages"][0]["annotations"];
+        assert_eq!(reopened.as_array().unwrap().len(), 2);
+        for index in 0..2 {
+            assert_eq!(reopened[index]["id"], ids[index]);
+            assert_eq!(reopened[index]["contents"], expected[index]);
+            assert_eq!(reopened[index]["rect"], original[index]["rect"]);
+        }
+
+        if request_id == 2 {
+            let note_prefix = |id, index: usize| {
+                let object = &reopened[index]["object"];
+                format!(
+                    r#""id":{id},"object":{{"objectNumber":{},"generation":{}}}"#,
+                    object["objectNumber"], object["generation"],
+                )
+            };
+            let swapped =
+                rehash_with_replacement(&applied, &note_prefix(ids[0], 0), &note_prefix(ids[1], 0));
+            let swapped =
+                rehash_with_replacement(&swapped, &note_prefix(ids[1], 1), &note_prefix(ids[0], 1));
+            assert!(!verify_native_pdf_worker_response(swapped));
+            let reconciled = call(native_pdf_snapshot, bound("snapshot", request_id, &current));
+            assert_eq!(reconciled["status"], "accepted");
+            assert_eq!(reconciled["snapshot"], response["snapshot"]);
+        }
+        current = response["snapshot"].clone();
+        previous_reply = applied;
+    }
+
+    let mut remove = bound("command", 4, &current);
+    remove["outputHash"] = current["outputHash"].clone();
+    remove["command"] = json!({"kind":"remove","note":ids[0]});
+    let applied = native_pdf_command(remove.to_string());
+    assert!(verify_native_pdf_worker_response(applied.clone()));
     let response: Value = serde_json::from_str(&applied).unwrap();
     assert_eq!(response["status"], "applied");
-    let revised_note = &response["snapshot"]["scene"]["pages"][0]["annotations"][1];
-    assert_eq!(revised_note["id"], id);
-    assert_eq!(revised_note["contents"], "Revised");
-    assert!(!verify_native_pdf_response(rehash_with_replacement(
-        &applied,
-        &format!(r#""id":{id},"object""#),
-        &format!(r#""id":{},"object""#, id + 1),
-    )));
-    let reconciled = call(native_pdf_snapshot, bound("snapshot", 2, base));
-    assert_eq!(reconciled["status"], "accepted");
-    assert_eq!(reconciled["snapshot"], response["snapshot"]);
+    let survivors = response["snapshot"]["scene"]["pages"][0]["annotations"]
+        .as_array()
+        .unwrap();
+    assert_eq!(survivors.len(), 1);
+    assert_ne!(
+        survivors[0]["object"],
+        current["scene"]["pages"][0]["annotations"][1]["object"]
+    );
+    assert_eq!(survivors[0]["id"], ids[1]);
+    assert_eq!(survivors[0]["contents"], "Revised second");
 
-    let current = &reconciled["snapshot"];
-    let mut remove = bound("command", 3, current);
-    remove["outputHash"] = current["outputHash"].clone();
-    remove["command"] =
-        json!({"kind":"remove","note":current["scene"]["pages"][0]["annotations"][0]["id"]});
-    let applied = call(native_pdf_command, remove);
-    assert_eq!(applied["status"], "applied");
-    let survivor = &applied["snapshot"]["scene"]["pages"][0]["annotations"][0];
-    assert_ne!(survivor["object"], revised_note["object"]);
-    assert_eq!(survivor["id"], id);
+    std::thread::spawn(move || {
+        assert!(verify_native_pdf_response(applied.clone()));
+        assert!(!verify_native_pdf_worker_response(applied));
+    })
+    .join()
+    .unwrap();
 }
 
 fn open() -> (Value, Value) {

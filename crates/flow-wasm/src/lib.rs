@@ -2756,7 +2756,10 @@ impl NativeVerifiedScene {
     }
 }
 
-fn verify_native_snapshot(response: &NativeResponse<NativeVerifiedScene>) -> Option<()> {
+fn verify_native_snapshot(
+    response: &NativeResponse<NativeVerifiedScene>,
+    require_live_session: bool,
+) -> Option<()> {
     let snapshot = response.snapshot.as_ref()?;
     let binding = response.binding?;
     if !native_binding_valid(snapshot.binding)
@@ -2809,50 +2812,51 @@ fn verify_native_snapshot(response: &NativeResponse<NativeVerifiedScene>) -> Opt
         .flat_map(|page| {
             page.annotations
                 .iter()
-                .filter_map(|annotation| match annotation {
-                    NativeVerifiedAnnotation::PlainNote { object, id, .. } => Some((*object, *id)),
+                .filter_map(move |annotation| match annotation {
+                    NativeVerifiedAnnotation::PlainNote { object, id, .. } => {
+                        Some((page.id, *object, *id))
+                    }
                     _ => None,
                 })
         })
         .collect();
-    let live_notes_match = NATIVE_REGISTRY.with(|registry| {
+    NATIVE_REGISTRY.with(|registry| {
         let registry = registry.borrow();
-        registry
+        let entry = registry
             .sessions
             .iter()
-            .find(|entry| {
-                let live = entry.session.snapshot();
-                native_same_session(live.binding, snapshot.binding)
+            .find(|entry| native_same_session(entry.session.snapshot().binding, snapshot.binding));
+        if (require_live_session && entry.is_none())
+            || entry.is_some_and(|entry| {
+                entry.origin_store_hash != snapshot.origin_store_hash
+                    || entry.session.snapshot().consumed_request != consumed
             })
-            .is_none_or(|entry| {
-                let live = entry.session.snapshot();
-                entry.origin_store_hash == snapshot.origin_store_hash
-                    && live.binding == snapshot.binding
-                    && live.output_hash == snapshot.output_hash
-                    && entry.session.matches_note_identities(&claimed_notes)
-            })
-    });
-    if !live_notes_match {
-        return None;
-    }
-    NativePdfSession::verify_page_and_field_projection(
-        &bytes,
-        native_edit_limits(),
-        snapshot.binding,
-        snapshot.scene.scene_hash,
-        &snapshot.page_state,
-        &snapshot.fields,
-        &claimed_notes,
-        matches!(
-            snapshot.redaction_admission,
-            NativeRedactionAdmission::Supported
-        ),
-    )
-    .ok()?
-    .then_some(())
+        {
+            return None;
+        }
+        NativePdfSession::verify_page_and_field_projection(
+            &bytes,
+            native_edit_limits(),
+            snapshot.binding,
+            snapshot.scene.scene_hash,
+            &snapshot.page_state,
+            &snapshot.fields,
+            &claimed_notes,
+            matches!(
+                snapshot.redaction_admission,
+                NativeRedactionAdmission::Supported
+            ),
+            entry.map(|entry| &entry.session),
+        )
+        .ok()?
+        .then_some(())
+    })
 }
 
-fn verify_native_redaction_response(response: &NativeResponse<NativeVerifiedScene>) -> Option<()> {
+fn verify_native_redaction_response(
+    response: &NativeResponse<NativeVerifiedScene>,
+    require_live_session: bool,
+) -> Option<()> {
     use NativeRedactionActionKind::*;
     use NativeWireVerificationStatus::{Passed, Pending};
     let redaction = response.redaction.as_ref()?;
@@ -2906,7 +2910,7 @@ fn verify_native_redaction_response(response: &NativeResponse<NativeVerifiedScen
                 .copied()
                 .filter(|id| candidate.affected_pages.contains(id))
                 .eq(candidate.affected_pages.iter().copied())
-            && verify_native_snapshot(response).is_some())
+            && verify_native_snapshot(response, require_live_session).is_some())
         .then_some(());
     }
     if response.snapshot.is_some() {
@@ -2928,11 +2932,20 @@ fn verify_native_redaction_response(response: &NativeResponse<NativeVerifiedScen
 
 #[wasm_bindgen]
 pub fn verify_native_pdf_response(response_json: String) -> bool {
+    verify_native_pdf_response_inner(&response_json, false)
+}
+
+#[wasm_bindgen]
+pub fn verify_native_pdf_worker_response(response_json: String) -> bool {
+    verify_native_pdf_response_inner(&response_json, true)
+}
+
+fn verify_native_pdf_response_inner(response_json: &str, require_live_session: bool) -> bool {
     if response_json.len() > NATIVE_PDF_RESULT {
         return false;
     }
     let Ok(mut response) =
-        serde_json::from_str::<NativeResponse<NativeVerifiedScene>>(&response_json)
+        serde_json::from_str::<NativeResponse<NativeVerifiedScene>>(response_json)
     else {
         return false;
     };
@@ -3053,7 +3066,7 @@ pub fn verify_native_pdf_response(response_json: String) -> bool {
                 && response.code.is_none()
         }
         (NativeOperation::Redaction, NativeStatus::Redaction | NativeStatus::Published) => {
-            verify_native_redaction_response(&response).is_some()
+            verify_native_redaction_response(&response, require_live_session).is_some()
         }
         (NativeOperation::Preview, NativeStatus::Preview) => {
             response.request_id > 0
@@ -3068,7 +3081,7 @@ pub fn verify_native_pdf_response(response_json: String) -> bool {
         _ => {
             response.request_id > 0
                 && response.code.is_none()
-                && verify_native_snapshot(&response).is_some()
+                && verify_native_snapshot(&response, require_live_session).is_some()
         }
     };
     valid && native_result_hash(&response).is_ok_and(|actual| actual == supplied)

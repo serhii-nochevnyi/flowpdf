@@ -810,22 +810,6 @@ impl NativePdfSession {
         self.apply_command(binding, request_id, Command::Field(command))
     }
 
-    pub fn matches_note_identities(&self, claimed: &[(PdfObjectRef, u64)]) -> bool {
-        self.snapshot
-            .scene
-            .pages
-            .iter()
-            .flat_map(|page| {
-                page.annotations
-                    .iter()
-                    .filter_map(|annotation| match annotation {
-                        NativePdfAnnotation::PlainNote(note) => Some((note.object, note.id.0)),
-                        _ => None,
-                    })
-            })
-            .eq(claimed.iter().copied())
-    }
-
     pub fn verify_page_and_field_projection(
         bytes: &[u8],
         limits: NativeEditLimits,
@@ -833,42 +817,58 @@ impl NativePdfSession {
         claimed_scene: [u8; 32],
         state: &NativePageState,
         claimed_fields: &[NativeFieldView],
-        claimed_notes: &[(PdfObjectRef, u64)],
+        claimed_notes: &[(u32, PdfObjectRef, u64)],
         redaction_admitted: bool,
+        live: Option<&Self>,
     ) -> Result<bool, NativeSessionError> {
-        let graph = NativePdfGraph::open(bytes, limits)?;
-        let ids = initial_ids(&graph);
         let hash = *blake3::hash(bytes).as_bytes();
-        let (scene, mut remaining) = accepted_scene(&graph, &ids, hash, binding, 0, 0)?;
-        let projected_notes = scene.pages.iter().flat_map(|page| {
+        if live.is_some_and(|session| {
+            session.snapshot.binding != binding || session.snapshot.output_hash != hash
+        }) {
+            return Ok(false);
+        }
+        let graph = NativePdfGraph::open(bytes, limits)?;
+        let initial;
+        let ids = if let Some(session) = live {
+            &session.ids
+        } else {
+            initial = initial_ids(&graph);
+            &initial
+        };
+        let (scene, mut remaining) = accepted_scene(&graph, ids, hash, binding, 0, 0)?;
+        let mut projected_notes = scene.pages.iter().flat_map(|page| {
             page.annotations
                 .iter()
-                .filter_map(|annotation| match annotation {
-                    NativePdfAnnotation::PlainNote(note) => Some((note.object, note.id.0)),
+                .filter_map(move |annotation| match annotation {
+                    NativePdfAnnotation::PlainNote(note) => {
+                        Some((page.id.0, note.object, note.id.0))
+                    }
                     _ => None,
                 })
         });
         let mut seen = BTreeSet::new();
-        let mut projected_notes = projected_notes;
-        let notes_match = claimed_notes.iter().all(|&(claimed_object, id)| {
-            let Some((object, initial_id)) = projected_notes.next() else {
-                return false;
-            };
-            let valid_id = if binding.revision == 0 {
-                id == initial_id
-            } else {
-                id != 0
-                    && (id < FIRST_ADDED_NOTE_ID
-                        || (id > FIRST_ADDED_NOTE_ID
-                            && id - FIRST_ADDED_NOTE_ID <= binding.revision)
-                        || (FIRST_PAGE_OBJECT_ID..PAGE_OBJECT_ID_LIMIT).contains(&id))
-            };
-            object == claimed_object && valid_id && seen.insert(id)
-        }) && projected_notes.next().is_none();
+        let notes_match = claimed_notes
+            .iter()
+            .all(|&(claimed_page, claimed_object, id)| {
+                let Some((page, object, projected_id)) = projected_notes.next() else {
+                    return false;
+                };
+                let valid_id = if live.is_some() || binding.revision == 0 {
+                    id == projected_id
+                } else {
+                    id != 0
+                        && (id < FIRST_ADDED_NOTE_ID
+                            || (id > FIRST_ADDED_NOTE_ID
+                                && id - FIRST_ADDED_NOTE_ID <= binding.revision)
+                            || (FIRST_PAGE_OBJECT_ID..PAGE_OBJECT_ID_LIMIT).contains(&id))
+                };
+                page == claimed_page && object == claimed_object && valid_id && seen.insert(id)
+            })
+            && projected_notes.next().is_none();
         Ok(scene.scene_hash == claimed_scene
             && notes_match
             && state.valid_for_count(scene.pages.len())
-            && (binding.revision != 0 || *state == page_state(&graph, &ids, None))
+            && (binding.revision != 0 || *state == page_state(&graph, ids, None))
             && forms::project(&graph, &scene.pages, binding, &mut remaining)? == claimed_fields
             && redaction::admitted(&graph, &state.order) == redaction_admitted)
     }
