@@ -1490,7 +1490,7 @@ struct RasterOutline<'a> {
     stencil: &'a Stencil,
     fill_rule: Option<bool>,
     ink: Pixel,
-    draw_edges: bool,
+    require_coverage: bool,
 }
 
 enum PreviewPaint<'a> {
@@ -1526,9 +1526,7 @@ impl RasterOutline<'_> {
 
     fn intersects_pixel(self, rect: Rect, work: &mut usize) -> VerifyResult<bool> {
         let stencil = self.stencil;
-        if self.draw_edges
-            && let Some(evenodd) = self.fill_rule
-        {
+        if let Some(evenodd) = self.fill_rule {
             return stencil.fill_intersects_rect(rect, evenodd, work);
         }
         spend(work, stencil.edges * 5 + 1)?;
@@ -1613,7 +1611,7 @@ impl Grid {
                                 stencil: glyph,
                                 fill_rule: Some(false),
                                 ink: color,
-                                draw_edges: false,
+                                require_coverage: true,
                             }),
                             glyph.edges + 1,
                             work,
@@ -1695,7 +1693,7 @@ impl Grid {
                 stencil,
                 fill_rule,
                 ink: color,
-                draw_edges: true,
+                require_coverage: false,
             }),
             stencil.edges + 1,
             work,
@@ -1730,6 +1728,7 @@ impl Grid {
                 .and_then(|cost| cost.checked_add(1))
                 .ok_or(Budget)?,
         )?;
+        let mut has_preview_coverage = false;
         for row in bottom..top {
             for col in left..right {
                 let logical = [
@@ -1764,6 +1763,7 @@ impl Grid {
                 } else if !intersects(bounds, rect) {
                     continue;
                 }
+                has_preview_coverage = true;
                 if let PreviewPaint::Image(image) = paint {
                     let Some(ink) = image.uniform_pixel(rect, work)? else {
                         *coverage = PreviewCoverage::Unresolved;
@@ -1793,15 +1793,14 @@ impl Grid {
                         continue;
                     }
                 }
-                coverage.paint_partial(
-                    pixel,
-                    color,
-                    outline.map(|outline| outline.ink),
-                    outline
-                        .filter(|outline| outline.draw_edges)
-                        .map(|outline| outline.ink),
-                );
+                coverage.paint_partial(pixel, color, outline.map(|outline| outline.ink));
             }
+        }
+        if !raster.coverage.is_empty()
+            && outline.is_some_and(|outline| outline.require_coverage)
+            && !has_preview_coverage
+        {
+            return Err(UnsupportedProfile);
         }
         Ok(())
     }
@@ -1833,13 +1832,7 @@ impl PreviewCoverage {
         }
     }
 
-    fn paint_partial(
-        &mut self,
-        pixel: &mut Pixel,
-        color: Option<Pixel>,
-        ink: Option<Pixel>,
-        edge_ink: Option<Pixel>,
-    ) {
+    fn paint_partial(&mut self, pixel: &mut Pixel, color: Option<Pixel>, ink: Option<Pixel>) {
         let visible = match *self {
             Self::Clear => false,
             Self::Partial {
@@ -1854,7 +1847,7 @@ impl PreviewCoverage {
         };
         if let Some(color) = color {
             *pixel = color;
-        } else if let Some(ink) = edge_ink.filter(|_| !visible) {
+        } else if let Some(ink) = ink.filter(|_| !visible) {
             // @contract: Edge-only coverage remains visible when center sampling misses it.
             for (channel, ink) in pixel.iter_mut().zip(ink) {
                 let blended = (u16::from(*channel) + u16::from(ink)).div_ceil(2) as u8;
@@ -1863,7 +1856,7 @@ impl PreviewCoverage {
         }
         *self = Self::Partial {
             ink,
-            visible: visible || color.is_some() || edge_ink.is_some(),
+            visible: visible || color.is_some() || ink.is_some(),
         };
     }
 }

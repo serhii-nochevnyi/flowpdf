@@ -977,7 +977,7 @@ fn registry_reserves_two_sessions_and_releases_capacity_on_close() {
     );
 }
 
-fn embedded_text_pdf() -> Vec<u8> {
+fn embedded_text_pdf(artwork: &[u8], page_size: &str) -> Vec<u8> {
     fn stream(bytes: &[u8], extra: &str) -> Vec<u8> {
         let mut data = format!("<< /Length {} {extra} >>\nstream\n", bytes.len()).into_bytes();
         data.extend_from_slice(bytes);
@@ -985,15 +985,15 @@ fn embedded_text_pdf() -> Vec<u8> {
         data
     }
     let font = include_bytes!("../../flow-core/data/NotoSans-Regular.ttf");
-    let cmap = b"/CIDInit /ProcSet findresource begin 12 dict begin begincmap\n/CMapName /Fixture def /CMapType 2 def\n1 begincodespacerange <00> <FF> endcodespacerange\n1 beginbfchar <41> <0041> endbfchar\nendcmap CMapName currentdict /CMap defineresource pop end end";
+    let cmap = b"/CIDInit /ProcSet findresource begin 12 dict begin begincmap\n/CMapName /Fixture-Latin def /CMapType 2 def\n1 begincodespacerange <00> <FF> endcodespacerange\n1 beginbfchar <41> <0041> endbfchar\nendcmap CMapName currentdict /CMap defineresource pop end end";
     let mut pdf = b"%PDF-1.7\n".to_vec();
     let objects = [
         b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
         b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
-        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>".to_vec(),
-        stream(b"BT /F1 12 Tf 20 100 Td (AAA) Tj ET", ""),
+        format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {page_size}] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>").into_bytes(),
+        stream(artwork, ""),
         b"<< /Type /Font /Subtype /TrueType /BaseFont /NotoSans-Regular /Encoding /WinAnsiEncoding /FirstChar 65 /LastChar 65 /Widths [639] /FontDescriptor 6 0 R /ToUnicode 7 0 R >>".to_vec(),
-        b"<< /Type /FontDescriptor /FontName /NotoSans-Regular /Flags 32 /FontFile2 8 0 R >>".to_vec(),
+        b"<< /Type /FontDescriptor /FontName /NotoSans-Regular /Flags 32 /FontBBox [-621 -389 2800 1067] /ItalicAngle 0 /Ascent 1069 /Descent -293 /CapHeight 714 /StemV 80 /FontFile2 8 0 R >>".to_vec(),
         stream(cmap, ""),
         stream(font, &format!("/Length1 {}", font.len())),
     ];
@@ -1016,8 +1016,50 @@ fn embedded_text_pdf() -> Vec<u8> {
 }
 
 #[test]
+fn accepted_preview_preserves_fine_text_and_declines_ambiguous_paint() {
+    let artwork = "BT /F1 4 Tf 2 6 Td (AAA) Tj ET\nBT /F1 0.2 Tf 2.03 2.03 Td (A) Tj ET";
+    for (extra, available) in [("", true), ("\n0 0 1 rg 2.04 2.04 0.09 0.09 re f", false)] {
+        let content = format!("{artwork}{extra}");
+        let source = embedded_text_pdf(content.as_bytes(), "12 12");
+        let opened = call(native_pdf_open, open_request(&source));
+        assert_eq!(opened["status"], "opened", "{opened}");
+        let base = &opened["snapshot"];
+        let reply = call(
+            native_pdf_preview,
+            preview_request(2, base, base["pageState"]["order"][0].clone()),
+        );
+        if available {
+            assert_eq!(reply["status"], "preview", "{reply}");
+            let raster = &reply["preview"];
+            assert_eq!(raster["outputHash"], base["outputHash"]);
+            assert_eq!(raster["width"], 24);
+            assert_eq!(raster["height"], 24);
+            let rgb = raster["rgbHex"].as_str().unwrap();
+            let pixel = (19 * 24 + 4) * 6;
+            assert_eq!(&rgb[pixel..pixel + 6], "808080");
+            assert!(
+                rgb.as_bytes()[..12 * 24 * 6]
+                    .chunks_exact(6)
+                    .any(|pixel| pixel != b"ffffff")
+            );
+        } else {
+            assert_eq!(
+                reply["code"], "FLOW_PDF_NATIVE_TARGET_UNAVAILABLE",
+                "{reply}"
+            );
+            assert!(reply["snapshot"].is_null());
+            assert!(reply.get("preview").is_none());
+        }
+        assert_eq!(
+            call(native_pdf_close, bound("close", 3, base))["status"],
+            "closed"
+        );
+    }
+}
+
+#[test]
 fn serialized_text_replacement_checks_capability_revision_and_output_identity() {
-    let bytes = embedded_text_pdf();
+    let bytes = embedded_text_pdf(b"BT /F1 12 Tf 20 100 Td (AAA) Tj ET", "612 792");
     let request = open_request(&bytes);
     let original = call(native_pdf_open, request.clone())["snapshot"].clone();
     let target = &original["scene"]["textPages"][0]["islands"][0];
@@ -1094,7 +1136,13 @@ fn wire_verifier_rejects_rehashed_capability_that_disagrees_with_output() {
         hash.finalize().to_hex().to_string()
     }
 
-    let response = native_pdf_open(open_request(&embedded_text_pdf()).to_string());
+    let response = native_pdf_open(
+        open_request(&embedded_text_pdf(
+            b"BT /F1 12 Tf 20 100 Td (AAA) Tj ET",
+            "612 792",
+        ))
+        .to_string(),
+    );
     let value: Value = serde_json::from_str(&response).unwrap();
     let old_result = value["resultHash"].as_str().unwrap();
     assert_eq!(result_hash(&response, old_result), old_result);
