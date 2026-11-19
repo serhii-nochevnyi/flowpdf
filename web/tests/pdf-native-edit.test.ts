@@ -1308,6 +1308,68 @@ describe('native redaction quarantine', () => {
 })
 
 describe('native PDF runtime composition', () => {
+  it('releases workers, schedulers, and the native coordinator before retrying a late startup failure', async () => {
+    const { createDefaultWorkerRuntime } = await import('../src/layout/layout-runtime.js')
+    const { RevisionAwareLayoutScheduler } = await import('../src/layout/layout-worker.js')
+    const { RevisionAwarePdfExportScheduler } = await import('../src/pdf/pdf-worker.js')
+    const { RevisionAwarePdfReaderScheduler } = await import('../src/pdf/pdf-reader-worker.js')
+    const { RevisionAwarePdfReconstructionScheduler } = await import('../src/pdf/pdf-reconstruction-worker.js')
+    const { PdfSourceStore } = await import('../persistence/pdf-source-store.js')
+    const workers: RuntimeWorker[] = []
+    class RuntimeWorker {
+      onmessage = null
+      onerror = null
+      onmessageerror = null
+      postMessage = vi.fn()
+      terminate = vi.fn()
+
+      constructor() {
+        workers.push(this)
+      }
+    }
+    const failure = new Error('coordinator subscription unavailable')
+    const subscribe = vi.spyOn(NativePdfEditCoordinator.prototype, 'subscribe')
+      .mockImplementationOnce(() => { throw failure })
+    const disposeLayout = vi.spyOn(RevisionAwareLayoutScheduler.prototype, 'dispose')
+    const disposeExport = vi.spyOn(RevisionAwarePdfExportScheduler.prototype, 'dispose')
+    const disposeReader = vi.spyOn(RevisionAwarePdfReaderScheduler.prototype, 'dispose')
+    const disposeReconstruction = vi.spyOn(RevisionAwarePdfReconstructionScheduler.prototype, 'dispose')
+    const disposeCoordinator = vi.spyOn(NativePdfEditCoordinator.prototype, 'dispose')
+    const closeStore = vi.spyOn(PdfSourceStore.prototype, 'close')
+    const catalog = { identity: 'fonts', faces: [], hyphenation: { identity: 'hyphenation', bytes: new Uint8Array() } }
+    const WorkerClass = RuntimeWorker as unknown as typeof Worker
+
+    try {
+      expect(() => createDefaultWorkerRuntime(catalog, WorkerClass)).toThrow(failure)
+      expect(workers).toHaveLength(6)
+      for (const worker of workers) expect(worker.terminate).toHaveBeenCalledOnce()
+      expect(disposeLayout).toHaveBeenCalledOnce()
+      expect(disposeExport).toHaveBeenCalledOnce()
+      expect(disposeReader).toHaveBeenCalledTimes(2)
+      expect(disposeReconstruction).toHaveBeenCalledOnce()
+      expect(disposeCoordinator).toHaveBeenCalledOnce()
+      expect(closeStore).toHaveBeenCalledOnce()
+
+      const runtime = createDefaultWorkerRuntime(catalog, WorkerClass)
+      try {
+        expect(runtime.nativePdf.createCoordinator().snapshot().phase).toBe('idle')
+        expect(workers).toHaveLength(12)
+        for (const worker of workers.slice(6)) expect(worker.terminate).not.toHaveBeenCalled()
+      } finally {
+        runtime.dispose()
+      }
+      for (const worker of workers) expect(worker.terminate).toHaveBeenCalledOnce()
+    } finally {
+      subscribe.mockRestore()
+      disposeLayout.mockRestore()
+      disposeExport.mockRestore()
+      disposeReader.mockRestore()
+      disposeReconstruction.mockRestore()
+      disposeCoordinator.mockRestore()
+      closeStore.mockRestore()
+    }
+  })
+
   it('reports startup failure and allows another attempt without restarting the app', async () => {
     const { createNativePdfRuntime } = await import('../src/layout/layout-runtime.js')
     const terminate = vi.fn()

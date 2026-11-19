@@ -7,6 +7,7 @@ use miniz_oxide::inflate::{
 
 use super::super::reader::{
     PdfObjectRef, PdfReadError, PdfReaderLimits, PdfStream, PdfValue, open_pdf_retained,
+    single_filter,
 };
 use super::verifier::{
     MAX_COORD, MAX_PAGES, NativeRedactionGeometry, NativeRedactionMark,
@@ -493,7 +494,6 @@ fn inspect(
     }
     if let PdfValue::Stream(stream) = value {
         let mut allowed = vec!["Length", "Filter"];
-        let filter = name(&stream.dict, "Filter");
         match role {
             FontFile => allowed.push("Length1"),
             XObject => match name(&stream.dict, "Subtype") {
@@ -524,17 +524,18 @@ fn inspect(
         } else if length.as_integer() != i64::try_from(stream.encoded.len()).ok() {
             return Err(Structure);
         }
-        match (filter, stream.dict.contains_key("Filter")) {
-            (None, false) => {}
-            (Some("FlateDecode" | "Fl"), true) => {
+        match stream.dict.get("Filter") {
+            None => {}
+            Some(filter) if matches!(filter.as_name(), Some("FlateDecode" | "Fl")) => {
                 if side == Side::Candidate {
                     exact_flate(stream)?;
                 }
             }
-            (Some("DCTDecode" | "DCT"), true)
+            Some(filter)
                 if side == Side::Accepted
                     && role == XObject
-                    && name(&stream.dict, "Subtype") == Some("Image") => {}
+                    && name(&stream.dict, "Subtype") == Some("Image")
+                    && matches!(single_filter(filter), Some("DCTDecode" | "DCT")) => {}
             _ => return Err(UnsupportedProfile),
         }
         if role == XObject {
