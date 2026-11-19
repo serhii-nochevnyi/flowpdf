@@ -10,18 +10,21 @@ import { createNativePdfRuntime } from '../src/layout/layout-runtime.js'
 import { nativePdfText, type NativePdfMessage } from '../src/pdf/pdf-native-edit-messages.js'
 import { nativeHexBytes, type NativePdfWorkerRequest } from '../src/pdf/pdf-native-edit-protocol.js'
 
-function pagePdf(count = 2, destination = false, font?: { bytes: Uint8Array<ArrayBuffer>; length: number }) {
-  const kids = Array.from({ length: count }, (_, index) => `${index + 3} 0 R`).join(' ')
+function pagePdf(count = 2, destination = false, font?: { bytes: Uint8Array<ArrayBuffer>; length: number },
+  scaledBranch = false) {
+  const kids = Array.from({ length: count }, (_, index) => `${index + 3} 0 R`)
   const note = count + 3
-  const content = note + 1
+  const branch = note + 1
+  const content = branch + Number(scaledBranch)
   const resources = font ? `/Resources << /Font << /Body ${content + 1} 0 R >> >> /Contents ${content} 0 R` : '/Resources <<>>'
   const objects = [
     `<< /Type /Catalog /Pages 2 0 R${destination ? ' /Dests << /Permanent [3 0 R /Fit] >>' : ''} >>`,
-    `<< /Type /Pages /Kids [${kids}] /Count ${count} >>`,
+    `<< /Type /Pages /Kids [${scaledBranch ? `${kids[0]} ${branch} 0 R` : kids.join(' ')}] /Count ${count} >>`,
     ...Array.from({ length: count }, (_, index) => index === 0
       ? `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 320 420] /CropBox [10 20 290 390] /Rotate 90 ${resources} /Annots [${note} 0 R] >>`
-      : `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 450 600] /Resources <<>>${font && index === 1 ? ` /Contents ${content + 7} 0 R` : ''} >>`),
+      : `<< /Type /Page /Parent ${scaledBranch ? branch : 2} 0 R /MediaBox [0 0 450 600] /Resources <<>>${scaledBranch && index === 1 ? ' /UserUnit 2' : ''}${font && index === 1 ? ` /Contents ${content + 7} 0 R` : ''} >>`),
     '<< /Type /Annot /Subtype /Text /P 3 0 R /Rect [34 56 58 80] /Contents (Source note) >>',
+    ...(scaledBranch ? [`<< /Type /Pages /Parent 2 0 R /Kids [${kids.slice(1).join(' ')}] /Count ${count - 1} >>`] : []),
   ]
   const offsets: number[] = []
   const parts: Uint8Array<ArrayBuffer>[] = []
@@ -105,7 +108,7 @@ for (const locale of ['en', 'uk'] as const) {
     const click = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function (this: HTMLAnchorElement) {
       downloads.push(fetch(this.href).then(async (response) => new Uint8Array(await response.arrayBuffer())))
     })
-    let pauseKind: 'deletePage' | 'insertBlankPage' | 'rotatePage' | undefined
+    let pauseKind: 'insertBlankPage' | 'rotatePage' | undefined
     let unseenRotation = false
     let failProjection = false
     const held: { resume?: () => void } = {}
@@ -444,20 +447,40 @@ for (const locale of ['en', 'uk'] as const) {
       await activate(noteList.getByRole('button').element())
       const draft = panel.getByRole('textbox', { name: t('note.contents'), exact: true })
       await draft.fill('Unsubmitted draft')
-      await confirmDelete(1, 2)
-      pauseKind = 'deletePage'
-      await userEvent.keyboard('{Tab}{Enter}')
-      await expect.poll(() => held.resume).toBeTypeOf('function')
-      await expect.element(selector).toBeDisabled()
-      release()
-      await expect.element(panel.getByRole('alert')).toHaveTextContent(t('page.unsupported'))
+      await expect.element(button('page.delete')).toBeDisabled()
+      await expect.element(button('page.delete')).toHaveAccessibleDescription(t('page.structure'))
       await expect.element(selector).toHaveValue('0')
-      await expect.element(selector).toHaveFocus()
       await expect.element(draft).toHaveValue('Unsubmitted draft')
       await expect.element(button('navigation.next')).toBeEnabled()
       expect(await download()).toEqual(safeBytes)
       await activate(button('navigation.next').element())
       await expect.element(selector).toHaveValue('1')
+      await expect.element(button('page.delete')).toBeEnabled()
+
+      await open(pagePdf(3, false, undefined, true), 'scaled-branch.pdf')
+      await expect.element(button('page.right')).toBeEnabled()
+      await expect.element(button('page.later')).toBeDisabled()
+      await expect.element(button('page.later')).toHaveAccessibleDescription(t('page.geometry'))
+      const positions = select('page.position')
+      await expect.element(positions).toBeDisabled()
+      expect((positions.element() as HTMLSelectElement).options[2]?.disabled).toBe(true)
+      await choose('navigation.select', '1')
+      for (const key of ['page.left', 'page.right', 'page.insert', 'page.duplicate'] as const) {
+        await expect.element(button(key)).toBeDisabled()
+        await expect.element(button(key)).toHaveAccessibleDescription(t('page.geometry'))
+      }
+      await expect.element(button('page.earlier')).toBeDisabled()
+      await expect.element(button('page.later')).toBeEnabled()
+      await expect.element(button('page.delete')).toBeEnabled()
+      await choose('page.position', '2')
+      await change('page.reorder', 3, 3)
+      expect((await readBack())[2]?.geometry).toBeNull()
+      await confirmDelete(3, 3)
+      await userEvent.keyboard('{Tab}{Enter}')
+      await accepted(2, 2)
+      expect((await readBack()).map(({ geometry }) => geometry?.bounds)).toEqual([
+        [10, 20, 290, 390], [0, 0, 450, 600],
+      ])
 
       await open(pagePdf(40), 'long.pdf')
       const pageSelect = selector.element()

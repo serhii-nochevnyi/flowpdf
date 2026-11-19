@@ -102,6 +102,53 @@ export interface NativePdfPageState {
   readonly selected: number | null
   readonly canDelete: boolean
   readonly maxPosition: number
+  readonly restrictions?: {
+    readonly positionsLocked: boolean
+    readonly pages: readonly {
+      readonly parent: number
+      readonly geometry?: 'geometry'
+      readonly reparent?: NativePdfPagePreservationRefusal
+      readonly duplicate?: NativePdfPagePreservationRefusal
+      readonly delete?: 'structure'
+    }[]
+  }
+}
+
+type NativePdfPagePreservationRefusal = 'geometry' | 'structure'
+export type NativePdfPageRefusal = NativePdfPagePreservationRefusal | 'finalPage'
+
+export function nativePageOperationRefusal(
+  state: NativePdfPageState, index: number, kind: Exclude<NativePdfPageCommand['kind'], 'reorderPage'>,
+): NativePdfPageRefusal | undefined {
+  const restrictions = state.restrictions
+  const page = restrictions?.pages[index]
+  if (kind === 'rotatePage') return page?.geometry
+  if (kind === 'deletePage' && !state.canDelete) return 'finalPage'
+  if (restrictions?.positionsLocked) return 'structure'
+  return kind === 'insertBlankPage' ? page?.geometry
+    : kind === 'duplicatePage' ? page?.duplicate
+      : page?.delete
+}
+
+export function nativePageMoveRefusals(state: NativePdfPageState, index: number): readonly (NativePdfPageRefusal | undefined)[] {
+  const restrictions = state.restrictions
+  if (!restrictions) return []
+  const { pages, positionsLocked } = restrictions
+  const source = pages[index]
+  if (!source) return []
+  const refusals = new Array<NativePdfPageRefusal | undefined>(pages.length)
+  for (const step of [-1, 1]) {
+    let displacedRefusal: NativePdfPageRefusal | undefined
+    for (let position = index + step; position >= 0 && position < pages.length; position += step) {
+      const destination = pages[position]!
+      const neighbor = pages[position - step]!
+      // @invariant: A page shifted toward the source can also change parents.
+      if (destination.parent !== neighbor.parent) displacedRefusal ??= destination.reparent
+      refusals[position] = positionsLocked ? 'structure'
+        : (source.parent !== destination.parent ? source.reparent : undefined) ?? displacedRefusal
+    }
+  }
+  return refusals
 }
 
 export type NativePdfCommand = NativePdfNoteCommand | NativePdfTextCommand | NativePdfObjectCommand
@@ -357,6 +404,7 @@ const rustErrorCodes = new Set([
   'FLOW_PDF_NATIVE_REQUEST_INVALID',
   'FLOW_PDF_NATIVE_REQUEST_CONFLICT',
   'FLOW_PDF_NATIVE_TARGET_UNAVAILABLE',
+  'FLOW_PDF_NATIVE_PAGE_GEOMETRY',
   'FLOW_PDF_NATIVE_FINAL_PAGE',
   'FLOW_PDF_NATIVE_POSTCONDITION_FAILED',
 ])
@@ -736,12 +784,36 @@ export function sameNativeSession(left: NativePdfBinding, right: NativePdfBindin
     && sameNativeBytes(left.originHash, right.originHash)
 }
 
-function pageState(value: unknown, count: number): boolean {
-  return count > 0 && shape(value, 'order', 'selected', 'canDelete', 'maxPosition')
+function pageRestrictions(value: unknown, pages: NativePdfNoteScene['pages']): boolean {
+  const refusal = (value: unknown) => value === 'geometry' || value === 'structure'
+  return shape(value, 'positionsLocked', 'pages') && typeof value.positionsLocked === 'boolean'
+    && Array.isArray(value.pages) && value.pages.length === pages.length
+    && value.pages.every((entry: unknown, index) => {
+      if (typeof entry !== 'object' || entry === null) return false
+      const keys = ['parent', ...['geometry', 'reparent', 'duplicate', 'delete'].filter((key) => Object.hasOwn(entry, key))]
+      return shape(entry, ...keys) && isNativeRequestId(entry.parent)
+        && (pages[index]?.geometry === null
+          ? entry.geometry === 'geometry' && entry.reparent === 'geometry' && entry.duplicate === 'geometry'
+          : !Object.hasOwn(entry, 'geometry') && entry.reparent !== 'geometry' && entry.duplicate !== 'geometry')
+        && (!Object.hasOwn(entry, 'reparent') || refusal(entry.reparent))
+        && (!Object.hasOwn(entry, 'duplicate') || refusal(entry.duplicate))
+        && (!Object.hasOwn(entry, 'delete') || entry.delete === 'structure')
+    })
+}
+
+function pageState(value: unknown, pages: NativePdfNoteScene['pages']): boolean {
+  const count = pages.length
+  if (typeof value !== 'object' || value === null) return false
+  const keys = ['order', 'selected', 'canDelete', 'maxPosition']
+  if (Object.hasOwn(value, 'restrictions')) keys.push('restrictions')
+  return count > 0 && shape(value, ...keys)
     && Array.isArray(value.order) && value.order.length === count
     && value.order.every(isNativeRequestId) && new Set(value.order).size === count
     && (value.selected === null || (isNativeRequestId(value.selected) && value.order.includes(value.selected)))
     && value.canDelete === (count > 1) && value.maxPosition === count - 1
+    && (Object.hasOwn(value, 'restrictions')
+      ? pageRestrictions(value.restrictions, pages)
+      : pages.every((page) => page.geometry !== null))
 }
 
 function fieldViews(value: unknown, count: number): boolean {
@@ -765,7 +837,7 @@ function snapshot(value: unknown): value is NativePdfVerifiedSnapshot {
   return shape(value, ...keys)
     && binding(value.binding) && isNativeStoreHash(value.originStoreHash) && hash(value.outputHash)
     && integer(value.consumedRequest, value.binding.revision) && scene(value.scene) && bytesHex(value.outputHex)
-    && pageState(value.pageState, value.scene.pages.length)
+    && pageState(value.pageState, value.scene.pages)
     && (value.redactionAdmission === 'supported' || value.redactionAdmission === 'unavailable')
     && (!Object.hasOwn(value, 'fields') || fieldViews(value.fields, value.scene.pages.length))
     && sameNativeBytes(value.outputHash, value.scene.outputHash)
@@ -869,6 +941,7 @@ function isNativeResponse(value: unknown): value is NativePdfResponse {
       && (!(textRefusalCodes.has(value.code) || objectRefusalCodes.has(value.code) || fieldRefusalCodes.has(value.code))
         || (value.operation === 'command' && value.requestId > 0))
       && (value.code !== 'FLOW_PDF_NATIVE_IMPORT_REFUSED' || (value.operation === 'open' && value.requestId > 0))
+      && (value.code !== 'FLOW_PDF_NATIVE_PAGE_GEOMETRY' || (value.operation === 'command' && value.requestId > 0))
       && (value.requestId === 0 ? value.binding === null && value.originStoreHash === null
         : isNativeStoreHash(value.originStoreHash) && (value.operation === 'open' ? value.binding === null : binding(value.binding)))
   }

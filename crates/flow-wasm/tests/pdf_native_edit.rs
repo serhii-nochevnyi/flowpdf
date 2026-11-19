@@ -1224,6 +1224,9 @@ fn serialized_page_delete_refuses_an_unowned_destination_and_keeps_output() {
         "<< /Type /Page /Parent 2 0 R >>",
     ]);
     let initial = call(native_pdf_open, open_request(bytes.as_bytes()))["snapshot"].clone();
+    let restrictions = &initial["pageState"]["restrictions"]["pages"];
+    assert_eq!(restrictions[0]["delete"], "structure");
+    assert!(restrictions[1].get("delete").is_none());
     let target = json!({"page":0,"stableId":initial["pageState"]["order"][0]});
     let refused = page_edit(&initial, 2, json!({"kind":"deletePage","target":target}));
     assert_eq!(refused["status"], "failed");
@@ -1232,6 +1235,57 @@ fn serialized_page_delete_refuses_an_unowned_destination_and_keeps_output() {
     assert_eq!(lookup["status"], "unseen");
     assert_eq!(lookup["snapshot"], initial);
     call(native_pdf_close, bound("close", 3, &initial));
+}
+
+#[test]
+fn page_capabilities_are_verified_against_the_reopened_tree_at_any_revision() {
+    let bytes = fixture_pdf(&[
+        "<< /Type /Catalog /Pages 2 0 R >>",
+        "<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 /MediaBox [0 0 612 792] /Resources <<>> >>",
+        "<< /Type /Page /Parent 2 0 R /UserUnit 2 >>",
+        "<< /Type /Pages /Parent 2 0 R /Kids [5 0 R] /Count 1 >>",
+        "<< /Type /Page /Parent 4 0 R >>",
+    ]);
+    let initial = call(native_pdf_open, open_request(bytes.as_bytes()))["snapshot"].clone();
+    let scaled = &initial["pageState"]["order"][0];
+    let normal = &initial["pageState"]["order"][1];
+    let refusal = page_edit(
+        &initial,
+        2,
+        json!({"kind":"rotatePage","target":{"page":0,"stableId":scaled},"degrees":90}),
+    );
+    assert_eq!(refusal["code"], "FLOW_PDF_NATIVE_PAGE_GEOMETRY");
+    let mut request = bound("command", 3, &initial);
+    request["outputHash"] = initial["outputHash"].clone();
+    request["command"] = json!({
+        "kind":"rotatePage","target":{"page":1,"stableId":normal},"degrees":90,
+    });
+    let response = native_pdf_command(request.to_string());
+    assert!(verify_native_pdf_worker_response(response.clone()));
+    let applied: Value = serde_json::from_str(&response).unwrap();
+    assert_eq!(applied["status"], "applied");
+    let current = &applied["snapshot"];
+    let pages = &current["pageState"]["restrictions"]["pages"];
+    assert_eq!(pages[0]["reparent"], "geometry");
+    assert_ne!(pages[0]["parent"], pages[1]["parent"]);
+    let digest = applied["resultHash"].as_str().unwrap();
+    let original = format!(r#""parent":{}"#, pages[0]["parent"]);
+    let forged_parent = format!(r#""parent":{}"#, pages[1]["parent"]);
+    assert!(response.contains(&original));
+    let edited = response
+        .replace(digest, "")
+        .replacen(&original, &forged_parent, 1);
+    let mut hash = blake3::Hasher::new();
+    hash.update(b"flowpdf:native-wire:v1");
+    hash.update(edited.as_bytes());
+    let forged = edited.replace(
+        r#""resultHash":"""#,
+        &format!(r#""resultHash":"{}""#, hash.finalize().to_hex()),
+    );
+    assert!(!verify_native_pdf_worker_response(forged.clone()));
+    call(native_pdf_close, bound("close", 4, current));
+    assert!(verify_native_pdf_response(response));
+    assert!(!verify_native_pdf_response(forged));
 }
 
 #[test]

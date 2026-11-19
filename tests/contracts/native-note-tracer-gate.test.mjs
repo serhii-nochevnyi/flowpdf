@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { execFileSync, spawnSync } from 'node:child_process'
 import { readFileSync } from 'node:fs'
 import { test } from 'node:test'
 import { buildArgv, browserArgv, bundleArgv, builtBrowserArgv, requirePassedCi, runTracer } from '../../scripts/check-native-note-tracer.mjs'
@@ -8,8 +9,11 @@ const repo = 'serhii-nochevnyi/flowpdf'
 const workflow = 'Native PDF note tracer'
 const name = 'native-pdf-note-tracer'
 const url = `https://api.github.com/repos/${repo}/check-runs/73`
+const root = new URL('../../', import.meta.url)
+const browserSuites = ['edit', 'text', 'objects', 'pages', 'forms', 'redaction']
+  .map((suite) => `web/tests/pdf-native-${suite}.browser.test.ts`)
 
-function fixture({ expanded = true, updatedPackage = true } = {}) {
+function fixture({ expanded = true, updatedPackage = true, historicalFiles = new Map() } = {}) {
   const run = {
     id: 7, run_number: 2, run_attempt: 3, head_sha: sha, event: 'push',
     name: workflow, path: '.github/workflows/pdf-native-note-tracer.yml',
@@ -45,6 +49,10 @@ function fixture({ expanded = true, updatedPackage = true } = {}) {
     if (argv[1] === 'show') {
       assert.ok(argv[2].startsWith(`${sha}:`))
       const path = argv[2].slice(sha.length + 1)
+      if (historicalFiles.has(path)) {
+        const contents = historicalFiles.get(path)
+        return path === state.changedPath ? contents + ' ' : contents
+      }
       let bytes = readFileSync(new URL(`../../${path}`, import.meta.url), 'utf8')
       if (!expanded && path === run.path) {
         bytes = bytes.replace(
@@ -83,11 +91,39 @@ test('requires the configured workflow, current attempt, and exact Actions check
   })
 })
 
-test('requires the expanded workflow and package for the final browser harness', () => {
+test('requires the expanded workflow and package for the current browser harness', () => {
   for (const options of [{ expanded: false, updatedPackage: false }, { updatedPackage: false }, { expanded: false }]) {
     assert.throws(() => requirePassedCi('HEAD', fixture(options).command), /HARNESS_NOT_APPROVED/)
   }
 })
+
+for (const [profile, revision, expanded] of [
+  ['historical note-only', '1e6cbafbcdbe1cd8d74fdcaca71dbcf24665a358', false],
+  ['historical expanded', '09ae65788a803835395e07beaa9240ab78239426', true],
+  ['previous reviewed page and redaction', '9a14e505d07f341beaa0af023da2c2ae4b095758', true],
+  ['previous reviewed page and stroke', '793ff4c687a71210205258e58003400c7738affa', true],
+]) {
+  test(`accepts the exact ${profile} harness`, (t) => {
+    const options = { cwd: root, encoding: 'utf8' }
+    const paths = ['.github/workflows/pdf-native-note-tracer.yml', 'package.json',
+      ...browserSuites.slice(0, expanded ? browserSuites.length : 1)]
+    const historicalFiles = new Map()
+    for (const path of paths) {
+      const blob = spawnSync('git', ['show', `${revision}:${path}`], options)
+      assert.ifError(blob.error)
+      if (blob.status !== 0 && execFileSync('git', ['rev-parse', '--is-shallow-repository'], options).trim() === 'true') {
+        t.skip('Historical harness bytes are unavailable in this shallow checkout')
+        return
+      }
+      assert.equal(blob.status, 0, blob.stderr)
+      historicalFiles.set(path, blob.stdout)
+    }
+    const { command, state } = fixture({ expanded, historicalFiles })
+    assert.deepEqual(requirePassedCi('HEAD', command), { repository: repo, sha, run: 7, attempt: 3, job: 73 })
+    state.changedPath = browserSuites[0]
+    assert.throws(() => requirePassedCi('HEAD', command), /HARNESS_NOT_APPROVED/)
+  })
+}
 
 for (const step of ['text replacement', 'object editing', 'page management', 'field editing', 'redaction']) {
   test(`requires a successful expanded ${step} step`, () => {
@@ -115,6 +151,7 @@ const refusals = [
   ['modified build definition', ({ state }) => { state.changedPath = 'package.json' }],
   ['modified browser configuration', ({ state }) => { state.changedPath = 'vitest.config.ts' }],
   ['modified bilingual browser assertions', ({ state }) => { state.changedPath = 'web/tests/pdf-native-edit.browser.test.ts' }],
+  ['modified expanded page assertions', ({ state }) => { state.changedPath = 'web/tests/pdf-native-pages.browser.test.ts' }],
   ['modified expanded redaction assertions', ({ state }) => { state.changedPath = 'web/tests/pdf-native-redaction.browser.test.ts' }],
   ['modified built smoke assertions', ({ state }) => { state.changedPath = 'scripts/check-native-note-built.mjs' }],
   ['pull request run', ({ run }) => { run.event = 'pull_request' }],

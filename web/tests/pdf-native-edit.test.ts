@@ -3,6 +3,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   NATIVE_PDF_LIMITS,
   nativeBytesHex,
+  nativePageMoveRefusals,
+  readNativeResponse,
   type NativePdfRequest,
   type NativePdfRedactionAction,
   type NativePdfRedactionCandidate,
@@ -1231,6 +1233,66 @@ describe('native PDF runtime composition', () => {
 })
 
 describe('verified page readback', () => {
+  it('checks displaced pages in either direction while allowing moves within a parent', () => {
+    const pageState = {
+      order: [1, 2, 3, 4], selected: null, canDelete: true, maxPosition: 3,
+      restrictions: { positionsLocked: false, pages: [
+        { parent: 10, reparent: 'geometry' },
+        { parent: 20, reparent: 'structure' },
+        { parent: 20 },
+        { parent: 20 },
+      ] },
+    } as const
+    expect(nativePageMoveRefusals(pageState, 3)[0]).toBe('geometry')
+    expect(nativePageMoveRefusals(pageState, 0)[3]).toBe('geometry')
+    expect(nativePageMoveRefusals(pageState, 1)[3]).toBeUndefined()
+    const withoutSourceRefusal = { ...pageState, restrictions: {
+      ...pageState.restrictions, pages: [{ parent: 10 }, ...pageState.restrictions.pages.slice(1)],
+    } }
+    expect(nativePageMoveRefusals(withoutSourceRefusal, 0)[3]).toBe('structure')
+  })
+
+  it('validates closed page capabilities and refuses rotation without verified geometry', async () => {
+    const lane = fakePort()
+    const opening = lane.coordinator.open(original())
+    const openDispatch = await lane.take()
+    const reply = openReply(openDispatch.request)
+    const before = {
+      ...reply.snapshot,
+      pageState: { ...reply.snapshot.pageState, restrictions: {
+        positionsLocked: false, pages: [{ parent: 131072, geometry: 'geometry', reparent: 'geometry', duplicate: 'geometry' }],
+      } },
+      scene: { ...reply.snapshot.scene, pages: [
+        { ...reply.snapshot.scene.pages[0]!, geometry: null, canAddNote: false },
+      ] },
+    } as const
+    const opened = { ...reply, snapshot: before }
+    const decodeWith = (restrictions: unknown) => readNativeResponse(JSON.stringify({
+      ...opened, snapshot: { ...before, pageState: { ...before.pageState, restrictions } },
+    }))
+    const { restrictions } = before.pageState
+    expect(decodeWith(restrictions)?.status).toBe('opened')
+    expect(decodeWith(undefined)).toBeNull()
+    expect(decodeWith({ ...restrictions, pages: [] })).toBeNull()
+    expect(decodeWith({ ...restrictions, pages: [{ ...restrictions.pages[0], parent: 0 }] })).toBeNull()
+    expect(decodeWith({ ...restrictions, pages: [{ ...restrictions.pages[0], extra: true }] })).toBeNull()
+    lane.deliver(openDispatch, opened)
+    await opening
+    const applying = lane.coordinator.command({ kind: 'rotatePage', target: { page: 0, stableId: 196608 }, degrees: 90 })
+    const refused = expect(applying).rejects.toMatchObject({ code: 'FLOW_PDF_NATIVE_RESPONSE_INVALID' })
+    const dispatch = await lane.take()
+    const outputHash = hash(22)
+    lane.deliver(dispatch, {
+      ...opened, requestId: dispatch.request.requestId, operation: 'command', status: 'applied',
+      snapshot: { ...before, binding: { ...before.binding, revision: 1 }, consumedRequest: dispatch.request.requestId,
+        outputHash, outputHex: '04', pageState: { ...before.pageState, selected: 196608 },
+        scene: { ...before.scene, outputHash } },
+    })
+    await refused
+    expect(lane.coordinator.snapshot().accepted).toEqual(before)
+    lane.coordinator.dispose()
+  })
+
   it.each(['applied', 'reconciled'] as const)('publishes page changes through %s', async (mode) => {
     const lane = fakePort()
     let current = await opened(lane)

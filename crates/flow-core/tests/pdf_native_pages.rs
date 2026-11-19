@@ -224,6 +224,223 @@ fn final_page_and_external_dependencies_refuse_without_changing_output() {
 }
 
 #[test]
+fn named_destination_restrictions_follow_indirect_targets() {
+    for catalog in ["/Dests << /Chapter 6 0 R >>", "/Names << /Dests 5 0 R >>"] {
+        let bytes = build_pdf(&[
+            (0, &format!("<< /Type /Catalog /Pages 2 0 R {catalog} >>")),
+            (
+                0,
+                "<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 /MediaBox [0 0 300 500] /Resources <<>> >>",
+            ),
+            (0, "<< /Type /Page /Parent 2 0 R >>"),
+            (0, "<< /Type /Page /Parent 2 0 R >>"),
+            (0, "<< /Names [(Chapter) 6 0 R] >>"),
+            (0, "[3 0 R /Fit]"),
+        ]);
+        let mut session =
+            NativePdfSession::open_scoped(&bytes, NativeEditLimits::default(), [3; 16]).unwrap();
+        let prior = session.snapshot().clone();
+        let pages = &prior.page_state.restrictions.as_ref().unwrap().pages;
+        assert!(pages[0].delete.is_some());
+        assert!(pages[1].delete.is_none());
+        assert_eq!(
+            session
+                .apply_page(prior.binding, 1, &command("deletePage", 0, &prior))
+                .unwrap_err()
+                .code(),
+            "FLOW_PDF_NATIVE_UNSUPPORTED",
+        );
+        assert_eq!(session.output_bytes(), bytes);
+        session
+            .apply_page(prior.binding, 2, &command("deletePage", 1, &prior))
+            .unwrap();
+        assert_eq!(
+            session.snapshot().page_state.order,
+            prior.page_state.order[..1]
+        );
+    }
+}
+
+#[test]
+fn page_widget_operations_share_calculation_order_admission() {
+    for (order, available) in [("[]", true), ("[5 0 R]", false)] {
+        let bytes = build_pdf(&[
+            (0, "<< /Type /Catalog /Pages 2 0 R /AcroForm 6 0 R >>"),
+            (
+                0,
+                "<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 /MediaBox [0 0 300 500] /Resources <<>> >>",
+            ),
+            (0, "<< /Type /Page /Parent 2 0 R /Annots [5 0 R] >>"),
+            (0, "<< /Type /Page /Parent 2 0 R >>"),
+            (
+                0,
+                "<< /Type /Annot /Subtype /Widget /P 3 0 R /Rect [40 60 80 90] /FT /Btn /T (approval) /V /Off /AS /Off >>",
+            ),
+            (0, &format!("<< /Fields [5 0 R] /CO {order} >>")),
+        ]);
+        for operation in ["duplicatePage", "deletePage"] {
+            let mut session =
+                NativePdfSession::open_scoped(&bytes, NativeEditLimits::default(), [3; 16])
+                    .unwrap();
+            let prior = session.snapshot().clone();
+            let capability = prior
+                .page_state
+                .restrictions
+                .as_ref()
+                .map(|caps| &caps.pages[0]);
+            let refusal = capability.and_then(|page| {
+                if operation == "duplicatePage" {
+                    page.duplicate
+                } else {
+                    page.delete
+                }
+            });
+            assert_eq!(refusal.is_none(), available);
+            let result = session.apply_page(prior.binding, 1, &command(operation, 0, &prior));
+            if available {
+                result.unwrap();
+            } else {
+                assert_eq!(result.unwrap_err().code(), "FLOW_PDF_NATIVE_UNSUPPORTED");
+                assert_eq!(session.output_bytes(), bytes);
+            }
+        }
+    }
+}
+
+#[test]
+fn chapter_outline_blocks_delete_but_leaf_outline_can_be_removed() {
+    let bytes = build_pdf(&[
+        (0, "<< /Type /Catalog /Pages 2 0 R /Outlines 5 0 R >>"),
+        (
+            0,
+            "<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 /MediaBox [0 0 300 500] /Resources <<>> >>",
+        ),
+        (0, "<< /Type /Page /Parent 2 0 R >>"),
+        (0, "<< /Type /Page /Parent 2 0 R >>"),
+        (0, "<< /Type /Outlines /First 6 0 R /Last 6 0 R /Count 2 >>"),
+        (
+            0,
+            "<< /Title (Chapter) /Parent 5 0 R /Dest [3 0 R /Fit] /First 7 0 R /Last 7 0 R /Count 1 >>",
+        ),
+        (0, "<< /Title (Section) /Parent 6 0 R /Dest [4 0 R /Fit] >>"),
+    ]);
+    let mut session =
+        NativePdfSession::open_scoped(&bytes, NativeEditLimits::default(), [3; 16]).unwrap();
+    let prior = session.snapshot().clone();
+    let capabilities = &prior.page_state.restrictions.as_ref().unwrap().pages;
+    assert!(capabilities[0].delete.is_some());
+    assert!(capabilities[1].delete.is_none());
+    assert!(
+        session
+            .apply_page(prior.binding, 1, &command("deletePage", 0, &prior))
+            .is_err()
+    );
+    assert_eq!(session.output_bytes(), bytes);
+    session
+        .apply_page(prior.binding, 2, &command("deletePage", 1, &prior))
+        .unwrap();
+    assert_eq!(
+        session.snapshot().page_state.order,
+        prior.page_state.order[..1]
+    );
+}
+
+#[test]
+fn many_outline_entries_do_not_block_unreferenced_pages() {
+    const PAGE_COUNT: usize = 300;
+    const BOOKMARK_COUNT: usize = 3400;
+    let outline = PAGE_COUNT + 3;
+    let first = outline + 1;
+    let last = outline + BOOKMARK_COUNT;
+    let kids = (3..outline)
+        .map(|page| format!("{page} 0 R "))
+        .collect::<String>();
+    let mut objects = vec![
+        format!("<< /Type /Catalog /Pages 2 0 R /Outlines {outline} 0 R >>"),
+        format!(
+            "<< /Type /Pages /Kids [{kids}] /Count {PAGE_COUNT} /MediaBox [0 0 300 500] /Resources <<>> >>"
+        ),
+    ];
+    objects.extend((0..PAGE_COUNT).map(|_| "<< /Type /Page /Parent 2 0 R >>".to_owned()));
+    objects.push(format!(
+        "<< /Type /Outlines /First {first} 0 R /Last {last} 0 R /Count {BOOKMARK_COUNT} >>"
+    ));
+    for entry in first..=last {
+        let prev = if entry > first {
+            format!("/Prev {} 0 R ", entry - 1)
+        } else {
+            String::new()
+        };
+        let next = if entry < last {
+            format!("/Next {} 0 R ", entry + 1)
+        } else {
+            String::new()
+        };
+        objects.push(format!(
+            "<< /Title (Reference) /Parent {outline} 0 R {prev}{next}/Dest [3 0 R /Fit] >>"
+        ));
+    }
+    let refs: Vec<_> = objects.iter().map(|value| (0, value.as_str())).collect();
+    let bytes = build_pdf(&refs);
+    let mut session =
+        NativePdfSession::open_scoped(&bytes, NativeEditLimits::default(), [3; 16]).unwrap();
+    let prior = session.snapshot().clone();
+    if let Some(capabilities) = &prior.page_state.restrictions {
+        assert!(capabilities.pages[PAGE_COUNT - 1].delete.is_none());
+    }
+    session
+        .apply_page(
+            prior.binding,
+            1,
+            &command("deletePage", PAGE_COUNT - 1, &prior),
+        )
+        .unwrap();
+    assert_eq!(session.snapshot().page_state.order.len(), PAGE_COUNT - 1);
+}
+
+#[test]
+fn grouped_field_refuses_duplicate_without_blocking_unrelated_deletion() {
+    let bytes = build_pdf(&[
+        (0, "<< /Type /Catalog /Pages 2 0 R /AcroForm 6 0 R >>"),
+        (
+            0,
+            "<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 /MediaBox [0 0 300 500] /Resources <<>> >>",
+        ),
+        (0, "<< /Type /Page /Parent 2 0 R /Annots [5 0 R] >>"),
+        (0, "<< /Type /Page /Parent 2 0 R /Annots [8 0 R] >>"),
+        (
+            0,
+            "<< /Type /Annot /Subtype /Widget /P 3 0 R /Rect [40 60 80 90] /FT /Btn /T (Approval) /V /Off /AS /Off >>",
+        ),
+        (0, "<< /Fields [5 0 R 7 0 R] >>"),
+        (0, "<< /T (Section) /Kids [8 0 R] >>"),
+        (
+            0,
+            "<< /Type /Annot /Subtype /Widget /Parent 7 0 R /P 4 0 R /Rect [40 60 80 90] /FT /Btn /T (Approval) /V /Off /AS /Off >>",
+        ),
+    ]);
+    let mut session =
+        NativePdfSession::open_scoped(&bytes, NativeEditLimits::default(), [3; 16]).unwrap();
+    let prior = session.snapshot().clone();
+    let first = &prior.page_state.restrictions.as_ref().unwrap().pages[0];
+    assert!(first.duplicate.is_some());
+    assert!(first.delete.is_none());
+    assert!(
+        session
+            .apply_page(prior.binding, 1, &command("duplicatePage", 0, &prior))
+            .is_err()
+    );
+    assert_eq!(session.output_bytes(), bytes);
+    session
+        .apply_page(prior.binding, 2, &command("deletePage", 0, &prior))
+        .unwrap();
+    assert_eq!(
+        session.snapshot().page_state.order,
+        prior.page_state.order[1..]
+    );
+}
+
+#[test]
 fn scaled_page_allows_safe_structural_edits_without_editable_geometry() {
     let bytes = build_pdf(&[
         (0, "<< /Type /Catalog /Pages 2 0 R >>"),
@@ -231,13 +448,28 @@ fn scaled_page_allows_safe_structural_edits_without_editable_geometry() {
             0,
             "<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 /MediaBox [0 0 300 500] /Resources <<>> >>",
         ),
-        (0, "<< /Type /Page /Parent 2 0 R /UserUnit 2 >>"),
+        (
+            0,
+            "<< /Type /Page /Parent 2 0 R /UserUnit 2 /Annots [5 0 R] >>",
+        ),
         (0, "<< /Type /Page /Parent 2 0 R >>"),
+        (
+            0,
+            "<< /Type /Annot /Subtype /Text /P 3 0 R /Rect [10 20 40 60] /Contents (Scaled note) >>",
+        ),
     ]);
     let mut session =
         NativePdfSession::open_scoped(&bytes, NativeEditLimits::default(), [3; 16]).unwrap();
     let prior = session.snapshot().clone();
     assert_eq!(prior.scene.pages[0].geometry, None);
+    assert!(matches!(
+        prior.scene.pages[0].annotations.as_slice(),
+        [flow_core::pdf::NativePdfAnnotation::ReadOnly { .. }]
+    ));
+    let capabilities = &prior.page_state.restrictions.as_ref().unwrap().pages;
+    assert_eq!(capabilities[0].parent, capabilities[1].parent);
+    assert!(capabilities[0].geometry.is_some());
+    assert!(capabilities[0].delete.is_none());
     let target = serde_json::json!({"page": 0, "stableId": prior.page_state.order[0]});
     for intent in [
         serde_json::json!({"kind": "rotatePage", "target": target, "degrees": 90}),
@@ -250,7 +482,7 @@ fn scaled_page_allows_safe_structural_edits_without_editable_geometry() {
                 .apply_page(prior.binding, 1, &edit)
                 .unwrap_err()
                 .code(),
-            "FLOW_PDF_NATIVE_TARGET_UNAVAILABLE"
+            "FLOW_PDF_NATIVE_PAGE_GEOMETRY"
         );
         assert_eq!(session.output_bytes(), bytes);
         assert_eq!(session.snapshot().binding, prior.binding);
@@ -292,34 +524,42 @@ fn scaled_page_cannot_move_across_parents_without_geometry_verification() {
         (0, "<< /Type /Catalog /Pages 2 0 R >>"),
         (
             0,
-            "<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 /MediaBox [0 0 300 500] /Resources <<>> >>",
+            "<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 3 /MediaBox [0 0 300 500] /Resources <<>> >>",
         ),
         (0, "<< /Type /Pages /Parent 2 0 R /Kids [5 0 R] /Count 1 >>"),
         (
             0,
-            "<< /Type /Pages /Parent 2 0 R /Kids [6 0 R] /Count 1 /Rotate 90 >>",
+            "<< /Type /Pages /Parent 2 0 R /Kids [6 0 R 7 0 R] /Count 2 /Rotate 90 >>",
         ),
         (0, "<< /Type /Page /Parent 3 0 R /UserUnit 2 >>"),
+        (0, "<< /Type /Page /Parent 4 0 R >>"),
         (0, "<< /Type /Page /Parent 4 0 R >>"),
     ]);
     let mut session =
         NativePdfSession::open_scoped(&bytes, NativeEditLimits::default(), [3; 16]).unwrap();
     let prior = session.snapshot().clone();
-    let reorder = serde_json::from_value(serde_json::json!({
-        "kind": "reorderPage",
-        "target": {"page": 1, "stableId": prior.page_state.order[1]},
-        "position": 0
-    }))
-    .unwrap();
-    assert_eq!(
-        session
-            .apply_page(prior.binding, 1, &reorder)
-            .unwrap_err()
-            .code(),
-        "FLOW_PDF_NATIVE_UNSUPPORTED"
-    );
-    assert_eq!(session.output_bytes(), bytes);
-    assert_eq!(session.snapshot().page_state, prior.page_state);
+    let capabilities = &prior.page_state.restrictions.as_ref().unwrap().pages;
+    assert_ne!(capabilities[0].parent, capabilities[1].parent);
+    assert_eq!(capabilities[1].parent, capabilities[2].parent);
+    assert!(capabilities[0].reparent.is_some());
+    assert!(capabilities[2].reparent.is_none());
+    for (page, position) in [(0, 2), (2, 0)] {
+        let reorder = serde_json::from_value(serde_json::json!({
+            "kind": "reorderPage",
+            "target": {"page": page, "stableId": prior.page_state.order[page]},
+            "position": position,
+        }))
+        .unwrap();
+        assert_eq!(
+            session
+                .apply_page(prior.binding, 1, &reorder)
+                .unwrap_err()
+                .code(),
+            "FLOW_PDF_NATIVE_PAGE_GEOMETRY"
+        );
+        assert_eq!(session.output_bytes(), bytes);
+        assert_eq!(session.snapshot().page_state, prior.page_state);
+    }
 }
 
 #[test]
@@ -340,6 +580,14 @@ fn print_page_ranges_refuse_structural_edits_but_allow_rotation() {
         let mut session =
             NativePdfSession::open_scoped(&bytes, NativeEditLimits::default(), [3; 16]).unwrap();
         let prior = session.snapshot().clone();
+        assert!(
+            prior
+                .page_state
+                .restrictions
+                .as_ref()
+                .unwrap()
+                .positions_locked
+        );
         let target = serde_json::json!({"page": 0, "stableId": prior.page_state.order[0]});
         for intent in [
             serde_json::json!({"kind": "reorderPage", "target": target, "position": 1}),
@@ -399,6 +647,7 @@ fn null_print_presets_allow_structural_edits() {
         let mut session =
             NativePdfSession::open_scoped(&bytes, NativeEditLimits::default(), [3; 16]).unwrap();
         let prior = session.snapshot().clone();
+        assert!(prior.page_state.restrictions.is_none());
         let reorder = serde_json::from_value(serde_json::json!({
             "kind": "reorderPage",
             "target": {"page": 0, "stableId": prior.page_state.order[0]},
