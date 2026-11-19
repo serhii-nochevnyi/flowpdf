@@ -373,15 +373,44 @@ function confirmsFieldCommand(
   }
 }
 
+function plainNotes(snapshot: NativePdfVerifiedSnapshot) {
+  return snapshot.scene.pages.flatMap((page) => page.annotations.flatMap((annotation) =>
+    annotation.kind === 'plainNote' ? [{ page: page.id, ...annotation }] : []))
+}
+
+type PlainNote = ReturnType<typeof plainNotes>[number]
+
+function sameNote(left: PlainNote, right: PlainNote): boolean {
+  return left.id === right.id && left.page === right.page && left.contents === right.contents
+    && sameNativeBytes(left.rect, right.rect)
+}
+
+function sameNotes(before: readonly PlainNote[], after: readonly PlainNote[]): boolean {
+  const byId = new Map(after.map((note) => [note.id, note]))
+  return byId.size === after.length && before.length === after.length && before.every((note) => {
+    const next = byId.get(note.id)
+    return next !== undefined && sameNote(note, next)
+  })
+}
+
 function confirmsCommand(request: CommandRequest, previous: NativePdfVerifiedSnapshot, snapshot: NativePdfVerifiedSnapshot): boolean {
   const command = request.command
   if (isNativePageCommand(command)) {
-    return snapshot.binding.revision === previous.binding.revision + 1
-      && snapshot.consumedRequest === request.requestId
-      && confirmsPageCommand(command, previous, snapshot)
+    if (snapshot.binding.revision !== previous.binding.revision + 1
+      || snapshot.consumedRequest !== request.requestId
+      || !confirmsPageCommand(command, previous, snapshot)) return false
+    const oldPages = new Set(previous.pageState.order)
+    const positions = new Map(snapshot.pageState.order.map((id, index) => [id, index]))
+    const survivors = plainNotes(previous).flatMap((note) => {
+      const page = positions.get(previous.pageState.order[note.page]!)
+      return page === undefined ? [] : [{ ...note, page }]
+    })
+    return sameNotes(survivors, plainNotes(snapshot).filter((note) => oldPages.has(snapshot.pageState.order[note.page]!)))
   }
   if (!sameNativeBytes(snapshot.pageState.order, previous.pageState.order)
     || snapshot.pageState.selected !== previous.pageState.selected) return false
+  if (!['add', 'edit', 'move', 'remove'].some((kind) => command.kind === kind)
+    && !sameNotes(plainNotes(previous), plainNotes(snapshot))) return false
   if (isObjectCommand(command)) {
     return snapshot.binding.revision === previous.binding.revision + 1
       && snapshot.consumedRequest === request.requestId
@@ -393,28 +422,22 @@ function confirmsCommand(request: CommandRequest, previous: NativePdfVerifiedSna
       && confirmsFieldCommand(command, previous, snapshot)
   }
   if (command.kind === 'replaceText') return confirmedNativeReplacement(command, previous, snapshot) !== null
-  for (const page of snapshot.scene.pages) {
-    for (const note of page.annotations) {
-      if (note.kind !== 'plainNote') continue
-      switch (command.kind) {
-        case 'add':
-          if (page.id === command.page && note.contents === command.contents && sameNativeBytes(note.rect, command.rect)
-            && !previous.scene.pages.some((old) => old.annotations.some((annotation) =>
-              annotation.kind === 'plainNote' && annotation.id === note.id))) return true
-          break
-        case 'edit':
-          if (note.id === command.note && note.contents === command.contents) return true
-          break
-        case 'move':
-          if (note.id === command.note && page.id === command.page && sameNativeBytes(note.rect, command.rect)) return true
-          break
-        case 'remove':
-          if (note.id === command.note) return false
-          break
-      }
-    }
+  if (snapshot.binding.revision !== previous.binding.revision + 1
+    || snapshot.consumedRequest !== request.requestId) return false
+  const before = plainNotes(previous)
+  const after = plainNotes(snapshot)
+  if (command.kind === 'add') {
+    const existing = new Set(before.map((note) => note.id))
+    const added = after.find((note) => !existing.has(note.id))
+    return added !== undefined && added.page === command.page && added.contents === command.contents
+      && sameNativeBytes(added.rect, command.rect) && sameNotes([...before, added], after)
   }
-  return command.kind === 'remove'
+  const target = before.find((note) => note.id === command.note)
+  if (target === undefined) return false
+  const survivors = before.filter((note) => note.id !== command.note)
+  if (command.kind === 'edit') survivors.push({ ...target, contents: command.contents })
+  if (command.kind === 'move') survivors.push({ ...target, page: command.page, rect: command.rect })
+  return sameNotes(survivors, after)
 }
 
 export class NativePdfEditCoordinator {
@@ -513,6 +536,9 @@ export class NativePdfEditCoordinator {
       ...this.boundRequest('command', 1, current), outputHash: current.outputHash, command,
     } })) return Promise.reject(new NativePdfWorkerError(REQUEST_INVALID))
     const owned = freezeNativeDto(structuredClone(command))
+    if ('note' in owned && !plainNotes(current).some((note) => note.id === owned.note)) {
+      return Promise.reject(new NativePdfWorkerError('FLOW_PDF_NATIVE_TARGET_UNAVAILABLE'))
+    }
     const index = 'page' in owned ? owned.page : 'target' in owned ? owned.target.page : undefined
     const stableId = index === undefined ? undefined : current.pageState.order[index]
     const indexedPage = index === undefined || stableId === undefined ? null : { index, stableId }
@@ -603,9 +629,10 @@ export class NativePdfEditCoordinator {
         || !sameNativeBytes(current.scene.sceneHash, previous.scene.sceneHash)
         || current.consumedRequest !== previous.consumedRequest
         || !sameNativeBytes(current.pageState.order, previous.pageState.order)
-        || current.pageState.selected !== previous.pageState.selected))
+        || current.pageState.selected !== previous.pageState.selected
+        || !sameNotes(plainNotes(previous), plainNotes(current))))
         || (reply.status === 'accepted'
-          && (current.consumedRequest === requestId || isObjectCommand(command.command) || isNativePageCommand(command.command) || isNativeFieldCommand(command.command))
+          && (current.consumedRequest === requestId || command.command.kind !== 'replaceText')
           && !confirmsCommand(command, previous, current))) {
         throw new NativePdfWorkerError(RESPONSE_INVALID, requestId)
       }
@@ -633,7 +660,8 @@ export class NativePdfEditCoordinator {
       if (reply.operation !== 'snapshot' || reply.status !== 'unseen'
         || reply.snapshot.consumedRequest !== accepted.consumedRequest
         || !sameNativeBytes(reply.snapshot.outputHash, accepted.outputHash)
-        || !sameNativeBytes(reply.snapshot.scene.sceneHash, accepted.scene.sceneHash)) return null
+        || !sameNativeBytes(reply.snapshot.scene.sceneHash, accepted.scene.sceneHash)
+        || !sameNotes(plainNotes(accepted), plainNotes(reply.snapshot))) return null
       return reply.snapshot.scene
     } catch (cause: unknown) {
       if (signal?.aborted || this.state.accepted !== accepted || this.state.phase !== 'ready') return null
@@ -654,8 +682,6 @@ export class NativePdfEditCoordinator {
       try {
         expectPhase(await this.send(request), 'closed')
         this.requireLive(requestId)
-        this.original = null
-        this.update('idle', null, null, null)
       } catch (cause: unknown) {
         const error = errorFor(cause, requestId)
         this.invalidate(error.code)
@@ -663,6 +689,8 @@ export class NativePdfEditCoordinator {
       } finally {
         this.closeFlight = null
       }
+      this.original = null
+      this.update('idle', null, null, null)
     })
     this.update('closing', requestId)
     for (const pending of this.pending.values()) {
@@ -775,7 +803,9 @@ export class NativePdfEditCoordinator {
     const current = this.state.accepted
     if (this.state.phase !== 'ready' || current === null) return
     let queued = this.queue.shift()
-    while (queued && ((queued.command.kind === 'replaceText' && !textTarget(current, queued.command))
+    const noteIds = new Set(plainNotes(current).map((note) => note.id))
+    while (queued && (('note' in queued.command && !noteIds.has(queued.command.note))
+      || (queued.command.kind === 'replaceText' && !textTarget(current, queued.command))
       || (isNativeFieldCommand(queued.command) && 'field' in queued.command
         && !hasFieldTarget(queued.command.field, current))
       || (isNativePageCommand(queued.command)
