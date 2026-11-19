@@ -1446,14 +1446,75 @@ struct Grid {
     height: usize,
 }
 
+struct Raster {
+    pixels: Vec<Pixel>,
+    coverage: Vec<PreviewCoverage>,
+    offset: Point,
+}
+
 #[derive(Clone, Copy)]
-enum RasterSample<'a> {
-    Point(Point),
-    Coverage {
-        stencil: &'a Stencil,
-        fill_rule: Option<bool>,
-        color: Pixel,
-    },
+enum PreviewCoverage {
+    Clear,
+    MixedBackground,
+    Partial { ink: Option<Pixel>, visible: bool },
+    Unresolved,
+}
+
+#[derive(Clone, Copy)]
+struct RasterOutline<'a> {
+    stencil: &'a Stencil,
+    fill_rule: Option<bool>,
+    ink: Pixel,
+    draw_edges: bool,
+}
+
+enum PreviewPaint<'a> {
+    Outline(RasterOutline<'a>),
+    Image(&'a Image<'a>),
+    Note,
+}
+
+impl PreviewPaint<'_> {
+    fn uniform_background(&self, bounds: Rect, pixel: Rect) -> bool {
+        match self {
+            Self::Outline(_) => true,
+            Self::Image(image) => image
+                .mask(pixel)
+                .is_some_and(|[l, t, r, b]| r - l == 1 && b - t == 1),
+            Self::Note => {
+                let [l, b, r, t] = bounds;
+                let inset = ((r - l).min(t - b) / 8).min(POINT);
+                let interior = [l + inset, b + inset, r - inset, t - inset];
+                contains(interior, pixel) || !intersects(interior, pixel)
+            }
+        }
+    }
+}
+
+impl RasterOutline<'_> {
+    fn covers_pixel(self, rect: Rect, work: &mut usize) -> VerifyResult<bool> {
+        let stencil = self.stencil;
+        if !contains(stencil.bounds, rect) {
+            return Ok(false);
+        }
+        spend(work, stencil.edges + 1)?;
+        let rect = stencil.expand(rect.map(|coordinate| coordinate * stencil.scale));
+        Ok(!stencil
+            .segments()
+            .any(|(a, b)| crosses_interior(a, b, rect)))
+    }
+
+    fn intersects_pixel(self, rect: Rect, work: &mut usize) -> VerifyResult<bool> {
+        let stencil = self.stencil;
+        if self.draw_edges
+            && let Some(evenodd) = self.fill_rule
+        {
+            return stencil.fill_intersects_rect(rect, evenodd, work);
+        }
+        spend(work, stencil.edges * 5 + 1)?;
+        let rect = rect.map(|coordinate| coordinate * stencil.scale);
+        Ok(stencil.contour_intersects(stencil.expand(rect)))
+    }
 }
 
 impl Grid {
@@ -1509,16 +1570,31 @@ impl Grid {
         let mut pixels = Vec::new();
         pixels.try_reserve_exact(count).map_err(|_| Budget)?;
         pixels.resize(count, [255; 3]);
-        let point_sample = RasterSample::Point(sample.unwrap_or([PITCH / 2; 2]));
+        let mut coverage = Vec::new();
+        if sample.is_none() {
+            spend(work, count)?;
+            coverage.try_reserve_exact(count).map_err(|_| Budget)?;
+            coverage.resize(count, PreviewCoverage::Clear);
+        }
+        let mut raster = Raster {
+            pixels,
+            coverage,
+            offset: sample.unwrap_or([PITCH / 2; 2]),
+        };
         for paint in paints {
             match &paint.kind {
                 PaintKind::Text(text) => {
                     let color = text.color.rgb();
                     for glyph in &text.glyphs {
                         self.paint(
-                            &mut pixels,
+                            &mut raster,
                             glyph.bounds,
-                            point_sample,
+                            PreviewPaint::Outline(RasterOutline {
+                                stencil: glyph,
+                                fill_rule: Some(false),
+                                ink: color,
+                                draw_edges: false,
+                            }),
                             glyph.edges + 1,
                             work,
                             |p| glyph.hits(p, false).then_some(color),
@@ -1529,30 +1605,29 @@ impl Grid {
                     if let (Some((color, evenodd)), Some(stencil)) =
                         (vector.fill, &vector.fill_path)
                     {
-                        self.paint_vector(
-                            &mut pixels,
-                            stencil,
-                            (color, Some(evenodd)),
-                            sample,
-                            work,
-                        )?;
+                        self.paint_vector(&mut raster, stencil, (color, Some(evenodd)), work)?;
                     }
                     if let Some((color, _)) = vector.stroke {
                         for stencil in &vector.stroke_paths {
-                            self.paint_vector(&mut pixels, stencil, (color, None), sample, work)?;
+                            self.paint_vector(&mut raster, stencil, (color, None), work)?;
                         }
                     }
                 }
                 PaintKind::Image(image) => self.paint(
-                    &mut pixels,
+                    &mut raster,
                     paint.bounds,
-                    point_sample,
+                    PreviewPaint::Image(image),
                     image.masks.len() + 1,
                     work,
                     |p| image.at(p),
                 )?,
-                PaintKind::Note(_) => {
-                    self.paint(&mut pixels, paint.bounds, point_sample, 1, work, |p| {
+                PaintKind::Note(_) => self.paint(
+                    &mut raster,
+                    paint.bounds,
+                    PreviewPaint::Note,
+                    1,
+                    work,
+                    |p| {
                         let [l, b, r, t] = paint.bounds;
                         let inset = ((r - l).min(t - b) / 8).min(POINT);
                         Some(if inside([l + inset, b + inset, r - inset, t - inset], p) {
@@ -1560,44 +1635,48 @@ impl Grid {
                         } else {
                             [40; 3]
                         })
-                    })?
-                }
+                    },
+                )?,
             }
         }
-        Ok(pixels)
+        spend(work, raster.coverage.len())?;
+        if raster
+            .coverage
+            .iter()
+            .any(|coverage| matches!(coverage, PreviewCoverage::Unresolved))
+        {
+            return Err(UnsupportedProfile);
+        }
+        Ok(raster.pixels)
     }
 
     fn paint_vector(
         &self,
-        pixels: &mut [Pixel],
+        raster: &mut Raster,
         stencil: &Stencil,
         (color, fill_rule): (Color, Option<bool>),
-        sample: Option<Point>,
         work: &mut usize,
     ) -> VerifyResult<()> {
         let color = color.rgb();
-        let sample = if let Some(point) = sample {
-            RasterSample::Point(point)
-        } else {
-            // @contract: Preview can place a rounded stroke within half a pixel of its outline.
-            if stencil.uncertain_join
+        // @contract: Preview can place a rounded stroke within half a pixel of its outline.
+        if !raster.coverage.is_empty()
+            && (stencil.uncertain_join
                 || stencil
                     .margin
                     .iter()
-                    .any(|&error| error >= PITCH / 2 * stencil.scale)
-            {
-                return Err(UnsupportedProfile);
-            }
-            RasterSample::Coverage {
+                    .any(|&error| error >= PITCH / 2 * stencil.scale))
+        {
+            return Err(UnsupportedProfile);
+        }
+        self.paint(
+            raster,
+            stencil.bounds,
+            PreviewPaint::Outline(RasterOutline {
                 stencil,
                 fill_rule,
-                color,
-            }
-        };
-        self.paint(
-            pixels,
-            stencil.bounds,
-            sample,
+                ink: color,
+                draw_edges: true,
+            }),
             stencil.edges + 1,
             work,
             |p| stencil.hits(p, fill_rule.unwrap_or(false)).then_some(color),
@@ -1606,13 +1685,17 @@ impl Grid {
 
     fn paint(
         &self,
-        pixels: &mut [Pixel],
+        raster: &mut Raster,
         bounds: Rect,
-        sample: RasterSample<'_>,
+        paint: PreviewPaint<'_>,
         cost: usize,
         work: &mut usize,
         mut value: impl FnMut(Point) -> Option<Pixel>,
     ) -> VerifyResult<()> {
+        let outline = match paint {
+            PreviewPaint::Outline(outline) => Some(outline),
+            _ => None,
+        };
         let [l, b, r, t] = bounds;
         let [x, y] = self.rotate([l, b]);
         let [u, v] = self.rotate([r, t]);
@@ -1627,56 +1710,99 @@ impl Grid {
                 .and_then(|cost| cost.checked_add(1))
                 .ok_or(Budget)?,
         )?;
-        let offset = match sample {
-            RasterSample::Point(offset) => offset,
-            RasterSample::Coverage { .. } => [PITCH / 2; 2],
-        };
         for row in bottom..top {
             for col in left..right {
                 let logical = [
-                    col as i64 * PITCH + offset[0],
-                    row as i64 * PITCH + offset[1],
+                    col as i64 * PITCH + raster.offset[0],
+                    row as i64 * PITCH + raster.offset[1],
                 ];
-                let point = self.unrotate(logical);
-                let pixel = &mut pixels[row * self.width + col];
-                if inside(bounds, point)
-                    && inside(self.geometry.crop_box, point)
-                    && let Some(color) = value(point)
-                {
-                    *pixel = color;
-                } else if let RasterSample::Coverage {
-                    stencil,
-                    fill_rule,
-                    color,
-                } = sample
-                {
-                    let [x, y] = point;
-                    let [l, b, r, t] = self.geometry.crop_box;
-                    let half = PITCH / 2;
-                    let rect = [
-                        l.max(x - half),
-                        b.max(y - half),
-                        r.min(x + half),
-                        t.min(y + half),
-                    ];
-                    let covered = if let Some(evenodd) = fill_rule {
-                        stencil.fill_intersects_rect(rect, evenodd, work)?
+                let point @ [x, y] = self.unrotate(logical);
+                let index = row * self.width + col;
+                let pixel = &mut raster.pixels[index];
+                let color = (inside(bounds, point) && inside(self.geometry.crop_box, point))
+                    .then(|| value(point))
+                    .flatten();
+                let Some(coverage) = raster.coverage.get_mut(index) else {
+                    if let Some(color) = color {
+                        *pixel = color;
+                    }
+                    continue;
+                };
+
+                let [l, b, r, t] = self.geometry.crop_box;
+                let half = PITCH / 2;
+                let rect = [
+                    l.max(x - half),
+                    b.max(y - half),
+                    r.min(x + half),
+                    t.min(y + half),
+                ];
+                if let Some(outline) = outline {
+                    if color.is_none() && !outline.intersects_pixel(rect, work)? {
+                        continue;
+                    }
+                } else if !intersects(bounds, rect) {
+                    continue;
+                }
+                if let Some(color) = color {
+                    let full = if let Some(outline) = outline {
+                        outline.covers_pixel(rect, work)?
                     } else {
-                        spend(work, stencil.edges * 5 + 1)?;
-                        let rect = rect.map(|coordinate| coordinate * stencil.scale);
-                        stencil.contour_intersects(stencil.expand(rect))
+                        contains(bounds, rect)
                     };
-                    // @contract: Edge-only coverage remains visible when center sampling misses it.
-                    if covered {
-                        for (channel, ink) in pixel.iter_mut().zip(color) {
-                            let blended = (u16::from(*channel) + u16::from(ink)).div_ceil(2) as u8;
-                            *channel = if blended == *channel { ink } else { blended };
-                        }
+                    if full {
+                        *pixel = color;
+                        *coverage = if paint.uniform_background(bounds, rect) {
+                            PreviewCoverage::Clear
+                        } else {
+                            PreviewCoverage::MixedBackground
+                        };
+                        continue;
                     }
                 }
+                coverage.paint_partial(pixel, color, outline);
             }
         }
         Ok(())
+    }
+}
+
+impl PreviewCoverage {
+    fn paint_partial(
+        &mut self,
+        pixel: &mut Pixel,
+        color: Option<Pixel>,
+        outline: Option<RasterOutline<'_>>,
+    ) {
+        let ink = outline.map(|outline| outline.ink);
+        let visible = match *self {
+            Self::Clear => false,
+            Self::Partial {
+                ink: prior,
+                visible,
+            } if ink.is_some() && ink == prior => visible,
+            // @invariant: Only full coverage can replace unresolved partial colors.
+            Self::Partial { .. } | Self::MixedBackground | Self::Unresolved => {
+                *self = Self::Unresolved;
+                return;
+            }
+        };
+        let edge_ink = outline
+            .filter(|outline| outline.draw_edges)
+            .map(|outline| outline.ink);
+        if let Some(color) = color {
+            *pixel = color;
+        } else if let Some(ink) = edge_ink.filter(|_| !visible) {
+            // @contract: Edge-only coverage remains visible when center sampling misses it.
+            for (channel, ink) in pixel.iter_mut().zip(ink) {
+                let blended = (u16::from(*channel) + u16::from(ink)).div_ceil(2) as u8;
+                *channel = if blended == *channel { ink } else { blended };
+            }
+        }
+        *self = Self::Partial {
+            ink,
+            visible: visible || color.is_some() || edge_ink.is_some(),
+        };
     }
 }
 

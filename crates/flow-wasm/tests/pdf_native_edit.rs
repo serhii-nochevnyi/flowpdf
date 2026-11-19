@@ -268,7 +268,10 @@ fn page_preview_binds_the_rotated_crop_and_current_accepted_revision() {
             artwork.len()
         ),
         "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 12 12] /Contents 6 0 R >>",
-        &format!("<< /Length {} >>\nstream\n{clipped}\nendstream", clipped.len()),
+        &format!(
+            "<< /Length {} >>\nstream\n{clipped}\nendstream",
+            clipped.len()
+        ),
     ]);
     let opened = call(native_pdf_open, open_request(source.as_bytes()));
     let base = &opened["snapshot"];
@@ -318,7 +321,10 @@ fn page_preview_binds_the_rotated_crop_and_current_accepted_revision() {
         call(native_pdf_preview, wrong_hash)["code"],
         "FLOW_PDF_NATIVE_REVISION_MISMATCH"
     );
-    let updated = call(native_pdf_preview, preview_request(6, current, first.clone()));
+    let updated = call(
+        native_pdf_preview,
+        preview_request(6, current, first.clone()),
+    );
     assert_eq!(updated["status"], "preview");
     assert_eq!(updated["preview"]["outputHash"], current["outputHash"]);
     assert_ne!(updated["preview"]["rgbHex"], raster["rgbHex"]);
@@ -326,6 +332,92 @@ fn page_preview_binds_the_rotated_crop_and_current_accepted_revision() {
         call(native_pdf_close, bound("close", 7, current))["status"],
         "closed"
     );
+}
+
+#[test]
+fn page_preview_declines_ambiguous_partial_paint_overlaps() {
+    let fine = "1 0 0 RG 0.04 w 1 2.08 m 4 2.08 l S";
+    let partial = "0 0 1 rg 2.1 2.04 0.3 0.35 re f";
+    let opaque = "0 0 1 rg 2 2 1 1 re f";
+    for (artwork, expected) in [
+        (format!("{fine}\n{partial}"), None),
+        (format!("{partial}\n{fine}"), None),
+        (format!("{fine}\n{opaque}"), Some("0000ff")),
+        (format!("{fine}\n{partial}\n{opaque}"), Some("0000ff")),
+        (format!("{fine}\n{fine}"), Some("ff8080")),
+    ] {
+        let source = fixture_pdf(&[
+            "<< /Type /Catalog /Pages 2 0 R >>",
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 8 8] /Contents 4 0 R >>",
+            &format!(
+                "<< /Length {} >>\nstream\n{artwork}\nendstream",
+                artwork.len()
+            ),
+        ]);
+        let opened = call(native_pdf_open, open_request(source.as_bytes()));
+        assert_eq!(opened["status"], "opened", "{opened}");
+        let base = &opened["snapshot"];
+        let page = base["pageState"]["order"][0].clone();
+        let reply = call(native_pdf_preview, preview_request(2, base, page));
+        if let Some(expected) = expected {
+            assert_eq!(reply["status"], "preview", "{reply}");
+            let rgb = reply["preview"]["rgbHex"].as_str().unwrap();
+            let pixel = |x: usize, y: usize| &rgb[(y * 16 + x) * 6..][..6];
+            assert_eq!(pixel(2, 11), "ff8080");
+            assert_eq!(pixel(4, 11), expected);
+        } else {
+            assert_eq!(
+                reply["code"], "FLOW_PDF_NATIVE_TARGET_UNAVAILABLE",
+                "{reply}"
+            );
+            assert!(reply["snapshot"].is_null());
+            assert!(reply.get("preview").is_none());
+        }
+        assert_eq!(
+            call(native_pdf_close, bound("close", 3, base))["status"],
+            "closed"
+        );
+    }
+}
+
+#[test]
+fn page_preview_refuses_partial_paint_over_mixed_image_samples() {
+    for (stroke, available) in [
+        ("", true),
+        ("1 0 0 RG 0.04 w 2.05 2.08 m 2.2 2.08 l S", false),
+    ] {
+        let artwork = format!("q 0.5 0 0 0.5 2 2 cm /Photo Do Q\n{stroke}");
+        let source = fixture_pdf(&[
+            "<< /Type /Catalog /Pages 2 0 R >>",
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 8 8] /Contents 4 0 R /Resources << /XObject << /Photo 5 0 R >> >> >>",
+            &format!(
+                "<< /Length {} >>\nstream\n{artwork}\nendstream",
+                artwork.len()
+            ),
+            "<< /Type /XObject /Subtype /Image /Width 2 /Height 1 /ColorSpace /DeviceRGB /BitsPerComponent 8 /Length 6 >>\nstream\nAzAzAz\nendstream",
+        ]);
+        let opened = call(native_pdf_open, open_request(source.as_bytes()));
+        assert_eq!(opened["status"], "opened", "{opened}");
+        let base = &opened["snapshot"];
+        let reply = call(
+            native_pdf_preview,
+            preview_request(2, base, base["pageState"]["order"][0].clone()),
+        );
+        if available {
+            assert_eq!(reply["status"], "preview", "{reply}");
+        } else {
+            assert_eq!(
+                reply["code"], "FLOW_PDF_NATIVE_TARGET_UNAVAILABLE",
+                "{reply}"
+            );
+        }
+        assert_eq!(
+            call(native_pdf_close, bound("close", 3, base))["status"],
+            "closed"
+        );
+    }
 }
 
 #[test]
