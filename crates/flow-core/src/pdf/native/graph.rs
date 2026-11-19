@@ -171,40 +171,55 @@ impl NativePdfGraph {
         let mut queue = VecDeque::new();
         let mut queued = BTreeSet::new();
         let mut initial = Vec::new();
-        inspect_dict(trailer, 0, &limits, &mut work, &mut retained, &mut initial)?;
+        inspect_dict(
+            trailer,
+            DictionaryRole::Object,
+            0,
+            &limits,
+            &mut work,
+            &mut retained,
+            &mut initial,
+        )?;
         for reference in initial {
             if queued.insert(reference) {
                 queue.push_back(reference);
             }
         }
-        while let Some(reference) = queue.pop_front() {
-            if objects.len() >= limits.max_objects {
-                return Err(NativeEditError::Budget);
-            }
-            spend(&mut retained, 512)?;
-            let (value, cost, tokens) = reader.retained_object(
-                reference,
-                retained,
-                decoded.min(limits.max_decoded_stream_bytes),
-                work,
-            )?;
-            spend(&mut retained, cost)?;
-            spend(&mut work, tokens)?;
-            if let PdfValue::Stream(stream) = &value {
-                spend(&mut decoded, stream.data.len())?;
+        while let Some((reference, role)) = queue.pop_front() {
+            if !objects.contains_key(&reference) {
+                if objects.len() >= limits.max_objects {
+                    return Err(NativeEditError::Budget);
+                }
+                spend(&mut retained, 512)?;
+                let (value, cost, tokens) = reader.retained_object(
+                    reference,
+                    retained,
+                    decoded.min(limits.max_decoded_stream_bytes),
+                    work,
+                )?;
+                spend(&mut retained, cost)?;
+                spend(&mut work, tokens)?;
+                if let PdfValue::Stream(stream) = &value {
+                    spend(&mut decoded, stream.data.len())?;
+                }
+                objects.insert(reference, value);
             }
             let mut refs = Vec::new();
-            inspect(&value, 0, &limits, &mut work, &mut retained, &mut refs)?;
+            inspect(
+                &objects[&reference],
+                role,
+                0,
+                &limits,
+                &mut work,
+                &mut retained,
+                &mut refs,
+            )?;
             for dependency in refs {
-                reverse.entry(dependency).or_default().insert(reference);
+                reverse.entry(dependency.0).or_default().insert(reference);
                 if queued.insert(dependency) {
-                    if queued.len() > limits.max_objects {
-                        return Err(NativeEditError::Budget);
-                    }
                     queue.push_back(dependency);
                 }
             }
-            objects.insert(reference, value);
         }
         let (source, trailer) = reader.into_retained_parts();
         let mut graph = Self {
@@ -754,13 +769,38 @@ pub(super) fn collect_refs(
     Ok(())
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum DictionaryRole {
+    Object,
+    Resources,
+    Appearance,
+    Names,
+}
+
+impl DictionaryRole {
+    fn child(self, key: &str) -> Self {
+        match (self, key) {
+            (Self::Object, "Resources") => Self::Resources,
+            (Self::Object, "AP") => Self::Appearance,
+            (Self::Appearance, "N" | "R" | "D")
+            | (
+                Self::Resources,
+                "ExtGState" | "ColorSpace" | "Pattern" | "Shading" | "XObject" | "Font"
+                | "Properties",
+            ) => Self::Names,
+            _ => Self::Object,
+        }
+    }
+}
+
 fn inspect(
     value: &PdfValue,
+    role: DictionaryRole,
     depth: usize,
     limits: &NativeEditLimits,
     work: &mut usize,
     retained: &mut usize,
-    refs: &mut Vec<PdfObjectRef>,
+    refs: &mut Vec<(PdfObjectRef, DictionaryRole)>,
 ) -> Result<(), NativeEditError> {
     spend(work, 1)?;
     if depth > limits.max_nesting {
@@ -770,14 +810,24 @@ fn inspect(
         PdfValue::Reference(reference) => {
             spend(work, 1)?;
             spend(retained, 128)?;
-            refs.push(*reference);
+            refs.push((*reference, role));
         }
         PdfValue::Array(values) => {
             for value in values {
-                inspect(value, depth + 1, limits, work, retained, refs)?;
+                inspect(
+                    value,
+                    DictionaryRole::Object,
+                    depth + 1,
+                    limits,
+                    work,
+                    retained,
+                    refs,
+                )?;
             }
         }
-        PdfValue::Dictionary(dict) => inspect_dict(dict, depth, limits, work, retained, refs)?,
+        PdfValue::Dictionary(dict) => {
+            inspect_dict(dict, role, depth, limits, work, retained, refs)?
+        }
         PdfValue::Stream(stream) => {
             if stream.dict.contains_key("F")
                 || stream.dict.contains_key("FFilter")
@@ -786,7 +836,15 @@ fn inspect(
             {
                 return Err(NativeEditError::Unsupported);
             }
-            inspect_dict(&stream.dict, depth, limits, work, retained, refs)?;
+            inspect_dict(
+                &stream.dict,
+                DictionaryRole::Object,
+                depth,
+                limits,
+                work,
+                retained,
+                refs,
+            )?;
             // @contract: Admission preserves encoded content without interpreting operators.
         }
         PdfValue::Name(name)
@@ -833,36 +891,40 @@ fn inspect(
 
 fn inspect_dict(
     dict: &BTreeMap<String, PdfValue>,
+    role: DictionaryRole,
     depth: usize,
     limits: &NativeEditLimits,
     work: &mut usize,
     retained: &mut usize,
-    refs: &mut Vec<PdfObjectRef>,
+    refs: &mut Vec<(PdfObjectRef, DictionaryRole)>,
 ) -> Result<(), NativeEditError> {
     for (key, value) in dict {
-        if matches!(
-            key.as_str(),
-            "JS" | "JavaScript"
-                | "OpenAction"
-                | "AA"
-                | "A"
-                | "Launch"
-                | "SubmitForm"
-                | "GoToR"
-                | "URI"
-                | "RichMedia"
-                | "Movie"
-                | "Sound"
-                | "EmbeddedFiles"
-                | "EF"
-                | "External"
-                | "ByteRange"
-                | "Perms"
-                | "XFA"
-        ) {
+        if role != DictionaryRole::Names
+            && matches!(
+                key.as_str(),
+                "JS" | "JavaScript"
+                    | "OpenAction"
+                    | "AA"
+                    | "A"
+                    | "Launch"
+                    | "SubmitForm"
+                    | "GoToR"
+                    | "URI"
+                    | "RichMedia"
+                    | "Movie"
+                    | "Sound"
+                    | "EmbeddedFiles"
+                    | "EF"
+                    | "External"
+                    | "ByteRange"
+                    | "Perms"
+                    | "XFA"
+            )
+        {
             return Err(NativeEditError::Unsupported);
         }
-        if matches!(key.as_str(), "Type" | "FT" | "S" | "Subtype")
+        if role != DictionaryRole::Names
+            && matches!(key.as_str(), "Type" | "FT" | "S" | "Subtype")
             && matches!(
                 value.as_name(),
                 Some(
@@ -885,7 +947,15 @@ fn inspect_dict(
         {
             return Err(NativeEditError::Unsupported);
         }
-        inspect(value, depth + 1, limits, work, retained, refs)?;
+        inspect(
+            value,
+            role.child(key),
+            depth + 1,
+            limits,
+            work,
+            retained,
+            refs,
+        )?;
     }
     Ok(())
 }
@@ -893,6 +963,32 @@ fn inspect_dict(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn action_keys_are_refused_outside_name_maps() {
+        let limits = NativeEditLimits::default();
+        for key in ["A", "AA", "OpenAction"] {
+            let dict = BTreeMap::from([(key.into(), PdfValue::Null)]);
+            let inspect_role = |role| {
+                let mut work = limits.max_work;
+                let mut retained = limits.max_retained_bytes;
+                inspect_dict(
+                    &dict,
+                    role,
+                    0,
+                    &limits,
+                    &mut work,
+                    &mut retained,
+                    &mut Vec::new(),
+                )
+            };
+            assert!(inspect_role(DictionaryRole::Names).is_ok());
+            assert!(matches!(
+                inspect_role(DictionaryRole::Object),
+                Err(NativeEditError::Unsupported)
+            ));
+        }
+    }
 
     #[test]
     fn cumulative_mutation_budget_refusal_leaves_graph_unchanged() {

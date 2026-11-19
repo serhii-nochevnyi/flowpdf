@@ -7,10 +7,19 @@ pub(crate) fn fixture(extra: &str, annots: &str) -> Vec<u8> {
 }
 
 pub(crate) fn fixture_with_contents(extra: &str, annots: &str, contents: &str) -> Vec<u8> {
+    fixture_with_resources(extra, annots, contents, "")
+}
+
+fn fixture_with_resources(
+    extra: &str,
+    annots: &str,
+    contents: &str,
+    page_resources: &str,
+) -> Vec<u8> {
     let objects = [
         (11, 2, format!("<< /Type /Catalog /Pages 12 0 R /Custom 26 9 R {extra} >>")),
         (12, 0, "<< /Type /Pages /Kids [13 3 R 14 0 R] /Count 2 /MediaBox [0 0 200 120] /Resources 26 9 R >>".into()),
-        (13, 3, format!("<< /Type /Page /Parent 12 0 R /CropBox [10 20 170 110] /Rotate 90 /Contents 21 0 R {annots} >>")),
+        (13, 3, format!("<< /Type /Page /Parent 12 0 R /CropBox [10 20 170 110] /Rotate 90 /Contents 21 0 R {annots} {page_resources} >>")),
         (14, 0, "<< /Type /Page /Parent 12 0 R /Contents 21 0 R /Resources 26 9 R >>".into()),
         (21, 0, "<< /Length 22 7 R /Filter /ASCIIHexDecode >>\nstream\n71 20 51>\nendstream".into()),
         (22, 7, "9".into()),
@@ -19,6 +28,10 @@ pub(crate) fn fixture_with_contents(extra: &str, annots: &str, contents: &str) -
         (31, 0, "<< /Type /Annot /Subtype /Square /Rect [20 30 40 50] >>".into()),
         (32, 0, "<< /Subtype /Text /Contents (With appearance) /Rect [20 30 40 50] /AP << /N 21 0 R >> >>".into()),
         (33, 0, "[30 5 R 31 0 R 32 0 R]".into()),
+        (34, 0, "<< /Type /Annot /Subtype /Square /Rect [20 30 40 50] /AP << /N 35 0 R >> /AS /A >>".into()),
+        (35, 0, "<< /A 36 0 R >>".into()),
+        (36, 0, "<< /Type /XObject /Subtype /Form /BBox [0 0 20 20] /Length 15 >>\nstream\n0 0 20 20 re f\n\nendstream".into()),
+        (37, 0, "<< /A 36 0 R /AA 36 0 R >>".into()),
         (99, 0, "<< /Broken 98 0 R /UnreachableDecoy true >>".into()),
     ];
     let mut pdf = "%PDF-1.7\n".to_owned();
@@ -81,4 +94,33 @@ fn unsafe_reachable_values_refuse_admission() {
         );
         assert!(result.is_err());
     }
+}
+
+#[test]
+fn passive_resource_names_and_appearance_states_survive_rewrite() {
+    let source = fixture_with_resources(
+        "",
+        "/Annots [34 0 R]",
+        "(Imported)",
+        "/Resources << /XObject 37 0 R >>",
+    );
+    let mut session =
+        NativePdfSession::open_scoped(&source, NativeEditLimits::default(), [1; 16]).unwrap();
+    let page = session.snapshot().scene.pages[0].id;
+    session
+        .apply(
+            session.snapshot().binding,
+            1,
+            &NativeNoteCommand::Add {
+                page,
+                rect: [20, 30, 40, 50],
+                contents: "Passive names".into(),
+            },
+        )
+        .unwrap();
+    let syntax = String::from_utf8_lossy(session.output_bytes());
+    assert_eq!(syntax.matches("/A ").count(), 3);
+    assert!(syntax.contains("/AA "));
+    assert!(syntax.contains("/AS /A"));
+    assert_eq!(syntax.matches("/Subtype /Form").count(), 1);
 }
