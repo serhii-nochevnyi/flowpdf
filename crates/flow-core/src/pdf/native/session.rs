@@ -328,8 +328,12 @@ impl NativePdfSession {
 
     pub fn redaction_admitted(&self) -> bool {
         *self.redaction_admission.get_or_init(|| {
-            NativePdfGraph::open(self.output_bytes(), self.snapshot.limits)
-                .is_ok_and(|graph| redaction::admitted(&graph, &self.snapshot.page_state.order))
+            let origin_len = Some(self.origin_bytes().len());
+            let limits = accepted_input_limits(self.snapshot.limits, self.snapshot.binding);
+            redaction::check_input_budget(&self.graph, origin_len).is_ok()
+                && NativePdfGraph::open(self.output_bytes(), limits).is_ok_and(|graph| {
+                    redaction::supports_document(&graph, &self.snapshot.page_state.order)
+                })
         })
     }
 
@@ -384,7 +388,7 @@ impl NativePdfSession {
         if self.redaction_marks.contains(&mark) {
             return Ok(());
         }
-        redaction::check_raster_budget(&self.graph)?;
+        redaction::check_input_budget(&self.graph, Some(self.origin_bytes().len()))?;
         if self.redaction_marks.len() == redaction::MAX_MARKS {
             return Err(NativeSessionError::Budget);
         }
@@ -531,26 +535,20 @@ impl NativePdfSession {
         if request_id <= self.last_redaction_request {
             return Err(NativeSessionError::ReconciliationRequired);
         }
-        redaction::check_raster_budget(&self.graph)?;
+        redaction::check_input_budget(&self.graph, Some(self.origin_bytes().len()))?;
         if self.redaction_marks_binding != Some(binding) {
             return Err(NativeSessionError::InvalidRedactionMark);
         }
         self.last_redaction_request = request_id;
         let max_input = super::verify_structure::MAX_INPUT;
         let pages = self.snapshot.page_state.order.len();
-        if self.origin_bytes().len().max(self.output_bytes().len()) > max_input {
-            return Err(NativeSessionError::Budget);
-        }
         let mut remaining = self.remaining_retained;
         spend(
             &mut remaining,
             self.mark_bytes() + evidence_reserve(pages) + pages * 128,
         )?;
         spend(&mut remaining, self.ids.len() * OBJECT_ID_BYTES)?;
-        let mut limits = self.snapshot.limits;
-        if binding.revision != 0 {
-            limits.max_source_bytes = limits.max_output_bytes;
-        }
+        let mut limits = accepted_input_limits(self.snapshot.limits, binding);
         let output_budget = limits.max_output_bytes.min(max_input).min(remaining / 5);
         if output_budget == 0 {
             return Err(NativeSessionError::Budget);
@@ -852,12 +850,14 @@ impl NativePdfSession {
         live: Option<&Self>,
     ) -> Result<bool, NativeSessionError> {
         let hash = *blake3::hash(bytes).as_bytes();
-        if live.is_some_and(|session| {
-            session.snapshot.binding != binding || session.snapshot.output_hash != hash
-        }) {
+        if (binding.revision == 0 && binding.origin_hash != hash)
+            || live.is_some_and(|session| {
+                session.snapshot.binding != binding || session.snapshot.output_hash != hash
+            })
+        {
             return Ok(false);
         }
-        let graph = NativePdfGraph::open(bytes, limits)?;
+        let graph = NativePdfGraph::open(bytes, accepted_input_limits(limits, binding))?;
         let initial;
         let ids = if let Some(session) = live {
             &session.ids
@@ -910,7 +910,14 @@ impl NativePdfSession {
             state.restrictions == projected.restrictions
                 && (binding.revision != 0 || *state == projected)
         };
-        Ok(page_state_matches && redaction::admitted(&graph, &state.order) == redaction_admitted)
+        Ok(page_state_matches
+            && live.map_or_else(
+                || {
+                    redaction::check_input_budget(&graph, None).is_ok()
+                        && redaction::supports_document(&graph, &state.order)
+                },
+                Self::redaction_admitted,
+            ) == redaction_admitted)
     }
 
     pub fn verify_page_projection(
@@ -1425,6 +1432,13 @@ fn initial_ids(graph: &NativePdfGraph) -> BTreeMap<PdfObjectRef, NativeNoteId> {
             )
         })
         .collect()
+}
+
+fn accepted_input_limits(mut limits: NativeEditLimits, binding: NativeBinding) -> NativeEditLimits {
+    if binding.revision != 0 {
+        limits.max_source_bytes = limits.max_output_bytes;
+    }
+    limits
 }
 
 fn accepted_scene(

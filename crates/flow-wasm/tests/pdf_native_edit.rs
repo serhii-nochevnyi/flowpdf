@@ -621,6 +621,70 @@ fn redaction_admission_follows_the_accepted_pdf() {
 }
 
 #[test]
+fn redaction_wire_uses_the_accepted_revision_after_an_ordinary_edit() {
+    let source = redaction_pdf(100);
+    let opened = call(native_pdf_open, open_request(source.as_bytes()));
+    let base = &opened["snapshot"];
+    let mut command = bound("command", 2, base);
+    command["outputHash"] = base["outputHash"].clone();
+    command["command"] = json!({
+        "kind":"add","page":0,"rect":[60,60,70,70],"contents":"review note"
+    });
+    let applied = native_pdf_command(command.to_string());
+    assert!(verify_native_pdf_worker_response(applied.clone()));
+    let reply: Value = serde_json::from_str(&applied).unwrap();
+    assert_eq!(reply["status"], "applied", "{reply}");
+    let accepted = &reply["snapshot"];
+    assert_eq!(accepted["binding"]["revision"], 1);
+    assert_eq!(
+        accepted["binding"]["originHash"],
+        base["binding"]["originHash"]
+    );
+    assert_ne!(accepted["outputHash"], accepted["binding"]["originHash"]);
+    assert_eq!(accepted["redactionAdmission"], "supported");
+    let forged = rehash_with_replacement(
+        &applied,
+        r#""redactionAdmission":"supported""#,
+        r#""redactionAdmission":"unavailable""#,
+    );
+    assert!(!verify_native_pdf_worker_response(forged.clone()));
+
+    let mark = json!({
+        "kind":"addMark","pageId":accepted["pageState"]["order"][0],
+        "rect":[12000,12000,13000,13000]
+    });
+    let stale = call(
+        native_pdf_redaction,
+        redaction_request(3, base, mark.clone()),
+    );
+    assert_eq!(stale["code"], "FLOW_PDF_NATIVE_REVISION_MISMATCH");
+    let add = redaction_request(3, accepted, mark);
+    let mut wrong_hash = add.clone();
+    wrong_hash["acceptedHash"] = accepted["binding"]["originHash"].clone();
+    let refused = call(native_pdf_redaction, wrong_hash);
+    assert_eq!(refused["code"], "FLOW_PDF_NATIVE_BINDING_MISMATCH");
+    assert_eq!(call(native_pdf_redaction, add)["redaction"]["markCount"], 1);
+
+    let stage = redaction_request(4, accepted, json!({"kind":"stage"}));
+    let staged = native_pdf_redaction(stage.to_string());
+    assert!(verify_native_pdf_worker_response(staged.clone()));
+    let candidate: Value = serde_json::from_str(&staged).unwrap();
+    assert_eq!(candidate["redaction"]["verification"]["status"], "pending");
+    assert_eq!(
+        candidate["redaction"]["acceptedHash"],
+        accepted["outputHash"]
+    );
+    assert_eq!(native_pdf_redaction(stage.to_string()), staged);
+    std::thread::spawn(move || {
+        assert!(verify_native_pdf_response(applied));
+        assert!(!verify_native_pdf_response(forged));
+        assert!(verify_native_pdf_response(staged));
+    })
+    .join()
+    .unwrap();
+}
+
+#[test]
 fn redaction_wire_releases_only_the_verified_exact_output() {
     let source = redaction_pdf(100);
     let opened = call(native_pdf_open, open_request(source.as_bytes()));

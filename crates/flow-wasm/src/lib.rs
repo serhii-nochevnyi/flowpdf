@@ -2952,7 +2952,6 @@ fn verify_native_snapshot(
         || snapshot.binding.revision > snapshot.consumed_request
         || snapshot.output_hash != snapshot.scene.output_hash
         || (snapshot.binding.revision == 0) != (snapshot.consumed_request == 0)
-        || (snapshot.binding.revision == 0 && snapshot.binding.origin_hash != snapshot.output_hash)
     {
         return None;
     }
@@ -3019,6 +3018,7 @@ fn verify_native_snapshot(
         {
             return None;
         }
+        // @contract: Wire imports already fit the redaction origin ceiling.
         NativePdfSession::verify_page_and_field_projection(
             &bytes,
             native_edit_limits(),

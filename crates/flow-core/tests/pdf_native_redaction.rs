@@ -499,6 +499,103 @@ fn raster_fixture(size: u32, paint: &str) -> Vec<u8> {
 }
 
 #[test]
+fn origin_over_the_redaction_byte_ceiling_refuses_marks_and_staging() {
+    let mut unused_object = b"null\n%".to_vec();
+    unused_object.resize(32 * 1024 * 1024, b' ');
+    let source = pdf(
+        vec![
+            b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+            b"<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 100 100] >>".to_vec(),
+            b"<< /Type /Page /Parent 2 0 R /Contents 4 0 R >>".to_vec(),
+            flate("", b"10 10 10 10 re f"),
+            unused_object,
+        ],
+        "",
+    );
+    let mut session = open(&source);
+    let binding = session.snapshot().binding;
+    let mark = mark(&session, 0, [12_000, 12_000, 13_000, 13_000]);
+
+    assert!(!session.redaction_admitted());
+    assert_eq!(
+        session.add_redaction_mark(binding, mark),
+        Err(NativeSessionError::Budget)
+    );
+    assert_eq!(
+        session.stage_redaction(binding, 1),
+        Err(NativeSessionError::Budget)
+    );
+    assert_eq!(session.lookup(binding, 1), Ok(NativeRequestLookup::Unseen));
+    assert!(session.redaction_marks().is_empty());
+    assert!(session.redaction_marks_binding().is_none());
+    assert!(session.redaction_candidate_status().is_none());
+    assert_accepted(&session, &source, 0, &source);
+}
+
+#[test]
+fn redaction_accepts_a_rewrite_larger_than_the_import_limit() {
+    let source = raster_fixture(100, "10 10 10 10 re f 40 40 10 10 re f");
+    let limits = NativeEditLimits {
+        max_source_bytes: source.len(),
+        max_output_bytes: 4096,
+        ..NativeEditLimits::default()
+    };
+    let mut session = NativePdfSession::open_scoped(&source, limits, [5; 16]).unwrap();
+    let base = session.snapshot().binding;
+    let page_id = session.snapshot().page_state.order[0];
+    assert!(session.redaction_admitted());
+    let edited = session
+        .apply_page(
+            base,
+            1,
+            &NativePageCommand::InsertBlankPage {
+                target: NativePageTarget {
+                    page: 0,
+                    stable_id: page_id,
+                },
+                side: NativePageSide::After,
+            },
+        )
+        .unwrap();
+    let snapshot = session.snapshot();
+    let accepted = session.output_bytes();
+    assert!(accepted.len() > limits.max_source_bytes);
+    assert!(accepted.len() <= limits.max_output_bytes);
+    assert_ne!(snapshot.output_hash, edited.binding.origin_hash);
+    assert!(session.redaction_admitted());
+    for live in [Some(&session), None] {
+        for admitted in [true, false] {
+            assert_eq!(
+                NativePdfSession::verify_page_and_field_projection(
+                    accepted,
+                    limits,
+                    edited.binding,
+                    snapshot.scene.scene_hash,
+                    &snapshot.page_state,
+                    &snapshot.fields,
+                    &[],
+                    admitted,
+                    live,
+                ),
+                Ok(admitted)
+            );
+        }
+    }
+
+    add(&mut session, 0, [12_000, 12_000, 13_000, 13_000]);
+    let staged = session.stage_redaction(edited.binding, 2).unwrap();
+    assert_eq!(session.stage_redaction(edited.binding, 2), Ok(staged));
+    assert_eq!(
+        session.stage_redaction(base, 2),
+        Err(NativeSessionError::RevisionMismatch)
+    );
+    let evidence = session.verify_redaction(edited.binding, 2).unwrap();
+    assert!(evidence.checks_passed(), "{evidence:?}");
+    session.publish_redaction(edited.binding, 2).unwrap();
+    assert_eq!(session.origin_bytes(), source);
+}
+
+#[test]
 fn accepted_page_preview_refuses_a_constrained_session_without_mutation() {
     let source = raster_fixture(100, "10 10 10 10 re f 40 40 10 10 re f");
     let default_session = open(&source);
@@ -795,6 +892,7 @@ fn output_budget_refusal_creates_no_candidate() {
     )
     .unwrap();
     let binding = session.snapshot().binding;
+    assert!(session.redaction_admitted());
     add(&mut session, 0, [11_000, 11_000, 13_000, 13_000]);
     assert!(session.stage_redaction(binding, 1).is_err());
     assert_accepted(&session, &source, 0, &source);

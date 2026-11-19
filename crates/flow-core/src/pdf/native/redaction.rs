@@ -9,6 +9,7 @@ use super::graph::{NativeEditError, NativePdfGraph, spend};
 use super::text::{RedactionText, redaction_number};
 use super::verifier::{NativeRedactionGeometry, NativeRedactionMark};
 use super::verify_raster;
+use super::verify_structure::MAX_INPUT;
 
 const POINT: i64 = 1_000;
 const MAX_COORD: i64 = 1_000_000 * POINT;
@@ -1793,7 +1794,12 @@ pub(super) fn scrub(
     apply(graph, roles, edits)
 }
 
-pub(super) fn check_raster_budget(graph: &NativePdfGraph) -> Result<()> {
+pub(super) fn check_input_budget(graph: &NativePdfGraph, origin_len: Option<usize>) -> Result<()> {
+    if origin_len.is_some_and(|len| len > MAX_INPUT)
+        || graph.original_bytes().len() > graph.limits.max_source_bytes.min(MAX_INPUT)
+    {
+        return Err(Budget);
+    }
     let pages = graph.pages.len();
     (pages <= MAX_PAGES
         && verify_raster::within_pixel_budget((0..pages).map(|index| geometry(graph, index))))
@@ -1801,10 +1807,8 @@ pub(super) fn check_raster_budget(graph: &NativePdfGraph) -> Result<()> {
     .ok_or(Budget)
 }
 
-pub(super) fn admitted(graph: &NativePdfGraph, order: &[u64]) -> bool {
-    graph.original_bytes().len() <= super::verify_structure::MAX_INPUT
-        && check_raster_budget(graph).is_ok()
-        && scan_document(graph, order, &[]).is_ok()
+pub(super) fn supports_document(graph: &NativePdfGraph, order: &[u64]) -> bool {
+    scan_document(graph, order, &[]).is_ok()
 }
 
 fn scan_document(
