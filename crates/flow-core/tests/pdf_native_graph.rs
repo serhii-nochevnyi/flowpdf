@@ -1,6 +1,8 @@
 use std::fmt::Write;
 
-use flow_core::{NativeEditLimits, NativeNoteCommand, NativePdfSession};
+use flow_core::{
+    NativeEditError, NativeEditLimits, NativeNoteCommand, NativePdfSession, NativeSessionError,
+};
 
 pub(crate) fn fixture(extra: &str, annots: &str) -> Vec<u8> {
     fixture_with_contents(extra, annots, "(Imported)")
@@ -32,6 +34,10 @@ fn fixture_with_resources(
         (35, 0, "<< /A 36 0 R >>".into()),
         (36, 0, "<< /Type /XObject /Subtype /Form /BBox [0 0 20 20] /Length 15 >>\nstream\n0 0 20 20 re f\n\nendstream".into()),
         (37, 0, "<< /A 36 0 R /AA 36 0 R >>".into()),
+        (38, 0, "<< /Fields [39 0 R] /DA (/A 10 Tf 0 g) /DR << /Font 40 0 R >> >>".into()),
+        (39, 0, "<< /Type /Annot /Subtype /Widget /FT /Tx /T (recipient) /V () /Rect [20 30 80 50] /P 13 3 R >>".into()),
+        (40, 0, "<< /A 41 0 R >>".into()),
+        (41, 0, "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".into()),
         (99, 0, "<< /Broken 98 0 R /UnreachableDecoy true >>".into()),
     ];
     let mut pdf = "%PDF-1.7\n".to_owned();
@@ -123,4 +129,63 @@ fn passive_resource_names_and_appearance_states_survive_rewrite() {
     assert!(syntax.contains("/AA "));
     assert!(syntax.contains("/AS /A"));
     assert_eq!(syntax.matches("/Subtype /Form").count(), 1);
+}
+
+#[test]
+fn passive_acroform_default_font_alias_survives_rewrite() {
+    let source = fixture("/AcroForm 38 0 R", "/Annots [39 0 R]");
+    let mut session = NativePdfSession::open_scoped(&source, NativeEditLimits::default(), [1; 16])
+        .expect("admit the passive AcroForm");
+    let page = session.snapshot().scene.pages[1].id;
+    session
+        .apply(
+            session.snapshot().binding,
+            1,
+            &NativeNoteCommand::Add {
+                page,
+                rect: [20, 60, 40, 80],
+                contents: "Form review".into(),
+            },
+        )
+        .expect("rewrite the document after adding a note");
+
+    let syntax = String::from_utf8_lossy(session.output_bytes());
+    let referenced_object = |dictionary: &str, key: &str| {
+        let (_, value) = dictionary
+            .split_once(key)
+            .unwrap_or_else(|| panic!("missing {key} in {dictionary}"));
+        let (reference, _) = value.split_once(" R").expect("indirect reference");
+        let (_, object) = syntax
+            .split_once(format!("\n{reference} obj\n").as_str())
+            .expect("referenced object");
+        object.split_once("\nendobj").expect("object boundary").0
+    };
+    let catalog = referenced_object(syntax.split_once("\ntrailer\n").unwrap().1, "/Root ");
+    let form = referenced_object(catalog, "/AcroForm ");
+    assert!(form.contains("/DA <2F4120313020546620302067>"));
+    let fonts = referenced_object(form, "/DR << /Font ");
+    let font = referenced_object(fonts, "/A ");
+    assert!(font.contains("/BaseFont /Helvetica"));
+}
+
+#[test]
+fn action_keys_remain_unsupported_outside_acroform_resource_name_maps() {
+    for extra in [
+        "/AcroForm << /Fields [] /AA << >> >>",
+        "/AcroForm << /Fields [] /DR << /AA << >> >> >>",
+        "/CustomForm << /AcroForm << /Fields [] /DR << /Font 40 0 R >> >> >>",
+    ] {
+        let result = NativePdfSession::open_scoped(
+            &fixture(extra, ""),
+            NativeEditLimits::default(),
+            [1; 16],
+        );
+        assert!(
+            matches!(
+                result,
+                Err(NativeSessionError::Graph(NativeEditError::Unsupported))
+            ),
+            "expected unsupported structure for {extra}"
+        );
+    }
 }
