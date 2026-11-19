@@ -1,7 +1,7 @@
 use flow_core::layout::LayoutUnit;
 use flow_core::pdf::native::{
     NativeEditLimits, NativeObjectCommand, NativeObjectRefusal, NativePdfSession,
-    NativeRedactionMark, NativeSessionError,
+    NativeRedactionMark, NativeRequestLookup, NativeSessionError,
 };
 use flow_core::pdf::{
     PdfPathCommand, PdfReadDiagnosticCode, PdfSceneElement, PdfSceneRequest, open_pdf,
@@ -655,6 +655,70 @@ fn embedded_masks_and_unbalanced_graphics_state_refuse_object_editing() {
     let unbalanced = open(&fixture(b"q 10 10 5 5 re f", false, "", &[]));
     assert!(!unbalanced.snapshot().scene.object_pages[0].can_add);
     assert_eq!(objects(&unbalanced, 0), json!([]));
+}
+
+#[test]
+fn jpeg_asset_add_roundtrips_and_constrained_edits_are_atomic() {
+    let image = stream(
+        "/Type /XObject /Subtype /Image /ColorSpace /DeviceGray /Width 1 /Height 1 /BitsPerComponent 8",
+        &[7],
+    );
+    let source = fixture(
+        b"q 10 0 0 10 5 5 cm /I Do Q",
+        false,
+        "/Resources << /XObject << /I 6 0 R >> >>",
+        &[image],
+    );
+    let mut jpeg = Vec::new();
+    image::codecs::jpeg::JpegEncoder::new(&mut jpeg)
+        .encode(&[30, 100, 200], 1, 1, image::ExtendedColorType::Rgb8)
+        .unwrap();
+    let hex: String = jpeg.iter().map(|byte| format!("{byte:02x}")).collect();
+    let bounds = [20_000, 20_000, 25_000, 25_000];
+    let add = json!({"kind":"addImage","page":0,"bounds":bounds,"assetHex":hex});
+
+    let mut roomy = open(&source);
+    apply(&mut roomy, add.clone()).unwrap();
+    let reopened = open(roomy.output_bytes());
+    let images = objects(&reopened, 0);
+    assert_eq!(images.as_array().unwrap().len(), 2);
+    assert_eq!(images[0]["profile"], "rasterGray8");
+    assert_eq!(images[1]["profile"], "rasterRgb8");
+    assert_eq!(images[1]["bounds"], json!(bounds));
+    assert!(
+        roomy
+            .output_bytes()
+            .windows(jpeg.len())
+            .any(|bytes| bytes == jpeg)
+    );
+
+    // @contract: The session cap fits the JPEG peak. The live edit allowance is smaller.
+    let limits = NativeEditLimits {
+        max_retained_bytes: 80 * 1024,
+        ..NativeEditLimits::default()
+    };
+    let mut constrained = NativePdfSession::open_scoped(&source, limits, [7; 16]).unwrap();
+    let selected = target(&constrained, 0, 0);
+    let replace = json!({"kind":"replaceImage","target":selected,"assetHex":hex});
+    let before = constrained.snapshot().clone();
+    assert!(before.scene.object_pages[0].can_add);
+    for command in [add, replace] {
+        assert_eq!(
+            apply(&mut constrained, command),
+            Err(NativeSessionError::Budget)
+        );
+        let after = constrained.snapshot();
+        assert_eq!(after.binding, before.binding);
+        assert_eq!(after.output_hash, before.output_hash);
+        assert_eq!(after.scene.scene_hash, before.scene.scene_hash);
+        assert_eq!(after.scene.object_pages, before.scene.object_pages);
+        assert_eq!(after.consumed_request, before.consumed_request);
+        assert_eq!(
+            constrained.lookup(before.binding, 1),
+            Ok(NativeRequestLookup::Unseen)
+        );
+        assert_eq!(constrained.output_bytes(), source);
+    }
 }
 
 #[test]
