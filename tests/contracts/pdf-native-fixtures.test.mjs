@@ -307,7 +307,19 @@ test("edit families and redaction pin operation outcomes, page identities, text 
   ];
   for (const [id, profile] of Object.entries(expanded)) {
     const data = json(corpus + id + ".expected.json");
-    keys(data, ["schemaVersion", "fixtureId", "raster", "operations"], id);
+    const expectedKeys = ["schemaVersion", "fixtureId", "raster", "operations"];
+    if (id === "edit-families") {
+      expectedKeys.push("widgetRaster");
+      same(data.widgetRaster, {
+        version: 1, annotationLayer: "included", backgroundGray: 1, inkGray: 0,
+        borderInset: 1, borderWidth: 1, checkmark: { inset: 2, width: 2 },
+        text: {
+          fixtureFontObject: 9, offsetPt: [2, 4], sizePt: 10,
+          hexByValue: { "": "", AB: "00010002", "ЇA": "00030001" },
+        },
+      }, id + "/widgetRaster");
+    }
+    keys(data, expectedKeys, id);
     same(data.schemaVersion, 2, id);
     same(data.fixtureId, id, id);
     same(data.raster, {

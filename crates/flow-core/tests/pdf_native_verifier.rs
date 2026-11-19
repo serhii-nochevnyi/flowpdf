@@ -719,3 +719,44 @@ fn session_redacts_embedded_font_text_and_publishes_only_the_verified_hash() {
     assert!(evidence.eligible_for(bytes, context, policy));
     assert!(!evidence.eligible_for(&different, context, policy));
 }
+
+#[test]
+fn verifier_accepts_standard_cid_metadata_and_retained_font_paint() {
+    let [_, descriptor, bundled_font, _]: [Vec<u8>; 4] = test_font_objects(6).try_into().unwrap();
+    let face = ttf_parser::Face::parse(include_bytes!("../data/NotoSans-Regular.ttf"), 0).unwrap();
+    let glyph_a = face.glyph_index('A').unwrap();
+    let glyph_b = face.glyph_index('B').unwrap();
+    let widths = [glyph_a, glyph_b].map(|glyph| face.glyph_hor_advance(glyph).unwrap());
+    let cmap = b"/CIDInit /ProcSet findresource begin 12 dict begin begincmap\n/CMapType 2 def\n/CMapName /Adobe-Identity-UCS def\n/CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def\n1 begincodespacerange\n<0000> <FFFF>\nendcodespacerange\n2 beginbfchar\n<0001> <0041>\n<0002> <0042>\nendbfchar\nendcmap\nCMapName currentdict /CMap defineresource pop\nend end";
+    let glyph_map = [0, glyph_a.0, glyph_b.0]
+        .into_iter()
+        .flat_map(u16::to_be_bytes)
+        .collect::<Vec<_>>();
+    let cmap = std::str::from_utf8(cmap).unwrap();
+    for name in ["Adobe-Identity-UCS", "FixtureMap", "Fixture-Latin"] {
+        let cmap = cmap.replace("Adobe-Identity-UCS", name);
+        let fonts = vec![
+            b"<< /Type /Font /Subtype /Type0 /BaseFont /NotoSans-Regular /Encoding /Identity-H /DescendantFonts [6 0 R] /ToUnicode 9 0 R >>".to_vec(),
+            format!("<< /Type /Font /Subtype /CIDFontType2 /BaseFont /NotoSans-Regular /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> /W [1 [{} {}]] /FontDescriptor 7 0 R /CIDToGIDMap 10 0 R >>", widths[0], widths[1]).into_bytes(),
+            descriptor.clone(),
+            bundled_font.clone(),
+            stream("", cmap.as_bytes()),
+            stream("", &glyph_map),
+        ];
+        let resources = "/Resources << /Font << /F1 5 0 R >> >>";
+        let retained = "BT /F1 12 Tf 55 55 Td <00010002> Tj ET";
+        let accepted = pdf(
+            &[(&format!("10 10 5 5 re f {retained}"), resources)],
+            fonts.clone(),
+            "",
+        );
+        let candidate = pdf(&[(retained, resources)], fonts, "");
+        let evidence = verify(
+            &accepted,
+            &candidate,
+            &[91],
+            &[mark(91, [11_000, 11_000, 14_000, 14_000])],
+        );
+        assert!(evidence.checks_passed(), "{evidence:?}");
+    }
+}

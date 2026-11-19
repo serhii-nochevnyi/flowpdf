@@ -554,10 +554,11 @@ fn inspect(
                     }))
         {
             return Err(UnsupportedProfile);
-        } else if role == FontFile
-            && get(&stream.dict, "Length1")?.as_integer() != i64::try_from(stream.data.len()).ok()
-        {
-            return Err(Structure);
+        } else if role == FontFile {
+            if get(&stream.dict, "Length1")?.as_integer() != i64::try_from(stream.data.len()).ok() {
+                return Err(Structure);
+            }
+            inspect_font_program(&stream.data)?;
         }
         return Ok(());
     }
@@ -774,8 +775,29 @@ fn inspect(
                     "Widths" | "W" if matches!(value, PdfValue::Reference(_)) => {
                         enqueue(value, Widths)?
                     }
-                    "Widths" | "W" | "FontBBox" => only_numbers(value, 0)?,
-                    "Type" | "Subtype" | "BaseFont" | "FontName" | "Encoding" => {
+                    "Widths" | "W" => only_numbers(value, 0)?,
+                    "FontBBox" => {
+                        let [l, b, r, t] = value.as_array().ok_or(Structure)? else {
+                            return Err(Structure);
+                        };
+                        for boundary in [l, b, r, t] {
+                            number(boundary)?;
+                        }
+                    }
+                    "BaseFont" | "FontName" => {
+                        let name = value.as_name().ok_or(Structure)?;
+                        if !(1..=63).contains(&name.len())
+                            || name.bytes().any(|b| !matches!(b, b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'_' | b'.' | b'+' | b'-'))
+                        {
+                            return Err(UnsupportedProfile);
+                        }
+                    }
+                    "Encoding" => match (name(dict, "Subtype"), value.as_name()) {
+                        (Some("Type0"), Some("Identity-H"))
+                        | (Some("TrueType"), Some("WinAnsiEncoding")) => {}
+                        _ => return Err(UnsupportedProfile),
+                    },
+                    "Type" | "Subtype" => {
                         value.as_name().ok_or(Structure)?;
                     }
                     _ => {
@@ -816,6 +838,13 @@ fn inspect(
                 inspect_entry(value, role, side, queue)?;
             }
         }
+    }
+    Ok(())
+}
+
+fn inspect_font_program(bytes: &[u8]) -> VerifyResult<()> {
+    if bytes != include_bytes!("../../../data/NotoSans-Regular.ttf") {
+        return Err(UnsupportedProfile);
     }
     Ok(())
 }

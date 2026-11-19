@@ -500,11 +500,12 @@ impl<'a> Inventory<'a> {
                     return Err(Unsupported);
                 }
             }
+            Unicode => check_cmap_metadata(&stream.data, &mut self.work)?,
             FontFile => {
                 if get(dict, "Length1")?.as_integer() != i64::try_from(stream.data.len()).ok() {
                     return Err(Malformed);
                 }
-                font_tables(&stream.data, &mut self.work)?;
+                check_font_program(&stream.data, &mut self.work)?;
             }
             XObject => {
                 if dict
@@ -600,8 +601,29 @@ impl<'a> Inventory<'a> {
         }
         for (key, value) in dict {
             match key.as_str() {
-                "Type" | "Subtype" | "BaseFont" | "Encoding" | "FontName" => {
+                "Type" | "Subtype" => {
                     value.as_name().ok_or(Malformed)?;
+                }
+                "BaseFont" | "FontName" => {
+                    let name = value.as_name().ok_or(Malformed)?;
+                    if name.is_empty()
+                        || name.len() > 63
+                        || !name
+                            .bytes()
+                            .all(|b| b.is_ascii_alphanumeric() || b"_.+-".contains(&b))
+                    {
+                        return Err(Unsupported);
+                    }
+                }
+                "Encoding" => {
+                    let expected = if name(dict, "Subtype") == Some("Type0") {
+                        "Identity-H"
+                    } else {
+                        "WinAnsiEncoding"
+                    };
+                    if value.as_name() != Some(expected) {
+                        return Err(Unsupported);
+                    }
                 }
                 "DescendantFonts" => {
                     let [child] = value.as_array().ok_or(Malformed)? else {
@@ -617,7 +639,12 @@ impl<'a> Inventory<'a> {
                     {
                         return Err(Unsupported);
                     }
-                    fixed(get(info, "Supplement")?)?;
+                    if !get(info, "Supplement")?
+                        .as_integer()
+                        .is_some_and(|n| (0..=10).contains(&n))
+                    {
+                        return Err(Unsupported);
+                    }
                 }
                 "CIDToGIDMap" if value.as_name() == Some("Identity") => {}
                 "CIDToGIDMap" => self.link(value, Glyphs)?,
@@ -625,7 +652,9 @@ impl<'a> Inventory<'a> {
                 "FontFile2" => self.link(value, FontFile)?,
                 "ToUnicode" => self.link(value, Unicode)?,
                 "W" | "Widths" => self.entry(value, Widths)?,
-                "FontBBox" => numeric(value, 0, &mut self.work)?,
+                "FontBBox" => {
+                    values::<4>(value)?;
+                }
                 _ => {
                     fixed(value)?;
                 }
@@ -670,62 +699,71 @@ fn safe_name(name: &str) -> bool {
             .all(|byte| byte.is_ascii_graphic() && byte != b'#')
 }
 
-fn font_tables(data: &[u8], work: &mut usize) -> Result<()> {
-    if !data.starts_with(&[0, 1, 0, 0]) {
+fn check_cmap_metadata(data: &[u8], work: &mut usize) -> Result<()> {
+    if data.len() > 128 * 1024 || !data.is_ascii() || data.contains(&b'%') {
         return Err(Unsupported);
     }
-    let face = ttf_parser::RawFace::parse(data, 0).map_err(|_| Unsupported)?;
-    let count = usize::from(face.table_records.len());
-    if count == 0 || count > 32 {
+    spend(work, data.len() + 1)?;
+    let mut words = data
+        .split(|&b| b.is_ascii_whitespace() || b"\0<>()".contains(&b))
+        .filter(|word| !word.is_empty());
+    while let Some(word) = words.next() {
+        match word {
+            b"/CMapName" => {
+                let name = words.next().ok_or(Malformed)?;
+                if !matches!(
+                    name,
+                    b"/Example"
+                        | b"/Adobe-Identity-UCS"
+                        | b"/Adobe-Identity-UCS2"
+                        | b"/FixtureMap"
+                        | b"/Fixture-Composite"
+                        | b"/Fixture-Latin"
+                ) {
+                    let count = name.strip_prefix(b"/FlowPDF-").ok_or(Unsupported)?;
+                    if count.len() > 4
+                        || count.starts_with(b"0")
+                        || !std::str::from_utf8(count)
+                            .ok()
+                            .and_then(|n| n.parse::<usize>().ok())
+                            .is_some_and(|n| (1..=4096).contains(&n))
+                        || !count.iter().all(u8::is_ascii_digit)
+                    {
+                        return Err(Unsupported);
+                    }
+                }
+            }
+            b"/CIDSystemInfo" => {
+                if words.next() != Some(b"/Registry")
+                    || words.next() != Some(b"Adobe")
+                    || words.next() != Some(b"/Ordering")
+                    || !matches!(words.next(), Some(b"Identity" | b"UCS"))
+                    || words.next() != Some(b"/Supplement")
+                {
+                    return Err(Unsupported);
+                }
+                if !matches!(
+                    words.next(),
+                    Some(
+                        b"0" | b"1" | b"2" | b"3" | b"4" | b"5" | b"6" | b"7" | b"8" | b"9" | b"10"
+                    )
+                ) {
+                    return Err(Unsupported);
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn check_font_program(data: &[u8], work: &mut usize) -> Result<()> {
+    let bundled = include_bytes!("../../../data/NotoSans-Regular.ttf");
+    if data.len() != bundled.len() {
         return Err(Unsupported);
     }
-    let mut tags = BTreeSet::new();
-    let mut ranges = Vec::new();
-    for record in face.table_records {
-        if !matches!(
-            &record.tag.0.to_be_bytes(),
-            b"cmap"
-                | b"glyf"
-                | b"head"
-                | b"hhea"
-                | b"hmtx"
-                | b"loca"
-                | b"maxp"
-                | b"name"
-                | b"post"
-                | b"OS/2"
-                | b"gasp"
-                | b"cvt "
-                | b"fpgm"
-                | b"prep"
-                | b"kern"
-                | b"GDEF"
-                | b"GPOS"
-                | b"GSUB"
-                | b"STAT"
-        ) || !tags.insert(record.tag.0)
-        {
-            return Err(Unsupported);
-        }
-        let end = record.offset.checked_add(record.length).ok_or(Malformed)?;
-        ranges.push((record.offset as usize, end as usize));
-    }
-    ranges.sort_unstable();
-    let mut end = 12 + 16 * count;
-    for (start, next) in ranges {
-        spend(work, 1)?;
-        let padding = data.get(end..start).ok_or(Malformed)?;
-        if padding.len() > 3
-            || padding.iter().any(|&byte| byte != 0)
-            || start % 4 != 0
-            || next > data.len()
-        {
-            return Err(Unsupported);
-        }
-        end = next;
-    }
-    let padding = &data[end..];
-    if padding.len() > 3 || padding.iter().any(|&byte| byte != 0) {
+    spend(work, data.len().div_ceil(16) + 1)?;
+    if data != bundled {
         return Err(Unsupported);
     }
     Ok(())
@@ -764,22 +802,43 @@ impl Matrix {
         Self::new(products.map(|n| n / POINT))
     }
 
+    fn numerator(self, [x, y]: Point) -> Point {
+        let [a, b, c, d, e, f] = self.0;
+        [a * x + c * y + e * POINT, b * x + d * y + f * POINT]
+    }
+
     fn bounds(self, bounds: Rect) -> Result<Rect> {
-        if !valid_rect(bounds) {
+        self.round_bounds(bounds, false)
+    }
+
+    fn clip_bounds(self, bounds: Rect) -> Result<Rect> {
+        self.round_bounds(bounds, true)
+    }
+
+    fn round_bounds(self, [l, b, r, t]: Rect, inward: bool) -> Result<Rect> {
+        if l > r || b > t || ![l, b, r, t].into_iter().all(in_range) {
             return Err(Unsupported);
         }
-        let [a, b, c, d, e, f] = self.0;
-        let [l, bottom, r, t] = bounds;
-        let xs = [a * l + c * bottom + e * POINT, a * r + c * t + e * POINT];
-        let ys = [b * l + d * bottom + f * POINT, b * r + d * t + f * POINT];
-        let result = [
-            xs[0].min(xs[1]).div_euclid(POINT),
-            ys[0].min(ys[1]).div_euclid(POINT),
-            -(-xs[0].max(xs[1])).div_euclid(POINT),
-            -(-ys[0].max(ys[1])).div_euclid(POINT),
-        ];
+        let [x, y] = self.numerator([l, b]);
+        let [u, v] = self.numerator([r, t]);
+        let min = if inward { ceil_point } else { floor_point };
+        let max = if inward { floor_point } else { ceil_point };
+        let result = [min(x.min(u)), min(y.min(v)), max(x.max(u)), max(y.max(v))];
         valid_rect(result).then_some(result).ok_or(Unsupported)
     }
+
+    fn margin(self, [x, y]: Point) -> Point {
+        let [a, b, c, d, _, _] = self.0;
+        [a.abs() * x + c.abs() * y, b.abs() * x + d.abs() * y]
+    }
+}
+
+fn floor_point(value: i64) -> i64 {
+    value.div_euclid(POINT)
+}
+
+fn ceil_point(value: i64) -> i64 {
+    -floor_point(-value)
 }
 
 fn form_geometry(dict: &Dict) -> Result<(Matrix, Rect)> {
@@ -963,7 +1022,7 @@ impl Path {
             if !strictly_convex(&self.points) {
                 return Err(Unsupported);
             }
-            remove |= polygon_hits(&self.points, graphics.matrix, scope, work, false)?;
+            remove |= polygon_hits(&self.points, [0; 2], graphics.matrix, scope, work, false)?;
         }
         if stroke {
             remove |= stroke_hits(&self.points, closed, graphics, scope, work)?;
@@ -1012,47 +1071,51 @@ fn strictly_convex(points: &[Point]) -> bool {
 
 fn polygon_hits(
     points: &[Point],
+    error: Point,
     matrix: Matrix,
     scope: Scope<'_, '_>,
     work: &mut usize,
-    include_boundary: bool,
+    stroke: bool,
 ) -> Result<bool> {
-    let bounds = matrix.bounds(point_bounds(points))?;
+    let [l, b, r, t] = point_bounds(points);
+    let [dx, dy] = error;
+    let bounds = matrix.bounds([l - dx, b - dy, r + dx, t + dy])?;
     if !contains(scope.clip, bounds) {
         return Err(Unsupported);
     }
-    let [a, b, c, d, e, f] = matrix.0;
+
     let corners = points
         .iter()
-        .map(|&[x, y]| {
-            [a * x + c * y + e * POINT, b * x + d * y + f * POINT]
-                .map(|n| (n + POINT / 2).div_euclid(POINT))
-        })
+        .map(|&point| matrix.numerator(point))
         .collect::<Vec<_>>();
     spend(work, corners.len() * corners.len())?;
-    if !strictly_convex(&corners) {
+    let convex = strictly_convex(&corners);
+    if !convex && !stroke {
         return Err(Unsupported);
     }
     spend(work, scope.marks.len() * corners.len())?;
     let orientation = side(corners[0], corners[1], corners[2]).signum();
     let [min_x, min_y, max_x, max_y] = point_bounds(&corners);
+    let [dx, dy] = matrix.margin(error);
+    // @invariant: Expanding the mark tests the outer envelope of the nominal stroke polygon.
     Ok(scope.marks.iter().any(|mark| {
-        let [left, bottom, right, top] = mark.rect;
-        let overlaps_axes = if include_boundary {
-            min_x <= right && left <= max_x && min_y <= top && bottom <= max_y
+        let [left, bottom, right, top] = mark.rect.map(|coord| coord * POINT);
+        let expanded = [left - dx, bottom - dy, right + dx, top + dy];
+        let [l, b, r, t] = expanded;
+        let overlaps_axes = if stroke {
+            min_x <= r && l <= max_x && min_y <= t && b <= max_y
         } else {
-            intersects([min_x, min_y, max_x, max_y], mark.rect)
+            intersects([min_x, min_y, max_x, max_y], expanded)
         };
         intersects(bounds, mark.rect)
             && overlaps_axes
-            && edge_pairs(&corners).all(|(a, b)| {
-                [[left, bottom], [right, bottom], [right, top], [left, top]]
-                    .into_iter()
-                    .any(|point| {
-                        let signed = side(a, b, point) * orientation;
-                        signed > 0 || (include_boundary && signed == 0)
+            && (!convex
+                || edge_pairs(&corners).all(|(start, end)| {
+                    [[l, b], [r, b], [r, t], [l, t]].into_iter().any(|point| {
+                        let signed = side(start, end, point) * orientation;
+                        signed > 0 || (stroke && signed == 0)
                     })
-            })
+                }))
     }))
 }
 
@@ -1069,6 +1132,70 @@ fn rounded_ratio(num: i128, den: i128) -> Result<i64> {
     i64::try_from((num * sign + den / 2).div_euclid(den)).map_err(|_| Unsupported)
 }
 
+fn dot([x, y]: Point, [u, v]: Point) -> i128 {
+    i128::from(x) * i128::from(u) + i128::from(y) * i128::from(v)
+}
+
+fn stroke_normal([x, y]: Point, width: i64) -> (Point, Point) {
+    let denominator = 4 * dot([x, y], [x, y]);
+    let normal = [-y, x].map(|component| {
+        let numerator = i128::from(component) * i128::from(width);
+        let square = numerator * numerator;
+        let floor = (square / denominator).isqrt();
+        let twice = 2 * floor + 1;
+        let round_up = 4 * square >= denominator * twice * twice;
+        let rounded = (floor + i128::from(round_up)) * numerator.signum();
+        (
+            rounded as i64,
+            i64::from(square != denominator * floor * floor),
+        )
+    });
+    ([normal[0].0, normal[1].0], [normal[0].1, normal[1].1])
+}
+
+fn miter_tip(
+    incoming: Point,
+    outgoing: Point,
+    normals: Point,
+    error: Point,
+) -> Result<Option<(Point, Point)>> {
+    let projection = dot(incoming, outgoing);
+    let squared_lengths = dot(incoming, incoming) * dot(outgoing, outgoing);
+    // @invariant: The default miter limit of 10 corresponds to a turn cosine of -49/50.
+    if projection < 0 {
+        let square = projection * projection;
+        let threshold = (squared_lengths / 2500) * 2401 + (squared_lengths % 2500) * 2401 / 2500;
+        if square > threshold {
+            return Ok(None);
+        }
+    }
+    let low = squared_lengths.isqrt();
+    let high = low + i128::from(low * low != squared_lengths);
+    if low + projection <= 0 {
+        return Err(Unsupported);
+    }
+    let mut tip = [0; 2];
+    let mut margin = [0; 2];
+    for axis in 0..2 {
+        let sum = i128::from(normals[axis]);
+        let error = i128::from(error[axis]);
+        // @invariant: The tip offset is the sum of the outer normals divided by 1 + cos(turn).
+        let limits = [low, high].map(|length| {
+            let divisor = length + projection;
+            [
+                ((sum - error) * length).div_euclid(divisor),
+                -(-(sum + error) * length).div_euclid(divisor),
+            ]
+        });
+        tip[axis] = rounded_ratio(sum * low, low + projection)?;
+        let at = i128::from(tip[axis]);
+        let lower = limits[0][0].min(limits[1][0]);
+        let upper = limits[0][1].max(limits[1][1]);
+        margin[axis] = i64::try_from((at - lower).max(upper - at)).map_err(|_| Unsupported)?;
+    }
+    Ok(Some((tip, margin)))
+}
+
 fn stroke_hits(
     points: &[Point],
     closed: bool,
@@ -1081,17 +1208,11 @@ fn stroke_hits(
     } else {
         points.len() - 1
     };
-    let width = i128::from(graphics.width);
     let mut normals = Vec::with_capacity(count);
     let mut remove = false;
     for (a, b) in edge_pairs(points).take(count) {
-        let [dx, dy] = difference(b, a).map(i128::from);
-        let length = (dx * dx + dy * dy).isqrt();
-        let normal = [
-            rounded_ratio(-dy * width, 2 * length)?,
-            rounded_ratio(dx * width, 2 * length)?,
-        ];
-        normals.push(normal);
+        let (normal, error) = stroke_normal(difference(b, a), graphics.width);
+        normals.push((normal, error));
         remove |= polygon_hits(
             &[
                 translated(a, normal),
@@ -1099,6 +1220,7 @@ fn stroke_hits(
                 difference(b, normal),
                 difference(a, normal),
             ],
+            error,
             graphics.matrix,
             scope,
             work,
@@ -1114,37 +1236,25 @@ fn stroke_hits(
         let outgoing = difference(points[(index + 1) % points.len()], center);
         let turn = cross(incoming, outgoing);
         if turn == 0 {
-            if i128::from(incoming[0]) * i128::from(outgoing[0])
-                + i128::from(incoming[1]) * i128::from(outgoing[1])
-                <= 0
-            {
+            if dot(incoming, outgoing) <= 0 {
                 return Err(Unsupported);
             }
             continue;
         }
 
         let outside = -(turn.signum() as i64);
-        let a = translated(center, normals[previous].map(|n| n * outside));
-        let b = translated(center, normals[index].map(|n| n * outside));
-        let numerator = cross(difference(b, a), outgoing);
-        let [dx, dy] = incoming.map(i128::from);
-        let offset = [
-            rounded_ratio(dx * numerator, turn)?,
-            rounded_ratio(dy * numerator, turn)?,
-        ];
-        let mut join = vec![center, a];
-        if offset
-            .iter()
-            .all(|axis| i128::from(*axis).abs() <= width * 6)
+        let [(a, ae), (b, be)] = [normals[previous], normals[index]];
+        let [a, b] = [a, b].map(|normal| normal.map(|n| n * outside));
+        let mut error = [ae[0].max(be[0]), ae[1].max(be[1])];
+        let mut join = vec![center, translated(center, a)];
+        if let Some((tip, margin)) =
+            miter_tip(incoming, outgoing, translated(a, b), translated(ae, be))?
         {
-            let tip = translated(a, offset);
-            let [x, y] = difference(tip, center).map(i128::from);
-            if x * x + y * y <= 25 * width * width {
-                join.push(tip);
-            }
+            join.push(translated(center, tip));
+            error = [error[0].max(margin[0]), error[1].max(margin[1])];
         }
-        join.push(b);
-        remove |= polygon_hits(&join, graphics.matrix, scope, work, true)?;
+        join.push(translated(center, b));
+        remove |= polygon_hits(&join, error, graphics.matrix, scope, work, true)?;
     }
     Ok(remove)
 }
@@ -1485,7 +1595,7 @@ impl<'a> Scan<'a> {
         }
         let (matrix, bounds) = form_geometry(&object.dict)?;
         let matrix = graphics.matrix.then(matrix)?;
-        let [l, b, r, t] = matrix.bounds(bounds)?;
+        let [l, b, r, t] = matrix.clip_bounds(bounds)?;
         let clip = [
             scope.clip[0].max(l),
             scope.clip[1].max(b),
@@ -1772,6 +1882,26 @@ fn apply(
 mod tests {
     use super::super::{NativeEditLimits, tests::redaction_fixture};
     use super::*;
+
+    #[test]
+    fn transform_rounds_paint_outward_and_clips_inward() {
+        let matrix = Matrix::new([0, 501, -501, 0, 0, 0]).unwrap();
+        let local = [1, 1, 5, 5];
+        assert_eq!(matrix.bounds(local), Ok([-3, 0, 0, 3]));
+        assert_eq!(matrix.clip_bounds(local), Ok([-2, 1, -1, 2]));
+    }
+
+    #[test]
+    fn exact_right_angle_miter_and_default_bevel_limit() {
+        assert_eq!(
+            miter_tip([8_000, 0], [0, 8_000], [1_000, -1_000], [0, 0]),
+            Ok(Some(([1_000, -1_000], [0, 0]))),
+        );
+        assert_eq!(
+            miter_tip([8_000, 0], [-8_000, 500], [125, 0], [1, 1]),
+            Ok(None),
+        );
+    }
 
     #[test]
     fn ordinary_admission_and_scrub_inventory_have_distinct_boundaries() {

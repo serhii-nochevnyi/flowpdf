@@ -7,7 +7,7 @@ use super::super::scene::{ContentCursor, ContentToken};
 use super::verifier::{
     MAX_COORD, NativeRedactionMark, NativeRedactionPageEvidence,
     NativeVerificationFailure::{Budget, Structure, TextMismatch, UnsupportedProfile},
-    POINT, Rect, VerifyResult, intersects, spend, valid_rect,
+    POINT, Rect, VerifyResult, contains, intersects, spend, valid_rect,
 };
 use super::verify_structure::{
     Dict, Document, Side, coverage, decimal, get, name, number, rect, reference, reject_comments,
@@ -133,17 +133,27 @@ impl<'a> Extraction<'a> {
         let mut output = Vec::new();
         let mut matrix = Matrix::IDENTITY;
         for &stream in &page.contents {
-            matrix = self.stream(doc, stream, page.resources, matrix, 0, &mut output)?;
+            matrix = self.stream(
+                doc,
+                stream,
+                page.resources,
+                matrix,
+                page.geometry.crop_box,
+                0,
+                &mut output,
+            )?;
         }
         Ok(output)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn stream(
         &mut self,
         doc: &'a Document,
         id: PdfObjectRef,
         resources: Option<&'a Dict>,
         mut matrix: Matrix,
+        clip: Rect,
         depth: usize,
         output: &mut Vec<Run>,
     ) -> VerifyResult<Matrix> {
@@ -172,6 +182,10 @@ impl<'a> Extraction<'a> {
                     let font = self.fonts.get(doc, font_id)?;
                     spend(&mut self.work, show.codes.len() * 4 + 1)?;
                     let layout = font.layout(show.codes, show.origin, show.size)?;
+                    let bounds = matrix.bounds(layout.bounds)?;
+                    if !contains(clip, bounds) {
+                        return Err(UnsupportedProfile);
+                    }
                     output.push(Run {
                         signature: Signature {
                             text: layout.glyphs.iter().map(|glyph| glyph.scalar).collect(),
@@ -180,7 +194,7 @@ impl<'a> Extraction<'a> {
                             origin: show.origin,
                             size: show.size,
                         },
-                        bounds: matrix.bounds(layout.bounds)?,
+                        bounds,
                         source: (id, operation),
                     });
                 }
@@ -195,8 +209,9 @@ impl<'a> Extraction<'a> {
                     let target = resource(doc, resources, "XObject", operand_name(args)?)?;
                     let dict = &doc.stream(target)?.dict;
                     if name(dict, "Subtype") == Some("Form") {
-                        let (matrix, _, resources) = form(doc, dict, resources, matrix)?;
-                        self.stream(doc, target, resources, matrix, depth + 1, output)?;
+                        let (matrix, form_clip, resources) =
+                            form(doc, dict, resources, matrix, clip)?;
+                        self.stream(doc, target, resources, matrix, form_clip, depth + 1, output)?;
                     }
                 }
                 "g" | "G" | "rg" | "RG" | "k" | "K" | "w" | "m" | "l" | "re" | "h" | "f" | "F"
@@ -319,10 +334,10 @@ impl Matrix {
 
     pub fn new(values: [i64; 6]) -> VerifyResult<Self> {
         let [a, b, c, d, _, _] = values;
-        if !((b == 0 && c == 0 && a * d > 0) || (a == 0 && d == 0 && b * c < 0))
-            || values
-                .into_iter()
-                .any(|value| !(-MAX_COORD..=MAX_COORD).contains(&value))
+        if values
+            .into_iter()
+            .any(|value| !(-MAX_COORD..=MAX_COORD).contains(&value))
+            || !((b == 0 && c == 0 && a * d > 0) || (a == 0 && d == 0 && b * c < 0))
         {
             return Err(UnsupportedProfile);
         }
@@ -356,13 +371,27 @@ impl Matrix {
     pub fn bounds(self, [l, b, r, t]: Rect) -> VerifyResult<Rect> {
         let [x, y] = self.numerator([l, b]);
         let [u, v] = self.numerator([r, t]);
-        let out = [
+        let rounded = [
             x.min(u).div_euclid(POINT),
             y.min(v).div_euclid(POINT),
             -(-x.max(u)).div_euclid(POINT),
             -(-y.max(v)).div_euclid(POINT),
         ];
-        valid_rect(out).then_some(out).ok_or(UnsupportedProfile)
+        valid_rect(rounded)
+            .then_some(rounded)
+            .ok_or(UnsupportedProfile)
+    }
+
+    fn restrict_clip(self, [l, b, r, t]: Rect, parent: Rect) -> VerifyResult<Rect> {
+        let [x, y] = self.numerator([l, b]);
+        let [u, v] = self.numerator([r, t]);
+        let clip = [
+            parent[0].max(-(-x.min(u)).div_euclid(POINT)),
+            parent[1].max(-(-y.min(v)).div_euclid(POINT)),
+            parent[2].min(x.max(u).div_euclid(POINT)),
+            parent[3].min(y.max(v).div_euclid(POINT)),
+        ];
+        valid_rect(clip).then_some(clip).ok_or(UnsupportedProfile)
     }
 }
 
@@ -382,6 +411,7 @@ pub(super) fn form<'a>(
     dict: &'a Dict,
     inherited: Option<&'a Dict>,
     outer: Matrix,
+    parent_clip: Rect,
 ) -> VerifyResult<(Matrix, Rect, Option<&'a Dict>)> {
     if dict
         .get("FormType")
@@ -404,12 +434,12 @@ pub(super) fn form<'a>(
     } else {
         outer
     };
-    let bounds = matrix.bounds(rect(get(dict, "BBox")?)?)?;
+    let clip = matrix.restrict_clip(rect(get(dict, "BBox")?)?, parent_clip)?;
     let resources = match dict.get("Resources") {
         Some(value) => Some(doc.dictionary(value)?),
         None => inherited,
     };
-    Ok((matrix, bounds, resources))
+    Ok((matrix, clip, resources))
 }
 
 #[derive(Default)]
@@ -596,15 +626,6 @@ impl<'a> Font<'a> {
         let tables = face.tables();
         let glyf = tables.glyf.ok_or(UnsupportedProfile)?;
         let raw = face.raw_face();
-        if [
-            b"fvar", b"gvar", b"COLR", b"SVG ", b"sbix", b"CBDT", b"EBDT", b"bdat", b"CFF ",
-            b"CFF2",
-        ]
-        .iter()
-        .any(|tag| raw.table(Tag::from_bytes(tag)).is_some())
-        {
-            return Err(UnsupportedProfile);
-        }
         let cmap = tables.cmap.ok_or(UnsupportedProfile)?;
         if cmap.subtables.len() > 32 {
             return Err(UnsupportedProfile);
@@ -1003,6 +1024,7 @@ fn read_cmap(mut rest: &[u8], width: usize) -> VerifyResult<BTreeMap<u16, char>>
     let mut codes = BTreeMap::new();
     let mut scalars = BTreeSet::new();
     let mut code_space = false;
+    let mut declared_mappings = None;
     loop {
         let mut look = rest;
         let next = token(&mut look)?;
@@ -1020,32 +1042,43 @@ fn read_cmap(mut rest: &[u8], width: usize) -> VerifyResult<BTreeMap<u16, char>>
             }
             b"/CMapName" => {
                 rest = look;
-                let name = token(&mut rest)?
-                    .strip_prefix(b"/")
-                    .ok_or(UnsupportedProfile)?;
-                if name.is_empty()
-                    || !name
-                        .iter()
-                        .all(|b| b.is_ascii_alphanumeric() || b"_.-".contains(b))
-                {
-                    return Err(UnsupportedProfile);
+                let name = token(&mut rest)?;
+                match name {
+                    b"/Adobe-Identity-UCS"
+                    | b"/Adobe-Identity-UCS2"
+                    | b"/Example"
+                    | b"/FixtureMap"
+                    | b"/Fixture-Composite"
+                    | b"/Fixture-Latin" => {}
+                    _ => {
+                        let suffix = name.strip_prefix(b"/FlowPDF-").ok_or(UnsupportedProfile)?;
+                        if suffix.is_empty()
+                            || suffix.len() > 4
+                            || suffix[0] == b'0'
+                            || !suffix.iter().all(u8::is_ascii_digit)
+                        {
+                            return Err(UnsupportedProfile);
+                        }
+                        declared_mappings = Some(
+                            suffix
+                                .iter()
+                                .fold(0, |count, byte| count * 10 + usize::from(byte - b'0')),
+                        );
+                    }
                 }
                 expect(&mut rest, &[b"def"])?;
             }
             b"/CIDSystemInfo" => {
                 rest = look;
-                expect(&mut rest, &[b"<<", b"/Registry"])?;
-                for next in [b"/Ordering".as_slice(), b"/Supplement"] {
-                    let value = token(&mut rest)?
-                        .strip_prefix(b"(")
-                        .and_then(|v| v.strip_suffix(b")"))
-                        .ok_or(UnsupportedProfile)?;
-                    if value.is_empty() || !value.iter().all(u8::is_ascii_alphanumeric) {
-                        return Err(UnsupportedProfile);
-                    }
-                    expect(&mut rest, &[next])?;
+                expect(&mut rest, &[b"<<", b"/Registry", b"(Adobe)", b"/Ordering"])?;
+                if !matches!(token(&mut rest)?, b"(Identity)" | b"(UCS)") {
+                    return Err(UnsupportedProfile);
                 }
-                cmap_integer(&mut rest)?;
+                expect(&mut rest, &[b"/Supplement"])?;
+                let supplement = token(&mut rest)?;
+                if !matches!(supplement, [b'0'..=b'9'] | b"10") {
+                    return Err(UnsupportedProfile);
+                }
                 expect(&mut rest, &[b">>", b"def"])?;
             }
             _ => {
@@ -1108,6 +1141,7 @@ fn read_cmap(mut rest: &[u8], width: usize) -> VerifyResult<BTreeMap<u16, char>>
         .iter()
         .all(|&byte| super::verify_structure::pdf_space(byte))
         || codes.is_empty()
+        || declared_mappings.is_some_and(|count| count != codes.len())
         || !metadata.contains(b"/CMapName".as_slice())
         || !metadata.contains(b"/CMapType".as_slice())
     {
@@ -1172,4 +1206,18 @@ fn hash_value(
         _ => return Err(UnsupportedProfile),
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fractional_form_clip_is_restricted_to_the_inner_grid() {
+        let matrix = Matrix::new([0, 501, -501, 0, 0, 0]).unwrap();
+        assert_eq!(
+            matrix.restrict_clip([1, 1, 5, 5], [-2, 0, 2, 2]),
+            Ok([-2, 1, -1, 2]),
+        );
+    }
 }

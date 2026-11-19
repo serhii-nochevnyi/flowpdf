@@ -500,3 +500,64 @@ fn redaction_keeps_disjoint_paint_inside_overlapping_path_bounds() {
     }
     assert!(!output.windows(square.len()).any(|window| window == square));
 }
+
+#[test]
+fn published_redaction_preserves_strokes_inside_a_fractional_form_clip() {
+    let stroke = b"1 0.5 0 RG 3 w 12 18 m 16 18 l 16 23 l S";
+    let source = pdf(
+        vec![
+            b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+            b"<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 100 100] >>".to_vec(),
+            b"<< /Type /Page /Parent 2 0 R /Contents 4 0 R /Resources << /XObject << /Art 5 0 R >> >> >>".to_vec(),
+            stream("", b"0 0 1 rg 10 10 5 5 re f /Art Do"),
+            stream(
+                "/Type /XObject /Subtype /Form /BBox [0.001 0.001 40.001 40.001] /Matrix [0.5 0 0 0.5 25 25]",
+                stroke,
+            ),
+        ],
+        "",
+    );
+    let mut session = open(&source);
+    let binding = session.snapshot().binding;
+    add(&mut session, 0, [11_000, 11_000, 12_000, 12_000]);
+    session.stage_redaction(binding, 1).unwrap();
+    let evidence = session.verify_redaction(binding, 1).unwrap();
+    assert!(evidence.checks_passed(), "{evidence:?}");
+    let receipt = session.publish_redaction(binding, 1).unwrap();
+    let output = session.redacted_output_bytes().unwrap();
+
+    assert_eq!(receipt.output_hash, *blake3::hash(output).as_bytes());
+    let retained = b"12 18 m\n16 18 l\n16 23 l\nS";
+    assert!(
+        output
+            .windows(retained.len())
+            .any(|bytes| bytes == retained)
+    );
+}
+
+#[test]
+fn reference_redaction_pdf_keeps_its_supported_cid_mapping() {
+    let source = include_bytes!("../../../fixtures/pdf-native/redaction.pdf");
+    let mut session = open(source);
+    assert!(session.redaction_admitted());
+    let binding = session.snapshot().binding;
+    let page_id = session.snapshot().page_state.order[0];
+    let geometry = session.redaction_mark_geometry(page_id).unwrap();
+    let rect = [12_000, 70_000, 40_000, 92_000];
+    session
+        .add_redaction_mark(
+            binding,
+            NativeRedactionMark {
+                page_id,
+                geometry,
+                rect,
+            },
+        )
+        .unwrap();
+    session.stage_redaction(binding, 1).unwrap();
+    let evidence = session.verify_redaction(binding, 1).unwrap();
+    assert!(evidence.checks_passed(), "{evidence:?}");
+    session.publish_redaction(binding, 1).unwrap();
+    assert_eq!(session.origin_bytes(), source);
+    assert_ne!(session.output_bytes(), source);
+}
