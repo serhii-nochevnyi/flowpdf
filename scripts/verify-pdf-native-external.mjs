@@ -8,7 +8,7 @@ import { pinnedEnvironment, root, runBounded } from './check-phase9.mjs'
 import { supportedNodeVersion } from './node-version.mjs'
 
 const corpus = 'fixtures/pdf-native'
-const manifestHash = 'd24c0eff7ef3a4c958298a12d51a35538218d968e7b9aff18a2e45f9ac894f16'
+const manifestHash = '285bb4e7b2ba4b5c23241af8cfff44b5d8de7b0bcb5391b022f28235ff84f4ba'
 const byteLimit = 4 * 1024 * 1024
 const wasmLimit = 32 * 1024 * 1024
 const toolNames = ['qpdf', 'pdftotext', 'pdftoppm']
@@ -84,6 +84,87 @@ function paintBounds({ rectPt }, page, scale) {
   const [left, , , top] = page.cropBoxPt
   const [x0, y0, x1, y1] = rectPt
   return [(x0 - left) * scale, (top - y1) * scale, (x1 - left) * scale, (top - y0) * scale]
+}
+
+export function compareWidgetRegion(page, dpi, rectPt, actual, expected) {
+  const { widthPx: width, heightPx: height } = page
+  const [x0, y0, x1, y1] = paintBounds({ rectPt }, page, dpi / 72)
+  const size = width * height * 3
+  if (page.rotation !== 0 || ![x0, y0, x1, y1].every(Number.isSafeInteger) ||
+    x0 < 0 || y0 < 0 || x0 >= x1 || y0 >= y1 || x1 > width || y1 > height ||
+    actual.length !== size || expected.length !== size) return false
+  for (let y = y0; y < y1; y++) {
+    const start = (y * width + x0) * 3
+    const end = (y * width + x1) * 3
+    if (!actual.subarray(start, end).equals(expected.subarray(start, end))) return false
+  }
+  return true
+}
+
+export function matchesWidgetBounds(rect, box, matrix = [1, 0, 0, 1, 0, 0]) {
+  if (![rect, box].every((bounds) =>
+    Array.isArray(bounds) && bounds.length === 4 && Array.from(bounds).every(Number.isFinite))) return false
+  const [left, bottom, right, top] = rect
+  return right > left && top > bottom && same(box, [0, 0, right - left, top - bottom]) &&
+    same(matrix, [1, 0, 0, 1, 0, 0])
+}
+
+function widgetReference(input, page, fields, policy) {
+  const trailer = /trailer\s+<<\s*\/Size 28\b[^>]*>>\s+startxref\s+(\d+)\s+%%EOF\s*$/
+    .exec(input.subarray(-128).toString('latin1'))
+  requireInput(trailer && policy?.version === 1 && policy.annotationLayer === 'included', 'widget-reference')
+  const objects = [
+    '<< /Type /Catalog /Pages 29 0 R /AcroForm 31 0 R >>',
+    '<< /Type /Pages /Kids [30 0 R] /Count 1 >>',
+    null,
+    null,
+  ]
+  const widgets = fields.map(({ rectPt, value, appearanceState }) => {
+    const [left, bottom, right, top] = rectPt
+    const width = right - left
+    const height = top - bottom
+    const { backgroundGray, inkGray, borderInset: inset, borderWidth } = policy
+    const frame = `q ${backgroundGray} g 0 0 ${width} ${height} re f ${inkGray} G ${borderWidth} w ` +
+      `${inset} ${inset} ${width - 2 * inset} ${height - 2 * inset} re S\n`
+    const stream = (ink, resources = '<<>>') => {
+      const content = frame + ink + 'Q\n'
+      objects.push(`<< /Type /XObject /Subtype /Form /BBox [0 0 ${width} ${height}] ` +
+        `/Resources ${resources} /Length ${Buffer.byteLength(content)} >>\nstream\n${content}endstream`)
+      return `${objects.length + 27} 0 R`
+    }
+    let field
+    if (appearanceState) {
+      const { inset: mark, width: stroke } = policy.checkmark
+      const off = stream('')
+      const yes = stream(`${stroke} w ${mark} ${mark} m ${width - mark} ${height - mark} l ` +
+        `${mark} ${height - mark} m ${width - mark} ${mark} l S\n`)
+      field = `/FT /Btn /V /${appearanceState} /AS /${appearanceState} /AP << /N << /Off ${off} /Yes ${yes} >> >>`
+    } else {
+      const { offsetPt, sizePt, hexByValue, fixtureFontObject } = policy.text
+      requireInput(Object.hasOwn(hexByValue, value), 'widget-reference-text')
+      const normal = stream(`BT /F1 ${sizePt} Tf ${inkGray} g ${offsetPt.join(' ')} Td <${hexByValue[value]}> Tj ET\n`,
+        `<< /Font << /F1 ${fixtureFontObject} 0 R >> >>`)
+      const unicode = Buffer.from(value, 'utf16le').swap16().toString('hex')
+      field = `/FT /Tx /V <FEFF${unicode}> /DA (/F1 ${sizePt} Tf ${inkGray} g) /AP << /N ${normal} >>`
+    }
+    objects.push(`<< /Type /Annot /Subtype /Widget /P 30 0 R /Rect [${rectPt.join(' ')}] ` +
+      `/T (Reference${objects.length}) ${field} >>`)
+    return `${objects.length + 27} 0 R`
+  })
+  objects[2] = `<< /Type /Page /Parent 29 0 R /MediaBox [${page.cropBoxPt.join(' ')}] ` +
+    `/Resources <<>> /Annots [${widgets.join(' ')}] >>`
+  objects[3] = `<< /Fields [${widgets.join(' ')}] /NeedAppearances false ` +
+    `/DR << /Font << /F1 ${policy.text.fixtureFontObject} 0 R >> >> /DA (/F1 ${policy.text.sizePt} Tf 0 g) >>`
+  let revision = '\n'
+  const offsets = objects.map((object, index) => {
+    const offset = input.length + revision.length
+    revision += `${28 + index} 0 obj\n${object}\nendobj\n`
+    return `${String(offset).padStart(10, '0')} 00000 n \n`
+  })
+  const xref = input.length + revision.length
+  revision += `xref\n28 ${objects.length}\n${offsets.join('')}trailer\n` +
+    `<< /Size ${28 + objects.length} /Root 28 0 R /Prev ${trailer[1]} >>\nstartxref\n${xref}\n%%EOF\n`
+  return Buffer.concat([input, Buffer.from(revision, 'ascii')])
 }
 
 export function compareRaster(page, policy, actual, source, glyphReference) {
@@ -336,10 +417,19 @@ function pdfStructure(json) {
       else if (subtype === '/Widget') {
         requireMatch(annot['/P'] === ref, 'widget-page')
         widgets.push(annotRef)
-        const appearance = resolveObject(resolveObject(annot['/AP'])?.['/N'])
+        const normal = resolveObject(annot['/AP'])?.['/N']
         const state = annot['/AS']
-        const form = state ? resolveObject(appearance?.[state]) : appearance
-        requireMatch(form?.['/Subtype'] === '/Form' && Array.isArray(resolveObject(form['/BBox'])), 'widget-appearance')
+        const appearance = resolveObject(normal)
+        if (state) requireMatch(Object.hasOwn(appearance ?? {}, state) && Object.hasOwn(appearance, '/Off') &&
+          Object.keys(appearance).length === 2, 'widget-appearance-state')
+        const streams = state ? Object.values(appearance) : [normal]
+        for (const stream of streams) {
+          const form = objects[`obj:${stream}`]?.stream?.dict
+          const matrix = form?.['/Matrix']
+          requireMatch(form?.['/Subtype'] === '/Form' &&
+            matchesWidgetBounds(rectPt, resolveObject(form['/BBox']),
+              matrix === undefined ? undefined : resolveObject(matrix) ?? null), 'widget-appearance')
+        }
         fields.push({ page, rectPt, name: pdfString(annot['/T']), value: pdfString(annot['/V']),
           defaultValue: pdfString(annot['/DV']), ...(state ? { appearanceState: pdfString(state) } : {}) })
       } else if (subtype === '/Link') {
@@ -439,6 +529,7 @@ function compareFixture(fixture, wasm, directory, invoke, observations) {
   const inputPath = join(directory, 'source.pdf')
   const outputPath = join(directory, 'output.pdf')
   const glyphPath = join(directory, 'glyph-reference.pdf')
+  const widgetPath = join(directory, 'widget-reference.pdf')
   writeFileSync(inputPath, fixture.input, { mode: 0o600 })
   const { spec } = fixture
   const observation = { fixture: fixture.id, sourceHash: fixture.sourceHash,
@@ -454,8 +545,9 @@ function compareFixture(fixture, wasm, directory, invoke, observations) {
   }
   const rawStream = (path, ref, raw = true) =>
     showObject(path, ref, raw ? '--raw-stream-data' : '--filtered-stream-data')
-  const raster = (path, page, width, height) => decodePpm(invoke('raster', ['pdftoppm',
-    '-r', String(spec.raster.dpi), '-cropbox', '-hide-annotations', '-f', String(page), '-l', String(page),
+  const raster = (path, page, width, height, annotations = false) => decodePpm(invoke(
+    annotations ? 'widget-raster' : 'raster', ['pdftoppm',
+    '-r', String(spec.raster.dpi), '-cropbox', ...(annotations ? [] : ['-hide-annotations']), '-f', String(page), '-l', String(page),
     '-singlefile', path]), width, height)
   const sources = new Map()
   const ordered = fixture.id === 'notes-preservation' ? nativeSession(wasm, fixture.input) : null
@@ -508,9 +600,24 @@ function compareFixture(fixture, wasm, directory, invoke, observations) {
             { mode: 0o600 })
           glyphReference = raster(glyphPath, sourcePage, page.widthPx, page.heightPx)
         }
-        requireMatch(compareRaster(page, spec.raster,
-          raster(outputPath, page.page, page.widthPx, page.heightPx), reference, glyphReference), 'page-raster')
+        const contentRaster = raster(outputPath, page.page, page.widthPx, page.heightPx)
+        requireMatch(compareRaster(page, spec.raster, contentRaster, reference, glyphReference), 'page-raster')
         pageEvidence.raster = 'pass'
+        const widgets = (operation.fieldReadback ?? []).filter((field) => field.page === page.page)
+        const vacated = source.fields.filter((field) => field.page === sourcePage &&
+          !widgets.some(({ rectPt }) => same(rectPt, field.rectPt)))
+        if (widgets.length || vacated.length) {
+          const rendered = raster(outputPath, page.page, page.widthPx, page.heightPx, true)
+          if (widgets.length) {
+            writeFileSync(widgetPath, widgetReference(fixture.input, page, widgets, spec.widgetRaster), { mode: 0o600 })
+            const expected = raster(widgetPath, 1, page.widthPx, page.heightPx, true)
+            requireMatch(widgets.every(({ rectPt }) => compareWidgetRegion(page, spec.raster.dpi, rectPt,
+              rendered, expected)), 'widget-raster')
+          }
+          requireMatch(vacated.every(({ rectPt }) => compareWidgetRegion(page, spec.raster.dpi, rectPt,
+            rendered, contentRaster)), 'widget-raster-vacated')
+          pageEvidence.widgetRaster = 'pass'
+        }
       }
       requireMatch(digest(boundedRead(outputPath)) === evidence.outputHash, 'output-changed')
       evidence.status = 'pass'

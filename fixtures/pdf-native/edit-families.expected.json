@@ -18,6 +18,28 @@
     "edgeBandPx": 1,
     "edgeChannelTolerance": 64
   },
+  "widgetRaster": {
+    "version": 1,
+    "annotationLayer": "included",
+    "backgroundGray": 1,
+    "inkGray": 0,
+    "borderInset": 1,
+    "borderWidth": 1,
+    "checkmark": {
+      "inset": 2,
+      "width": 2
+    },
+    "text": {
+      "fixtureFontObject": 9,
+      "offsetPt": [2, 4],
+      "sizePt": 10,
+      "hexByValue": {
+        "": "",
+        "AB": "00010002",
+        "ЇA": "00030001"
+      }
+    }
+  },
   "operations": [
     {
       "operation": "replaceText",
