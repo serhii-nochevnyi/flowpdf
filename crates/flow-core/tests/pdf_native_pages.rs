@@ -305,7 +305,6 @@ fn scaled_page_cannot_move_across_parents_without_geometry_verification() {
     let mut session =
         NativePdfSession::open_scoped(&bytes, NativeEditLimits::default(), [3; 16]).unwrap();
     let prior = session.snapshot().clone();
-    // Moving the ordinary page also moves the scaled page into a different parent.
     let reorder = serde_json::from_value(serde_json::json!({
         "kind": "reorderPage",
         "target": {"page": 1, "stableId": prior.page_state.order[1]},
