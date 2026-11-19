@@ -295,6 +295,33 @@ fn marks_and_quarantine_keep_accepted_bytes_and_scene_until_exact_publication() 
     assert!(out.windows(2).any(|window| window == [0, 83]));
     assert_eq!(session.snapshot().scene.pages[0].annotations.len(), 1);
     assert_eq!(session.origin_bytes(), source);
+
+    let next = session
+        .apply(
+            receipt.binding,
+            2,
+            &NativeNoteCommand::Add {
+                page: session.snapshot().scene.pages[0].id,
+                rect: [70, 70, 75, 75],
+                contents: "new note".into(),
+            },
+        )
+        .unwrap();
+    let edited = session.output_bytes().to_vec();
+    assert_ne!(next.output_hash, receipt.output_hash);
+    assert_eq!(
+        session.publish_redaction(base.binding, 1),
+        Err(NativeSessionError::RevisionMismatch)
+    );
+    assert_eq!(
+        session.stage_redaction(base.binding, 1),
+        Err(NativeSessionError::RevisionMismatch)
+    );
+    assert_eq!(
+        session.lookup(base.binding, 1),
+        Ok(NativeRequestLookup::Accepted(receipt))
+    );
+    assert_accepted(&session, &edited, next.binding.revision, &source);
 }
 
 #[test]
