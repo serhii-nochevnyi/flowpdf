@@ -109,6 +109,84 @@ export function matchesWidgetBounds(rect, box, matrix = [1, 0, 0, 1, 0, 0]) {
     same(matrix, [1, 0, 0, 1, 0, 0])
 }
 
+export function compareCheckboxAppearances(page, dpi, rectPt, actual, expected) {
+  return compareWidgetRegion(page, dpi, rectPt, actual.saved, expected.saved) &&
+    compareWidgetRegion(page, dpi, rectPt, actual.alternate, expected.alternate) &&
+    !compareWidgetRegion(page, dpi, rectPt, actual.saved, actual.alternate)
+}
+
+// @contract: Edit-family sources and native rewrites use one dense, generation-zero classic xref table.
+function classicLayout(bytes) {
+  if (!Buffer.isBuffer(bytes) || bytes.length > byteLimit) return null
+  const text = bytes.toString('latin1')
+  const header = '%PDF-1.7\n%\xE2\xE3\xCF\xD3\n'
+  const footer = /\nstartxref\n(\d{1,7})\n%%EOF\n$/.exec(text)
+  if (!text.startsWith(header) || !footer) return null
+  const xref = Number(footer[1])
+  const table = /^xref\n0 (\d+)\n0000000000 65535 f \n((?:\d{10} 00000 n \n)+)trailer\n(<<[^\n]*>>)\n$/
+    .exec(text.slice(xref, footer.index + 1))
+  if (!table) return null
+  const offsets = table[2].trimEnd().split('\n').map((entry) => Number(entry.slice(0, 10)))
+  if (Number(table[1]) !== offsets.length + 1 || offsets[0] !== header.length ||
+      !offsets.every((offset, index) => offset < xref && (index === 0 || offset > offsets[index - 1]))) return null
+  return {
+    size: offsets.length + 1,
+    trailer: table[3],
+    object(number) {
+      const offset = offsets[number - 1]
+      if (offset === undefined) return null
+      const prefix = `${number} 0 obj\n`
+      const end = offsets[number] ?? xref
+      const object = text.slice(offset, end)
+      if (!object.startsWith(prefix) || !object.endsWith('\nendobj\n')) return null
+      return { start: offset + prefix.length, body: object.slice(prefix.length, -'\nendobj\n'.length) }
+    },
+  }
+}
+
+function hasSingleRevision(bytes, { trailer, objects, resolveObject }) {
+  const layout = classicLayout(bytes)
+  if (!layout || Object.hasOwn(trailer, '/Prev') || Object.hasOwn(trailer, '/XRefStm') ||
+      layout.size !== trailer['/Size'] || layout.size !== Object.keys(objects).length ||
+      layout.trailer !== `<< /Size ${layout.size} /Root ${trailer['/Root']} >>`) return false
+  for (let number = 1; number < layout.size; number++) {
+    const object = layout.object(number)
+    const inspected = objects[`obj:${number} 0 R`]
+    if (!object || !inspected) return false
+    if (inspected.stream) {
+      const header = /^(<<[^\n]*>>)\nstream\n/.exec(object.body)
+      const length = header && / \/Length (\d+)( 0 R)?(?= )/.exec(header[1])
+      if (!length) return false
+      const size = length[2] ? resolveObject(`${length[1]} 0 R`) : Number(length[1])
+      if (!Number.isSafeInteger(size) || size < 0 ||
+          object.body.slice(header[0].length + size) !== '\nendstream') return false
+    } else if (object.body.includes('\n')) {
+      return false
+    }
+  }
+  return true
+}
+
+const alternateState = (state) => state === 'Off' ? 'Yes' : 'Off'
+
+export function alternateCheckboxPdf(saved, checkboxes) {
+  const layout = classicLayout(saved)
+  requireMatch(layout, 'checkbox-source-xref')
+  const alternate = Buffer.from(saved)
+  for (const { ref, state } of checkboxes) {
+    const number = /^([1-9]\d*) 0 R$/.exec(ref)?.[1]
+    const object = number && layout.object(Number(number))
+    requireMatch(object && !object.body.includes('\n') && ['Off', 'Yes'].includes(state), 'checkbox-source-widget')
+    for (const key of ['AS', 'V']) {
+      const [selector, duplicate] = object.body.matchAll(new RegExp(` /${key} /${state}(?= )`, 'g'))
+      requireMatch(selector && !duplicate, 'checkbox-source-state')
+      const start = object.start + selector.index + selector[0].length - state.length
+      alternate.write(alternateState(state), start, state.length, 'ascii')
+    }
+  }
+  return alternate
+}
+
 function widgetReference(input, page, fields, policy) {
   const trailer = /trailer\s+<<\s*\/Size 28\b[^>]*>>\s+startxref\s+(\d+)\s+%%EOF\s*$/
     .exec(input.subarray(-128).toString('latin1'))
@@ -418,6 +496,7 @@ export function pdfStructure(json) {
   }
   const notes = []
   const fields = []
+  const checkboxes = []
   const widgets = []
   const links = []
   const outlines = []
@@ -435,9 +514,13 @@ export function pdfStructure(json) {
         const normal = resolveObject(annot['/AP'])?.['/N']
         const state = annot['/AS']
         const appearance = resolveObject(normal)
-        if (state) requireMatch((state === '/Off' || state === '/Yes') &&
-          Object.hasOwn(appearance ?? {}, '/Off') && Object.hasOwn(appearance, '/Yes') &&
-          Object.keys(appearance).length === 2, 'widget-appearance-state')
+        if (state) {
+          requireMatch((state === '/Off' || state === '/Yes') &&
+            Object.hasOwn(appearance ?? {}, '/Off') && Object.hasOwn(appearance, '/Yes') &&
+            Object.keys(appearance).length === 2, 'widget-appearance-state')
+          requireMatch(appearance['/Off'] !== appearance['/Yes'], 'checkbox-shared-appearance')
+          checkboxes.push({ page, rectPt, ref: annotRef, state: pdfString(state) })
+        }
         const streams = state ? Object.values(appearance) : [normal]
         for (const stream of streams) {
           const form = objects[`obj:${stream}`]?.stream?.dict
@@ -478,7 +561,8 @@ export function pdfStructure(json) {
     readOutlines(outline['/Next'], depth + 1)
   }
   readOutlines(resolveObject(catalog['/Outlines'])?.['/First'])
-  return { catalog, trailer, resolveObject, objects, pages, notes, fields, destinations: [...outlines, ...links] }
+  return { catalog, trailer, resolveObject, objects, pages, notes, fields, checkboxes,
+    destinations: [...outlines, ...links] }
 }
 
 function sameRecords(actual, expected) {
@@ -486,7 +570,7 @@ function sameRecords(actual, expected) {
   return same(normalize(actual), normalize(expected))
 }
 
-export function checkStructure(actual, source, operation, rawStream, showObject, inputPath, outputPath) {
+export function checkStructure(actual, source, operation, rawStream, showObject, inputPath, outputPath, savedOutput) {
   const pages = operation.pages.map(({ page, cropBoxPt, rotation }) => ({ page, cropBoxPt, rotation }))
   requireMatch(same(actual.pages.map(({ page, cropBoxPt, rotation }) => ({ page, cropBoxPt, rotation })), pages),
     'page-structure')
@@ -525,6 +609,7 @@ export function checkStructure(actual, source, operation, rawStream, showObject,
     }
   }
   if (operation.operation === 'redact') {
+    requireMatch(hasSingleRevision(savedOutput, actual), 'redaction-revision')
     requireMatch(!actual.trailer['/Info'] && !actual.trailer['/ID'] &&
       !actual.catalog['/FlowPDFSource'] && !actual.catalog['/Metadata'], 'redaction-trailer')
     let images = 0
@@ -553,6 +638,7 @@ function compareFixture(fixture, wasm, directory, invoke, observations) {
   const outputPath = join(directory, 'output.pdf')
   const glyphPath = join(directory, 'glyph-reference.pdf')
   const widgetPath = join(directory, 'widget-reference.pdf')
+  const alternatePath = join(directory, 'checkbox-alternate.pdf')
   writeFileSync(inputPath, fixture.input, { mode: 0o600 })
   const { spec } = fixture
   const observation = { fixture: fixture.id, sourceHash: fixture.sourceHash,
@@ -590,7 +676,11 @@ function compareFixture(fixture, wasm, directory, invoke, observations) {
       writeFileSync(outputPath, output, { mode: 0o600 })
       invoke('qpdf-check', ['qpdf', '--check', outputPath])
       evidence.checks.qpdf = 'pass'
-      checkStructure(inspect(outputPath), source, operation, rawStream, showObject, inputPath, outputPath)
+      const actual = inspect(outputPath)
+      const savedOutput = boundedRead(outputPath)
+      requireMatch(digest(savedOutput) === evidence.outputHash, 'output-changed')
+      checkStructure(actual, source, operation, rawStream, showObject, inputPath, outputPath, savedOutput)
+      if (operation.operation === 'redact') evidence.checks.singleRevision = 'pass'
       evidence.checks.structure = 'pass'
       for (const page of operation.pages) {
         const num = String(page.page)
@@ -634,8 +724,24 @@ function compareFixture(fixture, wasm, directory, invoke, observations) {
           if (widgets.length) {
             writeFileSync(widgetPath, widgetReference(fixture.input, page, widgets, spec.widgetRaster), { mode: 0o600 })
             const expected = raster(widgetPath, 1, page.widthPx, page.heightPx, true)
-            requireMatch(widgets.every(({ rectPt }) => compareWidgetRegion(page, spec.raster.dpi, rectPt,
-              rendered, expected)), 'widget-raster')
+            requireMatch(widgets.filter(({ appearanceState }) => !appearanceState).every(({ rectPt }) =>
+              compareWidgetRegion(page, spec.raster.dpi, rectPt, rendered, expected)), 'widget-raster')
+            const checkboxes = actual.checkboxes.filter((field) => field.page === page.page)
+            if (checkboxes.length) {
+              writeFileSync(alternatePath, alternateCheckboxPdf(savedOutput, checkboxes), { mode: 0o600 })
+              const alternate = raster(alternatePath, page.page, page.widthPx, page.heightPx, true)
+              const alternateWidgets = widgets.map((field) => {
+                if (!field.appearanceState) return field
+                const state = alternateState(field.appearanceState)
+                return { ...field, appearanceState: state, value: state }
+              })
+              writeFileSync(widgetPath, widgetReference(fixture.input, page, alternateWidgets, spec.widgetRaster),
+                { mode: 0o600 })
+              const expectedAlternate = raster(widgetPath, 1, page.widthPx, page.heightPx, true)
+              requireMatch(checkboxes.every(({ rectPt }) => compareCheckboxAppearances(page, spec.raster.dpi, rectPt,
+                { saved: rendered, alternate }, { saved: expected, alternate: expectedAlternate })), 'checkbox-raster')
+              pageEvidence.checkboxAppearances = 'pass'
+            }
           }
           requireMatch(vacated.every(({ rectPt }) => compareWidgetRegion(page, spec.raster.dpi, rectPt,
             rendered, contentRaster)), 'widget-raster-vacated')
