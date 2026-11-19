@@ -597,7 +597,7 @@ fn redaction_accepts_a_rewrite_larger_than_the_import_limit() {
 
 #[test]
 fn accepted_page_preview_refuses_a_constrained_session_without_mutation() {
-    let source = raster_fixture(100, "10 10 10 10 re f 40 40 10 10 re f");
+    let source = raster_fixture(150, "10 10 10 10 re f 40 40 10 10 re f");
     let default_session = open(&source);
     let snapshot = default_session.snapshot();
     let raster = default_session
@@ -607,12 +607,12 @@ fn accepted_page_preview_refuses_a_constrained_session_without_mutation() {
             snapshot.page_state.order[0],
         )
         .unwrap();
-    assert_eq!((raster.width, raster.height), (200, 200));
-    assert_eq!(raster.crop_box, GEOMETRY.crop_box);
+    assert_eq!((raster.width, raster.height), (300, 300));
+    assert_eq!(raster.crop_box, [0, 0, 150_000, 150_000]);
     assert_eq!(raster.rotation, GEOMETRY.rotation);
-    assert_eq!(raster.rgb.len(), 200 * 200 * 3);
+    assert_eq!(raster.rgb.len(), 300 * 300 * 3);
 
-    // @contract: The 200 × 200 RGB buffer fits this cap, but RGB and coverage together do not.
+    // @contract: The 300 × 300 RGB output alone exceeds the constrained session cap.
     let mut session = NativePdfSession::open_scoped(
         &source,
         NativeEditLimits {
@@ -625,7 +625,12 @@ fn accepted_page_preview_refuses_a_constrained_session_without_mutation() {
     let binding = session.snapshot().binding;
     let output_hash = session.snapshot().output_hash;
     let scene_hash = session.snapshot().scene.scene_hash;
-    let mark = mark(&session, 0, [12_000, 12_000, 13_000, 13_000]);
+    let page_id = session.snapshot().page_state.order[0];
+    let mark = NativeRedactionMark {
+        page_id,
+        geometry: session.redaction_mark_geometry(page_id).unwrap(),
+        rect: [12_000, 12_000, 13_000, 13_000],
+    };
     session.add_redaction_mark(binding, mark).unwrap();
     let staged = session.stage_redaction(binding, 1).unwrap();
 

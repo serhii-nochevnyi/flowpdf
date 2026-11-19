@@ -1,9 +1,11 @@
+use flow_core::layout::LayoutUnit;
 use flow_core::pdf::native::{
     NativeEditLimits, NativeObjectCommand, NativeObjectRefusal, NativePdfSession,
     NativeRedactionMark, NativeSessionError,
 };
 use flow_core::pdf::{
-    PdfReadDiagnosticCode, PdfSceneElement, PdfSceneRequest, open_pdf, read_pdf_scene,
+    PdfPathCommand, PdfReadDiagnosticCode, PdfSceneElement, PdfSceneRequest, open_pdf,
+    read_pdf_scene,
 };
 use image::ImageDecoder;
 use serde_json::{Value, json};
@@ -126,6 +128,135 @@ fn path_crud_isolates_shared_content_and_roundtrips() {
         json!([10000, 20000, 40000, 60000])
     );
     assert_eq!(session.origin_bytes(), source);
+}
+
+#[test]
+fn moved_closing_paint_preserves_the_edge_and_does_not_join_the_next_path() {
+    let unit = |points: i64| LayoutUnit::from_raw(points * LayoutUnit::UNITS_PER_POINT);
+    for (operator, fill, partial) in [("s", false, false), ("b", true, false), ("b*", true, true)] {
+        let content = format!("20 20 m 40 24 l 32 46 l {operator}\n80 80 m 90 85 l S");
+        let source = fixture(content.as_bytes(), false, "", &[]);
+        let mut session = open(&source);
+        let selected = target(&session, 0, 0);
+        apply(
+            &mut session,
+            json!({"kind":"moveObject","target":selected,"transform":[1,0,0,1,15,7]}),
+        )
+        .unwrap();
+
+        for (bytes, dx, dy) in [(source.as_slice(), 0, 0), (session.output_bytes(), 15, 7)] {
+            let reader = open_pdf(bytes, Default::default()).unwrap();
+            let scene = read_pdf_scene(&reader, &PdfSceneRequest::default()).unwrap();
+            let page = &scene.pages[0];
+            let [
+                PdfSceneElement::Path { value: closed },
+                PdfSceneElement::Path { value: next },
+            ] = page.elements.as_slice()
+            else {
+                panic!("expected a closed path and an independent stroke for {operator}");
+            };
+            assert_eq!(closed.provenance.operator.as_deref(), Some(operator));
+            assert_eq!((closed.stroke, closed.fill), (true, fill));
+            assert_eq!(
+                closed.commands,
+                [
+                    PdfPathCommand::MoveTo {
+                        x: unit(20 + dx),
+                        y: unit(20 + dy)
+                    },
+                    PdfPathCommand::LineTo {
+                        x: unit(40 + dx),
+                        y: unit(24 + dy)
+                    },
+                    PdfPathCommand::LineTo {
+                        x: unit(32 + dx),
+                        y: unit(46 + dy)
+                    },
+                    PdfPathCommand::ClosePath,
+                ]
+            );
+            assert_eq!(next.provenance.operator.as_deref(), Some("S"));
+            assert!(next.stroke && !next.fill);
+            assert_eq!(
+                next.commands,
+                [
+                    PdfPathCommand::MoveTo {
+                        x: unit(80),
+                        y: unit(80)
+                    },
+                    PdfPathCommand::LineTo {
+                        x: unit(90),
+                        y: unit(85)
+                    },
+                ]
+            );
+            assert_eq!(page.partial, partial);
+            assert_eq!(scene.report.partial, partial);
+            assert_eq!(
+                page.report.diagnostics.iter().any(|diagnostic| {
+                    diagnostic.code == PdfReadDiagnosticCode::PartialPage
+                        && diagnostic.object_number
+                            == Some(closed.provenance.object_ref.object_number)
+                }),
+                partial
+            );
+        }
+    }
+}
+
+#[test]
+fn scene_reports_partial_for_closing_paint_with_mixed_coordinates() {
+    let source = fixture(
+        b"20 20 m 1 0 0 1 15 7 cm 40 24 l 32 46 l b 80 80 m 90 85 l S",
+        false,
+        "",
+        &[],
+    );
+    let reader = open_pdf(&source, Default::default()).unwrap();
+    let scene = read_pdf_scene(&reader, &PdfSceneRequest::default()).unwrap();
+    let page = &scene.pages[0];
+    assert!(page.partial && scene.report.partial);
+    assert!(page.report.diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == PdfReadDiagnosticCode::PartialPage && diagnostic.object_number == Some(5)
+    }));
+    assert!(matches!(
+        page.elements.as_slice(),
+        [PdfSceneElement::Path { value }]
+            if value.provenance.operator.as_deref() == Some("S")
+                && value.commands.len() == 2
+                && value.rect.x.raw() == 95 * 64 && value.rect.y.raw() == 87 * 64
+    ));
+}
+
+#[test]
+fn scene_reports_partial_for_closing_stroke_under_a_content_clip() {
+    let source = fixture(
+        b"q 10 10 30 30 re W* b 30 30 m 50 30 l 50 50 l s Q 80 80 10 10 re f",
+        false,
+        "",
+        &[],
+    );
+    let reader = open_pdf(&source, Default::default()).unwrap();
+    let scene = read_pdf_scene(&reader, &PdfSceneRequest::default()).unwrap();
+    let page = &scene.pages[0];
+    assert!(page.partial && scene.report.partial);
+    assert!(page.report.diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == PdfReadDiagnosticCode::PartialPage && diagnostic.object_number == Some(5)
+    }));
+    assert!(matches!(
+        page.elements.as_slice(),
+        [
+            PdfSceneElement::Path { value: first },
+            PdfSceneElement::Clip { value: clip },
+            PdfSceneElement::Path { value: clipped },
+            PdfSceneElement::Path { value: next },
+        ] if first.provenance.operator.as_deref() == Some("b")
+            && first.commands.len() == 5
+            && clip.even_odd
+            && clipped.provenance.operator.as_deref() == Some("s")
+            && clipped.commands.last() == Some(&PdfPathCommand::ClosePath)
+            && next.rect.x.raw() == 80 * 64 && next.rect.y.raw() == 80 * 64
+    ));
 }
 
 #[test]

@@ -536,6 +536,10 @@ impl NativePdfGraph {
         spend(&mut self.retained, retained)
     }
 
+    pub(super) fn release_page_retained(&mut self, released: usize) {
+        self.retained += released;
+    }
+
     pub(super) fn trailer_references(
         &self,
         work: &mut usize,

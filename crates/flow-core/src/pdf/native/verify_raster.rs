@@ -27,6 +27,7 @@ const MAX_PARSE_WORK: usize = 16_000_000;
 const MAX_DRAW_BYTES: usize = 16 * 1024 * 1024;
 const MAX_PATH_POINTS: usize = 64;
 const MAX_FORM_DEPTH: usize = 8;
+const PREVIEW_BAND_ROWS: usize = 16;
 const PITCH: i64 = POINT / 2;
 const NOTE_BORDER: Pixel = [40; 3];
 const NOTE_INTERIOR: Pixel = [255, 220, 64];
@@ -64,8 +65,7 @@ pub(super) fn accepted_page(
     let mut interpreter = Interpreter::new(workspace);
     let mut draw = DrawBudget::new(workspace);
     let paints = interpreter.page(&document, &page, &mut draw)?;
-    let _buffers = workspace
-        .reserve(grid.width * grid.height * (size_of::<Pixel>() + size_of::<PreviewCoverage>()))?;
+    let _rgb = workspace.reserve(grid.width * grid.height * size_of::<Pixel>())?;
     let mut work = MAX_RASTER_WORK;
     let mut pixels = grid.draw(&paints, None, &mut work, workspace)?;
     // @contract: Preview RGB starts at the top left of the rotated crop.
@@ -1594,8 +1594,9 @@ struct Grid {
 }
 
 struct Raster<'a> {
-    pixels: Vec<Pixel>,
-    coverage: Vec<PreviewCoverage>,
+    pixels: &'a mut [Pixel],
+    coverage: &'a mut [PreviewCoverage],
+    first_row: usize,
     offset: Point,
     workspace: &'a Workspace,
 }
@@ -1613,7 +1614,6 @@ struct RasterOutline<'a> {
     stencil: &'a Stencil,
     fill_rule: Option<bool>,
     ink: Pixel,
-    require_coverage: bool,
 }
 
 enum PreviewPaint<'a> {
@@ -1705,58 +1705,125 @@ impl Grid {
         let mut pixels = Vec::new();
         pixels.try_reserve_exact(count).map_err(|_| Budget)?;
         pixels.resize(count, [255; 3]);
-        let mut coverage = Vec::new();
-        if sample.is_none() {
-            spend(work, count)?;
-            coverage.try_reserve_exact(count).map_err(|_| Budget)?;
-            coverage.resize(count, PreviewCoverage::Clear);
+        if let Some(offset) = sample {
+            self.draw_paints(
+                paints,
+                &mut Raster {
+                    pixels: &mut pixels,
+                    coverage: &mut [],
+                    first_row: 0,
+                    offset,
+                    workspace,
+                },
+                &mut [],
+                work,
+            )?;
+            return Ok(pixels);
         }
-        let mut raster = Raster {
-            pixels,
-            coverage,
-            offset: sample.unwrap_or([PITCH / 2; 2]),
-            workspace,
-        };
+
+        spend(work, count)?;
+        let band_size = self.width * self.height.min(PREVIEW_BAND_ROWS);
+        let glyph_count = paints
+            .iter()
+            .map(|paint| match &paint.kind {
+                PaintKind::Text(text) => text.glyphs.len(),
+                _ => 0,
+            })
+            .sum::<usize>();
+        let _scratch = workspace
+            .reserve(band_size * size_of::<PreviewCoverage>() + glyph_count * size_of::<bool>())?;
+        let mut coverage = Vec::new();
+        coverage.try_reserve_exact(band_size).map_err(|_| Budget)?;
+        coverage.resize(band_size, PreviewCoverage::Clear);
+        let mut covered_glyphs = Vec::new();
+        covered_glyphs
+            .try_reserve_exact(glyph_count)
+            .map_err(|_| Budget)?;
+        covered_glyphs.resize(glyph_count, false);
+        for (band, pixels) in pixels.chunks_mut(band_size).enumerate() {
+            let coverage = &mut coverage[..pixels.len()];
+            coverage.fill(PreviewCoverage::Clear);
+            if band != 0 {
+                spend(work, paints.len())?;
+            }
+            self.draw_paints(
+                paints,
+                &mut Raster {
+                    pixels,
+                    coverage,
+                    first_row: band * PREVIEW_BAND_ROWS,
+                    offset: [PITCH / 2; 2],
+                    workspace,
+                },
+                &mut covered_glyphs,
+                work,
+            )?;
+            spend(work, coverage.len())?;
+            if coverage
+                .iter()
+                .any(|coverage| matches!(coverage, PreviewCoverage::Unresolved))
+            {
+                return Err(UnsupportedProfile);
+            }
+        }
+        if covered_glyphs.contains(&false) {
+            return Err(UnsupportedProfile);
+        }
+        Ok(pixels)
+    }
+
+    fn draw_paints(
+        &self,
+        paints: &[Paint<'_>],
+        raster: &mut Raster<'_>,
+        covered_glyphs: &mut [bool],
+        work: &mut usize,
+    ) -> VerifyResult<()> {
+        let mut covered_glyphs = covered_glyphs.iter_mut();
         for paint in paints {
             match &paint.kind {
                 PaintKind::Text(text) => {
                     let color = text.color.rgb();
                     for glyph in &text.glyphs {
-                        self.paint(
-                            &mut raster,
+                        let covered = self.paint(
+                            raster,
                             glyph.bounds,
                             PreviewPaint::Outline(RasterOutline {
                                 stencil: glyph,
                                 fill_rule: Some(false),
                                 ink: color,
-                                require_coverage: true,
                             }),
                             glyph.edges + 1,
                             work,
                             |p| glyph.hits(p, false).then_some(color),
                         )?;
+                        if let Some(covered_glyph) = covered_glyphs.next() {
+                            *covered_glyph |= covered;
+                        }
                     }
                 }
                 PaintKind::Vector(vector) => {
                     if let (Some((color, evenodd)), Some(stencil)) =
                         (vector.fill, &vector.fill_path)
                     {
-                        self.paint_vector(&mut raster, stencil, (color, Some(evenodd)), work)?;
+                        self.paint_vector(raster, stencil, (color, Some(evenodd)), work)?;
                     }
                     if let Some((color, _)) = vector.stroke {
                         for stencil in &vector.stroke_paths {
-                            self.paint_vector(&mut raster, stencil, (color, None), work)?;
+                            self.paint_vector(raster, stencil, (color, None), work)?;
                         }
                     }
                 }
-                PaintKind::Image(image) => self.paint(
-                    &mut raster,
-                    paint.bounds,
-                    PreviewPaint::Image(image),
-                    image.masks.len() + 1,
-                    work,
-                    |p| image.at(p),
-                )?,
+                PaintKind::Image(image) => {
+                    self.paint(
+                        raster,
+                        paint.bounds,
+                        PreviewPaint::Image(image),
+                        image.masks.len() + 1,
+                        work,
+                        |p| image.at(p),
+                    )?;
+                }
                 PaintKind::Note(_) => {
                     let [l, b, r, t] = paint.bounds;
                     let inset = ((r - l).min(t - b) / 8).min(POINT);
@@ -1765,7 +1832,7 @@ impl Grid {
                     }
                     let interior = [l + inset, b + inset, r - inset, t - inset];
                     self.paint(
-                        &mut raster,
+                        raster,
                         paint.bounds,
                         PreviewPaint::Note(interior),
                         1,
@@ -1781,15 +1848,7 @@ impl Grid {
                 }
             }
         }
-        spend(work, raster.coverage.len())?;
-        if raster
-            .coverage
-            .iter()
-            .any(|coverage| matches!(coverage, PreviewCoverage::Unresolved))
-        {
-            return Err(UnsupportedProfile);
-        }
-        Ok(raster.pixels)
+        Ok(())
     }
 
     fn paint_vector(
@@ -1817,12 +1876,12 @@ impl Grid {
                 stencil,
                 fill_rule,
                 ink: color,
-                require_coverage: false,
             }),
             stencil.edges + 1,
             work,
             |p| stencil.hits(p, fill_rule.unwrap_or(false)).then_some(color),
-        )
+        )?;
+        Ok(())
     }
 
     fn paint(
@@ -1833,7 +1892,7 @@ impl Grid {
         cost: usize,
         work: &mut usize,
         mut value: impl FnMut(Point) -> Option<Pixel>,
-    ) -> VerifyResult<()> {
+    ) -> VerifyResult<bool> {
         let outline = match paint {
             PreviewPaint::Outline(outline) => Some(outline),
             _ => None,
@@ -1845,6 +1904,9 @@ impl Grid {
         let right = ((x.max(u) + PITCH - 1).div_euclid(PITCH)).clamp(0, self.width as i64) as usize;
         let bottom = (y.min(v).div_euclid(PITCH)).clamp(0, self.height as i64) as usize;
         let top = ((y.max(v) + PITCH - 1).div_euclid(PITCH)).clamp(0, self.height as i64) as usize;
+        let last_row = raster.first_row + raster.pixels.len() / self.width;
+        let bottom = bottom.clamp(raster.first_row, last_row);
+        let top = top.clamp(raster.first_row, last_row);
         spend(
             work,
             ((right - left) * (top - bottom))
@@ -1860,7 +1922,7 @@ impl Grid {
                     row as i64 * PITCH + raster.offset[1],
                 ];
                 let point @ [x, y] = self.unrotate(logical);
-                let index = row * self.width + col;
+                let index = (row - raster.first_row) * self.width + col;
                 let pixel = &mut raster.pixels[index];
                 let color = (inside(bounds, point) && inside(self.geometry.crop_box, point))
                     .then(|| value(point))
@@ -1920,13 +1982,7 @@ impl Grid {
                 coverage.paint_partial(pixel, color, outline.map(|outline| outline.ink));
             }
         }
-        if !raster.coverage.is_empty()
-            && outline.is_some_and(|outline| outline.require_coverage)
-            && !has_preview_coverage
-        {
-            return Err(UnsupportedProfile);
-        }
-        Ok(())
+        Ok(has_preview_coverage)
     }
 }
 

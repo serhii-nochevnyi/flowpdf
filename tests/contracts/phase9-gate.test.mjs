@@ -11,12 +11,12 @@ test('inventory covers each planned task once and runs the existing note tracer'
   const counts = [2, 3, 3, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 3, 2, 2, 2]
   const expected = counts.flatMap((count, plan) => Array.from({ length: count },
     (_, index) => `09-${String(plan + 1).padStart(2, '0')}-0${index + 1}`))
-  assert.deepEqual(tasks.flatMap(({ covers }) => covers).sort(), [...expected, '09-60-01'])
+  assert.deepEqual(tasks.flatMap(({ covers }) => covers).sort(), [...expected, '09-27-01', '09-60-01', '09-77-01'])
   assert.deepEqual(tasks.find(({ id }) => id === '09-03-02').argv,
     ['node', 'scripts/check-native-note-tracer.mjs', '--run'])
   assert.equal(tasks.at(-1).lane, 'terminal')
   const inventory = createHash('sha256').update(JSON.stringify(tasks)).digest('hex')
-  assert.equal(inventory, 'd52b937e1c77ab1b24eda9ac861cbfe3a1070e45dfb051f7879b561387fa3e29')
+  assert.equal(inventory, 'c06e06d521eb58e5e4e98afeffa7fe390c07640245fc53c620e39602d440fbc4')
   assert.throws(() => assertManifest(tasks.slice(1)))
   assert.throws(() => assertManifest(tasks.toReversed()))
   assert.throws(() => assertManifest(tasks.map((task) => ({ ...task, argv: [] }))))
@@ -39,7 +39,7 @@ test('only declared product inputs participate in the fingerprint', () => {
   assert.ok(tasks.every(({ argv }) => argv.every((value) => !/\.planning|\.shipyard|install$/.test(value) || value === '--no-install')))
 })
 
-test('local execution builds generated WASM in a clean checkout before requiring the fixture lifecycle', (t) => {
+test('local execution builds WASM in a clean checkout and runs the checksum and fixture suites', (t) => {
   const cwd = mkdtempSync(join(tmpdir(), 'phase9-gate-'))
   t.after(() => rmSync(cwd, { recursive: true, force: true }))
   const calls = []
@@ -61,6 +61,8 @@ test('local execution builds generated WASM in a clean checkout before requiring
     return { status: 0 }
   }, cwd)
   assert.equal(result.status, 'pass')
+  assert.deepEqual(calls.filter((argv) => argv.includes('scripts/verify-wasm-bindgen-tool.test.mjs')),
+    [['node', '--test', 'scripts/verify-wasm-bindgen-tool.test.mjs']])
   assert.ok(calls.some((argv) => argv.includes('tests/contracts/pdf-native-fixtures.test.mjs')))
 })
 
