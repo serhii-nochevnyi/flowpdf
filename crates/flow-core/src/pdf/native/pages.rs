@@ -221,6 +221,7 @@ pub(super) fn restrictions(
     let catalog_values = dict(graph, catalog)?;
     let mut work = graph.remaining_work();
     let named_targets = named_destination_pages(graph, catalog_values, &mut work);
+    let incoming_links = incoming_link_index(graph, &mut work)?;
     let outlines = outline_index(graph, &mut work);
     if matches!(outlines, Err(Budget)) {
         return Err(Budget);
@@ -275,6 +276,7 @@ pub(super) fn restrictions(
                 delete: (tagged
                     || catalog_dependency
                     || !annotations_supported
+                    || incoming_links.cleanup_for(page.object).is_err()
                     || outline_dependency)
                     .then_some(Structure),
             })
@@ -875,13 +877,22 @@ fn copy_annotations(
     Ok(copies)
 }
 
-fn navigation_target(graph: &NativePdfGraph, values: &Dict) -> Option<Ref> {
-    let mut work = graph.remaining_work();
-    let destination = values.get("Dest")?;
-    let dest = graph
-        .resolve_metered(destination, &mut work)
-        .ok()?
-        .as_array()?;
+fn explicit_destination<'a>(
+    graph: &'a NativePdfGraph,
+    values: &'a Dict,
+    work: &mut usize,
+) -> Result<Option<&'a [PdfValue]>, NativeEditError> {
+    let Some(destination) = values.get("Dest") else {
+        return Ok(None);
+    };
+    match graph.resolve_metered(destination, work) {
+        Ok(value) => Ok(value.as_array()),
+        Err(Budget) => Err(Budget),
+        Err(_) => Ok(None),
+    }
+}
+
+fn navigation_target(dest: &[PdfValue]) -> Option<Ref> {
     let mode = dest.get(1)?.as_name()?;
     let length = match mode {
         "Fit" | "FitB" => 2,
@@ -900,16 +911,86 @@ fn navigation_target(graph: &NativePdfGraph, values: &Dict) -> Option<Ref> {
     dest.first()?.as_reference()
 }
 
+type LinkCleanup = BTreeMap<Ref, BTreeSet<Ref>>;
+
+#[derive(Default)]
+struct IncomingLinkIndex {
+    removable: BTreeMap<Ref, LinkCleanup>,
+    blocked: BTreeSet<Ref>,
+}
+
+impl IncomingLinkIndex {
+    fn cleanup_for(&self, page: Ref) -> Result<Option<&LinkCleanup>, NativeEditError> {
+        if self.blocked.contains(&page) {
+            return Err(Unsupported);
+        }
+        Ok(self.removable.get(&page))
+    }
+}
+
+fn incoming_link_index(
+    graph: &NativePdfGraph,
+    work: &mut usize,
+) -> Result<IncomingLinkIndex, NativeEditError> {
+    let mut index = IncomingLinkIndex::default();
+    spend(work, graph.pages.len())?;
+    let page_refs: BTreeSet<_> = graph.pages.iter().copied().collect();
+    for &source in &graph.pages {
+        let Some(annots) = dict(graph, source)?.get("Annots") else {
+            continue;
+        };
+        let items = graph
+            .resolve_metered(annots, work)?
+            .as_array()
+            .ok_or(Malformed)?;
+        spend(work, items.len())?;
+        let array_editable = exclusive_container(graph, source, annots)
+            .is_ok_and(|value| value.as_array().is_some())
+            && items.iter().all(|item| item.as_reference().is_some());
+        for item in items {
+            let values = graph
+                .resolve_metered(item, work)?
+                .as_dictionary()
+                .ok_or(Malformed)?;
+            let Some(subtype) = values.get("Subtype") else {
+                continue;
+            };
+            if graph.resolve_metered(subtype, work)?.as_name() != Some("Link") {
+                continue;
+            }
+            let Some(dest) = explicit_destination(graph, values, work)? else {
+                continue;
+            };
+            let Some(target) = dest.first().and_then(PdfValue::as_reference) else {
+                continue;
+            };
+            if target == source || !page_refs.contains(&target) {
+                continue;
+            }
+            let Some(annot) = item.as_reference().filter(|&annot| {
+                array_editable
+                    && navigation_target(dest).is_some()
+                    && matches!(annotation_profile(graph, source, annot), Ok(None))
+                    && exclusive_array_member(graph, source, annots, annot, None).is_ok()
+            }) else {
+                index.blocked.insert(target);
+                continue;
+            };
+            let drops = index.removable.entry(target).or_default().entry(source);
+            if !drops.or_default().insert(annot) {
+                index.blocked.insert(target);
+            }
+        }
+    }
+    Ok(index)
+}
+
 fn remove_page_dependencies(
     graph: &mut NativePdfGraph,
     page: Ref,
-    order: &[Ref],
 ) -> Result<BTreeSet<Ref>, NativeEditError> {
     let mut removed = BTreeSet::from([page]);
     let mut fields_to_remove = BTreeSet::new();
-    let mut links = Vec::new();
-    let budget = graph.remaining_work();
-    let mut work = budget;
     let page_annotations = annotations(graph, page)?;
     graph.charge_page_work(
         page_annotations
@@ -925,47 +1006,20 @@ fn remove_page_dependencies(
             removed.insert(field);
         }
     }
-    for &other in order.iter().filter(|&&other| other != page) {
-        // @contract: Unrelated annotation profiles can remain untouched.
-        let Some(entry) = dict(graph, other)?.get("Annots") else {
-            continue;
-        };
-        let items = graph
-            .resolve_metered(entry, &mut work)?
-            .as_array()
-            .ok_or(Malformed)?;
-        spend(&mut work, items.len())?;
-        if !items.iter().any(|item| {
-            item.as_reference().is_some_and(|annot| {
-                dict(graph, annot).is_ok_and(|values| {
-                    values.get("Subtype").and_then(PdfValue::as_name) == Some("Link")
-                        && navigation_target(graph, values) == Some(page)
-                })
-            })
-        }) {
-            continue;
-        }
-        let mut annots = annotations(graph, other)?;
-        let mut keep = Vec::new();
-        for annot in annots.drain(..) {
-            let values = dict(graph, annot)?;
-            if values.get("Subtype").and_then(PdfValue::as_name) == Some("Link")
-                && navigation_target(graph, values) == Some(page)
-            {
-                annotation_ownership(graph, other, annot)?;
-                if !removed.insert(annot) {
-                    return Err(Unsupported);
-                }
-            } else {
-                keep.push(annot);
-            }
-        }
-        links.push((other, keep));
-    }
+    let budget = graph.remaining_work();
+    let mut work = budget;
+    let links = incoming_link_index(graph, &mut work)?;
+    let cleanup = links.cleanup_for(page)?;
     graph.charge_page_work(budget - work)?;
-    for (other, keep) in links {
-        graph.reserve_page_copy(other)?;
-        dict_mut(graph, other)?.insert("Annots".into(), refs(keep));
+    if let Some(cleanup) = cleanup {
+        for (&source, drops) in cleanup {
+            let mut keep = annotations(graph, source)?;
+            graph.charge_page_work(keep.len())?;
+            keep.retain(|annot| !drops.contains(annot));
+            graph.reserve_page_copy(source)?;
+            dict_mut(graph, source)?.insert("Annots".into(), refs(keep));
+            removed.extend(drops);
+        }
     }
     if !fields_to_remove.is_empty() {
         let (form, mut fields) = form_fields(graph)?;
@@ -1085,7 +1139,7 @@ pub(super) fn stage(
             if order.len() == 1 {
                 return Err(NativeSessionError::FinalPage);
             }
-            removed = remove_page_dependencies(graph, page, &order)?;
+            removed = remove_page_dependencies(graph, page)?;
             let mut children = kids(graph, parent)?;
             children.retain(|&child| child != page);
             replace_kids(graph, parent, children)?;
@@ -1194,7 +1248,9 @@ fn outline_index(
             }
             current = values.get("Next").and_then(PdfValue::as_reference);
             let branch = values.contains_key("First") || values.contains_key("Last");
-            if let Some(page) = navigation_target(graph, values) {
+            if let Some(page) =
+                explicit_destination(graph, values, work)?.and_then(navigation_target)
+            {
                 let mut owners = BTreeSet::new();
                 owners.extend(previous);
                 owners.extend(current);
