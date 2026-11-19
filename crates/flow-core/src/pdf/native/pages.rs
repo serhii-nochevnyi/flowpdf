@@ -932,6 +932,12 @@ fn incoming_link_index(
     graph: &NativePdfGraph,
     work: &mut usize,
 ) -> Result<IncomingLinkIndex, NativeEditError> {
+    let mut trailer_refs = Vec::new();
+    let mut remaining = graph.remaining_retained();
+    for value in graph.trailer.values() {
+        collect_refs(value, &mut trailer_refs, work, &mut remaining)?;
+    }
+    let trailer_refs: BTreeSet<_> = trailer_refs.into_iter().collect();
     let mut index = IncomingLinkIndex::default();
     spend(work, graph.pages.len())?;
     let page_refs: BTreeSet<_> = graph.pages.iter().copied().collect();
@@ -944,8 +950,11 @@ fn incoming_link_index(
             .as_array()
             .ok_or(Malformed)?;
         spend(work, items.len())?;
-        let array_editable = exclusive_container(graph, source, annots)
-            .is_ok_and(|value| value.as_array().is_some())
+        let array_editable = annots
+            .as_reference()
+            .is_none_or(|reference| !trailer_refs.contains(&reference))
+            && exclusive_container(graph, source, annots)
+                .is_ok_and(|value| value.as_array().is_some())
             && items.iter().all(|item| item.as_reference().is_some());
         for item in items {
             let values = graph
@@ -969,6 +978,7 @@ fn incoming_link_index(
             }
             let Some(annot) = item.as_reference().filter(|&annot| {
                 array_editable
+                    && !trailer_refs.contains(&annot)
                     && navigation_target(dest).is_some()
                     && matches!(annotation_profile(graph, source, annot), Ok(None))
                     && exclusive_array_member(graph, source, annots, annot, None).is_ok()
