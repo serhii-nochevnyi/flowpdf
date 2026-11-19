@@ -3,6 +3,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use super::super::reader::{PdfObjectRef, PdfValue};
 use super::graph::{NativeEditError, NativePdfGraph, collect_refs, spend};
 
+fn hex_digits(byte: u8) -> [u8; 2] {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    [HEX[usize::from(byte >> 4)], HEX[usize::from(byte & 0x0f)]]
+}
+
 struct Output {
     bytes: Vec<u8>,
     limit: usize,
@@ -19,9 +24,13 @@ impl Output {
         if size > self.limit {
             return Err(NativeEditError::Budget);
         }
-        self.bytes
-            .try_reserve_exact(bytes.len())
-            .map_err(|_| NativeEditError::Budget)?;
+        let capacity = self.bytes.capacity();
+        if size > capacity {
+            let target = capacity.saturating_mul(2).min(self.limit).max(size);
+            self.bytes
+                .try_reserve_exact(target - self.bytes.len())
+                .map_err(|_| NativeEditError::Budget)?;
+        }
         self.bytes.extend_from_slice(bytes);
         Ok(())
     }
@@ -34,7 +43,8 @@ impl Output {
             if (33..=126).contains(&byte) && !b"()<>[]{}/%#".contains(&byte) {
                 self.append(&[byte])?;
             } else {
-                self.append(format!("#{byte:02X}").as_bytes())?;
+                let [upper, lower] = hex_digits(byte);
+                self.append(&[b'#', upper, lower])?;
             }
         }
         Ok(())
@@ -78,8 +88,8 @@ impl Output {
             PdfValue::Name(name) => self.name(name),
             PdfValue::String(bytes) => {
                 self.append(b"<")?;
-                for byte in bytes {
-                    self.append(format!("{byte:02X}").as_bytes())?;
+                for &byte in bytes {
+                    self.append(&hex_digits(byte))?;
                 }
                 self.append(b">")
             }
@@ -194,6 +204,31 @@ mod tests {
     use super::super::{NativeEditLimits, PlainTextNote};
     use super::*;
 
+    #[test]
+    fn output_buffer_grows_geometrically_up_to_limit() {
+        let limit = 257;
+        let mut output = Output {
+            bytes: Vec::new(),
+            limit,
+            work: 0,
+        };
+        let mut growths = 0;
+        for _ in 0..limit - 1 {
+            let capacity = output.bytes.capacity();
+            output.append(b"x").unwrap();
+            growths += usize::from(output.bytes.capacity() != capacity);
+            assert!(output.bytes.capacity() <= limit);
+        }
+        assert!(growths <= 10);
+        let capacity = output.bytes.capacity();
+        assert_eq!(output.append(b"yz"), Err(NativeEditError::Budget));
+        assert_eq!(output.bytes.capacity(), capacity);
+        assert_eq!(output.bytes, vec![b'x'; limit - 1]);
+        output.append(b"x").unwrap();
+        assert!(output.bytes.capacity() <= limit);
+        assert_eq!(output.bytes, vec![b'x'; limit]);
+    }
+
     fn independent(streams: &[(&[u8], &str)], trailer: &str) -> Vec<u8> {
         let mut bytes = b"%PDF-1.4\r\n".to_vec();
         let mut objects = vec![
@@ -262,6 +297,13 @@ mod tests {
             })
             .unwrap();
         let output = graph.rewrite().unwrap();
+        let canonical_values = b"/N#20#FF <00FF>";
+        assert!(
+            output
+                .windows(canonical_values.len())
+                .any(|window| window == canonical_values)
+        );
+        assert_eq!(output, graph.rewrite().unwrap());
         let reopened = NativePdfGraph::open(&output, NativeEditLimits::default()).unwrap();
         let values = reopened.trailer["Custom"].as_array().unwrap();
         assert!(matches!(values[0], PdfValue::Boolean(true)));
