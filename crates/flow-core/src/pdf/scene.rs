@@ -347,6 +347,20 @@ impl Matrix {
         f: LayoutUnit::from_raw(0),
     };
 
+    fn from_pdf_array(value: &PdfValue) -> Result<Self, PdfReadError> {
+        let [a, b, c, d, e, f] = value.as_array().ok_or(PdfReadError::Syntax)? else {
+            return Err(PdfReadError::Syntax);
+        };
+        Ok(Self {
+            a: a.as_number().ok_or(PdfReadError::Syntax)?,
+            b: b.as_number().ok_or(PdfReadError::Syntax)?,
+            c: c.as_number().ok_or(PdfReadError::Syntax)?,
+            d: d.as_number().ok_or(PdfReadError::Syntax)?,
+            e: e.as_number().ok_or(PdfReadError::Syntax)?,
+            f: f.as_number().ok_or(PdfReadError::Syntax)?,
+        })
+    }
+
     fn multiply(self, other: Self) -> Result<Self, PdfReadError> {
         Ok(Self {
             a: mul(self.a, other.a)?.checked_add(mul(self.c, other.b)?)?,
@@ -1129,8 +1143,25 @@ impl<'a> SceneBuilder<'a> {
                     None | Some(PdfValue::Null) => resources,
                     Some(value) => Some(value),
                 };
+                let form_ctm = match dictionary.get("Matrix") {
+                    None | Some(PdfValue::Null) => self.state.ctm,
+                    Some(value) => {
+                        let resolved;
+                        let value = if let PdfValue::Reference(reference) = value {
+                            resolved = self.reader.object(*reference)?;
+                            &resolved
+                        } else {
+                            value
+                        };
+                        match value {
+                            PdfValue::Null => self.state.ctm,
+                            value => self.state.ctm.multiply(Matrix::from_pdf_array(value)?)?,
+                        }
+                    }
+                };
                 let caller_state = self.state.clone();
                 let caller_stack = std::mem::take(&mut self.state_stack);
+                self.state.ctm = form_ctm;
                 self.invocation_path.push(provenance.stream_offset);
                 let result =
                     self.interpret_stream(&stream, xobject_ref, depth + 1, effective_resources);

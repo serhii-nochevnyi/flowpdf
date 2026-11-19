@@ -260,11 +260,11 @@ fn nested_shared_image_invocations_are_isolated() {
 #[test]
 fn scene_reads_nested_image_replacement_and_unchanged_sibling() {
     let outer = stream(
-        "/Type /XObject /Subtype /Form /BBox [0 0 40 40] /Resources 9 0 R",
+        "/Type /XObject /Subtype /Form /BBox [0 0 40 40] /Matrix [2 0 0 1 0 0] /Resources 9 0 R",
         b"/Inner Do 1 0 0 1 5 0 cm",
     );
     let inner = stream(
-        "/Type /XObject /Subtype /Form /BBox [0 0 40 40] /Resources << /XObject << /I 8 0 R >> >>",
+        "/Type /XObject /Subtype /Form /BBox [0 0 40 40] /Matrix [1 0 0 1 4 3] /Resources << /XObject << /I 8 0 R >> >>",
         b"q 10 0 0 10 10 10 cm /I Do Q",
     );
     let pixels = miniz_oxide::deflate::compress_to_vec_zlib(&[7], 6);
@@ -318,8 +318,9 @@ fn scene_reads_nested_image_replacement_and_unchanged_sibling() {
     assert_eq!(images[0].data_hex, hex);
     assert_eq!(images[1].filter, "FlateDecode");
     assert_eq!(images[1].data_hex, "07");
-    assert_eq!(images[0].rect.x.raw(), 640);
-    assert_eq!(images[0].rect.width.raw(), 640);
+    assert_eq!(images[0].rect.x.raw(), 1_792);
+    assert_eq!(images[0].rect.y.raw(), 832);
+    assert_eq!(images[0].rect.width.raw(), 1_280);
     assert_eq!(images[0].rect.height.raw(), 640);
     assert_eq!((images[1].width, images[1].height), (1, 1));
     let sibling = images[1].rect;
@@ -330,7 +331,7 @@ fn scene_reads_nested_image_replacement_and_unchanged_sibling() {
             sibling.width.raw(),
             sibling.height.raw()
         ),
-        (4_480, 640, 640, 640)
+        (5_632, 832, 1_280, 640)
     );
 }
 
