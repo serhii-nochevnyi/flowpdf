@@ -188,8 +188,9 @@ for (const locale of ['uk', 'en'] satisfies NativePdfLocale[]) {
 
       await navigate('navigation.next')
       await expect.element(text(secondReadback)).toBeVisible()
-      await expect.element(text(locale === 'uk' ? 'Текст вилучено не повністю. Показано лише розпізнаний текст.'
-        : 'Text extraction was incomplete. Only recognized text is shown.')).toBeVisible()
+      const limitedText = locale === 'uk' ? 'Текст вилучено не повністю. Показано лише розпізнаний текст.'
+        : 'Text extraction was incomplete. Only recognized text is shown.'
+      await expect.element(text(limitedText)).toBeVisible()
       expect(post.mock.calls.some(([message]) => {
         const request = message as PdfReaderWorkerInboundMessage
         return request.type === 'cancel' && request.requestId === firstRead?.request.requestId
@@ -202,7 +203,7 @@ for (const locale of ['uk', 'en'] satisfies NativePdfLocale[]) {
       expect(text(secondReadback).query()).toBeNull()
       expect(workspace.getByRole('region', { name: t('text.title'), exact: true }).element()
         .querySelector('[id$="-text-capability"]')).not.toBeNull()
-      await expect.element(text(t('projection.partial'))).toBeVisible()
+      await expect.element(text(limitedText)).toBeVisible()
 
       const addNote = button('note.add')
       const edited = button('download.edited')
