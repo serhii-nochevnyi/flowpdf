@@ -224,6 +224,106 @@ fn final_page_and_external_dependencies_refuse_without_changing_output() {
 }
 
 #[test]
+fn scaled_page_allows_safe_structural_edits_without_editable_geometry() {
+    let bytes = build_pdf(&[
+        (0, "<< /Type /Catalog /Pages 2 0 R >>"),
+        (
+            0,
+            "<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 /MediaBox [0 0 300 500] /Resources <<>> >>",
+        ),
+        (0, "<< /Type /Page /Parent 2 0 R /UserUnit 2 >>"),
+        (0, "<< /Type /Page /Parent 2 0 R >>"),
+    ]);
+    let mut session =
+        NativePdfSession::open_scoped(&bytes, NativeEditLimits::default(), [3; 16]).unwrap();
+    let prior = session.snapshot().clone();
+    assert_eq!(prior.scene.pages[0].geometry, None);
+    let target = serde_json::json!({"page": 0, "stableId": prior.page_state.order[0]});
+    for intent in [
+        serde_json::json!({"kind": "rotatePage", "target": target, "degrees": 90}),
+        serde_json::json!({"kind": "insertBlankPage", "target": target, "side": "after"}),
+        serde_json::json!({"kind": "duplicatePage", "target": target}),
+    ] {
+        let edit = serde_json::from_value(intent).unwrap();
+        assert_eq!(
+            session
+                .apply_page(prior.binding, 1, &edit)
+                .unwrap_err()
+                .code(),
+            "FLOW_PDF_NATIVE_TARGET_UNAVAILABLE"
+        );
+        assert_eq!(session.output_bytes(), bytes);
+        assert_eq!(session.snapshot().binding, prior.binding);
+    }
+
+    let reorder = serde_json::from_value(
+        serde_json::json!({"kind": "reorderPage", "target": target, "position": 1}),
+    )
+    .unwrap();
+    session.apply_page(prior.binding, 1, &reorder).unwrap();
+    let reordered = session.snapshot();
+    assert_eq!(
+        reordered.page_state.order,
+        [prior.page_state.order[1], prior.page_state.order[0]]
+    );
+    assert_eq!(
+        reordered.scene.pages[0].geometry,
+        prior.scene.pages[1].geometry
+    );
+    assert_eq!(reordered.scene.pages[1].geometry, None);
+    assert!(String::from_utf8_lossy(session.output_bytes()).contains("/UserUnit 2"));
+
+    let delete = command("deletePage", 1, reordered);
+    session.apply_page(reordered.binding, 2, &delete).unwrap();
+    assert_eq!(
+        session.snapshot().page_state.order,
+        [prior.page_state.order[1]]
+    );
+    assert_eq!(
+        session.snapshot().scene.pages[0].geometry,
+        prior.scene.pages[1].geometry
+    );
+    assert!(!session.snapshot().page_state.can_delete);
+}
+
+#[test]
+fn scaled_page_cannot_move_across_parents_without_geometry_verification() {
+    let bytes = build_pdf(&[
+        (0, "<< /Type /Catalog /Pages 2 0 R >>"),
+        (
+            0,
+            "<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 /MediaBox [0 0 300 500] /Resources <<>> >>",
+        ),
+        (0, "<< /Type /Pages /Parent 2 0 R /Kids [5 0 R] /Count 1 >>"),
+        (
+            0,
+            "<< /Type /Pages /Parent 2 0 R /Kids [6 0 R] /Count 1 /Rotate 90 >>",
+        ),
+        (0, "<< /Type /Page /Parent 3 0 R /UserUnit 2 >>"),
+        (0, "<< /Type /Page /Parent 4 0 R >>"),
+    ]);
+    let mut session =
+        NativePdfSession::open_scoped(&bytes, NativeEditLimits::default(), [3; 16]).unwrap();
+    let prior = session.snapshot().clone();
+    // Moving the ordinary page also moves the scaled page into a different parent.
+    let reorder = serde_json::from_value(serde_json::json!({
+        "kind": "reorderPage",
+        "target": {"page": 1, "stableId": prior.page_state.order[1]},
+        "position": 0
+    }))
+    .unwrap();
+    assert_eq!(
+        session
+            .apply_page(prior.binding, 1, &reorder)
+            .unwrap_err()
+            .code(),
+        "FLOW_PDF_NATIVE_UNSUPPORTED"
+    );
+    assert_eq!(session.output_bytes(), bytes);
+    assert_eq!(session.snapshot().page_state, prior.page_state);
+}
+
+#[test]
 fn print_page_ranges_refuse_structural_edits_but_allow_rotation() {
     for preferences in ["<< /PrintPageRange [1 1] >>", "5 0 R"] {
         let catalog = format!("<< /Type /Catalog /Pages 2 0 R /ViewerPreferences {preferences} >>");
