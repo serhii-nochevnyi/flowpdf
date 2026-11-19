@@ -19,6 +19,7 @@ import {
   type NativePdfNoteScene,
   type NativePdfObjectCommand,
   type NativePdfPageCommand,
+  type NativePdfPagePreview,
   type NativePdfFieldCommand,
   type NativePdfFieldView,
   type NativePdfRequest,
@@ -97,16 +98,18 @@ export function installNativePdfWorker(scope: NativePdfWorkerScope, startup: Pro
         const serialized = JSON.stringify(request)
         const limit = request.operation === 'open' ? NATIVE_PDF_LIMITS.requestBytes : NATIVE_PDF_LIMITS.commandBytes
         if (!fitsNativeJson(serialized, limit)) throw new NativePdfWorkerError(REQUEST_INVALID)
-        const json = wasm[`native_pdf_${request.operation}`](serialized)
+        const execute = wasm[`native_pdf_${request.operation}`]
+        if (execute === undefined) throw new NativePdfWorkerError(RESPONSE_INVALID)
+        const json = execute.call(wasm, serialized)
         verifyReply(request, json, (value) => wasm.verify_native_pdf_response(value))
         response = { dispatchId, type: 'response', json }
       } catch (error: unknown) {
-        if (!(error instanceof NativePdfWorkerError)) {
+        if (!(error instanceof NativePdfWorkerError) && request.operation !== 'preview') {
           failed = true
           scope.postMessage({ dispatchId, type: 'failed', code: WORKER_FAILED })
           return
         }
-        const code = error.code === REQUEST_INVALID ? REQUEST_INVALID : RESPONSE_INVALID
+        const code = error instanceof NativePdfWorkerError && error.code === REQUEST_INVALID ? REQUEST_INVALID : RESPONSE_INVALID
         response = { dispatchId, type: 'failed', code }
       }
       scope.postMessage(response)
@@ -669,6 +672,29 @@ export class NativePdfEditCoordinator {
     }
   }
 
+  async previewPage(pageId: number, signal: AbortSignal): Promise<NativePdfPagePreview | null> {
+    const accepted = this.state.accepted
+    if (!accepted || signal.aborted || this.state.phase !== 'ready') return null
+    const index = accepted.pageState.order.indexOf(pageId)
+    const geometry = accepted.scene.pages[index]?.geometry
+    if (!geometry) return null
+    const request = freezeNativeDto({
+      ...this.boundRequest('preview', this.nextRequestId++, accepted),
+      outputHash: accepted.outputHash, pageId,
+    })
+    try {
+      const reply = await this.send(request, signal)
+      if (signal.aborted || this.state.accepted !== accepted
+        || reply.status !== 'preview' || reply.preview.rotation !== geometry.rotation) return null
+      const [l, b, r, t] = reply.preview.cropBox
+      // @contract: Note geometry rounds inward to whole points within the exact raster crop.
+      const bounds = [Math.ceil(l / 1000), Math.ceil(b / 1000), Math.floor(r / 1000), Math.floor(t / 1000)]
+      return sameNativeBytes(bounds, geometry.bounds) ? reply.preview : null
+    } catch {
+      return null
+    }
+  }
+
   close(): Promise<void> {
     if (this.closeFlight !== null) return this.closeFlight
     if (this.state.phase === 'idle' || this.state.phase === 'invalidated') return Promise.resolve()
@@ -794,7 +820,7 @@ export class NativePdfEditCoordinator {
     }
   }
 
-  private boundRequest<O extends 'close' | 'snapshot' | 'command' | 'redaction'>(operation: O, requestId: number, snapshot: NativePdfSnapshot) {
+  private boundRequest<O extends 'close' | 'snapshot' | 'command' | 'redaction' | 'preview'>(operation: O, requestId: number, snapshot: NativePdfSnapshot) {
     return { protocolVersion: NATIVE_PDF_PROTOCOL_VERSION, operation, requestId,
       binding: snapshot.binding, originStoreHash: snapshot.originStoreHash } as const
   }

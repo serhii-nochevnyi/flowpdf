@@ -15,6 +15,7 @@ import {
   type NativePdfFieldCommand, type NativePdfFieldView,
   type NativePdfRedactionCandidate, type NativePdfRedactionMarkAction,
   type NativePdfRedactionResult, type NativePdfRedactionVerification,
+  type NativePdfPagePreview,
 } from './pdf-native-edit-protocol.js'
 import {
   confirmedNativeReplacement, NativePdfWorkerError, type NativePdfEditCoordinator,
@@ -27,6 +28,7 @@ type Note = Extract<NativePdfAnnotation, { kind: 'plainNote' }>
 type Coordinator = Pick<NativePdfEditCoordinator,
   'open' | 'project' | 'reconcile' | 'snapshot' | 'subscribe' | 'dispose' | 'markRedaction' | 'applyRedaction'> & {
   command(command: NativePdfSessionCommand): Promise<NativePdfSnapshot>
+  previewPage?: NativePdfEditCoordinator['previewPage']
 }
 type Message = readonly [NativePdfMessage, Readonly<Record<string, string | number>>?]
 type Size = readonly [number, number]
@@ -727,6 +729,11 @@ export function PdfNativeEditPanel({
   const [movePosition, setMovePosition] = useState<number | null>(null)
   const [zoom, setZoom] = useState(0)
   const [draft, setDraft] = useState<Draft | null>(null)
+  const [previewRead, setPreviewRead] = useState<{
+    readonly snapshot: NativePdfSnapshot; readonly pageId: number; readonly raster: NativePdfPagePreview | null
+  } | null>(null)
+  const [paintedPreview, setPaintedPreview] = useState<NativePdfPagePreview | null>(null)
+  const previewCanvas = useRef<HTMLCanvasElement>(null)
   const [textDrafts, setTextDrafts] = useState<readonly TextDraft[]>([])
   const [objectId, setObjectId] = useState<readonly number[] | null>(null)
   const [objectProfile, setObjectProfile] = useState<ObjectProfile>('image')
@@ -840,14 +847,22 @@ export function PdfNativeEditPanel({
   const needsReconcile = service?.phase === 'reconciliationRequired'
   const revision = snapshot?.binding.revision ?? 0
   const outputHash = snapshot ? nativeBytesHex(Uint8Array.from(snapshot.outputHash)) : ''
+  const previewCoordinator = snapshot && service?.accepted === snapshot && !invalidated
+    && typeof coordinator?.previewPage === 'function' ? coordinator : null
+  const currentPreview = previewCoordinator && previewRead && previewRead.snapshot === snapshot
+    && previewRead.pageId === stableId ? previewRead : null
+  const raster = currentPreview?.raster ?? null
+  const previewVerified = raster !== null && raster === paintedPreview
+  const previewPending = !!(previewCoordinator && geometry && stableId !== undefined && !currentPreview)
   const redactionAvailable = !!coordinator && typeof coordinator.markRedaction === 'function'
     && typeof coordinator.applyRedaction === 'function' && pageState !== undefined
-    && service?.accepted === snapshot && snapshot?.redactionAdmission === 'supported'
+    && !invalidated && service?.accepted === snapshot && snapshot?.redactionAdmission === 'supported'
   const markRect = geometry && nativeObjectBounds(redactionCoordinates, geometry.bounds)
   const pageMarks = marks.filter((mark) => mark.pageId === stableId)
   const duplicateMark = markRect !== null && pageMarks.some((mark) => sameNativeBytes(mark.rect, markRect))
-  const markInputs = redactionAvailable && sessionReady && !navigationBlocked
+  const markInputs = redactionAvailable && previewVerified && sessionReady && !navigationBlocked
   const markControls = markInputs && !composing
+  const markCleanup = redactionAvailable && sessionReady && !navigationBlocked && !composing
   const markError = markRect === null && redactionCoordinates.some(Boolean) ? 'redaction.geometry.invalid'
     : duplicateMark ? 'redaction.geometry.duplicate' : null
   const attempt = pendingRedaction.current
@@ -870,6 +885,38 @@ export function PdfNativeEditPanel({
   const noteLimit = t('limit.bytes', { count: NATIVE_PDF_LIMITS.noteBytes })
   const pdfLimit = t('limit.bytes', { count: NATIVE_PDF_LIMITS.pdfBytes })
   const position = page === undefined ? '' : t('navigation.position', { page: pageIndex + 1, total: pages.length })
+
+  useEffect(() => {
+    if (!previewCoordinator?.previewPage || !snapshot || stableId === undefined || !geometry) return
+    const controller = new AbortController()
+    const settle = (raster: NativePdfPagePreview | null) => {
+      if (!controller.signal.aborted) setPreviewRead({ snapshot, pageId: stableId, raster })
+    }
+    void previewCoordinator.previewPage(stableId, controller.signal).then(settle, () => settle(null))
+    return () => controller.abort()
+  }, [previewCoordinator, snapshot, stableId, geometry])
+
+  useLayoutEffect(() => {
+    const canvas = previewCanvas.current
+    if (!raster || !canvas) return
+    try {
+      const context = canvas.getContext('2d')
+      if (!context) return
+      const image = context.createImageData(raster.width, raster.height)
+      const rgb = nativeHexBytes(raster.rgbHex)
+      for (let source = 0, target = 0; source < rgb.length; source += 3, target += 4) {
+        image.data[target] = rgb[source]!
+        image.data[target + 1] = rgb[source + 1]!
+        image.data[target + 2] = rgb[source + 2]!
+        image.data[target + 3] = 255
+      }
+      context.putImageData(image, 0, 0)
+      setPaintedPreview(raster)
+    } catch {
+      setPaintedPreview(null)
+    }
+    return () => setPaintedPreview(null)
+  }, [raster])
 
   useLayoutEffect(() => {
     const element = dialog.current
@@ -988,7 +1035,8 @@ export function PdfNativeEditPanel({
   }
 
   async function runRedaction(action: RedactionAction, invoker: HTMLElement | null) {
-    if (!coordinator || !snapshot || !markControls || locked.current || composition.current || navigationRequest.current) return
+    const allowed = action.kind === 'addMark' || action.kind === 'stage' ? markControls : markCleanup
+    if (!coordinator || !snapshot || !allowed || locked.current || composition.current || navigationRequest.current) return
     const live = coordinator.snapshot()
     if (live.phase !== 'ready' || live.accepted !== snapshot) return
     const nextMarks = action.kind === 'addMark' ? [...marks, { pageId: action.pageId, rect: action.rect }]
@@ -1168,13 +1216,17 @@ export function PdfNativeEditPanel({
     }])
   }
 
-  function rememberPageDrafts(keepNoteSelection = false) {
+  function rememberNoteDraft(keepNoteSelection = false) {
     if (draft && geometry) {
       const original = selected ? draftFrom(selected, geometry) : { contents: '', x: '0', y: '0' }
       if (keepNoteSelection || draft.contents !== original.contents || draft.x !== original.x || draft.y !== original.y) {
         recoveredDrafts.current.remember(pageId, draft)
       }
     }
+  }
+
+  function rememberPageDrafts(keepNoteSelection = false) {
+    rememberNoteDraft(keepNoteSelection)
     const profile = selectedObject?.kind === 'graphic' ? selectedObject.profile : 'image'
     const initialCoordinates = selectedObject && geometry ? objectCoordinates(selectedObject.bounds, geometry.bounds) : ['', '', '', '']
     const edited = objectForm && (asset || objectProfile !== profile || color !== '#334155' || stroke !== '1'
@@ -1253,6 +1305,7 @@ export function PdfNativeEditPanel({
 
   function chooseNote(note: Note) {
     if (geometry === null || locked.current || navigationRequest.current) return
+    rememberNoteDraft()
     setComposition(false)
     setDraft(recoveredDrafts.current.get(pageId, note.id) ?? draftFrom(note, geometry))
     focusAfterRender.current = `${id}-contents`
@@ -1260,6 +1313,7 @@ export function PdfNativeEditPanel({
 
   function startNote() {
     if (!canAdd || locked.current || navigationRequest.current) return
+    rememberNoteDraft()
     setComposition(false)
     setDraft(recoveredDrafts.current.get(pageId, null) ?? { note: null, contents: '', x: '0', y: '0' })
     focusAfterRender.current = `${id}-contents`
@@ -1907,8 +1961,12 @@ export function PdfNativeEditPanel({
           {page && <div className="native-stack">
             <p>{position}</p>
             <div className="native-viewport" role="region" aria-label={t('viewport.label')} tabIndex={0}>
-              {geometry && <NativePagePaper geometry={geometry} zoom={zoom} notes={notes} marks={pageMarks}
-                selected={selected?.id} onSelect={chooseNote} />}
+              {geometry && <NativePagePaper geometry={geometry} zoom={zoom} notes={notes}
+                marks={previewVerified ? pageMarks : []} selected={selected?.id} onSelect={chooseNote}
+                raster={raster} canvasRef={previewCanvas} previewVerified={previewVerified} revision={revision} outputHash={outputHash} />}
+            </div>
+            <div aria-live="polite">
+              {!previewVerified && <p className="native-help">{t(previewPending ? 'viewport.loading' : 'viewport.unavailable')}</p>}
             </div>
           </div>}
           {snapshot && <section className="native-stack" aria-labelledby={`${id}-redaction`}>
@@ -1923,7 +1981,7 @@ export function PdfNativeEditPanel({
                 <p>{t('redaction.markSummary', markSummary)}</p>
                 <p className="native-help">{t('redaction.editLock')}</p>
               </> : !currentRedacted && <p>{t('redaction.empty')}</p>}
-              {geometry && stableId !== undefined ? <form className="native-stack" onSubmit={(event) => {
+              {geometry && stableId !== undefined && previewVerified && <form className="native-stack" onSubmit={(event) => {
                 event.preventDefault()
                 if (!markRect || duplicateMark) return
                 void runRedaction({ kind: 'addMark', pageId: stableId, rect: markRect }, document.getElementById(`${id}-redaction-add`))
@@ -1947,7 +2005,7 @@ export function PdfNativeEditPanel({
                   <div className="native-actions"><button type="submit" id={`${id}-redaction-add`} disabled={!markControls || !markRect || duplicateMark}>
                     {t('redaction.add')}</button></div>
                 </fieldset>
-              </form> : <p>{t('redaction.geometry.unavailable')}</p>}
+              </form>}
               {geometry && pageMarks.length > 0 && <ul className="native-note-list" aria-label={t('redaction.pageMarks')}>
                 {pageMarks.map((mark, index) => {
                   const [l, b, r, top] = mark.rect
@@ -1956,15 +2014,15 @@ export function PdfNativeEditPanel({
                   const markId = `${id}-redaction-mark-${index}`
                   return <li key={mark.rect.join(',')} className="native-stack">
                     <span id={markId}>{t('redaction.markGeometry', parameters)}</span>
-                    <button type="button" disabled={!markControls} aria-describedby={markId} onClick={(event) =>
+                    <button type="button" disabled={!markCleanup} aria-describedby={markId} onClick={(event) =>
                       void runRedaction({ kind: 'removeMark', ...mark }, event.currentTarget)}>{t('redaction.removeMark')}</button>
                   </li>
                 })}
               </ul>}
               {marks.length > 0 && <div className="native-actions">
-                {(['clearMarks', 'stage'] as const).map((action) => <button key={action} type="button"
+                {(['clearMarks', 'stage'] as const).filter((action) => action === 'clearMarks' || previewVerified).map((action) => <button key={action} type="button"
                   id={`${id}-redaction-${action}`} className={action === 'stage' ? 'native-destructive' : undefined}
-                  disabled={!markControls} onClick={(event) => {
+                  disabled={action === 'stage' ? !markControls : !markCleanup} onClick={(event) => {
                     removeTrigger.current = event.currentTarget
                     setConfirm({ snapshot, redaction: action, marks })
                   }}>{t(action === 'stage' ? 'redaction.apply' : 'redaction.clear')}</button>)}
@@ -2376,11 +2434,13 @@ export function PdfNativeEditPanel({
           <div className="native-actions">
             <button type="button" ref={cancelConfirmation} onClick={() => setConfirm(null)}>{t(redactionConfirmation ? 'redaction.keep'
               : deletingPage ? 'page.keep' : removingField ? 'field.keep' : 'note.remove.cancel')}</button>
-            <button type="button" className="native-destructive" onClick={() => {
+            <button type="button" className="native-destructive"
+              disabled={redactionConfirmation?.redaction === 'stage' && !markControls} onClick={() => {
               if (confirm === null) return
               setConfirm(null)
               if ('redaction' in confirm) {
-                if (confirm.snapshot !== snapshot || confirm.marks !== marks || !markControls || marks.length === 0) {
+                const allowed = confirm.redaction === 'stage' ? markControls : markCleanup
+                if (confirm.snapshot !== snapshot || confirm.marks !== marks || !allowed || marks.length === 0) {
                   setError(['error.stale'])
                   return
                 }
@@ -2442,26 +2502,43 @@ export function PdfNativeEditPanel({
   )
 }
 
-function NativePagePaper({ geometry, notes, marks, selected, onSelect, zoom }: {
+function NativePagePaper({ geometry, notes, marks, selected, onSelect, zoom, raster, canvasRef, previewVerified, revision, outputHash }: {
   readonly geometry: Geometry
   readonly notes: readonly Note[]
   readonly marks: readonly RedactionMark[]
   readonly selected: number | undefined
   readonly onSelect: (note: Note) => void
   readonly zoom: number
+  readonly raster: NativePdfPagePreview | null
+  readonly canvasRef: React.Ref<HTMLCanvasElement>
+  readonly previewVerified: boolean
+  readonly revision: number
+  readonly outputHash: string
 }) {
-  const [width, height] = rotatedSize(geometry)
+  const displayGeometry = raster ? {
+    bounds: [raster.cropBox[0] / 1000, raster.cropBox[1] / 1000, raster.cropBox[2] / 1000, raster.cropBox[3] / 1000] as const,
+    rotation: raster.rotation,
+  } : geometry
+  const [width, height] = rotatedSize(displayGeometry)
   const markers = notes.map((note) => {
-    const [x, y] = nativeMarkerPosition(geometry, note.rect)
+    const [x, y] = nativeMarkerPosition(displayGeometry, note.rect)
     return <span key={note.id} className="native-marker" data-selected={note.id === selected}
       style={{ left: `${x}%`, top: `${y}%` }} onClick={() => onSelect(note)}><span /></span>
   })
   return <div className="native-paper" aria-hidden="true"
-    style={{ width: zoom === 0 ? '100%' : width * zoom / 100, aspectRatio: `${width} / ${height}` }}>
+    style={{
+      width: zoom === 0 ? `min(100%, calc(var(--native-fit-height) * ${width / height}))` : width * zoom / 100,
+      aspectRatio: `${width} / ${height}`,
+    }}>
+    {raster && <div className="native-page-raster" hidden={!previewVerified}>
+      <canvas ref={canvasRef} width={raster.width} height={raster.height}
+        data-native-preview-page={raster.pageId} data-native-preview-revision={revision} data-native-preview-hash={outputHash}
+        style={{ width: `${50 * raster.width / width}%`, height: `${50 * raster.height / height}%` }} />
+    </div>}
     {marks.map(({ rect }) => {
       const [l, b, r, t] = rect
-      const [x1, y1] = nativeMarkerPosition(geometry, [l / 1000, b / 1000, l / 1000, b / 1000])
-      const [x2, y2] = nativeMarkerPosition(geometry, [r / 1000, t / 1000, r / 1000, t / 1000])
+      const [x1, y1] = nativeMarkerPosition(displayGeometry, [l / 1000, b / 1000, l / 1000, b / 1000])
+      const [x2, y2] = nativeMarkerPosition(displayGeometry, [r / 1000, t / 1000, r / 1000, t / 1000])
       return <span className="native-redaction-mark" key={rect.join(',')} style={{
         left: `${Math.min(x1, x2)}%`, top: `${Math.min(y1, y2)}%`,
         width: `${Math.abs(x1 - x2)}%`, height: `${Math.abs(y1 - y2)}%`,

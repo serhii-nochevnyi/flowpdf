@@ -1,5 +1,5 @@
 use flow_wasm::{
-    native_pdf_close, native_pdf_command, native_pdf_open, native_pdf_redaction,
+    native_pdf_close, native_pdf_command, native_pdf_open, native_pdf_preview, native_pdf_redaction,
     native_pdf_snapshot, verify_native_pdf_response,
 };
 use serde_json::{Value, json};
@@ -203,6 +203,80 @@ fn redaction_pdf(size: u32) -> String {
     ])
 }
 
+fn preview_request(request_id: u64, snapshot: &Value, page_id: Value) -> Value {
+    let mut request = bound("preview", request_id, snapshot);
+    request["pageId"] = page_id;
+    request["outputHash"] = snapshot["outputHash"].clone();
+    request
+}
+
+#[test]
+fn page_preview_binds_the_rotated_crop_and_current_accepted_revision() {
+    let red = "1 0 0 rg 3 5 3 3 re f";
+    let clipped = "q 0 0 12 12 re W n 0 0 1 rg 2 2 4 4 re f Q";
+    let source = fixture_pdf(&[
+        "<< /Type /Catalog /Pages 2 0 R >>",
+        "<< /Type /Pages /Kids [3 0 R 5 0 R] /Count 2 >>",
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 20 20] /CropBox [2 4 14 12] /Rotate 90 /Contents 4 0 R >>",
+        &format!("<< /Length {} >>\nstream\n{red}\nendstream", red.len()),
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 12 12] /Contents 6 0 R >>",
+        &format!("<< /Length {} >>\nstream\n{clipped}\nendstream", clipped.len()),
+    ]);
+    let opened = call(native_pdf_open, open_request(source.as_bytes()));
+    let base = &opened["snapshot"];
+    let first = &base["pageState"]["order"][0];
+    let second = &base["pageState"]["order"][1];
+    let original_request = preview_request(2, base, first.clone());
+    let preview = call(native_pdf_preview, original_request.clone());
+    assert_eq!(preview["status"], "preview");
+    assert_eq!(preview["binding"], base["binding"]);
+    assert!(preview["snapshot"].is_null());
+    assert!(preview.get("redaction").is_none());
+    let raster = &preview["preview"];
+    assert_eq!(raster["outputHash"], base["outputHash"]);
+    assert_eq!(raster["pageId"], *first);
+    assert_eq!(raster["cropBox"], json!([2000, 4000, 14000, 12000]));
+    assert_eq!(raster["rotation"], 90);
+    assert_eq!(raster["width"], 16);
+    assert_eq!(raster["height"], 24);
+    let rgb = raster["rgbHex"].as_str().unwrap();
+    let pixel = |x: usize, y: usize| &rgb[(y * 16 + x) * 6..][..6];
+    assert_eq!(pixel(4, 4), "ff0000");
+    assert_eq!(pixel(12, 4), "ffffff");
+    assert_eq!(pixel(4, 18), "ffffff");
+
+    for page in [second.clone(), json!(1)] {
+        let unavailable = call(native_pdf_preview, preview_request(3, base, page));
+        assert_eq!(unavailable["code"], "FLOW_PDF_NATIVE_TARGET_UNAVAILABLE");
+        assert!(unavailable["snapshot"].is_null());
+        assert!(unavailable.get("preview").is_none());
+    }
+    let mut edit = bound("command", 4, base);
+    edit["outputHash"] = base["outputHash"].clone();
+    edit["command"] = json!({"kind":"add","page":0,"rect":[8,6,12,10],"contents":"Review note"});
+    let applied = call(native_pdf_command, edit);
+    assert_eq!(applied["status"], "applied");
+    let current = &applied["snapshot"];
+    assert_eq!(
+        call(native_pdf_preview, original_request)["code"],
+        "FLOW_PDF_NATIVE_REVISION_MISMATCH"
+    );
+    let mut wrong_hash = preview_request(5, current, first.clone());
+    wrong_hash["outputHash"] = base["outputHash"].clone();
+    assert_eq!(
+        call(native_pdf_preview, wrong_hash)["code"],
+        "FLOW_PDF_NATIVE_REVISION_MISMATCH"
+    );
+    let updated = call(native_pdf_preview, preview_request(6, current, first.clone()));
+    assert_eq!(updated["status"], "preview");
+    assert_eq!(updated["preview"]["outputHash"], current["outputHash"]);
+    assert_ne!(updated["preview"]["rgbHex"], raster["rgbHex"]);
+    assert_eq!(
+        call(native_pdf_close, bound("close", 7, current))["status"],
+        "closed"
+    );
+}
+
 #[test]
 fn redaction_admission_follows_the_accepted_pdf() {
     let paint = "q 0 0 80 80 re W n 10 10 10 10 re f Q";
@@ -278,6 +352,9 @@ fn redaction_wire_releases_only_the_verified_exact_output() {
     let opened = call(native_pdf_open, open_request(source.as_bytes()));
     let base = &opened["snapshot"];
     let page = base["pageState"]["order"][0].clone();
+    let preview = preview_request(15, base, page.clone());
+    let accepted_raster = call(native_pdf_preview, preview.clone());
+    assert_eq!(accepted_raster["status"], "preview");
     let request = |id, action| redaction_request(id, base, action);
     let add = |id| {
         request(
@@ -325,6 +402,7 @@ fn redaction_wire_releases_only_the_verified_exact_output() {
     assert_eq!(busy_close["status"], "failed");
     status_only(&pending);
     let candidate = pending["redaction"]["candidate"].clone();
+    assert_eq!(call(native_pdf_preview, preview), accepted_raster);
     assert_eq!(candidate["affectedPages"], json!([page]));
     let publish = request(7, json!({"kind":"publish","candidate":candidate}));
     let refused = call(native_pdf_redaction, publish.clone());

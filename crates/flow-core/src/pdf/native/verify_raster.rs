@@ -27,6 +27,49 @@ const MAX_FORM_DEPTH: usize = 8;
 const PITCH: i64 = POINT / 2;
 const SAMPLE_OFFSETS: [[i64; 2]; 4] = [[125, 125], [375, 125], [125, 375], [375, 375]];
 
+pub const NATIVE_PREVIEW_MAX_PIXELS: usize = 4_000_000;
+pub const NATIVE_PREVIEW_MAX_DIMENSION: usize = 8192;
+
+pub struct NativePageRaster {
+    pub crop_box: [i64; 4],
+    pub rotation: u16,
+    pub width: usize,
+    pub height: usize,
+    pub rgb: Vec<u8>,
+}
+
+pub(super) fn accepted_page(
+    bytes: &[u8],
+    index: usize,
+    geometry: NativeRedactionGeometry,
+) -> VerifyResult<NativePageRaster> {
+    let document = Document::open(bytes, Side::Accepted)?;
+    let page = document.page(index)?;
+    if page.geometry != geometry {
+        return Err(Structure);
+    }
+    let mut pixels_left = NATIVE_PREVIEW_MAX_PIXELS;
+    let grid = Grid::new(geometry, &mut pixels_left)?;
+    if grid.width > NATIVE_PREVIEW_MAX_DIMENSION || grid.height > NATIVE_PREVIEW_MAX_DIMENSION {
+        return Err(Budget);
+    }
+    let paints = Interpreter::new().page(&document, &page)?;
+    let mut work = MAX_RASTER_WORK;
+    let mut pixels = grid.draw(&paints, [PITCH / 2; 2], &mut work)?;
+    // @contract: Preview RGB starts at the top left of the rotated crop.
+    pixels.reverse();
+    for row in pixels.chunks_exact_mut(grid.width) {
+        row.reverse();
+    }
+    Ok(NativePageRaster {
+        crop_box: geometry.crop_box,
+        rotation: geometry.rotation,
+        width: grid.width,
+        height: grid.height,
+        rgb: pixels.into_flattened(),
+    })
+}
+
 type Point = [i64; 2];
 type Pixel = [u8; 3];
 const COLOR_UNIT: i64 = 1_000_000_000;

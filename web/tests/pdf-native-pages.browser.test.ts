@@ -224,6 +224,10 @@ for (const locale of ['en', 'uk'] as const) {
       await expect.element(button('navigation.fit')).toBeDisabled()
       await open(pagePdf(2, false, font), 'pages.pdf')
       await expect.element(button('navigation.previous')).toBeDisabled()
+      const preview = () => root.querySelector<HTMLCanvasElement>('.native-page-raster:not([hidden]) canvas')
+      const unavailablePreview = panel.getByText(t('viewport.unavailable'), { exact: true })
+      await expect.element(unavailablePreview).toBeVisible()
+      expect(preview()).toBeNull()
       failProjection = true
       await activate(button('navigation.next').element())
       await expect.poll(() => held.resume).toBeTypeOf('function')
@@ -236,9 +240,21 @@ for (const locale of ['en', 'uk'] as const) {
       await expect.element(selector).toHaveValue('0')
       await activate(button('navigation.retry').element())
       await expect.element(selector).toHaveValue('1')
+      await expect.poll(() => preview()?.width).toBe(900)
+      expect(preview()?.height).toBe(1200)
+      expect(preview()?.dataset.nativePreviewRevision).toBe('0')
+      await page.viewport(1280, 440)
+      const viewport = root.querySelector<HTMLElement>('.native-viewport')!
+      const paper = root.querySelector<HTMLElement>('.native-paper')!
+      expect(paper.getBoundingClientRect().height).toBeLessThan(viewport.clientHeight)
+      expect(viewport.scrollHeight).toBeLessThanOrEqual(viewport.clientHeight + 1)
+      expect(viewport.scrollWidth).toBeLessThanOrEqual(viewport.clientWidth + 1)
+      await page.viewport(320, 900)
       await expect.element(button('navigation.next')).toBeDisabled()
       await activate(button('navigation.previous').element())
       await expect.element(selector).toHaveValue('0')
+      await expect.element(unavailablePreview).toBeVisible()
+      expect(preview()).toBeNull()
 
       await choose('navigation.zoom', '200')
       await activate(button('navigation.fit').element())
@@ -409,10 +425,17 @@ for (const locale of ['en', 'uk'] as const) {
       expect((objectSelect.element() as HTMLSelectElement).selectedIndex).toBe(1)
 
       await open(pagePdf(1), 'final.pdf')
+      await expect.poll(() => preview()?.width).toBe(740)
+      expect(preview()?.height).toBe(560)
+      const firstPage = preview()?.dataset.nativePreviewPage
+      expect(firstPage).toBeDefined()
       await expect.element(button('page.delete')).toBeDisabled()
       await expect.element(button('page.delete')).toHaveAccessibleDescription(t('page.final'))
       await choose('page.placement', 'after')
       await change('page.insert', 2, 2)
+      await expect.poll(() => preview()?.dataset.nativePreviewRevision).toBe('1')
+      expect(preview()?.dataset.nativePreviewPage).toBeDefined()
+      expect(preview()?.dataset.nativePreviewPage).not.toBe(firstPage)
       expect((await readBack()).map(({ annotations }) => annotations.length)).toEqual([1, 0])
 
       await open(pagePdf(2, true), 'destination.pdf')

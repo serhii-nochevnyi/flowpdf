@@ -252,6 +252,24 @@ for (const locale of ['uk', 'en'] satisfies NativePdfLocale[]) {
       await userEvent.keyboard('{Control>}z{/Control}')
       expect(semanticShortcut).toBe(false)
       const x = panelLocator.getByRole('spinbutton', { name: t('geometry.x') })
+      const y = panelLocator.getByRole('spinbutton', { name: t('geometry.y') })
+      const noteText = panelLocator.getByRole('textbox', { name: t('note.contents') })
+      const draftText = `${firstText} — draft / чернетка`
+      await noteText.fill(draftText)
+      await x.fill('48')
+      await y.fill('64')
+      await activate(firstButton)
+      await expect.element(noteText).toHaveValue(draftText)
+      await activate(notes().find((entry) => entry !== firstButton)!)
+      await expect.element(noteText).toHaveValue('Confirm delivery date')
+      await activate(firstButton)
+      await expect.element(noteText).toHaveFocus()
+      await expect.element(noteText).toHaveValue(draftText)
+      await expect.element(x).toHaveValue(48)
+      await expect.element(y).toHaveValue(64)
+      await noteText.fill(firstText)
+      await expect.poll(() => panel.querySelector<HTMLElement>('[data-native-preview-revision="2"]')?.dataset.nativePreviewHash)
+        .toBe(edited.dataset.outputHash)
       await x.fill('999')
       const beforeInvalid = post.mock.calls.length
       const beforeInvalidHash = edited.dataset.outputHash
@@ -260,7 +278,7 @@ for (const locale of ['uk', 'en'] satisfies NativePdfLocale[]) {
       expect(edited.dataset.outputHash).toBe(beforeInvalidHash)
       expect(post.mock.calls).toHaveLength(beforeInvalid)
       await x.fill('48')
-      await panelLocator.getByRole('spinbutton', { name: t('geometry.y') }).fill('64')
+      await y.fill('64')
       await activate(button('note.move'))
       const moved = await readEdited(3)
       expect(moved).toEqual(expect.arrayContaining([expect.objectContaining({

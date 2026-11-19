@@ -95,13 +95,14 @@ function controlledWorker() {
   const worker = new Worker(new URL('../src/pdf/pdf-native-edit-worker-entry.ts', import.meta.url), { type: 'module' })
   const requests: Action[] = []
   const statuses: NativePdfRedactionResult[] = []
+  const unpublished: Extract<NativePdfWorkerResponse, { type: 'response' }>[] = []
   const syntheticRefusals = new Set<string>()
   let publishedOutput: string | undefined
   const control = {
     fault: null as Fault,
     hold: null as Action | null,
     resume: undefined as (() => void) | undefined,
-    requests, statuses,
+    requests, statuses, unpublished,
     output: () => publishedOutput,
     die: () => port.onerror?.(new ErrorEvent('error')),
   }
@@ -128,6 +129,7 @@ function controlledWorker() {
     if (reply?.operation === 'redaction' && reply.status !== 'failed') {
       const result = reply.redaction
       statuses.push(result)
+      if (reply.status === 'redaction') unpublished.push(data)
       if (reply.status === 'published') publishedOutput = reply.snapshot.outputHex
       if (result.action === 'verify' && control.fault && control.fault !== 'lostPublish') {
         const fault = control.fault
@@ -228,6 +230,11 @@ for (const locale of ['en', 'uk'] as const) {
       const prior = button('redaction.downloadPrior')
       const newOutput = () => button('redaction.download').query()
       const marksOnPage = () => root.querySelectorAll('.native-redaction-mark')
+      const visibleRaster = () => root.querySelector<HTMLCanvasElement>('.native-page-raster:not([hidden]) canvas')
+      const paintAtMark = () => {
+        const pixels = visibleRaster()?.getContext('2d')?.getImageData(60, 220, 1, 1).data
+        return pixels && Array.from(pixels)
+      }
       const acceptedScope = () => lane.coordinator.snapshot().accepted
       const putOriginal = async (bytes: Uint8Array<ArrayBuffer>) => {
         const picker = root.querySelector<HTMLInputElement>('[data-pdf-native-edit] input[type=file][accept*="application/pdf"]')
@@ -287,6 +294,11 @@ for (const locale of ['en', 'uk'] as const) {
       await notes.fill(retainedDraft)
       const ordinary = acceptedScope()!
       const ordinaryBytes = nativeHexBytes(ordinary.outputHex)
+      const ordinaryHash = nativeBytesHex(Uint8Array.from(ordinary.outputHash))
+      await expect.poll(() => visibleRaster()?.dataset.nativePreviewHash).toBe(ordinaryHash)
+      expect(visibleRaster()?.dataset.nativePreviewRevision).toBe('1')
+      expect(visibleRaster()?.dataset.nativePreviewPage).toBe(String(ordinary.pageState.order[0]))
+      expect(paintAtMark()).toEqual([255, 0, 0, 255])
 
       await fillMark(20, 20, 0, 80)
       await expect.element(redactionButton('redaction.add')).toBeDisabled()
@@ -299,6 +311,15 @@ for (const locale of ['en', 'uk'] as const) {
       await addMark(1)
       await expect.element(redaction.getByText(t('redaction.marked'), { exact: true })).toBeVisible()
       expect(getComputedStyle(marksOnPage()[0]!).borderTopStyle).toBe('dashed')
+      const rasterBounds = visibleRaster()!.getBoundingClientRect()
+      const markBounds = marksOnPage()[0]!.getBoundingClientRect()
+      const paintedX = rasterBounds.left + rasterBounds.width * (30 / 160)
+      const paintedY = rasterBounds.top + rasterBounds.height * (110 / 140)
+      expect(paintedX).toBeGreaterThan(markBounds.left)
+      expect(paintedX).toBeLessThan(markBounds.right)
+      expect(paintedY).toBeGreaterThan(markBounds.top)
+      expect(paintedY).toBeLessThan(markBounds.bottom)
+      expect(paintAtMark()).toEqual([255, 0, 0, 255])
       expect(newOutput()).toBeNull()
       expect(acceptedScope()).toBe(ordinary)
       const preRedaction = await getDownload('redaction.downloadPrior')
@@ -331,6 +352,8 @@ for (const locale of ['en', 'uk'] as const) {
       await pageSelect.selectOptions(nextOption)
       await expect.element(pageSelect).toHaveValue(nextOption.value)
       await expect.element(panel.getByText(t('navigation.position', { page: 2, total: 2 }), { exact: true }).first()).toBeVisible()
+      await expect.poll(() => visibleRaster()?.dataset.nativePreviewPage).toBe(String(ordinary.pageState.order[1]))
+      expect(paintAtMark()).toEqual([0, 0, 255, 255])
       await expect.element(status).toHaveAttribute('data-native-redaction-status', 'neutral')
       await fillMark(20, 20, 20, 20)
       await addMark(1)
@@ -357,6 +380,8 @@ for (const locale of ['en', 'uk'] as const) {
         const exposed = lane.coordinator.outputBytes()
         expect(exposed === null || nativeBytesHex(exposed) === ordinary.outputHex).toBe(true)
         expect(marksOnPage()).toHaveLength(1)
+        expect(visibleRaster()?.dataset.nativePreviewHash).toBe(ordinaryHash)
+        expect(paintAtMark()).toEqual([255, 0, 0, 255])
         await expect.element(panel.getByText(privateNote, { exact: true })).toBeVisible()
         await expect.element(notes).toHaveValue(retainedDraft)
         expect(prior.element().getAttribute('data-output-hash')).toBe(nativeBytesHex(Uint8Array.from(ordinary.outputHash)))
@@ -447,6 +472,22 @@ for (const locale of ['en', 'uk'] as const) {
       expect(hash).toBe(nativeBytesHex(Uint8Array.from(accepted!.candidate!.hash)))
       expect(button('redaction.download').element().getAttribute('data-output-hash')).toBe(hash)
       expect(button('redaction.download').element().getAttribute('data-validator-version')).toBe('1')
+      await expect.poll(() => visibleRaster()?.dataset.nativePreviewHash).toBe(hash)
+      expect(visibleRaster()?.dataset.nativePreviewRevision).toBe('2')
+      expect(paintAtMark()).toEqual([255, 255, 255, 255])
+      expect(lane.control.unpublished.length).toBeGreaterThan(0)
+      for (const message of lane.control.unpublished) {
+        expect(Object.keys(message).sort()).toEqual(['dispatchId', 'json', 'type'])
+        const payload = JSON.parse(message.json)
+        expect(Object.keys(payload).sort()).toEqual([
+          'binding', 'code', 'limits', 'operation', 'originStoreHash', 'protocolVersion',
+          'redaction', 'requestId', 'resultHash', 'snapshot', 'status',
+        ])
+        expect(payload).toMatchObject({ operation: 'redaction', status: 'redaction', snapshot: null })
+        expect(Object.keys(payload.redaction).sort()).toEqual([
+          'acceptedHash', 'action', 'candidate', 'markCount', 'published', 'verification',
+        ])
+      }
       await expect.element(panel.getByText(t('redaction.outputIdentity', { revision: 2, hash }), { exact: true })).toBeVisible()
       expect(reopened.scene.pages.flatMap((page) => page.annotations.flatMap((entry) =>
         entry.kind === 'plainNote' ? [entry.contents] : [],
@@ -472,6 +513,8 @@ for (const locale of ['en', 'uk'] as const) {
       lane = controlledWorker()
       await putOriginal(await redactionFixture(true))
       await expect.element(redaction.getByText(t('redaction.documentUnavailable'), { exact: true })).toBeVisible()
+      await expect.element(panel.getByText(t('viewport.unavailable'), { exact: true })).toBeVisible()
+      expect(visibleRaster()).toBeNull()
       expect(redactionButton('redaction.add').query()).toBeNull()
       expect(redactionButton('redaction.apply').query()).toBeNull()
       expect(marksOnPage()).toHaveLength(0)
