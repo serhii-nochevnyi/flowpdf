@@ -1319,7 +1319,7 @@ pub(super) fn stage(
 struct OutlineIndex {
     root: Option<Ref>,
     siblings: BTreeMap<Ref, Vec<Ref>>,
-    removable: BTreeMap<Ref, BTreeMap<Ref, BTreeSet<Ref>>>,
+    removable: BTreeMap<Ref, BTreeMap<Ref, BTreeSet<usize>>>,
     blocked: BTreeSet<Ref>,
 }
 
@@ -1431,7 +1431,7 @@ fn outline_index(
                         .or_default()
                         .entry(parent)
                         .or_default()
-                        .insert(child);
+                        .insert(children.len());
                     has_removable = true;
                 } else {
                     index.blocked.insert(page);
@@ -1464,25 +1464,28 @@ fn plan_outline_cleanup(
     if let Some(groups) = index.removable.get(&page) {
         for (&parent, drops) in groups {
             let siblings = index.siblings.get(&parent).ok_or(Malformed)?;
-            spend(work, siblings.len())?;
-            let retained: Vec<_> = siblings
-                .iter()
-                .copied()
-                .filter(|child| !drops.contains(child))
-                .collect();
-            let values = plan.edit(graph, parent, work)?;
-            set_ref(values, "First", retained.first().copied());
-            set_ref(values, "Last", retained.last().copied());
-            for (position, &child) in retained.iter().enumerate() {
-                let values = plan.edit(graph, child, work)?;
-                set_ref(
-                    values,
-                    "Prev",
-                    position.checked_sub(1).map(|previous| retained[previous]),
-                );
-                set_ref(values, "Next", retained.get(position + 1).copied());
+            spend(work, drops.len())?;
+            let mut positions = drops.iter().copied().peekable();
+            while let Some(first) = positions.next() {
+                let mut last = first;
+                plan.removed.insert(siblings[first]);
+                while positions.next_if_eq(&(last + 1)).is_some() {
+                    last += 1;
+                    plan.removed.insert(siblings[last]);
+                }
+                let previous = first.checked_sub(1).map(|position| siblings[position]);
+                let next = siblings.get(last + 1).copied();
+                if let Some(previous) = previous {
+                    set_ref(plan.edit(graph, previous, work)?, "Next", next);
+                } else {
+                    set_ref(plan.edit(graph, parent, work)?, "First", next);
+                }
+                if let Some(next) = next {
+                    set_ref(plan.edit(graph, next, work)?, "Prev", previous);
+                } else {
+                    set_ref(plan.edit(graph, parent, work)?, "Last", previous);
+                }
             }
-            plan.removed.extend(drops);
         }
     }
     for (ancestor, count) in counts {

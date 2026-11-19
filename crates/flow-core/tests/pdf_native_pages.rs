@@ -798,27 +798,25 @@ fn chapter_outline_blocks_delete_but_leaf_outline_can_be_removed() {
     );
 }
 
-#[test]
-fn many_outline_entries_do_not_block_unreferenced_pages() {
-    const PAGE_COUNT: usize = 300;
-    const BOOKMARK_COUNT: usize = 3400;
-    let outline = PAGE_COUNT + 3;
+fn outline_pdf(page_count: usize, targets: &[usize]) -> Vec<u8> {
+    let bookmark_count = targets.len();
+    let outline = page_count + 3;
     let first = outline + 1;
-    let last = outline + BOOKMARK_COUNT;
+    let last = outline + bookmark_count;
     let kids = (3..outline)
         .map(|page| format!("{page} 0 R "))
         .collect::<String>();
     let mut objects = vec![
         format!("<< /Type /Catalog /Pages 2 0 R /Outlines {outline} 0 R >>"),
         format!(
-            "<< /Type /Pages /Kids [{kids}] /Count {PAGE_COUNT} /MediaBox [0 0 300 500] /Resources <<>> >>"
+            "<< /Type /Pages /Kids [{kids}] /Count {page_count} /MediaBox [0 0 300 500] /Resources <<>> >>"
         ),
     ];
-    objects.extend((0..PAGE_COUNT).map(|_| "<< /Type /Page /Parent 2 0 R >>".to_owned()));
+    objects.extend((0..page_count).map(|_| "<< /Type /Page /Parent 2 0 R >>".to_owned()));
     objects.push(format!(
-        "<< /Type /Outlines /First {first} 0 R /Last {last} 0 R /Count {BOOKMARK_COUNT} >>"
+        "<< /Type /Outlines /First {first} 0 R /Last {last} 0 R /Count {bookmark_count} >>"
     ));
-    for entry in first..=last {
+    for (entry, &target) in (first..=last).zip(targets) {
         let prev = if entry > first {
             format!("/Prev {} 0 R ", entry - 1)
         } else {
@@ -830,11 +828,18 @@ fn many_outline_entries_do_not_block_unreferenced_pages() {
             String::new()
         };
         objects.push(format!(
-            "<< /Title (Reference) /Parent {outline} 0 R {prev}{next}/Dest [3 0 R /Fit] >>"
+            "<< /Title (Reference {target}) /Parent {outline} 0 R {prev}{next}/Dest [{} 0 R /Fit] >>",
+            target + 3
         ));
     }
     let refs: Vec<_> = objects.iter().map(|value| (0, value.as_str())).collect();
-    let bytes = build_pdf(&refs);
+    build_pdf(&refs)
+}
+
+#[test]
+fn many_outline_entries_do_not_block_unreferenced_pages() {
+    const PAGE_COUNT: usize = 300;
+    let bytes = outline_pdf(PAGE_COUNT, &[0; 3400]);
     let mut session =
         NativePdfSession::open_scoped(&bytes, NativeEditLimits::default(), [3; 16]).unwrap();
     let prior = session.snapshot().clone();
@@ -849,6 +854,47 @@ fn many_outline_entries_do_not_block_unreferenced_pages() {
         )
         .unwrap();
     assert_eq!(session.snapshot().page_state.order.len(), PAGE_COUNT - 1);
+}
+
+#[test]
+fn bookmarks_spread_across_pages_fit_the_default_deletion_budget() {
+    const PAGE_COUNT: usize = 200;
+    const TARGET: usize = 99;
+    let targets: Vec<_> = (0..PAGE_COUNT - 1).flat_map(|page| [page, page]).collect();
+    let bytes = outline_pdf(PAGE_COUNT, &targets);
+    let mut session =
+        NativePdfSession::open_scoped(&bytes, NativeEditLimits::default(), [3; 16]).unwrap();
+    let prior = session.snapshot().clone();
+    assert!(
+        prior
+            .page_state
+            .restrictions
+            .as_ref()
+            .is_none_or(|caps| caps.pages[TARGET].delete.is_none()
+                && caps.pages[PAGE_COUNT - 1].delete.is_none())
+    );
+    session
+        .apply_page(prior.binding, 1, &command("deletePage", TARGET, &prior))
+        .unwrap();
+    let after = session.snapshot().clone();
+    let mut expected = prior.page_state.order;
+    expected.remove(TARGET);
+    assert_eq!(after.page_state.order, expected);
+    let output = String::from_utf8_lossy(session.output_bytes());
+    assert_eq!(output.matches("/Title").count(), targets.len() - 2);
+
+    let last_page = PAGE_COUNT - 2;
+    session
+        .apply_page(after.binding, 2, &command("deletePage", last_page, &after))
+        .unwrap();
+    expected.pop();
+    assert_eq!(session.snapshot().page_state.order, expected);
+    assert_eq!(
+        String::from_utf8_lossy(session.output_bytes())
+            .matches("/Title")
+            .count(),
+        targets.len() - 2
+    );
 }
 
 #[test]
