@@ -419,6 +419,83 @@ fn trailer_owned_navigation_blocks_only_its_target() {
 }
 
 #[test]
+fn retained_annotation_references_block_only_the_link_target() {
+    for (annots, retained) in [
+        ("[6 0 R]", ""),
+        ("7 0 R", ""),
+        ("[6 0 R]", "/FlowPDFRetained << /References [6 0 R] >>"),
+        ("7 0 R", "/FlowPDFRetained << /References [7 0 R] >>"),
+    ] {
+        let bytes = build_pdf(&[
+            (0, "<< /Type /Catalog /Pages 2 0 R >>"),
+            (
+                0,
+                "<< /Type /Pages /Kids [3 0 R 4 0 R 5 0 R] /Count 3 /MediaBox [0 0 300 500] /Resources <<>> >>",
+            ),
+            (0, "<< /Type /Page /Parent 2 0 R >>"),
+            (0, "<< /Type /Page /Parent 2 0 R >>"),
+            (
+                0,
+                &format!("<< /Type /Page /Parent 2 0 R /Annots {annots} {retained} >>"),
+            ),
+            (
+                0,
+                "<< /Type /Annot /Subtype /Link /P 5 0 R /Rect [20 30 50 60] /Dest [3 0 R /Fit] >>",
+            ),
+            (0, "[6 0 R]"),
+        ]);
+        let mut session =
+            NativePdfSession::open_scoped(&bytes, NativeEditLimits::default(), [3; 16]).unwrap();
+        let prior = session.snapshot().clone();
+        assert_eq!(prior.scene.pages[2].annotations.len(), 1);
+        let restrictions = prior.page_state.restrictions.as_ref();
+        assert_eq!(
+            restrictions.is_some_and(|caps| caps.pages[0].delete.is_some()),
+            !retained.is_empty(),
+            "{annots} {retained}",
+        );
+        assert!(restrictions.is_none_or(|caps| caps.pages[1].delete.is_none()));
+        let delete = command("deletePage", 0, &prior);
+        if retained.is_empty() {
+            session.apply_page(prior.binding, 1, &delete).unwrap();
+            assert_eq!(
+                session.snapshot().page_state.order,
+                [prior.page_state.order[1], prior.page_state.order[2]]
+            );
+            assert!(session.snapshot().scene.pages[1].annotations.is_empty());
+            continue;
+        }
+
+        assert_eq!(
+            session
+                .apply_page(prior.binding, 1, &delete)
+                .unwrap_err()
+                .code(),
+            "FLOW_PDF_NATIVE_UNSUPPORTED",
+        );
+        assert_eq!(session.output_bytes(), bytes);
+        assert_eq!(session.snapshot().binding, prior.binding);
+        assert_eq!(session.snapshot().page_state, prior.page_state);
+
+        session
+            .apply_page(prior.binding, 2, &command("deletePage", 1, &prior))
+            .unwrap();
+        let after = session.snapshot();
+        assert_eq!(
+            after.page_state.order,
+            [prior.page_state.order[0], prior.page_state.order[2]]
+        );
+        assert_eq!(after.scene.pages[1].annotations.len(), 1);
+        assert!(String::from_utf8_lossy(session.output_bytes()).contains("/FlowPDFRetained"));
+        assert!(
+            after.page_state.restrictions.as_ref().unwrap().pages[0]
+                .delete
+                .is_some()
+        );
+    }
+}
+
+#[test]
 fn deleting_page_removes_both_links_with_a_shared_destination() {
     for (first_annots, second_annots, link_owner) in
         [("", "[5 0 R 6 0 R]", 4), ("/Annots [6 0 R]", "[5 0 R]", 3)]
