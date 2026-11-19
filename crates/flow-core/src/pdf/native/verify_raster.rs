@@ -1455,6 +1455,7 @@ struct Raster {
 #[derive(Clone, Copy)]
 enum PreviewCoverage {
     Clear,
+    MixedBackground,
     Partial { ink: Option<Pixel>, visible: bool },
     Unresolved,
 }
@@ -1465,6 +1466,29 @@ struct RasterOutline<'a> {
     fill_rule: Option<bool>,
     ink: Pixel,
     draw_edges: bool,
+}
+
+enum PreviewPaint<'a> {
+    Outline(RasterOutline<'a>),
+    Image(&'a Image<'a>),
+    Note,
+}
+
+impl PreviewPaint<'_> {
+    fn uniform_background(&self, bounds: Rect, pixel: Rect) -> bool {
+        match self {
+            Self::Outline(_) => true,
+            Self::Image(image) => image
+                .mask(pixel)
+                .is_some_and(|[l, t, r, b]| r - l == 1 && b - t == 1),
+            Self::Note => {
+                let [l, b, r, t] = bounds;
+                let inset = ((r - l).min(t - b) / 8).min(POINT);
+                let interior = [l + inset, b + inset, r - inset, t - inset];
+                contains(interior, pixel) || !intersects(interior, pixel)
+            }
+        }
+    }
 }
 
 impl RasterOutline<'_> {
@@ -1565,7 +1589,7 @@ impl Grid {
                         self.paint(
                             &mut raster,
                             glyph.bounds,
-                            Some(RasterOutline {
+                            PreviewPaint::Outline(RasterOutline {
                                 stencil: glyph,
                                 fill_rule: Some(false),
                                 ink: color,
@@ -1592,13 +1616,18 @@ impl Grid {
                 PaintKind::Image(image) => self.paint(
                     &mut raster,
                     paint.bounds,
-                    None,
+                    PreviewPaint::Image(image),
                     image.masks.len() + 1,
                     work,
                     |p| image.at(p),
                 )?,
-                PaintKind::Note(_) => {
-                    self.paint(&mut raster, paint.bounds, None, 1, work, |p| {
+                PaintKind::Note(_) => self.paint(
+                    &mut raster,
+                    paint.bounds,
+                    PreviewPaint::Note,
+                    1,
+                    work,
+                    |p| {
                         let [l, b, r, t] = paint.bounds;
                         let inset = ((r - l).min(t - b) / 8).min(POINT);
                         Some(if inside([l + inset, b + inset, r - inset, t - inset], p) {
@@ -1606,8 +1635,8 @@ impl Grid {
                         } else {
                             [40; 3]
                         })
-                    })?
-                }
+                    },
+                )?,
             }
         }
         spend(work, raster.coverage.len())?;
@@ -1642,7 +1671,7 @@ impl Grid {
         self.paint(
             raster,
             stencil.bounds,
-            Some(RasterOutline {
+            PreviewPaint::Outline(RasterOutline {
                 stencil,
                 fill_rule,
                 ink: color,
@@ -1658,11 +1687,15 @@ impl Grid {
         &self,
         raster: &mut Raster,
         bounds: Rect,
-        outline: Option<RasterOutline<'_>>,
+        paint: PreviewPaint<'_>,
         cost: usize,
         work: &mut usize,
         mut value: impl FnMut(Point) -> Option<Pixel>,
     ) -> VerifyResult<()> {
+        let outline = match paint {
+            PreviewPaint::Outline(outline) => Some(outline),
+            _ => None,
+        };
         let [l, b, r, t] = bounds;
         let [x, y] = self.rotate([l, b]);
         let [u, v] = self.rotate([r, t]);
@@ -1719,7 +1752,11 @@ impl Grid {
                     };
                     if full {
                         *pixel = color;
-                        *coverage = PreviewCoverage::Clear;
+                        *coverage = if paint.uniform_background(bounds, rect) {
+                            PreviewCoverage::Clear
+                        } else {
+                            PreviewCoverage::MixedBackground
+                        };
                         continue;
                     }
                 }
@@ -1745,7 +1782,7 @@ impl PreviewCoverage {
                 visible,
             } if ink.is_some() && ink == prior => visible,
             // @invariant: Only full coverage can replace unresolved partial colors.
-            Self::Partial { .. } | Self::Unresolved => {
+            Self::Partial { .. } | Self::MixedBackground | Self::Unresolved => {
                 *self = Self::Unresolved;
                 return;
             }
