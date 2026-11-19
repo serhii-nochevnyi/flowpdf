@@ -26,6 +26,7 @@ pub const NATIVE_REQUEST_HISTORY: usize = 128;
 pub const NATIVE_MAX_NOTE_BYTES: usize = 16 * 1024;
 const REQUEST_RECORD_BYTES: usize = 512;
 const SESSION_BYTES: usize = 1024;
+const FIRST_ADDED_NOTE_ID: u64 = 1 << 48;
 const FIRST_PAGE_OBJECT_ID: u64 = 1 << 52;
 const PAGE_OBJECT_ID_LIMIT: u64 = 1 << 53;
 pub(super) const OBJECT_ID_BYTES: usize = 128;
@@ -595,7 +596,7 @@ impl NativePdfSession {
         let revision = binding
             .revision
             .checked_add(1)
-            .filter(|&revision| revision < FIRST_PAGE_OBJECT_ID - (1 << 48))
+            .filter(|&revision| revision < FIRST_PAGE_OBJECT_ID - FIRST_ADDED_NOTE_ID)
             .ok_or(NativeSessionError::Budget)?;
         let next_binding = NativeBinding {
             revision,
@@ -699,6 +700,22 @@ impl NativePdfSession {
         Ok(())
     }
 
+    pub fn check_close(
+        &self,
+        binding: NativeBinding,
+        request_id: u64,
+    ) -> Result<(), NativeSessionError> {
+        self.check_current_binding(binding)?;
+        if request_id <= self.snapshot.consumed_request || request_id <= self.last_redaction_request
+        {
+            return Err(NativeSessionError::InvalidRequest);
+        }
+        if self.candidate.is_some() {
+            return Err(NativeSessionError::ReconciliationRequired);
+        }
+        Ok(())
+    }
+
     pub fn lookup(
         &self,
         binding: NativeBinding,
@@ -770,6 +787,22 @@ impl NativePdfSession {
         self.apply_command(binding, request_id, Command::Field(command))
     }
 
+    pub fn matches_note_identities(&self, claimed: &[(PdfObjectRef, u64)]) -> bool {
+        self.snapshot
+            .scene
+            .pages
+            .iter()
+            .flat_map(|page| {
+                page.annotations
+                    .iter()
+                    .filter_map(|annotation| match annotation {
+                        NativePdfAnnotation::PlainNote(note) => Some((note.object, note.id.0)),
+                        _ => None,
+                    })
+            })
+            .eq(claimed.iter().copied())
+    }
+
     pub fn verify_page_and_field_projection(
         bytes: &[u8],
         limits: NativeEditLimits,
@@ -777,13 +810,40 @@ impl NativePdfSession {
         claimed_scene: [u8; 32],
         state: &NativePageState,
         claimed_fields: &[NativeFieldView],
+        claimed_notes: &[(PdfObjectRef, u64)],
         redaction_admitted: bool,
     ) -> Result<bool, NativeSessionError> {
         let graph = NativePdfGraph::open(bytes, limits)?;
         let ids = initial_ids(&graph);
         let hash = *blake3::hash(bytes).as_bytes();
         let (scene, mut remaining) = accepted_scene(&graph, &ids, hash, binding, 0, 0)?;
+        let projected_notes = scene.pages.iter().flat_map(|page| {
+            page.annotations
+                .iter()
+                .filter_map(|annotation| match annotation {
+                    NativePdfAnnotation::PlainNote(note) => Some((note.object, note.id.0)),
+                    _ => None,
+                })
+        });
+        let mut seen = BTreeSet::new();
+        let mut projected_notes = projected_notes;
+        let notes_match = claimed_notes.iter().all(|&(claimed_object, id)| {
+            let Some((object, initial_id)) = projected_notes.next() else {
+                return false;
+            };
+            let valid_id = if binding.revision == 0 {
+                id == initial_id
+            } else {
+                id != 0
+                    && (id < FIRST_ADDED_NOTE_ID
+                        || (id > FIRST_ADDED_NOTE_ID
+                            && id - FIRST_ADDED_NOTE_ID <= binding.revision)
+                        || (FIRST_PAGE_OBJECT_ID..PAGE_OBJECT_ID_LIMIT).contains(&id))
+            };
+            object == claimed_object && valid_id && seen.insert(id)
+        }) && projected_notes.next().is_none();
         Ok(scene.scene_hash == claimed_scene
+            && notes_match
             && state.valid_for_count(scene.pages.len())
             && (binding.revision != 0 || *state == page_state(&graph, &ids, None))
             && forms::project(&graph, &scene.pages, binding, &mut remaining)? == claimed_fields
@@ -875,7 +935,7 @@ impl NativePdfSession {
             .revision
             .checked_add(1)
             .ok_or(NativeSessionError::Budget)?;
-        if revision >= FIRST_PAGE_OBJECT_ID - (1 << 48) {
+        if revision >= FIRST_PAGE_OBJECT_ID - FIRST_ADDED_NOTE_ID {
             return Err(NativeSessionError::Budget);
         }
         let record_count = (self.records.len() + 1).min(NATIVE_REQUEST_HISTORY);

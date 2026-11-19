@@ -38,6 +38,20 @@ fn call(export: fn(String) -> String, request: Value) -> Value {
     serde_json::from_str(&response).unwrap()
 }
 
+fn rehash_with_replacement(response: &str, old: &str, new: &str) -> String {
+    let value: Value = serde_json::from_str(response).unwrap();
+    let original_hash = value["resultHash"].as_str().unwrap();
+    assert!(response.contains(old));
+    let changed = response.replace(old, new).replace(original_hash, "");
+    let mut digest = blake3::Hasher::new();
+    digest.update(b"flowpdf:native-wire:v1");
+    digest.update(changed.as_bytes());
+    changed.replace(
+        r#""resultHash":"""#,
+        &format!(r#""resultHash":"{}""#, digest.finalize().to_hex()),
+    )
+}
+
 fn open_request(bytes: &[u8]) -> Value {
     let bytes_hex: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
     json!({
@@ -85,6 +99,61 @@ fn open_verifies_source_bytes_and_returns_verifiable_reader_refusals() {
         call(native_pdf_open, open_request(original.as_bytes()))["status"],
         "opened"
     );
+}
+
+#[test]
+fn verifies_original_storage_digest_and_stable_note_identity() {
+    let source = fixture_pdf(&[
+        "<< /Type /Catalog /Pages 2 0 R >>",
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 400] /Annots [4 0 R 5 0 R] >>",
+        "<< /Type /Annot /Subtype /Text /P 3 0 R /Contents (First) /Rect [1 2 3 4] >>",
+        "<< /Type /Annot /Subtype /Text /P 3 0 R /Contents (Original) /Rect [1 2 3 4] >>",
+    ]);
+    let request = open_request(source.as_bytes());
+    let opened = native_pdf_open(request.to_string());
+    assert!(verify_native_pdf_response(opened.clone()));
+    let origin = request["originStoreHash"].as_str().unwrap();
+    assert!(!verify_native_pdf_response(rehash_with_replacement(
+        &opened,
+        origin,
+        &"00".repeat(32),
+    )));
+    let response: Value = serde_json::from_str(&opened).unwrap();
+    let base = &response["snapshot"];
+    let original_note = &base["scene"]["pages"][0]["annotations"][1];
+    assert_eq!(original_note["kind"], "plainNote");
+    let id = original_note["id"].as_u64().unwrap();
+
+    let mut edit = bound("command", 2, base);
+    edit["outputHash"] = base["outputHash"].clone();
+    edit["command"] = json!({"kind":"edit","note":id,"contents":"Revised"});
+    let applied = native_pdf_command(edit.to_string());
+    assert!(verify_native_pdf_response(applied.clone()));
+    let response: Value = serde_json::from_str(&applied).unwrap();
+    assert_eq!(response["status"], "applied");
+    let revised_note = &response["snapshot"]["scene"]["pages"][0]["annotations"][1];
+    assert_eq!(revised_note["id"], id);
+    assert_eq!(revised_note["contents"], "Revised");
+    assert!(!verify_native_pdf_response(rehash_with_replacement(
+        &applied,
+        &format!(r#""id":{id},"object""#),
+        &format!(r#""id":{},"object""#, id + 1),
+    )));
+    let reconciled = call(native_pdf_snapshot, bound("snapshot", 2, base));
+    assert_eq!(reconciled["status"], "accepted");
+    assert_eq!(reconciled["snapshot"], response["snapshot"]);
+
+    let current = &reconciled["snapshot"];
+    let mut remove = bound("command", 3, current);
+    remove["outputHash"] = current["outputHash"].clone();
+    remove["command"] =
+        json!({"kind":"remove","note":current["scene"]["pages"][0]["annotations"][0]["id"]});
+    let applied = call(native_pdf_command, remove);
+    assert_eq!(applied["status"], "applied");
+    let survivor = &applied["snapshot"]["scene"]["pages"][0]["annotations"][0];
+    assert_ne!(survivor["object"], revised_note["object"]);
+    assert_eq!(survivor["id"], id);
 }
 
 fn open() -> (Value, Value) {
@@ -235,6 +304,8 @@ fn redaction_wire_releases_only_the_verified_exact_output() {
         status_only(&reply);
     }
     assert_eq!(call(native_pdf_redaction, add(4))["status"], "failed");
+    let stale_close = call(native_pdf_close, bound("close", 5, base));
+    assert_eq!(stale_close["code"], "FLOW_PDF_NATIVE_REQUEST_INVALID");
     let lookup = |candidate| request(7, json!({"kind":"status","candidate":candidate}));
     let missing = call(native_pdf_redaction, lookup(Value::Null));
     assert!(missing["redaction"]["candidate"].is_null());
@@ -250,6 +321,8 @@ fn redaction_wire_releases_only_the_verified_exact_output() {
         "{pending}"
     );
     assert_eq!(pending["binding"]["revision"], 0);
+    let busy_close = call(native_pdf_close, bound("close", 8, base));
+    assert_eq!(busy_close["status"], "failed");
     status_only(&pending);
     let candidate = pending["redaction"]["candidate"].clone();
     assert_eq!(candidate["affectedPages"], json!([page]));
@@ -359,6 +432,8 @@ fn cancelling_a_verified_redaction_keeps_the_base_and_prevents_publication() {
     assert_eq!(cancelled["redaction"]["markCount"], 1);
     assert_eq!(&cancelled["redaction"]["candidate"], candidate);
     assert!(cancelled["redaction"]["verification"].is_null());
+    let stale_close = call(native_pdf_close, bound("close", 3, base));
+    assert_eq!(stale_close["code"], "FLOW_PDF_NATIVE_REQUEST_INVALID");
     for kind in ["verify", "publish", "readPublished"] {
         let reply = start(3, json!({"kind":kind,"candidate":candidate}));
         assert_eq!(reply["status"], "failed");
@@ -544,6 +619,8 @@ fn serialized_note_lifecycle_and_fail_closed_wire() {
         }
     }
 
+    let wrong_revision = call(native_pdf_close, bound("close", 6, &original));
+    assert_eq!(wrong_revision["code"], "FLOW_PDF_NATIVE_REVISION_MISMATCH");
     let close = bound("close", 6, &latest);
     let stale_close = call(native_pdf_close, bound("close", 5, &latest));
     assert_eq!(stale_close["code"], "FLOW_PDF_NATIVE_REQUEST_INVALID");
