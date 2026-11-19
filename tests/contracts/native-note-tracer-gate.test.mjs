@@ -83,11 +83,10 @@ test('requires the configured workflow, current attempt, and exact Actions check
   })
 })
 
-test('retains the original approval and accepts reviewed expanded runs before and after the runner', () => {
-  for (const options of [{ expanded: false, updatedPackage: false }, { updatedPackage: false }, {}]) {
-    assert.equal(requirePassedCi('HEAD', fixture(options).command).sha, sha)
+test('requires the expanded workflow and package for the final browser harness', () => {
+  for (const options of [{ expanded: false, updatedPackage: false }, { updatedPackage: false }, { expanded: false }]) {
+    assert.throws(() => requirePassedCi('HEAD', fixture(options).command), /HARNESS_NOT_APPROVED/)
   }
-  assert.throws(() => requirePassedCi('HEAD', fixture({ expanded: false }).command), /HARNESS_NOT_APPROVED/)
 })
 
 for (const step of ['text replacement', 'object editing', 'page management', 'field editing', 'redaction']) {

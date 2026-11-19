@@ -27,7 +27,6 @@ const approvedHarness = [
   ['vitest.config.ts', 'ec28afa609c9842929e91a4804c0b4b272e5bf0b7b7648b296d8c0b139cb60f8'],
   ['web/index.html', 'b822d2d54af4513d06170efce5b41fa450636a8e9ab85638c474d72b8e37f6c2'],
   ['web/editor.html', '1827eb7316907e5b0fabad0b7da31ea19172f65056d969ee05bbd9e01f8f5063'],
-  ['web/tests/pdf-native-edit.browser.test.ts', 'e1b9dec38bbc3fe7dcc981c28c45576e22e419da4d8d230e5c739ccf6ff81410'],
   ['scripts/check-native-note-built.mjs', 'aa9ae9e33f53a1ea00a92163ad9f2951d30705ce6892abd8f055b2877faed105'],
   ['scripts/serve-inspector.mjs', '07e3f482d39f79c3e4e3423e2627c5971477e492fc26855583ce37c77fe98376'],
 ]
@@ -35,12 +34,21 @@ const historicalWorkflow = '62f76deaa269fe69c7e44dcd54458f26ab4d65ea0b195fc1636a
 const expandedWorkflow = '8d8e9d50c10fc6f3bed4803254abf99ac5955b445a81d699b785710268354a80'
 const historicalPackage = 'a5686497377219cf6c5279e057fa831e445547226a39dc5418a31d5a4be9ab74'
 const expandedPackage = 'a4496f8694df21f759c6bde4274ce4f849e057270871a85b84eb285c28bb4c04'
+const historicalNote = ['web/tests/pdf-native-edit.browser.test.ts', 'e1b9dec38bbc3fe7dcc981c28c45576e22e419da4d8d230e5c739ccf6ff81410']
 const expandedHarness = [
   ['web/tests/pdf-native-text.browser.test.ts', '46be62e7b0f31e30e877001aa714e6717eda4376585bd2fa5c340ec1140c533c'],
   ['web/tests/pdf-native-objects.browser.test.ts', 'a9ede30d753528f7b2e507b5f1403e96c93fb1b7028ecd5e8eab778795c943c4'],
   ['web/tests/pdf-native-pages.browser.test.ts', '251eba3f60794ee7d126d858f9377b752ceea1d152cbb5b4c9cfacaf53b51e3b'],
   ['web/tests/pdf-native-forms.browser.test.ts', '3d7f96b9c219f2a6c133fa4653caac5a1080045e3dcad7bd2a55bd1ed4e3ef52'],
   ['web/tests/pdf-native-redaction.browser.test.ts', '7c9ec2bb7fa67c6eee34969d7b4ef0e21352b886bad8a4d4a5cec1d95f5737e7'],
+]
+const reviewedBrowserHarness = [
+  ['web/tests/pdf-native-edit.browser.test.ts', 'f544a59cf5b81b07317725b40171be0c3486f09a18eec352a9e8fe8364376228'],
+  ['web/tests/pdf-native-text.browser.test.ts', '46be62e7b0f31e30e877001aa714e6717eda4376585bd2fa5c340ec1140c533c'],
+  ['web/tests/pdf-native-objects.browser.test.ts', '5af47f1df548e19b4eb545797bbf7de339406133c31428a406cbb7ce736e1612'],
+  ['web/tests/pdf-native-pages.browser.test.ts', '4d1e7b9af40bb99abcbbb8eb6ef275bcc32384141c233d914e4e91887fe783f5'],
+  ['web/tests/pdf-native-forms.browser.test.ts', 'e3a8b28119e3a4d78215bd5694c1c740c6d8855d50bcc8dfdbc8d0319afacbcd'],
+  ['web/tests/pdf-native-redaction.browser.test.ts', '4ca3822bc56c8c764ee5d716523dc623121720cd4e0c5152281bbe3ea0a4b7bc'],
 ]
 const expandedSteps = [
   'Run bilingual Chromium text replacement tracer',
@@ -122,10 +130,16 @@ export function requirePassedCi(ref, command = execute) {
     (packageDigest === historicalPackage || (expanded && packageDigest === expandedPackage)),
   'NATIVE_NOTE_TRACER_HARNESS_NOT_APPROVED')
   const steps = expanded ? [...requiredSteps.slice(0, 3), ...expandedSteps, ...requiredSteps.slice(3)] : requiredSteps
-  for (const [path, digest] of expanded ? [...approvedHarness, ...expandedHarness] : approvedHarness) {
+  for (const [path, digest] of approvedHarness) {
     requireEvidence(harnessDigest(path) === digest,
       'NATIVE_NOTE_TRACER_HARNESS_NOT_APPROVED')
   }
+  const historicalBrowserHarness = expanded ? [historicalNote, ...expandedHarness] : [historicalNote]
+  const observedBrowserHarness = new Map(historicalBrowserHarness.map(([path]) => [path, harnessDigest(path)]))
+  const matchesBrowserHarness = (profile) => profile.every(([path, digest]) => observedBrowserHarness.get(path) === digest)
+  requireEvidence(matchesBrowserHarness(historicalBrowserHarness) ||
+    (expanded && packageDigest === expandedPackage && matchesBrowserHarness(reviewedBrowserHarness)),
+  'NATIVE_NOTE_TRACER_HARNESS_NOT_APPROVED')
   const { workflow_runs: runs, total_count: runCount } = get(`actions/workflows/${workflowFile}/runs?event=push&head_sha=${sha}&per_page=100`)
   requireEvidence(Array.isArray(runs) && runs.length > 0 && runs.length < 100 && runCount === runs.length &&
     runs.every((run) => Number.isSafeInteger(run.run_number)), 'NATIVE_NOTE_TRACER_RUN_UNAVAILABLE')
