@@ -423,7 +423,6 @@ fn load_form(graph: &NativePdfGraph, work: &mut usize) -> FieldResult<Form> {
         {
             return Err(Reference);
         }
-        // Read-only fields still reserve their names in the form namespace.
         let label = graph
             .resolve_metered(values.get("T").ok_or(Reference)?, work)
             .map_err(|_| Reference)?;
