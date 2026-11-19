@@ -1,3 +1,5 @@
+use std::fmt::Write as _;
+
 use flow_wasm::{
     native_pdf_close, native_pdf_command, native_pdf_open, native_pdf_preview,
     native_pdf_redaction, native_pdf_snapshot, verify_native_pdf_response,
@@ -242,7 +244,10 @@ fn status_only(reply: &Value) {
 }
 
 fn redaction_pdf(size: u32) -> String {
-    let paint = "10 10 10 10 re f 40 40 10 10 re f";
+    redaction_pdf_with_paint(size, "10 10 10 10 re f 40 40 10 10 re f")
+}
+
+fn redaction_pdf_with_paint(size: u32, paint: &str) -> String {
     fixture_pdf(&[
         "<< /Type /Catalog /Pages 2 0 R >>",
         "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
@@ -893,10 +898,50 @@ fn cancelling_a_verified_redaction_keeps_the_base_and_prevents_publication() {
 }
 
 #[test]
-fn redaction_wire_retains_marks_when_only_some_checks_pass() {
+fn redaction_wire_refuses_marks_on_oversized_pages() {
     let source = redaction_pdf(3_000);
     let opened = call(native_pdf_open, open_request(source.as_bytes()));
+    assert_eq!(opened["status"], "opened", "{opened}");
     let base = &opened["snapshot"];
+    assert_eq!(base["redactionAdmission"], "unavailable");
+    let page = &base["pageState"]["order"][0];
+    let refused = call(
+        native_pdf_redaction,
+        redaction_request(
+            2,
+            base,
+            json!({"kind":"addMark","pageId":page,"rect":[12000,12000,13000,13000]}),
+        ),
+    );
+    assert_eq!(refused["status"], "failed", "{refused}");
+    assert_eq!(refused["code"], "FLOW_PDF_NATIVE_UNSUPPORTED");
+    assert!(refused["redaction"].is_null());
+    status_only(&refused);
+
+    let unchanged = call(native_pdf_snapshot, bound("snapshot", 2, base));
+    assert_eq!(unchanged["status"], "unseen");
+    assert_eq!(unchanged["snapshot"], *base);
+    let status = call(
+        native_pdf_redaction,
+        redaction_request(3, base, json!({"kind":"status","candidate":null})),
+    );
+    assert_eq!(status["redaction"]["markCount"], 0, "{status}");
+    status_only(&status);
+}
+
+#[test]
+fn redaction_wire_retains_marks_when_only_some_checks_pass() {
+    // @contract: The retained polygon exceeds the raster paint budget before sampling.
+    let mut paint = String::from("10 10 10 10 re f 40 616 m");
+    for step in -23..=24 {
+        write!(paint, " {} {} l", 1_000 + 40 * step, 40 + step * step).unwrap();
+    }
+    paint.push_str(" 1960 1960 l 40 1960 l h f");
+    let source = redaction_pdf_with_paint(1_980, &paint);
+    let opened = call(native_pdf_open, open_request(source.as_bytes()));
+    assert_eq!(opened["status"], "opened", "{opened}");
+    let base = &opened["snapshot"];
+    assert_eq!(base["redactionAdmission"], "supported");
     let page = &base["pageState"]["order"][0];
     let request = |action| redaction_request(3, base, action);
     let added = call(
@@ -907,7 +952,7 @@ fn redaction_wire_retains_marks_when_only_some_checks_pass() {
             json!({"kind":"addMark","pageId":page,"rect":[12000,12000,13000,13000]}),
         ),
     );
-    assert_eq!(added["redaction"]["markCount"], 1);
+    assert_eq!(added["redaction"]["markCount"], 1, "{added}");
     let staged = call(native_pdf_redaction, request(json!({"kind":"stage"})));
     status_only(&staged);
     let candidate = &staged["redaction"]["candidate"];
