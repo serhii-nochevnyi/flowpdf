@@ -90,6 +90,7 @@ function redactionChecks(verification: NativePdfRedactionVerification | null, fa
 export interface NativePdfAcceptedDocument {
   readonly filename: string
   readonly snapshot: NativePdfSnapshot
+  readonly originalStoreHash?: string
 }
 
 export interface NativePdfVerifiedPageText {
@@ -197,14 +198,18 @@ function objectUnits(value: string) {
 }
 
 export function nativeObjectBounds(values: ObjectCoordinates, page: NativePdfRect): NativePdfRect | null {
+  return nativeCropBounds(values, [page[0] * 1000, page[1] * 1000, page[2] * 1000, page[3] * 1000])
+}
+
+export function nativeCropBounds(values: ObjectCoordinates, cropBox: NativePdfRect): NativePdfRect | null {
   const [x, y, width, height] = values
-  const [left, bottom, right, top] = page
-  const l = left * 1000 + objectUnits(x)
-  const b = bottom * 1000 + objectUnits(y)
+  const [left, bottom, right, top] = cropBox
+  const l = left + objectUnits(x)
+  const b = bottom + objectUnits(y)
   const w = objectUnits(width)
   const h = objectUnits(height)
   const bounds = [l, b, l + w, b + h] as const
-  return w > 0 && h > 0 && bounds[2] <= right * 1000 && bounds[3] <= top * 1000
+  return w > 0 && h > 0 && bounds[2] <= right && bounds[3] <= top
     && bounds.every((point) => Number.isInteger(point) && Math.abs(point) <= 1_000_000_000)
     ? bounds : null
 }
@@ -502,6 +507,22 @@ export function nativeMarkerPosition(geometry: Geometry, [l, b, r, t]: NativePdf
   }
 }
 
+export function nativeRedactionOffsets([l, b, r, t]: NativePdfRect, cropBox: NativePdfRect): NativePdfRect {
+  return [l - cropBox[0], b - cropBox[1], r - l, t - b]
+}
+
+export function nativeRedactionOverlay({ cropBox, rotation }: Pick<NativePdfPagePreview, 'cropBox' | 'rotation'>,
+  [l, b, r, t]: NativePdfRect,
+) {
+  const geometry = { bounds: cropBox, rotation }
+  const [x1, y1] = nativeMarkerPosition(geometry, [l, b, l, b])
+  const [x2, y2] = nativeMarkerPosition(geometry, [r, t, r, t])
+  return {
+    left: `${Math.min(x1, x2)}%`, top: `${Math.min(y1, y2)}%`,
+    width: `${Math.abs(x1 - x2)}%`, height: `${Math.abs(y1 - y2)}%`,
+  }
+}
+
 export function nativeDownloadName(filename: string, edited: boolean): string {
   const basename = (filename.split(/[\\/]/u).at(-1) ?? '').replace(/\.pdf$/iu, '')
   const safe = Array.from(basename.replace(/[<>:"|?*\p{Cc}\p{Cf}\p{Cs}]/gu, '_')
@@ -792,7 +813,7 @@ export function PdfNativeEditPanel({
   const focusAfterRender = useRef<string | HTMLElement | { pageAction: HTMLElement | null } | { fieldAction: HTMLElement | null } | null>(null)
   const dialog = useRef<HTMLDialogElement>(null)
   const cancelConfirmation = useRef<HTMLButtonElement>(null)
-  const reopenOriginal = useRef<HTMLButtonElement>(null)
+  const reopenButton = useRef<HTMLButtonElement>(null)
   const removeTrigger = useRef<HTMLButtonElement | null>(null)
 
   useEffect(() => {
@@ -813,9 +834,11 @@ export function PdfNativeEditPanel({
     idle,
   )
   const snapshot = accepted?.snapshot
+  const originalStoreHash = accepted?.originalStoreHash ?? snapshot?.originStoreHash
   const currentRefusal = redactionRefusal?.before === snapshot ? redactionRefusal : null
   const invalidated = service?.phase === 'invalidated' || currentRefusal?.requiresReopen === true
-  const canReopen = invalidated || service?.reopenOriginal === true
+  const reopenAccepted = service?.reopenAccepted === true && service.accepted === snapshot
+  const canReopen = reopenAccepted || invalidated || service?.reopenOriginal === true
   const pages = snapshot?.scene.pages ?? []
   const page = pages.find((entry) => entry.id === pageId)
   const pageIndex = page === undefined ? -1 : pages.indexOf(page)
@@ -887,6 +910,7 @@ export function PdfNativeEditPanel({
   const canAdd = canEdit && page?.canAddNote === true && geometry !== null
   const needsReconcile = service?.phase === 'reconciliationRequired'
   const revision = snapshot?.binding.revision ?? 0
+  const hasEdits = revision > 0 || snapshot?.originStoreHash !== originalStoreHash
   const outputHash = snapshot ? nativeBytesHex(Uint8Array.from(snapshot.outputHash)) : ''
   const previewCoordinator = snapshot && service?.accepted === snapshot && service.phase === 'ready' && !invalidated
     && typeof coordinator?.previewPage === 'function' ? coordinator : null
@@ -895,17 +919,18 @@ export function PdfNativeEditPanel({
   const raster = currentPreview?.raster ?? null
   const hasPreview = raster !== null
   const previewVerified = raster !== null && raster === paintedPreview
+  const markCrop = previewVerified ? raster.cropBox : null
   const previewPending = !!(previewCoordinator && geometry && stableId !== undefined && !currentPreview)
   const redactionAvailable = !!coordinator && typeof coordinator.markRedaction === 'function'
     && typeof coordinator.applyRedaction === 'function' && pageState !== undefined
     && !invalidated && service?.accepted === snapshot && snapshot?.redactionAdmission === 'supported'
-  const markRect = geometry && nativeObjectBounds(redactionCoordinates, geometry.bounds)
+  const markRect = markCrop && nativeCropBounds(redactionCoordinates, markCrop)
   const pageMarks = marks.filter((mark) => mark.pageId === stableId)
   const duplicateMark = markRect !== null && pageMarks.some((mark) => sameNativeBytes(mark.rect, markRect))
   const markInputs = redactionAvailable && previewVerified && sessionReady && !navigationBlocked
   const markControls = markInputs && !composing
   const markCleanup = redactionAvailable && sessionReady && !navigationBlocked && !composing
-  const markError = markRect === null && redactionCoordinates.some(Boolean) ? 'redaction.geometry.invalid'
+  const markError = markCrop !== null && markRect === null && redactionCoordinates.some(Boolean) ? 'redaction.geometry.invalid'
     : duplicateMark ? 'redaction.geometry.duplicate' : null
   const attempt = pendingRedaction.current
   const activeRedaction = attempt?.action.kind === 'stage' ? attempt : null
@@ -972,7 +997,7 @@ export function PdfNativeEditPanel({
     if (confirm === null && element?.open) {
       element.close()
       const trigger = removeTrigger.current
-      if (invalidated && reopenOriginal.current) reopenOriginal.current.focus()
+      if (invalidated && reopenButton.current) reopenButton.current.focus()
       else if (trigger?.isConnected && !trigger.matches(':disabled')) trigger.focus()
       else if (!locked.current) {
         const selector = trigger?.id === `${id}-field-remove` ? `${id}-field-selector` : pageSelectorId
@@ -1169,7 +1194,10 @@ export function PdfNativeEditPanel({
     setNavigation(null)
   }
 
-  async function open(filename: string, read: () => Promise<Uint8Array>, originalHash?: string) {
+  async function open(filename: string, read: () => Promise<Uint8Array>,
+    recovery?: { readonly expectedSourceHash: string; readonly originalStoreHash?: never }
+      | { readonly expectedSourceHash?: never; readonly originalStoreHash: string },
+  ) {
     if (locked.current) return
     locked.current = true
     clearFeedback()
@@ -1185,7 +1213,7 @@ export function PdfNativeEditPanel({
         return
       }
       const hash = (await hashPdfSourceBytes(bytes)).slice('sha256:v1:'.length)
-      if (originalHash !== undefined && hash !== originalHash) {
+      if (recovery?.expectedSourceHash !== undefined && hash !== recovery.expectedSourceHash) {
         throw new PdfSourceStoreError('FLOW_PDF_SOURCE_IDENTITY_CONFLICT')
       }
       await sourceStore.put(hash, bytes)
@@ -1212,7 +1240,9 @@ export function PdfNativeEditPanel({
       setRedactionCoordinates(['', '', '', ''])
       setRedactionRefusal(null)
       setRedactedOutput(null)
-      setAccepted({ filename, snapshot: result })
+      setAccepted({ filename, snapshot: result,
+        ...(recovery?.originalStoreHash !== undefined ? { originalStoreHash: recovery.originalStoreHash } : {}),
+      })
       setPageId(acceptedPageIndex(result))
       setMovePosition(null)
       setBlankSide('after')
@@ -1221,7 +1251,8 @@ export function PdfNativeEditPanel({
       setTextDrafts([])
       resetObject()
       setComposition(false)
-      setStatus([originalHash === undefined ? 'status.ready' : 'status.reopened'])
+      setStatus([recovery === undefined ? 'status.ready'
+        : recovery.originalStoreHash !== undefined ? 'status.reopenedAccepted' : 'status.reopened'])
     } catch (cause) {
       candidate?.dispose()
       if (mounted.current) setFailure(cause, true)
@@ -1805,8 +1836,10 @@ export function PdfNativeEditPanel({
     } catch (cause) {
       if (!mounted.current) return
       setFailure(cause, false)
-      if (coordinator.snapshot().phase !== 'reconciliationRequired' && document.activeElement === invoker) {
-        focusAfterRender.current = `${id}-notes`
+      const current = coordinator.snapshot()
+      if (pageActionOwnsFocus(invoker)) {
+        if (current.reopenAccepted) focusAfterRender.current = `${id}-reopen`
+        else if (current.phase !== 'reconciliationRequired') focusAfterRender.current = `${id}-notes`
       }
     } finally {
       locked.current = false
@@ -1831,11 +1864,11 @@ export function PdfNativeEditPanel({
   }
 
   async function downloadOriginal() {
-    if (!accepted) return
+    if (!accepted || originalStoreHash === undefined) return
     clearFeedback()
     try {
-      const bytes = await sourceStore.get(accepted.snapshot.originStoreHash)
-      if (bytes === null || (await hashPdfSourceBytes(bytes)) !== `sha256:v1:${accepted.snapshot.originStoreHash}`) {
+      const bytes = await sourceStore.get(originalStoreHash)
+      if (bytes === null || (await hashPdfSourceBytes(bytes)) !== `sha256:v1:${originalStoreHash}`) {
         throw new PdfSourceStoreError('FLOW_PDF_SOURCE_IDENTITY_CONFLICT')
       }
       if (!mounted.current) return
@@ -1858,7 +1891,7 @@ export function PdfNativeEditPanel({
   if (invalidated && !failure) failure = t('error.session')
   if (currentRefusal) failure = [t('redaction.noOutput', { reason: t(currentRefusal.reason) }), failure].filter(Boolean).join(' ')
   if (canReopen && !invalidated && needsReconcile) {
-    failure = [failure, t('session.redactionRecovery')].filter(Boolean).join(' ')
+    failure = [failure, t(reopenAccepted ? 'session.commandRecovery' : 'session.redactionRecovery')].filter(Boolean).join(' ')
   }
   const announcement = busy === 'opening' ? t('status.opening')
     : busy === 'mutating' ? t('status.pending')
@@ -1906,7 +1939,7 @@ export function PdfNativeEditPanel({
               }} />
           </label>
           <button type="button" disabled={!accepted} onClick={() => void downloadOriginal()}
-            data-origin-hash={snapshot?.originStoreHash}>{t('download.original')}</button>
+            data-origin-hash={originalStoreHash}>{t('download.original')}</button>
           {currentRedacted ? <button type="button" disabled={busy !== null}
             data-output-hash={outputHash} data-validator-version={currentRedacted.candidate.validatorVersion}
             aria-describedby={`${id}-redacted-output`} onClick={() => {
@@ -1919,10 +1952,10 @@ export function PdfNativeEditPanel({
                 setError(['error.download'])
               }
             }}>{t('redaction.download')}</button>
-          : <button type="button" disabled={revision === 0 || busy !== null}
+          : <button type="button" disabled={!hasEdits || busy !== null}
             aria-describedby={`${id}-edited`} data-output-hash={snapshot ? outputHash : undefined}
             onClick={() => {
-              if (!snapshot || !accepted || revision === 0 || locked.current) return
+              if (!snapshot || !accepted || !hasEdits || locked.current) return
               clearFeedback()
               try {
                 const filename = preRedactionOutput
@@ -1932,15 +1965,20 @@ export function PdfNativeEditPanel({
               } catch {
                 setError(['error.download'])
               }
-            }}>{t(preRedactionOutput && revision > 0 ? 'redaction.downloadPrior' : 'download.edited')}</button>}
-          {canReopen && accepted && <button type="button" id={`${id}-reopen`} ref={reopenOriginal} disabled={busy !== null} onClick={() => {
-            const origin = accepted.snapshot.originStoreHash
-            void open(accepted.filename, async () => {
-              const original = await sourceStore.get(origin)
-              if (original === null) throw new Error()
-              return original
-            }, origin)
-          }}>{t('session.reopen')}</button>}
+            }}>{t(preRedactionOutput && hasEdits ? 'redaction.downloadPrior' : 'download.edited')}</button>}
+          {canReopen && accepted && originalStoreHash !== undefined && <button type="button" id={`${id}-reopen`} ref={reopenButton}
+            disabled={busy !== null} onClick={() => {
+              if (reopenAccepted) {
+                void open(accepted.filename, async () => nativeHexBytes(accepted.snapshot.outputHex),
+                  { originalStoreHash })
+              } else {
+                void open(accepted.filename, async () => {
+                  const original = await sourceStore.get(originalStoreHash)
+                  if (original === null) throw new Error()
+                  return original
+                }, { expectedSourceHash: originalStoreHash })
+              }
+            }}>{t(reopenAccepted ? 'session.reopenAccepted' : 'session.reopen')}</button>}
           {(needsReconcile || service?.phase === 'reconciling' || busy === 'reconciling')
             && <button type="button" id={reconcileId} aria-disabled={busy !== null} onClick={(event) => void reconcile(event.currentTarget)}>
               {t('session.reconcile')}</button>}
@@ -1949,7 +1987,7 @@ export function PdfNativeEditPanel({
         {accepted && <p data-native-filename="" dir="auto"><bdi>{accepted.filename}</bdi></p>}
         {currentRedacted ? <p className="native-help" id={`${id}-redacted-output`}>
           {t('redaction.outputIdentity', { revision, hash: outputHash })}</p>
-        : <p className="native-help" id={`${id}-edited`}>{revision === 0 ? t('download.unavailable')
+        : <p className="native-help" id={`${id}-edited`}>{!hasEdits ? t('download.unavailable')
           : preRedactionOutput ? t('redaction.prior', { revision })
             : invalidated || needsReconcile ? t('output.last', { revision })
               : operationError && !operationError.file ? t('output.previous', { revision })
@@ -2038,7 +2076,7 @@ export function PdfNativeEditPanel({
             <p>{position}</p>
             <div id={viewportId} className="native-viewport" role="region" aria-label={t('viewport.label')} tabIndex={0}>
               {geometry && <NativePagePaper geometry={geometry} zoom={zoom} notes={notes}
-                marks={previewVerified ? pageMarks : []} selected={selected?.id} onSelect={chooseNote}
+                marks={pageMarks} selected={selected?.id} onSelect={chooseNote}
                 raster={raster} canvasRef={previewCanvas} previewVerified={previewVerified} revision={revision} outputHash={outputHash} />}
             </div>
             <div aria-live="polite">
@@ -2064,7 +2102,7 @@ export function PdfNativeEditPanel({
             </>}
             {redactionAvailable && <>
               {marks.length === 0 && !currentRedacted && <p>{t('redaction.empty')}</p>}
-              {geometry && stableId !== undefined && previewVerified && <form className="native-stack" onSubmit={(event) => {
+              {markCrop && stableId !== undefined && <form className="native-stack" onSubmit={(event) => {
                 event.preventDefault()
                 if (!markRect || duplicateMark) return
                 void runRedaction({ kind: 'addMark', pageId: stableId, rect: markRect }, document.getElementById(`${id}-redaction-add`))
@@ -2089,14 +2127,15 @@ export function PdfNativeEditPanel({
                     {t('redaction.add')}</button></div>
                 </fieldset>
               </form>}
-              {geometry && pageMarks.length > 0 && <ul className="native-note-list" aria-label={t('redaction.pageMarks')}>
+              {pageMarks.length > 0 && <ul className="native-note-list" aria-label={t('redaction.pageMarks')}>
                 {pageMarks.map((mark, index) => {
-                  const [l, b, r, top] = mark.rect
-                  const parameters = { x: formatPoint(l - geometry.bounds[0] * 1000), y: formatPoint(b - geometry.bounds[1] * 1000),
-                    width: formatPoint(r - l), height: formatPoint(top - b) }
+                  const offsets = markCrop && nativeRedactionOffsets(mark.rect, markCrop)
                   const markId = `${id}-redaction-mark-${index}`
                   return <li key={mark.rect.join(',')} className="native-stack">
-                    <span id={markId}>{t('redaction.markGeometry', parameters)}</span>
+                    <span id={markId}>{offsets ? t('redaction.markGeometry', {
+                      x: formatPoint(offsets[0]), y: formatPoint(offsets[1]),
+                      width: formatPoint(offsets[2]), height: formatPoint(offsets[3]),
+                    }) : t('redaction.markIndex', { index: pointFormat.format(index + 1) })}</span>
                     <button type="button" disabled={!markCleanup} aria-describedby={markId} onClick={(event) =>
                       void runRedaction({ kind: 'removeMark', ...mark }, event.currentTarget)}>{t('redaction.removeMark')}</button>
                   </li>
@@ -2618,15 +2657,8 @@ function NativePagePaper({ geometry, notes, marks, selected, onSelect, zoom, ras
         data-native-preview-page={raster.pageId} data-native-preview-revision={revision} data-native-preview-hash={outputHash}
         style={{ width: `${50 * raster.width / width}%`, height: `${50 * raster.height / height}%` }} />
     </div>}
-    {marks.map(({ rect }) => {
-      const [l, b, r, t] = rect
-      const [x1, y1] = nativeMarkerPosition(displayGeometry, [l / 1000, b / 1000, l / 1000, b / 1000])
-      const [x2, y2] = nativeMarkerPosition(displayGeometry, [r / 1000, t / 1000, r / 1000, t / 1000])
-      return <span className="native-redaction-mark" key={rect.join(',')} style={{
-        left: `${Math.min(x1, x2)}%`, top: `${Math.min(y1, y2)}%`,
-        width: `${Math.abs(x1 - x2)}%`, height: `${Math.abs(y1 - y2)}%`,
-      }} />
-    })}
+    {previewVerified && raster && marks.map(({ rect }) =>
+      <span className="native-redaction-mark" key={rect.join(',')} style={nativeRedactionOverlay(raster, rect)} />)}
     {markers}
   </div>
 }
