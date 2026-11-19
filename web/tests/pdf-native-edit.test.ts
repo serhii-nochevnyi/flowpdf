@@ -1,5 +1,6 @@
 import * as wasm from '../generated/flow_wasm.js'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { hashPdfSourceBytes } from '../persistence/pdf-source-store.js'
 import { nativeCropBounds } from '../src/pdf/pdf-native-edit-panel.js'
 import {
   NATIVE_PDF_LIMITS,
@@ -637,10 +638,7 @@ describe('native PDF edit coordinator', () => {
     const savedDispatch = await lane.take()
     const applied = addReply(savedDispatch.request, initial)
     const bytes = nativeHexBytes(applied.snapshot.outputHex)
-    const outputHash = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes)))
-    lane.deliver(savedDispatch, { ...applied, snapshot: {
-      ...applied.snapshot, outputHash, scene: { ...applied.snapshot.scene, outputHash },
-    } })
+    lane.deliver(savedDispatch, applied)
     const accepted = await saved
 
     const lost = expect(lane.coordinator.command(note('uncertain edit'))).rejects.toMatchObject({ code: 'FLOW_PDF_NATIVE_REPLY_LOST' })
@@ -672,7 +670,9 @@ describe('native PDF edit coordinator', () => {
     expect(sent.mock.calls.map(([message]) => message.request.operation)).toEqual(['open', 'command', 'command', 'snapshot'])
 
     const replacement = fakePort()
-    const originStoreHash = nativeBytesHex(Uint8Array.from(accepted.outputHash))
+    const originStoreHash = (await hashPdfSourceBytes(bytes)).slice('sha256:v1:'.length)
+    expect(originStoreHash).not.toBe(nativeBytesHex(Uint8Array.from(accepted.outputHash)))
+    expect(originStoreHash).not.toBe(accepted.originStoreHash)
     const reopening = replacement.coordinator.open({ bytes: lane.coordinator.outputBytes()!, originStoreHash })
     const open = await replacement.take()
     expect(open.request).toMatchObject({ operation: 'open', originStoreHash, bytesHex: accepted.outputHex })

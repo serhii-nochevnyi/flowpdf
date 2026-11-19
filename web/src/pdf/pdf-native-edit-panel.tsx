@@ -1195,7 +1195,8 @@ export function PdfNativeEditPanel({
   }
 
   async function open(filename: string, read: () => Promise<Uint8Array>,
-    recovery?: { readonly hash: string; readonly originalStoreHash?: string },
+    recovery?: { readonly expectedSourceHash: string; readonly originalStoreHash?: never }
+      | { readonly expectedSourceHash?: never; readonly originalStoreHash: string },
   ) {
     if (locked.current) return
     locked.current = true
@@ -1212,7 +1213,7 @@ export function PdfNativeEditPanel({
         return
       }
       const hash = (await hashPdfSourceBytes(bytes)).slice('sha256:v1:'.length)
-      if (recovery && hash !== recovery.hash) {
+      if (recovery?.expectedSourceHash !== undefined && hash !== recovery.expectedSourceHash) {
         throw new PdfSourceStoreError('FLOW_PDF_SOURCE_IDENTITY_CONFLICT')
       }
       await sourceStore.put(hash, bytes)
@@ -1969,13 +1970,13 @@ export function PdfNativeEditPanel({
             disabled={busy !== null} onClick={() => {
               if (reopenAccepted) {
                 void open(accepted.filename, async () => nativeHexBytes(accepted.snapshot.outputHex),
-                  { hash: outputHash, originalStoreHash })
+                  { originalStoreHash })
               } else {
                 void open(accepted.filename, async () => {
                   const original = await sourceStore.get(originalStoreHash)
                   if (original === null) throw new Error()
                   return original
-                }, { hash: originalStoreHash })
+                }, { expectedSourceHash: originalStoreHash })
               }
             }}>{t(reopenAccepted ? 'session.reopenAccepted' : 'session.reopen')}</button>}
           {(needsReconcile || service?.phase === 'reconciling' || busy === 'reconciling')
