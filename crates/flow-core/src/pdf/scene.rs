@@ -1156,7 +1156,7 @@ impl<'a> SceneBuilder<'a> {
         }
         if !glyphs.is_empty() {
             let rect = union_rect(glyphs.iter().map(|glyph| glyph.rect))?;
-            if !self.form_paint_visible(rect, true, &provenance)? {
+            if !self.form_paint_visible(rect, false, &provenance)? {
                 return Ok(());
             }
             self.push_element(PdfSceneElement::Text {
