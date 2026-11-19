@@ -23,3 +23,5 @@ jobs:
         run: cargo test --locked -p flow-core --lib pdf::native -- --nocapture
       - name: PDF reader, scene, and COS regressions
         run: cargo test --locked -p flow-core --test pdf_reader --test pdf_scene --test pdf_cos -- --nocapture
+      - name: Serialized PDF native edit tests
+        run: cargo test --locked -p flow-wasm --test pdf_native_edit
