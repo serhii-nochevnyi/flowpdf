@@ -322,6 +322,11 @@ mod tests {
             }
         }
         assert_eq!(graph.original_bytes(), source);
+
+        graph.limits.max_output_bytes = output.len();
+        assert_eq!(graph.rewrite().unwrap(), output);
+        graph.limits.max_output_bytes -= 1;
+        assert_eq!(graph.rewrite(), Err(NativeEditError::Budget));
     }
 
     #[test]
