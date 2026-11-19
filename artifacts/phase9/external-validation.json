@@ -2,19 +2,23 @@
   "schemaVersion": 1,
   "lane": "release",
   "status": "unavailable",
-  "argv": ["npm", "run", "check:phase9:release"],
+  "argv": [
+    "npm",
+    "run",
+    "check:phase9:release"
+  ],
   "exitCode": 2,
   "tasks": [
     {
       "id": "09-17-02",
       "status": "unavailable",
       "exitCode": 2,
-      "elapsedMilliseconds": 46
+      "elapsedMilliseconds": 38
     }
   ],
   "evidence": {
     "status": "unavailable",
-    "observedAt": "2026-11-19T00:42:18.183Z",
+    "observedAt": "2026-11-19T00:45:08.512Z",
     "manifestHash": "d24c0eff7ef3a4c958298a12d51a35538218d968e7b9aff18a2e45f9ac894f16",
     "tools": {
       "qpdf": null,
@@ -22,11 +26,19 @@
       "pdftoppm": null
     },
     "commands": {
-      "probe": { "pass": 0, "fail": 0, "unavailable": 3 }
+      "probe": {
+        "pass": 0,
+        "fail": 0,
+        "unavailable": 3
+      }
     },
     "fixtures": [],
-    "missing": ["qpdf", "pdftotext", "pdftoppm", "node-24.10.0"]
+    "missing": [
+      "qpdf",
+      "pdftotext",
+      "pdftoppm"
+    ]
   },
-  "nextRequiredInput": "Configured Node 24.10.0, npm 11.9.0, pinned offline WASM build, qpdf with JSON v2, and matching Poppler utilities",
+  "nextRequiredInput": "Configured qpdf with JSON v2, pdftotext, and pdftoppm from matching Poppler builds.",
   "externalCompatibilityClaim": "unavailable"
 }

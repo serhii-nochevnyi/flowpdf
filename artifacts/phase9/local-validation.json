@@ -1,19 +1,12 @@
 {
   "schemaVersion": 1,
-  "observedAt": "2026-11-19T00:42:18.183Z",
-  "inheritedHead": "cc39e443663acf1e194aa8717dc33d21f9a98c3f",
-  "status": "unavailable",
+  "status": "pass",
+  "observedAt": "2026-11-19T00:49:44.798Z",
+  "sourceCommit": "334f415598f6da9270058fed82db3e6ed7d67d4f",
   "runtime": {
-    "required": {
-      "node": "24.10.0",
-      "npm": "11.9.0",
-      "rust": "1.97.1"
-    },
-    "default": {
-      "node": "24.21.0",
-      "npm": "11.19.0"
-    },
-    "pinnedNodeProbe": "24.10.0"
+    "node": "24.10.0",
+    "npm": "11.9.0",
+    "rust": "1.97.1"
   },
   "commands": [
     {
@@ -22,9 +15,8 @@
         "run",
         "check:phase9"
       ],
-      "status": "unavailable",
-      "exitCode": 2,
-      "reason": "node-24.10.0"
+      "status": "pass",
+      "exitCode": 0
     },
     {
       "argv": [
@@ -32,9 +24,8 @@
         "run",
         "build:web"
       ],
-      "status": "unavailable",
-      "exitCode": 1,
-      "reason": "node-24.10.0"
+      "status": "pass",
+      "exitCode": 0
     },
     {
       "argv": [
@@ -42,48 +33,8 @@
         "scripts/check-phase9.mjs",
         "--browser"
       ],
-      "status": "unavailable",
-      "exitCode": 2,
-      "reason": "node-24.10.0"
-    },
-    {
-      "argv": [
-        "node",
-        "scripts/check-phase9.mjs"
-      ],
-      "node": "24.10.0",
-      "status": "unavailable",
-      "exitCode": 2,
-      "reason": "npm-11.9.0"
-    },
-    {
-      "argv": [
-        "node",
-        "scripts/check-phase9.mjs",
-        "--browser"
-      ],
-      "node": "24.10.0",
-      "status": "unavailable",
-      "exitCode": 2,
-      "reason": "npm-11.9.0"
-    },
-    {
-      "argv": [
-        "npm",
-        "run",
-        "check:phase7"
-      ],
-      "status": "not-run",
-      "reason": "configured-ci-required"
-    },
-    {
-      "argv": [
-        "npm",
-        "run",
-        "check:phase8"
-      ],
-      "status": "not-run",
-      "reason": "configured-ci-required"
+      "status": "pass",
+      "exitCode": 0
     }
   ],
   "tasks": [
@@ -94,7 +45,9 @@
         "09-01-01",
         "09-01-02"
       ],
-      "status": "not-run"
+      "status": "pass",
+      "exitCode": 0,
+      "elapsedMilliseconds": 757
     },
     {
       "id": "09-18-01",
@@ -103,7 +56,9 @@
         "09-18-01",
         "09-18-02"
       ],
-      "status": "not-run"
+      "status": "pass",
+      "exitCode": 0,
+      "elapsedMilliseconds": 215
     },
     {
       "id": "09-02-01",
@@ -116,7 +71,9 @@
         "09-10-02",
         "09-14-01"
       ],
-      "status": "not-run"
+      "status": "pass",
+      "exitCode": 0,
+      "elapsedMilliseconds": 1005
     },
     {
       "id": "09-02-02",
@@ -125,7 +82,9 @@
         "09-02-02",
         "09-14-02"
       ],
-      "status": "not-run"
+      "status": "pass",
+      "exitCode": 0,
+      "elapsedMilliseconds": 550
     },
     {
       "id": "09-02-03",
@@ -134,7 +93,9 @@
         "09-02-03",
         "09-03-01"
       ],
-      "status": "not-run"
+      "status": "pass",
+      "exitCode": 0,
+      "elapsedMilliseconds": 1887
     },
     {
       "id": "09-19-01",
@@ -148,7 +109,9 @@
         "09-11-01",
         "09-15-01"
       ],
-      "status": "not-run"
+      "status": "pass",
+      "exitCode": 0,
+      "elapsedMilliseconds": 569
     },
     {
       "id": "09-03-03",
@@ -156,7 +119,9 @@
       "covers": [
         "09-03-03"
       ],
-      "status": "not-run"
+      "status": "pass",
+      "exitCode": 0,
+      "elapsedMilliseconds": 101
     },
     {
       "id": "09-04-01",
@@ -164,7 +129,9 @@
       "covers": [
         "09-04-01"
       ],
-      "status": "not-run"
+      "status": "pass",
+      "exitCode": 0,
+      "elapsedMilliseconds": 295
     },
     {
       "id": "09-06-01",
@@ -172,7 +139,9 @@
       "covers": [
         "09-06-01"
       ],
-      "status": "not-run"
+      "status": "pass",
+      "exitCode": 0,
+      "elapsedMilliseconds": 87
     },
     {
       "id": "09-08-01",
@@ -181,7 +150,9 @@
         "09-08-01",
         "09-10-01"
       ],
-      "status": "not-run"
+      "status": "pass",
+      "exitCode": 0,
+      "elapsedMilliseconds": 161
     },
     {
       "id": "09-12-01",
@@ -192,7 +163,9 @@
         "09-13-01",
         "09-13-02"
       ],
-      "status": "not-run"
+      "status": "pass",
+      "exitCode": 0,
+      "elapsedMilliseconds": 887
     },
     {
       "id": "09-16-01",
@@ -201,7 +174,9 @@
         "09-16-01",
         "09-20-01"
       ],
-      "status": "not-run"
+      "status": "pass",
+      "exitCode": 0,
+      "elapsedMilliseconds": 32
     },
     {
       "id": "09-16-02",
@@ -210,7 +185,9 @@
         "09-16-02",
         "09-20-02"
       ],
-      "status": "not-run"
+      "status": "pass",
+      "exitCode": 0,
+      "elapsedMilliseconds": 238
     },
     {
       "id": "09-17-01",
@@ -218,7 +195,9 @@
       "covers": [
         "09-17-01"
       ],
-      "status": "not-run"
+      "status": "pass",
+      "exitCode": 0,
+      "elapsedMilliseconds": 69
     },
     {
       "id": "09-03-02",
@@ -226,7 +205,9 @@
       "covers": [
         "09-03-02"
       ],
-      "status": "not-run"
+      "status": "pass",
+      "exitCode": 0,
+      "elapsedMilliseconds": 7349
     },
     {
       "id": "09-05-02",
@@ -234,7 +215,9 @@
       "covers": [
         "09-05-02"
       ],
-      "status": "not-run"
+      "status": "pass",
+      "exitCode": 0,
+      "elapsedMilliseconds": 66125
     },
     {
       "id": "09-07-02",
@@ -242,7 +225,9 @@
       "covers": [
         "09-07-02"
       ],
-      "status": "not-run"
+      "status": "pass",
+      "exitCode": 0,
+      "elapsedMilliseconds": 125600
     },
     {
       "id": "09-09-02",
@@ -250,7 +235,9 @@
       "covers": [
         "09-09-02"
       ],
-      "status": "not-run"
+      "status": "pass",
+      "exitCode": 0,
+      "elapsedMilliseconds": 10996
     },
     {
       "id": "09-11-02",
@@ -258,7 +245,9 @@
       "covers": [
         "09-11-02"
       ],
-      "status": "not-run"
+      "status": "pass",
+      "exitCode": 0,
+      "elapsedMilliseconds": 6520
     },
     {
       "id": "09-15-02",
@@ -266,7 +255,19 @@
       "covers": [
         "09-15-02"
       ],
-      "status": "not-run"
+      "status": "pass",
+      "exitCode": 0,
+      "elapsedMilliseconds": 23562
+    },
+    {
+      "id": "09-17-02",
+      "lane": "release",
+      "covers": [
+        "09-17-02"
+      ],
+      "status": "unavailable",
+      "exitCode": 2,
+      "elapsedMilliseconds": 38
     },
     {
       "id": "09-17-03",
@@ -274,59 +275,40 @@
       "covers": [
         "09-17-03"
       ],
-      "status": "unavailable",
-      "exitCode": 2
+      "status": "pass",
+      "exitCode": 0
     }
   ],
-  "supplemental": [
+  "priorPhaseRegression": [
     {
-      "id": "09-03-03",
       "argv": [
-        "node",
-        "--test",
-        "tests/contracts/native-note-tracer-gate.test.mjs"
+        "npm",
+        "run",
+        "check:phase7"
       ],
-      "status": "pass",
-      "exitCode": 0,
-      "tests": 41
+      "status": "fail",
+      "exitCode": 1,
+      "functionalChecksPassed": 7,
+      "blockedTask": "07-04-03",
+      "nestedGuard": "06-06-01"
     },
     {
-      "id": "09-16-02",
-      "covers": [
-        "09-16-02",
-        "09-20-02"
-      ],
       "argv": [
-        "node",
-        "--test",
-        "tests/contracts/pdf-native-fixtures.test.mjs"
+        "npm",
+        "run",
+        "check:phase8"
       ],
-      "node": "24.10.0",
-      "status": "pass",
-      "exitCode": 0,
-      "tests": 7
-    },
-    {
-      "id": "09-17-02",
-      "check": "native-corpus-adapter",
-      "node": "24.10.0",
-      "status": "pass",
-      "exitCode": 0,
-      "operations": 31
+      "status": "fail",
+      "exitCode": 1,
+      "functionalChecksPassed": 7,
+      "blockedTask": "08-04-02",
+      "nestedGuard": "06-06-01"
     }
   ],
-  "hostVerification": {
-    "status": "pending",
-    "taskIds": [
-      "09-17-01",
-      "09-17-02"
-    ]
-  },
   "additionalEvidence": {
-    "chromium": "unavailable",
+    "chromium": "pass",
     "assistiveTechnology": "unavailable",
     "edge": "unavailable"
   },
-  "localVerifierIndependence": "separate verifier with shared parsing and font code",
-  "nextRequiredInput": "Configured Node 24.10.0 and npm 11.9.0 environment with pinned Rust/WASM and Chromium"
+  "localVerifierIndependence": "Separate exact-byte readback verifier with shared parsing, codec and font code."
 }
