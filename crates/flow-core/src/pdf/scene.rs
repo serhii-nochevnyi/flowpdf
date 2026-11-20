@@ -13,7 +13,8 @@ use crate::layout::{LayoutRect, LayoutUnit};
 use super::reader::{
     PdfObjectRef, PdfPageRecord, PdfReadDiagnostic, PdfReadDiagnosticCode, PdfReadError,
     PdfReadReport, PdfReader, PdfReaderLimits, PdfStream, PdfValue, decode_pdf_text_string,
-    read_scene_name, report_active_content, resolve_label_value, single_filter,
+    map_widget_label, read_scene_name, report_active_content, resolve_annotation_value,
+    single_filter,
 };
 
 use super::native::{NativeNoteId, NativePageGeometry, NativePageId, NativeTextPage};
@@ -686,7 +687,7 @@ struct SceneBuilder<'a> {
     page_index: u32,
     page: &'a PdfPageRecord,
     field_counts: &'a BTreeMap<PdfObjectRef, usize>,
-    widget_label_work: usize,
+    annotation_work: usize,
     elements: Vec<PdfSceneElement>,
     emit_elements: bool,
     report: PdfReadReport,
@@ -711,7 +712,7 @@ impl<'a> SceneBuilder<'a> {
             page_index,
             page,
             field_counts,
-            widget_label_work: reader.limits().max_content_tokens,
+            annotation_work: reader.limits().max_content_tokens,
             elements: Vec::new(),
             emit_elements: true,
             report: PdfReadReport::default(),
@@ -1090,19 +1091,20 @@ impl<'a> SceneBuilder<'a> {
             }
             let rect = path_bounds(&commands)?;
             let stroke = matches!(operator, "S" | "s" | "B" | "B*" | "b" | "b*");
-            if self.invocation_path.len() > 1
-                && self.state.clip.is_empty()
-                && !self.state.paint_clip.is_empty()
-                && (stroke
-                    || paint_bounds
-                        .is_none_or(|bounds| !self.state.paint_clip.intersect(bounds).is_empty()))
-            {
-                self.report_partial(provenance.object_ref);
-            }
+            let fill = !matches!(operator, "S" | "s");
             let visible = if stroke {
+                if (self.invocation_path.len() > 1
+                    && self.state.clip.is_empty()
+                    && !self.state.paint_clip.is_empty())
+                    || (fill
+                        && self.state.clip.intersect(rect, true)?.is_empty()
+                        && self.paint_may_be_visible(paint_bounds))
+                {
+                    self.report_partial(provenance.object_ref);
+                }
                 self.stroke_visible(rect, &provenance)?
             } else {
-                self.paint_visible(rect, true, &provenance)?
+                self.bounded_paint_visible(rect, paint_bounds, &provenance)?
             };
             if visible {
                 // @contract: Only provenance records the fill rule for painted paths.
@@ -1114,7 +1116,7 @@ impl<'a> SceneBuilder<'a> {
                         commands,
                         rect,
                         stroke,
-                        fill: !matches!(operator, "S" | "s"),
+                        fill,
                         provenance,
                     },
                 })?;
@@ -1157,12 +1159,22 @@ impl<'a> SceneBuilder<'a> {
         rect: LayoutRect,
         provenance: &PdfSourceProvenance,
     ) -> Result<bool, PdfReadError> {
-        if self.state.clip.is_empty() {
+        let clip = self.state.clip;
+        if clip.is_empty() {
             return Ok(false);
         }
-        if let Some(bounds) = self.stroke_bounds(rect) {
-            return self.paint_visible(bounds, false, provenance);
+        if let Some(bounds) = self.stroke_bounds(rect)
+            && clip.rectangular
+            && clip.bounds == self.page.media_box
+            && bounds.x > clip.bounds.x
+            && bounds.y > clip.bounds.y
+            && bounds.x.checked_add(bounds.width)? < clip.bounds.x.checked_add(clip.bounds.width)?
+            && bounds.y.checked_add(bounds.height)?
+                < clip.bounds.y.checked_add(clip.bounds.height)?
+        {
+            return Ok(true);
         }
+        // @contract: Stroke geometry can extend beyond the scene rectangle.
         self.report_partial(provenance.object_ref);
         Ok(true)
     }
@@ -1199,35 +1211,27 @@ impl<'a> SceneBuilder<'a> {
         })
     }
 
-    fn paint_visible(
+    fn paint_may_be_visible(&self, paint_bounds: Option<PaintBounds>) -> bool {
+        let clip = self.state.paint_clip;
+        !clip.is_empty() && paint_bounds.is_none_or(|bounds| !clip.intersect(bounds).is_empty())
+    }
+
+    fn bounded_paint_visible(
         &mut self,
         rect: LayoutRect,
-        bounded: bool,
+        paint_bounds: Option<PaintBounds>,
         provenance: &PdfSourceProvenance,
     ) -> Result<bool, PdfReadError> {
-        let clip = self.state.clip;
-        if clip.is_empty() {
+        let intersection = self.state.clip.intersect(rect, true)?;
+        if intersection.is_empty() {
+            if self.paint_may_be_visible(paint_bounds) {
+                self.report_partial(provenance.object_ref);
+            }
             return Ok(false);
         }
-        if bounded {
-            let intersection = clip.intersect(rect, true)?;
-            if intersection.is_empty() {
-                return Ok(false);
-            }
-            if intersection.rectangular && intersection.bounds == rect {
-                return Ok(true);
-            }
-        } else if clip.rectangular
-            && clip.bounds == self.page.media_box
-            && rect.x > clip.bounds.x
-            && rect.y > clip.bounds.y
-            && rect.x.checked_add(rect.width)? < clip.bounds.x.checked_add(clip.bounds.width)?
-            && rect.y.checked_add(rect.height)? < clip.bounds.y.checked_add(clip.bounds.height)?
-        {
-            return Ok(true);
+        if !intersection.rectangular || intersection.bounds != rect {
+            self.report_partial(provenance.object_ref);
         }
-        // @contract: Stroke geometry can extend beyond the scene rectangle.
-        self.report_partial(provenance.object_ref);
         Ok(true)
     }
 
@@ -1670,20 +1674,11 @@ impl<'a> SceneBuilder<'a> {
                 height: one,
             },
         )?;
-        if self.state.clip.intersect(rect, true)?.is_empty() {
-            let clip = self.state.paint_clip;
-            if !clip.is_empty()
-                && self
-                    .state
-                    .paint_ctm
-                    .and_then(|matrix| matrix.bounds([0., 0., 1., 1.]))
-                    .is_none_or(|bounds| !clip.intersect(bounds).is_empty())
-            {
-                self.report_partial(provenance.object_ref);
-            }
-            return Ok(());
-        }
-        if !self.paint_visible(rect, true, &provenance)? {
+        let paint_bounds = self
+            .state
+            .paint_ctm
+            .and_then(|matrix| matrix.bounds([0., 0., 1., 1.]));
+        if !self.bounded_paint_visible(rect, paint_bounds, &provenance)? {
             return Ok(());
         }
         let Matrix { a, b, c, d, .. } = self.state.ctm;
@@ -1740,27 +1735,35 @@ impl<'a> SceneBuilder<'a> {
                 invocation_path: Vec::new(),
             };
             if subtype.as_deref() == Some("Link") {
-                if let Some(action) = dictionary.get("A").and_then(PdfValue::as_dictionary) {
-                    let action_type = action.get("S").and_then(PdfValue::as_name).unwrap_or("");
-                    if action_type != "GoTo" {
-                        self.report.push(PdfReadDiagnostic::blocked(
-                            PdfReadDiagnosticCode::ActiveContent,
-                            Some(self.page_index),
-                            Some(annotation_ref.object_number),
-                        ));
-                    }
+                let action = dictionary.get("A").and_then(PdfValue::as_dictionary);
+                let goto = action
+                    .filter(|action| action.get("S").and_then(PdfValue::as_name) == Some("GoTo"));
+                if action.is_some() && goto.is_none() {
+                    self.report.push(PdfReadDiagnostic::blocked(
+                        PdfReadDiagnosticCode::ActiveContent,
+                        Some(self.page_index),
+                        Some(annotation_ref.object_number),
+                    ));
                 }
                 let destination = dictionary
                     .get("Dest")
-                    .or_else(|| {
-                        dictionary
-                            .get("A")
-                            .and_then(PdfValue::as_dictionary)
-                            .and_then(|value| value.get("D"))
+                    .or_else(|| goto.and_then(|action| action.get("D")))
+                    .and_then(|destination| {
+                        resolve_annotation_value(
+                            destination,
+                            self.limits.max_nesting,
+                            &mut self.annotation_work,
+                            &mut |reference| {
+                                self.reader
+                                    .non_stream_object(reference)
+                                    .ok()
+                                    .map(Cow::Owned)
+                            },
+                        )
                     })
+                    .as_deref()
                     .and_then(PdfValue::as_array)
-                    .and_then(|value| value.first())
-                    .and_then(PdfValue::as_reference)
+                    .and_then(explicit_destination_target)
                     .and_then(|reference| self.page_refs.get(&reference).copied());
                 self.push_element(PdfSceneElement::Link {
                     value: PdfLinkElement {
@@ -1776,21 +1779,31 @@ impl<'a> SceneBuilder<'a> {
                 let field_type = field.get("FT").and_then(PdfValue::as_name);
                 let limit = self.limits.max_string_bytes;
                 let mut available = limit.saturating_mul(3);
-                let name = field.get("T").and_then(|label| {
-                    resolve_label_value(
-                        label,
-                        self.limits.max_nesting,
-                        &mut self.widget_label_work,
-                        &mut |reference| self.reader.label_object(reference).ok().map(Cow::Owned),
-                    )
-                });
-                let name = name
-                    .as_deref()
-                    .and_then(PdfValue::as_bytes)
-                    .map(|bytes| decode_pdf_text_string(bytes, limit, &mut available))
-                    .transpose()?
-                    .flatten()
-                    .filter(|name| !name.is_empty() && !name.chars().any(char::is_control));
+                let parent = dictionary
+                    .get("Parent")
+                    .and_then(PdfValue::as_reference)
+                    .filter(|parent| self.field_counts.get(parent) == Some(&1));
+                let name = map_widget_label(
+                    *annotation_ref,
+                    dictionary.get("T"),
+                    parent,
+                    self.limits.max_nesting,
+                    &mut self.annotation_work,
+                    |reference| {
+                        if reference == *annotation_ref {
+                            Some(Cow::Borrowed(&value))
+                        } else {
+                            self.reader
+                                .non_stream_object(reference)
+                                .ok()
+                                .map(Cow::Owned)
+                        }
+                    },
+                    |bytes| decode_pdf_text_string(bytes, limit, &mut available),
+                )
+                .transpose()?
+                .flatten()
+                .filter(|name| !name.is_empty() && !name.chars().any(char::is_control));
                 let saved = field.get("V");
                 let value = if field_type == Some("Btn")
                     && field
@@ -1856,11 +1869,16 @@ impl<'a> SceneBuilder<'a> {
             return None;
         }
         if let Some(label) = dictionary.get("T") {
-            let label = resolve_label_value(
+            let label = resolve_annotation_value(
                 label,
                 self.limits.max_nesting,
-                &mut self.widget_label_work,
-                &mut |reference| self.reader.label_object(reference).ok().map(Cow::Owned),
+                &mut self.annotation_work,
+                &mut |reference| {
+                    self.reader
+                        .non_stream_object(reference)
+                        .ok()
+                        .map(Cow::Owned)
+                },
             )?;
             if !matches!(*label, PdfValue::Null) {
                 return None;
@@ -1877,11 +1895,16 @@ impl<'a> SceneBuilder<'a> {
         {
             return None;
         }
-        let children = resolve_label_value(
+        let children = resolve_annotation_value(
             field.get("Kids")?,
             self.limits.max_nesting,
-            &mut self.widget_label_work,
-            &mut |reference| self.reader.label_object(reference).ok().map(Cow::Owned),
+            &mut self.annotation_work,
+            &mut |reference| {
+                self.reader
+                    .non_stream_object(reference)
+                    .ok()
+                    .map(Cow::Owned)
+            },
         )?;
         if !matches!(children.as_array(), Some([PdfValue::Reference(child)]) if *child == widget) {
             return None;
@@ -1905,6 +1928,25 @@ impl<'a> SceneBuilder<'a> {
         self.elements.push(element);
         Ok(())
     }
+}
+
+fn explicit_destination_target(destination: &[PdfValue]) -> Option<PdfObjectRef> {
+    let mode = destination.get(1)?.as_name()?;
+    let length = match mode {
+        "Fit" | "FitB" => 2,
+        "FitH" | "FitV" | "FitBH" | "FitBV" => 3,
+        "XYZ" => 5,
+        "FitR" => 6,
+        _ => return None,
+    };
+    if destination.len() != length
+        || !destination[2..].iter().all(|value| {
+            value.as_number().is_some() || (mode != "FitR" && matches!(value, PdfValue::Null))
+        })
+    {
+        return None;
+    }
+    destination.first()?.as_reference()
 }
 
 /// Reads a bounded page window and calculates a stable scene hash.

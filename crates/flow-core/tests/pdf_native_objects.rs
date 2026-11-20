@@ -131,6 +131,82 @@ fn path_crud_isolates_shared_content_and_roundtrips() {
 }
 
 #[test]
+fn filled_rectangles_reopen_with_a_path_or_a_precision_diagnostic() {
+    let source = fixture(b"", false, "", &[]);
+    for (right, expected_width) in [(30_000, Some(10 * 64)), (20_001, None)] {
+        let mut session = open(&source);
+        apply(
+            &mut session,
+            json!({"kind":"addGraphic","page":0,"graphic":{
+                "shape":"rectangle","points":[[20_000,20_000],[right,30_000]],
+                "stroke":null,"fill":[0,0,0],"strokeWidth":0
+            }}),
+        )
+        .unwrap();
+        let reopened = open(session.output_bytes());
+        assert_eq!(
+            objects(&reopened, 0)[0]["bounds"],
+            json!([20_000, 20_000, right, 30_000])
+        );
+
+        let reader = open_pdf(session.output_bytes(), Default::default()).unwrap();
+        let scene = read_pdf_scene(&reader, &PdfSceneRequest::default()).unwrap();
+        let page = &scene.pages[0];
+        if let Some(width) = expected_width {
+            assert!(matches!(
+                page.elements.as_slice(),
+                [PdfSceneElement::Path { value }]
+                    if value.fill && !value.stroke
+                        && value.rect.x.raw() == 20 * 64 && value.rect.y.raw() == 20 * 64
+                        && value.rect.width.raw() == width && value.rect.height.raw() == 10 * 64
+            ));
+            assert!(!page.partial && !scene.report.partial);
+        } else {
+            assert!(page.elements.is_empty());
+            assert!(page.partial && scene.report.partial);
+            assert!(matches!(page.report.diagnostics.as_slice(), [diagnostic]
+                if diagnostic.code == PdfReadDiagnosticCode::PartialPage
+                    && diagnostic.page_index == Some(0)
+                    && diagnostic.object_number.is_some()));
+        }
+    }
+}
+
+#[test]
+fn collapsed_fill_diagnostics_account_for_precise_clipping() {
+    for (contents, page_entries, partial) in [
+        ("0 0 10 10 re W n 5 5 0.001 1 re f", "", true),
+        ("0 0 10 10 re W n 15 5 0.001 1 re f", "", false),
+        ("0 0 10.004 10 re W n 10.004 5 0.001 1 re f", "", false),
+        ("0 0 10.004 10 re W n 10.003 5 0.002 1 re f", "", true),
+        ("5 5 0.001 10 re W n 4 4 5 5 re f", "", true),
+        ("5 5 0.001 10 re W n 8 4 5 5 re f", "", false),
+        ("5 5 0 1 re f", "", false),
+        ("10.003 5 0.002 1 re f", "/CropBox [0 0 10.004 10]", true),
+    ] {
+        let source = fixture(contents.as_bytes(), false, page_entries, &[]);
+        let reader = open_pdf(&source, Default::default()).unwrap();
+        let scene = read_pdf_scene(&reader, &PdfSceneRequest::default()).unwrap();
+        let page = &scene.pages[0];
+        assert!(
+            page.elements
+                .iter()
+                .all(|element| matches!(element, PdfSceneElement::Clip { .. })),
+            "{contents} {page_entries}"
+        );
+        assert_eq!(page.partial, partial, "{contents} {page_entries}");
+        assert_eq!(scene.report.partial, partial);
+        if partial {
+            assert!(matches!(page.report.diagnostics.as_slice(), [diagnostic]
+                if diagnostic.code == PdfReadDiagnosticCode::PartialPage
+                    && diagnostic.object_number == Some(5)));
+        } else {
+            assert!(page.report.diagnostics.is_empty());
+        }
+    }
+}
+
+#[test]
 fn moved_closing_paint_preserves_the_edge_and_does_not_join_the_next_path() {
     let unit = |points: i64| LayoutUnit::from_raw(points * LayoutUnit::UNITS_PER_POINT);
     for (operator, fill, partial) in [("s", false, false), ("b", true, false), ("b*", true, true)] {

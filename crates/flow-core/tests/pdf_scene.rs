@@ -428,6 +428,50 @@ fn widget_readback_requires_a_registered_split_field_with_a_single_matching_chil
 }
 
 #[test]
+fn link_destinations_resolve_within_reader_limits() {
+    for (entries, destination, max_nesting, expected) in [
+        ("/Dest 5 0 R", "6 0 R", 8, Some(0)),
+        ("/Dest 5 0 R", "6 0 R", 4, None),
+        ("/A << /S /GoTo /D 8 0 R >>", "null", 4, Some(0)),
+        ("/A << /S /GoToR /D 8 0 R >>", "null", 4, None),
+        ("/Dest 5 0 R", "5 0 R", 4, None),
+        ("/Dest 5 0 R", "[3 0 R /FitR null 0 20 30]", 4, None),
+    ] {
+        let bytes = pdf(vec![
+            (1, b"<< /Type /Catalog /Pages 2 0 R >>".to_vec()),
+            (2, b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec()),
+            (
+                3,
+                b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Annots [4 0 R] >>".to_vec(),
+            ),
+            (
+                4,
+                format!("<< /Subtype /Link /Rect [10 10 40 30] {entries} >>").into_bytes(),
+            ),
+            (5, destination.as_bytes().to_vec()),
+            (6, b"7 0 R".to_vec()),
+            (7, b"8 0 R".to_vec()),
+            (8, b"9 0 R".to_vec()),
+            (9, b"[3 0 R /XYZ null 20 null]".to_vec()),
+        ]);
+        let reader = open_pdf(
+            &bytes,
+            PdfReaderLimits {
+                max_nesting,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let scene = read_pdf_scene(&reader, &PdfSceneRequest::default()).unwrap();
+        let [PdfSceneElement::Link { value }] = scene.pages[0].elements.as_slice() else {
+            panic!("expected a link");
+        };
+        assert_eq!(value.destination_page, expected, "{entries} {destination}");
+        assert_eq!(value.internal, expected.is_some());
+    }
+}
+
+#[test]
 fn indirect_page_crop_obeys_the_reader_nesting_limit() {
     let bytes = pdf(vec![
         (1, b"<< /Type /Catalog /Pages 2 0 R >>".to_vec()),
