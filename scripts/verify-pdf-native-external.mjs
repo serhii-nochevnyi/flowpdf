@@ -567,7 +567,10 @@ export function pdfStructure(json) {
             matchesWidgetBounds(rectPt, resolveObject(form['/BBox']),
               matrix === undefined ? undefined : resolveObject(matrix) ?? null), 'widget-appearance')
         }
-        fields.push({ page, rectPt, fieldType: resolveObject(annot['/FT']),
+        const fieldType = resolveObject(annot['/FT'])
+        const { '/Ff': flags = 0 } = annot
+        fields.push({ page, rectPt, fieldType,
+          ...(fieldType === '/Btn' ? { fieldFlags: resolveObject(flags) } : {}),
           name: pdfString(annot['/T']), value: pdfString(annot['/V']),
           defaultValue: pdfString(annot['/DV']), ...(state ? { appearanceState: pdfString(state) } : {}) })
       } else if (subtype === '/Link') {
@@ -614,7 +617,7 @@ export function checkStructure(actual, source, operation, rawStream, showObject,
     'page-structure')
   requireMatch(sameRecords(actual.notes, operation.noteReadback), 'note-structure')
   const fields = (operation.fieldReadback ?? []).map((field) => ({
-    ...field, fieldType: Object.hasOwn(field, 'appearanceState') ? '/Btn' : '/Tx',
+    ...field, ...(Object.hasOwn(field, 'appearanceState') ? { fieldType: '/Btn', fieldFlags: 0 } : { fieldType: '/Tx' }),
   }))
   requireMatch(sameRecords(actual.fields, fields), 'field-structure')
   requireMatch(sameRecords(actual.destinations, operation.destinations ?? []), 'destination-structure')

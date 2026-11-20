@@ -5,6 +5,7 @@ import init, { native_pdf_close, native_pdf_open, read_pdf, verify_native_pdf_re
 import '../src/styles.css'
 import '../src/editor/editor.css'
 import { mountEditorApp } from '../src/editor/editor-app.js'
+import { createNativePdfRuntime } from '../src/layout/layout-runtime.js'
 import { hashPdfSourceBytes, PdfSourceStore } from '../persistence/pdf-source-store.js'
 import { nativePdfText, type NativePdfMessage } from '../src/pdf/pdf-native-edit-messages.js'
 import {
@@ -268,6 +269,7 @@ for (const locale of ['en', 'uk'] as const) {
     document.body.append(root)
     const lifecycle = new AbortController()
     const store = new PdfSourceStore(`native-redaction-${crypto.randomUUID()}`)
+    const nativePdf = createNativePdfRuntime(undefined, store)
     const put = vi.spyOn(store, 'put')
     const clipboard = vi.spyOn(Clipboard.prototype, 'writeText')
     const clipboardItems = vi.spyOn(Clipboard.prototype, 'write')
@@ -280,10 +282,14 @@ for (const locale of ['en', 'uk'] as const) {
     const t = (key: NativePdfMessage, values?: Record<string, string | number>) => nativePdfText(locale, key, values)
     try {
       const editor = await mountEditorApp(root, { locale, databaseName: `redaction-editor-${crypto.randomUUID()}` },
-        {}, undefined, { nativePdf: { createCoordinator: () => lane.coordinator, sourceStore: store }, signal: lifecycle.signal })
+        {}, undefined, { nativePdf: { ...nativePdf, createCoordinator: () => lane.coordinator }, signal: lifecycle.signal })
       const semantic = editor.snapshot().accepted
       const panel = page.getByRole('region', { name: t('title'), exact: true })
       const redaction = panel.getByRole('region', { name: t('family.redaction'), exact: true })
+      const projection = panel.getByRole('region', { name: t('projection.label'), exact: true })
+      const retiredPageText = 'ЇЇ'
+      const retiredText = projection.getByText(retiredPageText, { exact: true })
+      const retainedText = projection.getByText('AA', { exact: true })
       const button = (key: NativePdfMessage) => panel.getByRole('button', { name: t(key), exact: true })
       const redactionButton = (key: NativePdfMessage) => redaction.getByRole('button', { name: t(key), exact: true })
       const text = (key: NativePdfMessage) => redaction.getByRole('textbox', { name: t(key), exact: true })
@@ -488,6 +494,8 @@ for (const locale of ['en', 'uk'] as const) {
       await userEvent.keyboard('{Enter}')
       expect(document.activeElement).toBe(redactionButton('redaction.apply').element())
       expect(lane.control.requests).not.toContain('stage')
+      await expect.element(retiredText).toBeVisible()
+      await expect.element(retainedText).toBeVisible()
 
       const checkpoint = () => ({ downloads: downloads.length, urls: urls.mock.calls.length })
       async function assertQuarantine(previous: ReturnType<typeof checkpoint>) {
@@ -560,6 +568,14 @@ for (const locale of ['en', 'uk'] as const) {
       await runApply()
       await expect.poll(() => lane.control.resume).toBeTypeOf('function')
       await assertQuarantine(beforePublish)
+      const assertTextQuarantine = async () => {
+        const unavailable = locale === 'uk' ? 'Вилучення тексту для цієї сторінки недоступне.'
+          : 'Text extraction is unavailable for this page.'
+        await expect.element(projection.getByText(unavailable, { exact: true })).toBeVisible()
+        await expect.element(projection).toHaveAttribute('aria-busy', 'false')
+        expect(projection.element().textContent).toBe(unavailable)
+      }
+      await assertTextQuarantine()
       for (const key of ['internal', 'structure', 'text', 'raster'] as const) await assertCheck(key, 'evidence.passed')
       await expect.element(redactionButton('redaction.cancel')).toBeDisabled()
       const unpublished = rawRedactionReplies(lane.control)
@@ -571,9 +587,13 @@ for (const locale of ['en', 'uk'] as const) {
       if (locale === 'uk') {
         await expect.element(button('session.reconcile'), { timeout: 6_000 }).toBeVisible()
         await assertQuarantine(beforePublish)
+        await assertTextQuarantine()
         await activate(button('session.reconcile').element())
       }
       await expect.element(status).toHaveTextContent(t('redaction.success'))
+      await expect.element(retainedText).toBeVisible()
+      await expect.element(projection).toHaveAttribute('aria-busy', 'false')
+      expect(projection.element().textContent).not.toContain(retiredPageText)
       expect(status.element().hasAttribute('data-native-redaction-status')).toBe(false)
       const publication = rawRedactionReplies(lane.control).slice(unpublished.length)
       expect(publication.map(({ request }) => request.action.kind)).toEqual(
@@ -699,6 +719,7 @@ for (const locale of ['en', 'uk'] as const) {
     } finally {
       lifecycle.abort()
       lane.coordinator.dispose()
+      nativePdf.dispose()
       root.remove()
       vi.restoreAllMocks()
     }

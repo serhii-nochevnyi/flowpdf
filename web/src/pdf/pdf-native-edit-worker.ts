@@ -412,6 +412,15 @@ function sameNotes(before: readonly PlainNote[], after: readonly PlainNote[]): b
   })
 }
 
+function isUnchangedSnapshot(previous: NativePdfVerifiedSnapshot, current: NativePdfVerifiedSnapshot): boolean {
+  return sameNativeAcceptedOutput(previous, current)
+    && previous.consumedRequest === current.consumedRequest
+    && sameNativeBytes(previous.scene.sceneHash, current.scene.sceneHash)
+    && sameNativeBytes(previous.pageState.order, current.pageState.order)
+    && previous.pageState.selected === current.pageState.selected
+    && sameNotes(plainNotes(previous), plainNotes(current))
+}
+
 function confirmsCommand(request: CommandRequest, previous: NativePdfVerifiedSnapshot, snapshot: NativePdfVerifiedSnapshot): boolean {
   const command = request.command
   if (isNativePageCommand(command)) {
@@ -580,8 +589,7 @@ export class NativePdfEditCoordinator {
     }
     const job = this.startRedaction(action, 'marking', [], expectedMarkCount)
     try {
-      const { redaction } = await this.redactionStep(job, job.request.action)
-      this.finishRedaction(job, redaction)
+      const { redaction } = await this.settleRedactionMark(job)
       return redaction
     } catch (cause: unknown) {
       const error = errorFor(cause, job.request.requestId)
@@ -651,12 +659,7 @@ export class NativePdfEditCoordinator {
       this.requireLive(requestId)
       if (reply.operation !== 'snapshot') throw new NativePdfWorkerError(RESPONSE_INVALID, requestId)
       const current = reply.snapshot
-      if ((reply.status === 'unseen' && (!sameNativeAcceptedOutput(current, previous)
-        || !sameNativeBytes(current.scene.sceneHash, previous.scene.sceneHash)
-        || current.consumedRequest !== previous.consumedRequest
-        || !sameNativeBytes(current.pageState.order, previous.pageState.order)
-        || current.pageState.selected !== previous.pageState.selected
-        || !sameNotes(plainNotes(previous), plainNotes(current))))
+      if ((reply.status === 'unseen' && !isUnchangedSnapshot(previous, current))
         || (reply.status === 'accepted'
           && (current.consumedRequest === requestId || command.command.kind !== 'replaceText')
           && !confirmsCommand(command, previous, current))) {
@@ -818,9 +821,8 @@ export class NativePdfEditCoordinator {
     this.update('reconciling', requestId, null, job.previous, this.state.redaction, this.state.reopenOriginal ? 'original' : null)
     try {
       if (job.request.action.kind !== 'stage') {
-        const { redaction } = await this.redactionStep(job, job.request.action)
-        this.finishRedaction(job, redaction)
-        return Object.freeze({ status: 'unseen', snapshot: job.previous })
+        const { snapshot } = await this.settleRedactionMark(job)
+        return Object.freeze({ status: 'unseen', snapshot })
       }
       if (job.publishedCandidate === null) {
         const { redaction } = await this.redactionStep(job, { kind: 'status', candidate: job.candidate })
@@ -852,6 +854,25 @@ export class NativePdfEditCoordinator {
     }
   }
 
+  private async settleRedactionMark(job: RedactionJob) {
+    const { previous, request: { action, requestId } } = job
+    const { redaction } = await this.redactionStep(job, action)
+    if (redaction.markCount !== job.expectedMarkCount) {
+      this.invalidate(RESPONSE_INVALID)
+      throw new NativePdfWorkerError(RESPONSE_INVALID, requestId)
+    }
+    const reply = await this.send(this.boundRequest('snapshot', requestId, previous))
+    this.requireLive(requestId)
+    if (reply.operation !== 'snapshot' || reply.status !== 'unseen' || !isUnchangedSnapshot(previous, reply.snapshot)) {
+      throw new NativePdfWorkerError(RESPONSE_INVALID, requestId)
+    }
+    const { redactionAdmission } = reply.snapshot
+    const snapshot = redactionAdmission === previous.redactionAdmission
+      ? previous : Object.freeze({ ...previous, redactionAdmission })
+    this.finishRedaction(job, redaction, snapshot)
+    return { redaction, snapshot }
+  }
+
   private finishRedaction(
     job: RedactionJob,
     redaction: NativePdfRedactionResult,
@@ -859,10 +880,6 @@ export class NativePdfEditCoordinator {
     code: string | null = null,
   ): void {
     this.requireLive(job.request.requestId)
-    if (job.expectedMarkCount !== null && redaction.markCount !== job.expectedMarkCount) {
-      this.invalidate(RESPONSE_INVALID)
-      throw new NativePdfWorkerError(RESPONSE_INVALID, job.request.requestId)
-    }
     this.redactionJob = null
     this.update('ready', null, code, accepted, freezeNativeDto(redaction))
   }
