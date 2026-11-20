@@ -533,6 +533,10 @@ fn collapsed_image_diagnostics_account_for_unrounded_clip_visibility() {
             false,
         ),
         (
+            &b"q 20 20 m 22 20 28 20 30 20 c 30 30 l 20 30 l h W n 0 0 10 10 re W n 1 0 0 1 5 5 cm /I Do Q"[..],
+            false,
+        ),
+        (
             &b"q 0 0 10.004 10 re W n 1 0 0 1 9.997 5 cm /I Do Q"[..],
             true,
         ),
@@ -567,11 +571,42 @@ fn collapsed_image_diagnostics_account_for_unrounded_clip_visibility() {
 }
 
 #[test]
+fn fractional_page_crop_matches_content_clip_for_images() {
+    let image = stream(
+        "/Type /XObject /Subtype /Image /ColorSpace /DeviceGray /Width 1 /Height 1 /BitsPerComponent 8",
+        &[7],
+    );
+    for (right, left, partial) in [("10.006", "10.003", true), ("9.997", "9.998", false)] {
+        let paint = format!("1 0 0 1 {left} 5 cm /I Do");
+        let clip = format!("0 0 {right} 10 re W n {paint}");
+        let crop = format!("/CropBox [0 0 {right} 10] /Resources << /XObject << /I 6 0 R >> >>");
+        for (content, dictionary) in [
+            (paint.as_bytes(), crop.as_str()),
+            (clip.as_bytes(), "/Resources << /XObject << /I 6 0 R >> >>"),
+        ] {
+            let source = fixture(content, false, dictionary, std::slice::from_ref(&image));
+            let reader = open_pdf(&source, Default::default()).unwrap();
+            let scene = read_pdf_scene(&reader, &PdfSceneRequest::default()).unwrap();
+            let page = &scene.pages[0];
+            assert_eq!(page.partial, partial);
+            assert_eq!(scene.report.partial, partial);
+            assert!(
+                page.elements
+                    .iter()
+                    .all(|element| matches!(element, PdfSceneElement::Clip { .. }))
+            );
+        }
+    }
+}
+
+#[test]
 fn image_diagnostics_account_for_precise_form_clipping() {
     for (matrix, paint, partial) in [
         ("", "0.001 0 0 1 60 60 cm /I Do", false),
         ("/Matrix [1 0 0 1 0 0]", "0.001 0 0 1 60 60 cm /I Do", false),
         ("/Matrix 8 0 R", "0.001 0 0 1 60 60 cm /I Do", false),
+        ("/Matrix [0.001 0 0 1 5 5]", "", false),
+        ("/Matrix [0.001 0 0 1 5 5]", "1 0 0 1 2 0 cm /I Do", false),
         ("/Matrix [0.001 0 0 1 5 5]", "/I Do", true),
         ("/Matrix [0.001 0 0 1 500 5]", "/I Do", false),
     ] {

@@ -464,12 +464,6 @@ impl SceneClip {
 struct PaintBounds([f64; 4]);
 
 impl PaintBounds {
-    fn from_layout(rect: LayoutRect) -> Self {
-        let points = |unit: LayoutUnit| unit.raw() as f64 / LayoutUnit::UNITS_PER_POINT as f64;
-        let (x, y) = (points(rect.x), points(rect.y));
-        Self([x, y, x + points(rect.width), y + points(rect.height)])
-    }
-
     fn union(self, other: Self) -> Self {
         let [left, bottom, right, top] = self.0;
         let [x0, y0, x1, y1] = other.0;
@@ -513,15 +507,7 @@ impl PaintMatrix {
         let values: &[PdfValue; N] = value.as_array()?.try_into().ok()?;
         let mut numbers = [0.; N];
         for (number, value) in numbers.iter_mut().zip(values) {
-            *number = match value {
-                PdfValue::Integer(value) => *value as f64,
-                PdfValue::Real((_, precise)) => *precise,
-                PdfValue::ExactReal(value) => value.parse().ok()?,
-                _ => return None,
-            };
-            if !number.is_finite() {
-                return None;
-            }
+            *number = value.as_precise_number()?;
         }
         Some(numbers)
     }
@@ -580,11 +566,11 @@ struct GraphicsState {
 }
 
 impl GraphicsState {
-    fn new(bounds: LayoutRect) -> Self {
+    fn new(bounds: LayoutRect, paint_clip: PaintBounds) -> Self {
         Self {
             ctm: Matrix::IDENTITY,
             paint_ctm: Some(PaintMatrix([1., 0., 0., 1., 0., 0.])),
-            paint_clip: PaintBounds::from_layout(bounds),
+            paint_clip,
             path_paint_bounds: None,
             text_matrix: Matrix::IDENTITY,
             line_matrix: Matrix::IDENTITY,
@@ -700,7 +686,7 @@ impl<'a> SceneBuilder<'a> {
                         .map(|index| (page.object_ref, index))
                 })
                 .collect(),
-            state: GraphicsState::new(page.media_box),
+            state: GraphicsState::new(page.media_box, PaintBounds(page.media_edges)),
             state_stack: Vec::new(),
             invocation_path: Vec::new(),
         }
@@ -709,10 +695,9 @@ impl<'a> SceneBuilder<'a> {
     fn run(mut self) -> Result<PdfScenePage, PdfReadError> {
         if let Some(crop_box) = self.page.crop_box {
             self.state.clip = self.state.clip.intersect(crop_box, true)?;
-            self.state.paint_clip = self
-                .state
-                .paint_clip
-                .intersect(PaintBounds::from_layout(crop_box));
+        }
+        if let Some(crop_edges) = self.page.crop_edges {
+            self.state.paint_clip = self.state.paint_clip.intersect(PaintBounds(crop_edges));
         }
         self.inspect_annotations()?;
         for (index, content_ref) in self.page.contents.iter().enumerate() {
@@ -852,16 +837,30 @@ impl<'a> SceneBuilder<'a> {
                 self.state.current_point = Some((x, y));
             }
             "c" => {
-                self.state.path_paint_bounds = None;
                 let values = six_number_values(operands)?;
+                for point in operands[operands.len() - 6..].chunks_exact(2) {
+                    self.state.extend_path_paint_bounds([
+                        point[0].precise_number(),
+                        point[1].precise_number(),
+                        0.,
+                        0.,
+                    ]);
+                }
                 self.state.path.push(RawPathCommand::CurveTo(
                     values[0], values[1], values[2], values[3], values[4], values[5],
                 ));
                 self.state.current_point = Some((values[4], values[5]));
             }
             "v" => {
-                self.state.path_paint_bounds = None;
                 let values = four_number_values(operands)?;
+                for point in operands[operands.len() - 4..].chunks_exact(2) {
+                    self.state.extend_path_paint_bounds([
+                        point[0].precise_number(),
+                        point[1].precise_number(),
+                        0.,
+                        0.,
+                    ]);
+                }
                 let (x0, y0) = self.state.current_point.ok_or(PdfReadError::Syntax)?;
                 self.state.path.push(RawPathCommand::CurveTo(
                     x0, y0, values[0], values[1], values[2], values[3],
@@ -869,8 +868,15 @@ impl<'a> SceneBuilder<'a> {
                 self.state.current_point = Some((values[2], values[3]));
             }
             "y" => {
-                self.state.path_paint_bounds = None;
                 let values = four_number_values(operands)?;
+                for point in operands[operands.len() - 4..].chunks_exact(2) {
+                    self.state.extend_path_paint_bounds([
+                        point[0].precise_number(),
+                        point[1].precise_number(),
+                        0.,
+                        0.,
+                    ]);
+                }
                 self.state.path.push(RawPathCommand::CurveTo(
                     values[0], values[1], values[2], values[3], values[2], values[3],
                 ));
@@ -1029,7 +1035,7 @@ impl<'a> SceneBuilder<'a> {
         provenance: PdfSourceProvenance,
     ) -> Result<(), PdfReadError> {
         let pending_clip = self.state.pending_clip.take();
-        self.state.path_paint_bounds = None;
+        let paint_bounds = self.state.path_paint_bounds.take();
         let path_ctm_changed = std::mem::take(&mut self.state.path_ctm_changed);
         self.state.current_point = None;
 
@@ -1053,6 +1059,15 @@ impl<'a> SceneBuilder<'a> {
             }
             let rect = path_bounds(&commands)?;
             let stroke = matches!(operator, "S" | "s" | "B" | "B*" | "b" | "b*");
+            if self.invocation_path.len() > 1
+                && self.state.clip.is_empty()
+                && !self.state.paint_clip.is_empty()
+                && (stroke
+                    || paint_bounds
+                        .is_none_or(|bounds| !self.state.paint_clip.intersect(bounds).is_empty()))
+            {
+                self.report_partial(provenance.object_ref);
+            }
             let visible = if stroke {
                 self.stroke_visible(rect, &provenance)?
             } else {
@@ -1389,6 +1404,9 @@ impl<'a> SceneBuilder<'a> {
         }
         if !glyphs.is_empty() {
             if self.state.clip.is_empty() {
+                if self.invocation_path.len() > 1 && !self.state.paint_clip.is_empty() {
+                    self.report_partial(provenance.object_ref);
+                }
                 return Ok(());
             }
             let rect = union_rect(glyphs.iter().map(|glyph| glyph.rect))?;
@@ -1489,18 +1507,21 @@ impl<'a> SceneBuilder<'a> {
                     .get("BBox")
                     .map(|value| self.reader.resolve(value, depth))
                     .transpose()?;
+                let precise_bbox = local_bbox.as_ref().and_then(|value| {
+                    let [x, y, right, top] = PaintMatrix::pdf_numbers(value)?;
+                    (x < right && y < top).then_some([x, y, right - x, top - y])
+                });
                 let form_paint_clip = form_paint_ctm
-                    .and_then(|matrix| {
-                        let [x, y, right, top] = PaintMatrix::pdf_numbers(local_bbox.as_ref()?)?;
-                        matrix.bounds([x, y, (right - x).max(0.), (top - y).max(0.)])
-                    })
+                    .and_then(|matrix| matrix.bounds(precise_bbox?))
                     .map_or(self.state.paint_clip, |bounds| {
                         self.state.paint_clip.intersect(bounds)
                     });
                 let Some(bbox) = local_bbox
                     .as_ref()
                     .and_then(|value| parse_bbox(value).ok())
-                    .filter(|bbox| bbox.width.raw() > 0 && bbox.height.raw() > 0)
+                    .filter(|bbox| {
+                        precise_bbox.is_some() || (bbox.width.raw() > 0 && bbox.height.raw() > 0)
+                    })
                 else {
                     self.report_partial(xobject_ref);
                     return Ok(());
@@ -1521,12 +1542,10 @@ impl<'a> SceneBuilder<'a> {
                         },
                     },
                 })?;
-                if clip.is_empty() {
-                    if !form_paint_clip.is_empty() {
-                        self.report_partial(xobject_ref);
-                    }
+                if clip.is_empty() && form_paint_clip.is_empty() {
                     return Ok(());
                 }
+                let element_count = self.elements.len();
                 let caller_state = self.state.clone();
                 let caller_stack = std::mem::take(&mut self.state_stack);
                 self.state.ctm = form_ctm;
@@ -1542,6 +1561,9 @@ impl<'a> SceneBuilder<'a> {
                 let result =
                     self.interpret_stream(&stream, xobject_ref, depth + 1, effective_resources);
                 self.invocation_path.pop();
+                if clip.is_empty() {
+                    self.elements.truncate(element_count);
+                }
                 if !self.state_stack.is_empty() {
                     self.report_partial(xobject_ref);
                 }

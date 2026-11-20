@@ -376,6 +376,16 @@ impl PdfValue {
         }
     }
 
+    pub(super) fn as_precise_number(&self) -> Option<f64> {
+        let value = match self {
+            Self::Integer(value) => *value as f64,
+            Self::Real((_, precise)) => *precise,
+            Self::ExactReal(token) => token.parse().ok()?,
+            _ => return None,
+        };
+        value.is_finite().then_some(value)
+    }
+
     pub(crate) fn as_reference(&self) -> Option<PdfObjectRef> {
         match self {
             Self::Reference(value) => Some(*value),
@@ -510,11 +520,19 @@ struct PdfXrefEntry {
     generation: u16,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct PageBox {
+    layout: LayoutRect,
+    edges: [f64; 4],
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct PdfPageRecord {
     pub object_ref: PdfObjectRef,
     pub media_box: LayoutRect,
     pub crop_box: Option<LayoutRect>,
+    pub(super) media_edges: [f64; 4],
+    pub(super) crop_edges: Option<[f64; 4]>,
     pub resources: Option<PdfValue>,
     pub contents: Vec<PdfObjectRef>,
     pub annotations: Vec<PdfObjectRef>,
@@ -823,7 +841,7 @@ impl PdfReader {
     fn collect_pages(
         &self,
         reference: PdfObjectRef,
-        inherited_boxes: (Option<LayoutRect>, Option<LayoutRect>),
+        inherited_boxes: (Option<PageBox>, Option<PageBox>),
         inherited_resources: Option<PdfValue>,
         depth: usize,
         active: &mut BTreeSet<PdfObjectRef>,
@@ -928,8 +946,10 @@ impl PdfReader {
                 };
                 pages.push(PdfPageRecord {
                     object_ref: reference,
-                    media_box,
-                    crop_box,
+                    media_box: media_box.layout,
+                    crop_box: crop_box.map(|bounds| bounds.layout),
+                    media_edges: media_box.edges,
+                    crop_edges: crop_box.map(|bounds| bounds.edges),
                     resources,
                     contents,
                     annotations,
@@ -1203,7 +1223,7 @@ fn refs_from_array(value: &PdfValue) -> Result<Vec<PdfObjectRef>, PdfReadError> 
         .collect()
 }
 
-fn parse_page_box(value: &PdfValue) -> Result<LayoutRect, PdfReadError> {
+fn parse_page_box(value: &PdfValue) -> Result<PageBox, PdfReadError> {
     let values = value.as_array().ok_or(PdfReadError::PageTreeInvalid)?;
     if values.len() != 4 {
         return Err(PdfReadError::PageTreeInvalid);
@@ -1219,11 +1239,25 @@ fn parse_page_box(value: &PdfValue) -> Result<LayoutRect, PdfReadError> {
     if width.raw() <= 0 || height.raw() <= 0 {
         return Err(PdfReadError::PageTreeInvalid);
     }
-    Ok(LayoutRect {
-        x: x0,
-        y: y0,
-        width,
-        height,
+    let precise = |index: usize| {
+        values[index]
+            .as_precise_number()
+            .ok_or(PdfReadError::NumericLimit)
+    };
+    let (left, top, right, bottom) = (precise(0)?, precise(1)?, precise(2)?, precise(3)?);
+    Ok(PageBox {
+        layout: LayoutRect {
+            x: x0,
+            y: y0,
+            width,
+            height,
+        },
+        edges: [
+            left.min(right),
+            top.min(bottom),
+            left.max(right),
+            top.max(bottom),
+        ],
     })
 }
 
