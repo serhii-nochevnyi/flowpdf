@@ -1104,10 +1104,14 @@ fn cancelling_a_verified_redaction_keeps_the_base_and_prevents_publication() {
     let stale_stage = start(3, json!({"kind":"stage"}));
     assert_eq!(stale_stage["status"], "failed");
     status_only(&stale_stage);
-    assert_eq!(
-        call(native_pdf_snapshot, bound("snapshot", 4, base))["snapshot"],
-        *base
-    );
+    let unseen_wire = native_pdf_snapshot(bound("snapshot", 4, base).to_string());
+    assert!(verify_native_pdf_worker_response(unseen_wire.clone()));
+    let unseen: Value = serde_json::from_str(&unseen_wire).unwrap();
+    assert_eq!(unseen["status"], "unseen");
+    assert_eq!(unseen["snapshot"], *base);
+    let different = rehash_with_replacement(&unseen_wire, r#""requestId":4,"#, r#""requestId":3,"#);
+    assert!(verify_native_pdf_response(different.clone()));
+    assert!(!verify_native_pdf_worker_response(different));
     let next = start(4, json!({"kind":"stage"}));
     status_only(&next);
     assert_eq!(next["redaction"]["markCount"], 1);
@@ -1385,8 +1389,35 @@ fn serialized_note_lifecycle_and_fail_closed_wire() {
     let stale_close = call(native_pdf_close, bound("close", 5, &latest));
     assert_eq!(stale_close["code"], "FLOW_PDF_NATIVE_REQUEST_INVALID");
     assert!(stale_close["snapshot"].is_null());
-    assert_eq!(call(native_pdf_close, close.clone())["status"], "closed");
-    assert_eq!(call(native_pdf_close, close)["status"], "closed");
+    let closed_wire = native_pdf_close(close.to_string());
+    assert!(verify_native_pdf_worker_response(closed_wire.clone()));
+    let closed: Value = serde_json::from_str(&closed_wire).unwrap();
+    assert_eq!(closed["status"], "closed");
+    assert_eq!(native_pdf_close(close.to_string()), closed_wire);
+    for (field, other) in [
+        ("requestId", json!(7)),
+        ("revision", json!(0)),
+        ("originStoreHash", json!("00".repeat(32))),
+    ] {
+        let original = if field == "revision" {
+            &closed["binding"][field]
+        } else {
+            &closed[field]
+        };
+        let different = rehash_with_replacement(
+            &closed_wire,
+            &format!(r#""{field}":{original}"#),
+            &format!(r#""{field}":{other}"#),
+        );
+        assert!(verify_native_pdf_response(different.clone()), "{field}");
+        assert!(!verify_native_pdf_worker_response(different), "{field}");
+    }
+    std::thread::spawn(move || {
+        assert!(verify_native_pdf_response(closed_wire.clone()));
+        assert!(!verify_native_pdf_worker_response(closed_wire));
+    })
+    .join()
+    .unwrap();
     assert_eq!(
         call(native_pdf_close, bound("close", 7, &latest))["status"],
         "failed"
@@ -1435,10 +1466,15 @@ fn expired_receipt_reconciles_to_current_snapshot_without_replay() {
         assert_eq!(reply["status"], "applied", "{reply}");
         current = reply["snapshot"].clone();
         if request_id == 3 {
-            assert_eq!(
-                call(native_pdf_snapshot, bound("snapshot", 2, &initial))["status"],
-                "accepted"
-            );
+            let accepted_wire = native_pdf_snapshot(bound("snapshot", 2, &initial).to_string());
+            assert!(verify_native_pdf_worker_response(accepted_wire.clone()));
+            let accepted: Value = serde_json::from_str(&accepted_wire).unwrap();
+            assert_eq!(accepted["status"], "accepted");
+            assert_eq!(accepted["snapshot"], current);
+            let different =
+                rehash_with_replacement(&accepted_wire, r#""requestId":2,"#, r#""requestId":1,"#);
+            assert!(verify_native_pdf_response(different.clone()));
+            assert!(!verify_native_pdf_worker_response(different));
             let mut conflicting = first.clone();
             conflicting["command"]["contents"] = json!("conflict");
             assert_eq!(
@@ -1451,9 +1487,22 @@ fn expired_receipt_reconciles_to_current_snapshot_without_replay() {
         call(native_pdf_command, first)["code"],
         "FLOW_PDF_NATIVE_RECONCILIATION_REQUIRED"
     );
-    let reconciliation = call(native_pdf_snapshot, bound("snapshot", 2, &initial));
+    let evicted_wire = native_pdf_snapshot(bound("snapshot", 2, &initial).to_string());
+    assert!(verify_native_pdf_worker_response(evicted_wire.clone()));
+    let reconciliation: Value = serde_json::from_str(&evicted_wire).unwrap();
     assert_eq!(reconciliation["status"], "evicted");
     assert_eq!(reconciliation["snapshot"], current);
+    for (original, other) in [
+        (r#""status":"evicted""#, r#""status":"accepted""#),
+        (r#""requestId":2,"#, r#""requestId":3,"#),
+    ] {
+        let different = rehash_with_replacement(&evicted_wire, original, other);
+        assert!(verify_native_pdf_response(different.clone()), "{other}");
+        assert!(!verify_native_pdf_worker_response(different), "{other}");
+    }
+    std::thread::spawn(move || assert!(verify_native_pdf_response(evicted_wire)))
+        .join()
+        .unwrap();
 }
 
 #[test]
