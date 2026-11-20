@@ -22,9 +22,13 @@ async function start(): Promise<void> {
   const lifecycle = new AbortController()
   let runtime: ReturnType<typeof createDefaultWorkerRuntime> | undefined
   function dispose() {
-    lifecycle.abort()
-    runtime?.dispose()
+    const acquired = runtime
     runtime = undefined
+    try {
+      lifecycle.abort()
+    } finally {
+      acquired?.dispose()
+    }
   }
   try {
     await init()
@@ -63,10 +67,14 @@ async function start(): Promise<void> {
       },
     )
   } catch (error: unknown) {
-    dispose()
     const message = error instanceof Error && /^FLOW_[A-Z_]{1,80}$/.test(error.message)
       ? error.message
       : 'FLOW_EDITOR_STARTUP'
+    try {
+      dispose()
+    } catch {
+      // @invariant: Recovery remains available when teardown fails.
+    }
     const alert = document.createElement('p')
     alert.className = 'startup-error'
     alert.setAttribute('role', 'alert')
