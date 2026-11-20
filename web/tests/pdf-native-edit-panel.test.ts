@@ -1,11 +1,14 @@
 import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
+import * as wasm from '../generated/flow_wasm.js'
+import { hashPdfSourceBytes } from '../persistence/pdf-source-store.js'
 import {
   NativeNoteDraftRecovery,
   PdfNativeEditPanel,
   nativeCropBounds,
   nativeDownloadName,
+  nativeImageCommand,
   nativeObjectBounds,
   nativeFieldBounds,
   redactedDownloadFor,
@@ -30,6 +33,7 @@ import {
   NATIVE_PDF_LIMITS,
   NATIVE_PDF_PROTOCOL_VERSION,
   isNativeFieldCommand,
+  nativeBytesHex,
   readNativeResponse,
   type NativePdfAnnotation,
   type NativePdfFieldView,
@@ -554,6 +558,50 @@ describe('native object tools', () => {
       ['', '2', '40', '30'], ['0', '0', '0', '30'], ['-1', '2', '40', '30'],
       ['1.0001', '2', '40', '30'], ['180', '2', '40', '30'], ['1,', '2', '40', '30'],
     ] as const) expect(nativeObjectBounds(draft, pageBounds)).toBeNull()
+  })
+
+  it('replaces the accepted image in place with an invalid move draft', async () => {
+    const { readFileSync } = await vi.importActual<{ readFileSync(path: URL): Uint8Array }>('node:fs')
+    const module = new Uint8Array(readFileSync(new URL('../generated/flow_wasm_bg.wasm', import.meta.url)))
+    wasm.initSync({ module })
+    const bytes = readFileSync(new URL('../../fixtures/pdf-native/edit-families.pdf', import.meta.url))
+    const originStoreHash = (await hashPdfSourceBytes(bytes)).slice('sha256:v1:'.length)
+    const identity = { protocolVersion: NATIVE_PDF_PROTOCOL_VERSION, originStoreHash }
+    const opening = readNativeResponse(wasm.native_pdf_open(JSON.stringify({
+      ...identity, operation: 'open', requestId: 1, epoch: Array<number>(16).fill(1), bytesHex: nativeBytesHex(bytes),
+    })))
+    if (opening?.status !== 'opened') throw new Error('expected the fixture to open for editing')
+    const before = opening.snapshot
+    let binding = before.binding
+    try {
+      const page = 2
+      const geometry = before.scene.pages[page]?.geometry
+      const image = before.scene.objectPages?.[page]?.objects.find((object) => object.kind === 'image')
+      if (!geometry || !image) throw new Error('expected an accepted image on the fixture page')
+      const bounds = nativeObjectBounds(['', '44', '16', '12'], geometry.bounds)
+      expect(bounds).toBeNull()
+      const asset = { name: 'replacement.png', status: 'ready', hex: nativeBytesHex(Uint8Array.from(
+        atob('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAAAAAA6fptVAAAACklEQVR4nGNwAAAAQgBBKTf07wAAAABJRU5ErkJggg=='),
+        (character) => character.charCodeAt(0),
+      )) } as const
+      expect(nativeImageCommand(page, undefined, bounds, asset)).toBeNull()
+      expect(nativeImageCommand(page, image, bounds, { name: asset.name, status: 'loading' })).toBeNull()
+
+      const command = nativeImageCommand(page, image, bounds, asset)
+      expect(command).toEqual({ kind: 'replaceImage', target: { page, id: image.id, profile: image.profile }, assetHex: asset.hex })
+      if (!command) throw new Error('expected an image replacement command')
+      const applied = readNativeResponse(wasm.native_pdf_command(JSON.stringify({
+        ...identity, operation: 'command', requestId: 2, binding, outputHash: before.outputHash, command,
+      })))
+      if (applied?.status !== 'applied') throw new Error('expected image replacement to be accepted')
+      binding = applied.snapshot.binding
+      const replacement = rebindNativeObject(before, applied.snapshot, page, image, command)
+      expect(replacement).toMatchObject({ kind: 'image', bounds: image.bounds })
+      expect(replacement?.id).not.toEqual(image.id)
+      expect(applied.snapshot.outputHash).not.toEqual(before.outputHash)
+    } finally {
+      wasm.native_pdf_close(JSON.stringify({ ...identity, operation: 'close', requestId: 3, binding }))
+    }
   })
 
   it('rebinds the exact invocation slot through verified insertions and removals', () => {

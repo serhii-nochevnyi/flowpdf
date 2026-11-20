@@ -11,6 +11,7 @@ fn hex_digits(byte: u8) -> [u8; 2] {
 struct Output {
     bytes: Vec<u8>,
     limit: usize,
+    peak_limit: usize,
     work: usize,
 }
 
@@ -26,10 +27,19 @@ impl Output {
         }
         let capacity = self.bytes.capacity();
         if size > capacity {
-            let target = capacity.saturating_mul(2).min(self.limit).max(size);
+            // @security: A moving reallocation can hold both buffer capacities at once.
+            let available = self.peak_limit - capacity;
+            let target = capacity
+                .saturating_mul(2)
+                .max(size)
+                .min(self.limit.min(available));
+            if target < size {
+                return Err(NativeEditError::Budget);
+            }
             self.bytes
                 .try_reserve_exact(target - self.bytes.len())
                 .map_err(|_| NativeEditError::Budget)?;
+            debug_assert!(self.bytes.capacity() <= available);
         }
         self.bytes.extend_from_slice(bytes);
         Ok(())
@@ -162,7 +172,8 @@ pub(super) fn rewrite_with_workspace(
     }
     let mut out = Output {
         bytes: Vec::new(),
-        limit: graph.limits.max_output_bytes.min(workspace),
+        limit: graph.limits.max_output_bytes,
+        peak_limit: workspace,
         work,
     };
     out.append(b"%PDF-1.7\n%\xE2\xE3\xCF\xD3\n")?;
@@ -217,6 +228,7 @@ mod tests {
         let mut output = Output {
             bytes: Vec::new(),
             limit,
+            peak_limit: 2 * limit - 1,
             work: 0,
         };
         let mut growths = 0;
@@ -234,6 +246,29 @@ mod tests {
         output.append(b"x").unwrap();
         assert!(output.bytes.capacity() <= limit);
         assert_eq!(output.bytes, vec![b'x'; limit]);
+    }
+
+    #[test]
+    fn output_growth_counts_both_allocations_against_workspace() {
+        let mut output = Output {
+            bytes: Vec::new(),
+            limit: 24,
+            peak_limit: 35,
+            work: 0,
+        };
+        output.append(b"12345678").unwrap();
+        output.append(b"abcdefgh").unwrap();
+        let old_capacity = output.bytes.capacity();
+        assert_eq!(old_capacity, 16);
+
+        assert_eq!(output.append(b"ijkl"), Err(NativeEditError::Budget));
+        assert_eq!(output.bytes.capacity(), old_capacity);
+        assert_eq!(output.bytes.as_slice(), b"12345678abcdefgh");
+
+        output.append(b"ijk").unwrap();
+        assert_eq!(old_capacity + output.bytes.capacity(), output.peak_limit);
+        assert_eq!(output.bytes.as_slice(), b"12345678abcdefghijk");
+        assert_eq!(output.append(b"l"), Err(NativeEditError::Budget));
     }
 
     fn independent(streams: &[(&[u8], &str)], trailer: &str) -> Vec<u8> {
@@ -312,6 +347,7 @@ mod tests {
         );
         assert_eq!(output, graph.rewrite().unwrap());
         let reopened = NativePdfGraph::open(&output, NativeEditLimits::default()).unwrap();
+        assert_eq!(reopened.original_bytes(), output);
         let values = reopened.trailer["Custom"].as_array().unwrap();
         assert!(matches!(values[0], PdfValue::Boolean(true)));
         assert!(matches!(values[1], PdfValue::Boolean(false)));
