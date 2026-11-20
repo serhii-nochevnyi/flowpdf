@@ -40,6 +40,14 @@ fn fixture_with_resources(
         (41, 0, "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".into()),
         (99, 0, "<< /Broken 98 0 R /UnreachableDecoy true >>".into()),
     ];
+    write_pdf(objects, 100, "11 2 R")
+}
+
+fn write_pdf(
+    objects: impl IntoIterator<Item = (u32, u16, String)>,
+    size: u32,
+    root: &str,
+) -> Vec<u8> {
     let mut pdf = "%PDF-1.7\n".to_owned();
     let mut offsets = Vec::new();
     for (id, generation, value) in objects {
@@ -48,15 +56,60 @@ fn fixture_with_resources(
     }
     let xref = pdf.len();
     pdf.push_str("xref\n0 1\n0000000000 65535 f \n");
+    offsets.sort_unstable();
     for (id, generation, offset) in offsets {
         write!(pdf, "{id} 1\n{offset:010} {generation:05} n \n").unwrap();
     }
     write!(
         pdf,
-        "trailer\n<< /Size 100 /Root 11 2 R >>\nstartxref\n{xref}\n%%EOF\n"
+        "trailer\n<< /Size {size} /Root {root} >>\nstartxref\n{xref}\n%%EOF\n"
     )
     .unwrap();
     pdf.into_bytes()
+}
+
+#[test]
+fn retained_reader_accepts_sparse_reordered_objects_and_both_stream_lengths() {
+    let direct = "10 10 10 10 re f\n";
+    let indirect = "40 40 10 10 re f";
+    let source = write_pdf(
+        [
+            (
+                12,
+                0,
+                "<< /Type /Page /Parent 4 0 R /Contents [21 0 R 33 0 R] >>".into(),
+            ),
+            (40, 2, indirect.len().to_string()),
+            (7, 0, "<< /Type /Catalog /Pages 4 0 R >>".into()),
+            (
+                21,
+                0,
+                format!(
+                    "<< /Length {} >>\nstream\n{direct}\nendstream",
+                    direct.len()
+                ),
+            ),
+            (
+                4,
+                0,
+                "<< /Type /Pages /Kids [12 0 R] /Count 1 /MediaBox [0 0 100 100] >>".into(),
+            ),
+            (
+                33,
+                0,
+                format!("<< /Length 40 2 R >>\nstream\n{indirect}\nendstream"),
+            ),
+        ],
+        41,
+        "7 0 R",
+    );
+    let session =
+        NativePdfSession::open_scoped(&source, NativeEditLimits::default(), [1; 16]).unwrap();
+    let objects = &session.snapshot().scene.object_pages[0].objects;
+    assert_eq!(objects.len(), 2);
+    assert_eq!(objects[0].bounds, [10_000, 10_000, 20_000, 20_000]);
+    assert_eq!(objects[1].bounds, [40_000, 40_000, 50_000, 50_000]);
+    assert_eq!(session.output_bytes(), source);
 }
 
 #[test]

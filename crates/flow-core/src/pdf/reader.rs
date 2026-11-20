@@ -568,7 +568,7 @@ pub struct PdfReader {
     version: String,
     source_hash: String,
     xref: BTreeMap<u32, PdfXrefEntry>,
-    xref_offset: usize,
+    retained_starts: Vec<usize>,
     trailer: BTreeMap<String, PdfValue>,
     root: PdfObjectRef,
     pub(crate) retained_cost: usize,
@@ -715,10 +715,20 @@ impl PdfReader {
         if entry.generation != reference.generation {
             return Err(PdfReadError::ReferenceInvalid);
         }
-        if retention.is_some() && entry.offset >= self.xref_offset {
-            return Err(PdfReadError::XrefInvalid);
-        }
-        let mut cursor = Cursor::new(&self.bytes, entry.offset, self.limits.clone());
+        let bytes = if retention.is_some() {
+            let index = self
+                .retained_starts
+                .binary_search(&entry.offset)
+                .map_err(|_| PdfReadError::XrefInvalid)?;
+            let end = self
+                .retained_starts
+                .get(index + 1)
+                .ok_or(PdfReadError::XrefInvalid)?;
+            &self.bytes[..*end]
+        } else {
+            &self.bytes
+        };
+        let mut cursor = Cursor::new(bytes, entry.offset, self.limits.clone());
         if let Some((retained, decoded, work)) = retention {
             cursor.exact = true;
             cursor.remaining = Some(retained);
@@ -726,12 +736,19 @@ impl PdfReader {
                 decoded.min(self.limits.max_decoded_stream_bytes);
             cursor.limits.max_content_tokens = work;
         }
-        let object_number = cursor.parse_u64_token()?.ok_or(PdfReadError::Syntax)?;
-        let generation = cursor.parse_u64_token()?.ok_or(PdfReadError::Syntax)?;
-        let object_keyword = cursor.token()?.ok_or(PdfReadError::Syntax)?;
+        let object_number = cursor
+            .parse_u64_token()?
+            .ok_or_else(|| cursor.object_syntax_error())?;
+        let generation = cursor
+            .parse_u64_token()?
+            .ok_or_else(|| cursor.object_syntax_error())?;
+        let object_keyword = cursor
+            .token()?
+            .ok_or_else(|| cursor.object_syntax_error())?;
         if object_number != u64::from(reference.object_number)
             || generation != u64::from(reference.generation)
             || object_keyword != b"obj"
+            || (cursor.exact && cursor.position == cursor.bytes.len())
         {
             return Err(PdfReadError::XrefInvalid);
         }
@@ -745,14 +762,14 @@ impl PdfReader {
         retention: Option<(usize, usize, usize)>,
     ) -> Result<(PdfValue, usize, usize), PdfReadError> {
         let (mut cursor, source_offset) = self.object_cursor(reference, depth, retention)?;
-        let mut value = cursor.parse_value(0)?;
+        let mut value = cursor.object_value()?;
         cursor.skip_space();
         if cursor.consume_keyword(b"stream")? {
             let dictionary = match value {
                 PdfValue::Dictionary(dict) => dict,
                 _ => return Err(PdfReadError::Syntax),
             };
-            if !matches!(self.bytes.get(cursor.position()), Some(b'\r' | b'\n')) {
+            if !matches!(cursor.bytes.get(cursor.position()), Some(b'\r' | b'\n')) {
                 return Err(PdfReadError::Syntax);
             }
             cursor.consume_stream_eol();
@@ -765,19 +782,15 @@ impl PdfReader {
             if length > self.limits.max_stream_bytes {
                 return Err(PdfReadError::StreamLimit);
             }
-            let end = cursor
-                .position()
-                .checked_add(length)
-                .ok_or(PdfReadError::StreamLimit)?;
-            if end > self.bytes.len() {
-                return Err(PdfReadError::StreamLimit);
+            let payload = cursor.stream_payload(length)?;
+            if retention.is_some() {
+                cursor.require_object_keyword(b"endstream")?;
+                cursor.require_object_keyword(b"endobj")?;
             }
             cursor.charge(length.checked_mul(2).ok_or(PdfReadError::InputSizeLimit)?)?;
-            let raw = self.bytes[cursor.position()..end].to_vec();
-            cursor.set_position(end);
-            cursor.skip_space();
-            if !cursor.consume_keyword(b"endstream")? {
-                return Err(PdfReadError::Syntax);
+            let raw = payload.to_vec();
+            if retention.is_none() {
+                cursor.require_object_keyword(b"endstream")?;
             }
             let encoded = raw.clone();
             let data = decode_stream(&dictionary, raw, &cursor.limits, cursor.remaining)?;
@@ -796,11 +809,8 @@ impl PdfReader {
                 source_offset,
             });
         }
-        if !cursor.consume_keyword(b"endobj")? {
-            return Err(PdfReadError::Syntax);
-        }
-        if retention.is_some() && cursor.position() > self.xref_offset {
-            return Err(PdfReadError::XrefInvalid);
+        if retention.is_none() || !matches!(value, PdfValue::Stream(_)) {
+            cursor.require_object_keyword(b"endobj")?;
         }
         let retained =
             retention.map_or(0, |(initial, _, _)| initial - cursor.remaining.unwrap_or(0));
@@ -813,35 +823,26 @@ impl PdfReader {
         owner: &mut Cursor<'_>,
     ) -> Result<usize, PdfReadError> {
         let length = if let PdfValue::Reference(reference) = value {
-            let entry = self
-                .xref
-                .get(&reference.object_number)
-                .ok_or(PdfReadError::ObjectMissing)?;
-            if entry.generation != reference.generation || entry.offset >= self.xref_offset {
-                return Err(PdfReadError::ReferenceInvalid);
-            }
-            // @security: Resolve Length as a scalar integer to avoid recursive stream decoding.
-            let mut cursor = Cursor::new(&self.bytes, entry.offset, owner.limits.clone());
-            cursor.exact = true;
-            cursor.remaining = owner.remaining;
-            cursor.limits.max_content_tokens = owner
+            let work = owner
                 .limits
                 .max_content_tokens
                 .checked_sub(owner.tokens)
                 .ok_or(PdfReadError::TokenLimit)?;
-            if cursor.parse_u64_token()? != Some(u64::from(reference.object_number))
-                || cursor.parse_u64_token()? != Some(u64::from(reference.generation))
-                || !cursor.consume_keyword(b"obj")?
-            {
-                return Err(PdfReadError::XrefInvalid);
-            }
+            // @security: Resolve Length as a scalar integer to avoid recursive stream decoding.
+            let (mut cursor, _) = self.object_cursor(
+                *reference,
+                0,
+                Some((
+                    owner.remaining.ok_or(PdfReadError::InputSizeLimit)?,
+                    owner.limits.max_decoded_stream_bytes,
+                    work,
+                )),
+            )?;
             let number = cursor
-                .parse_value(0)?
+                .object_value()?
                 .as_integer()
                 .ok_or(PdfReadError::Syntax)?;
-            if !cursor.consume_keyword(b"endobj")? || cursor.position() > self.xref_offset {
-                return Err(PdfReadError::Syntax);
-            }
+            cursor.require_object_keyword(b"endobj")?;
             owner.tokens = owner
                 .tokens
                 .checked_add(cursor.tokens)
@@ -1019,8 +1020,24 @@ fn open_pdf_mode(
                 .ok_or(PdfReadError::InputSizeLimit)
         })
         .transpose()?;
-    let (xref, trailer, retained_cost, open_work) =
+    let (xref, trailer, mut retained_cost, mut open_work) =
         parse_xref(bytes, startxref, &limits, retention)?;
+    let retained_starts = if let Some(available) = retention {
+        let index_work = xref
+            .len()
+            .checked_mul(xref.len().ilog2() as usize + 1)
+            .ok_or(PdfReadError::TokenLimit)?;
+        open_work = open_work
+            .checked_add(index_work)
+            .filter(|work| *work <= limits.max_content_tokens)
+            .ok_or(PdfReadError::TokenLimit)?;
+        let (starts, cost) =
+            retained_object_starts(&xref, &bytes[..startxref], available - retained_cost)?;
+        retained_cost += cost;
+        starts
+    } else {
+        Vec::new()
+    };
     let root = trailer
         .get("Root")
         .and_then(PdfValue::as_reference)
@@ -1036,13 +1053,48 @@ fn open_pdf_mode(
         version,
         source_hash: blake3::hash(bytes).to_hex().to_string(),
         xref,
-        xref_offset: startxref,
+        retained_starts,
         trailer,
         root,
         retained_cost,
         open_work,
         limits,
     })
+}
+
+fn retained_object_starts(
+    xref: &BTreeMap<u32, PdfXrefEntry>,
+    before_xref: &[u8],
+    available: usize,
+) -> Result<(Vec<usize>, usize), PdfReadError> {
+    let count = xref
+        .len()
+        .checked_add(1)
+        .ok_or(PdfReadError::InputSizeLimit)?;
+    let cost = count
+        .checked_mul(std::mem::size_of::<usize>())
+        .filter(|cost| *cost <= available)
+        .ok_or(PdfReadError::InputSizeLimit)?;
+    let mut starts = Vec::new();
+    starts
+        .try_reserve_exact(count)
+        .map_err(|_| PdfReadError::InputSizeLimit)?;
+    for entry in xref.values() {
+        if entry.offset < 8
+            || !before_xref
+                .get(entry.offset)
+                .is_some_and(u8::is_ascii_digit)
+        {
+            return Err(PdfReadError::XrefInvalid);
+        }
+        starts.push(entry.offset);
+    }
+    starts.sort_unstable();
+    if starts.windows(2).any(|pair| pair[0] == pair[1]) {
+        return Err(PdfReadError::XrefInvalid);
+    }
+    starts.push(before_xref.len());
+    Ok((starts, cost))
 }
 
 fn parse_header(bytes: &[u8]) -> Result<String, PdfReadError> {
@@ -1089,6 +1141,9 @@ fn parse_xref(
 ) -> Result<ParsedXref, PdfReadError> {
     let exact = retention.is_some();
     if offset >= bytes.len() {
+        return Err(PdfReadError::XrefInvalid);
+    }
+    if exact && (is_pdf_space(bytes[offset]) || bytes[offset] == b'%') {
         return Err(PdfReadError::XrefInvalid);
     }
     if bytes[offset..].starts_with(b"obj") {
@@ -1738,10 +1793,6 @@ impl<'a> Cursor<'a> {
         self.position
     }
 
-    fn set_position(&mut self, position: usize) {
-        self.position = position;
-    }
-
     fn skip_space(&mut self) {
         loop {
             while self
@@ -1816,6 +1867,44 @@ impl<'a> Cursor<'a> {
         }
         self.position = checkpoint;
         Ok(false)
+    }
+
+    fn object_syntax_error(&self) -> PdfReadError {
+        if self.exact && self.position >= self.bytes.len() {
+            PdfReadError::XrefInvalid
+        } else {
+            PdfReadError::Syntax
+        }
+    }
+
+    fn object_value(&mut self) -> Result<PdfValue, PdfReadError> {
+        self.parse_value(0).map_err(|error| match error {
+            PdfReadError::Syntax => self.object_syntax_error(),
+            error => error,
+        })
+    }
+
+    fn stream_payload(&mut self, length: usize) -> Result<&'a [u8], PdfReadError> {
+        let end = self
+            .position
+            .checked_add(length)
+            .ok_or(PdfReadError::StreamLimit)?;
+        let refusal = if self.exact {
+            PdfReadError::XrefInvalid
+        } else {
+            PdfReadError::StreamLimit
+        };
+        let bytes = self.bytes.get(self.position..end).ok_or(refusal)?;
+        self.position = end;
+        Ok(bytes)
+    }
+
+    fn require_object_keyword(&mut self, keyword: &[u8]) -> Result<(), PdfReadError> {
+        let token = self.token()?;
+        if (self.exact && self.position == self.bytes.len()) || token.as_deref() != Some(keyword) {
+            return Err(self.object_syntax_error());
+        }
+        Ok(())
     }
 
     fn consume_stream_eol(&mut self) {
@@ -2132,6 +2221,81 @@ mod retained_reader_tests {
     use super::*;
 
     #[test]
+    fn retained_starts_require_budget_and_distinct_offsets_before_xref() {
+        let mut xref = BTreeMap::from([
+            (
+                2,
+                PdfXrefEntry {
+                    offset: 30,
+                    generation: 0,
+                },
+            ),
+            (
+                8,
+                PdfXrefEntry {
+                    offset: 10,
+                    generation: 0,
+                },
+            ),
+        ]);
+        let mut bytes = [b'1'; 50];
+        let cost = 3 * std::mem::size_of::<usize>();
+        assert_eq!(
+            retained_object_starts(&xref, &bytes, cost - 1),
+            Err(PdfReadError::InputSizeLimit)
+        );
+        assert_eq!(
+            retained_object_starts(&xref, &bytes, cost),
+            Ok((vec![10, 30, 50], cost))
+        );
+        assert_eq!(
+            retained_object_starts(&xref, &bytes[..30], cost),
+            Err(PdfReadError::XrefInvalid)
+        );
+        bytes[10] = b' ';
+        assert_eq!(
+            retained_object_starts(&xref, &bytes, cost),
+            Err(PdfReadError::XrefInvalid)
+        );
+        bytes[10] = b'1';
+        xref.get_mut(&8).unwrap().offset = 30;
+        assert_eq!(
+            retained_object_starts(&xref, &bytes, cost),
+            Err(PdfReadError::XrefInvalid)
+        );
+    }
+
+    #[test]
+    fn stream_payload_checks_extent_before_advancing() {
+        let paint = b"q Q";
+        let mut cursor = Cursor::new(paint, 0, PdfReaderLimits::default());
+        assert_eq!(cursor.stream_payload(4), Err(PdfReadError::StreamLimit));
+        cursor.exact = true;
+        assert_eq!(cursor.stream_payload(4), Err(PdfReadError::XrefInvalid));
+        assert_eq!(cursor.position(), 0);
+        assert_eq!(cursor.stream_payload(3).unwrap(), paint);
+        assert_eq!(cursor.position(), 3);
+    }
+
+    #[test]
+    fn retained_scalar_requires_a_complete_terminator_within_its_extent() {
+        let scalar = b"42 endobj\n";
+        for end in [5, 9, scalar.len()] {
+            let mut cursor = Cursor::new(&scalar[..end], 0, PdfReaderLimits::default());
+            cursor.exact = true;
+            assert!(matches!(cursor.parse_value(0), Ok(PdfValue::Integer(42))));
+            assert_eq!(
+                cursor.require_object_keyword(b"endobj"),
+                if end == scalar.len() {
+                    Ok(())
+                } else {
+                    Err(PdfReadError::XrefInvalid)
+                },
+            );
+        }
+    }
+
+    #[test]
     fn retained_jpeg_checks_decoded_budget_and_dictionary_before_returning_samples() {
         let mut bytes = Vec::new();
         image::codecs::jpeg::JpegEncoder::new(&mut bytes)
@@ -2202,7 +2366,7 @@ mod retained_reader_tests {
     fn scene_names_decode_utf8_while_retained_names_keep_encoded_bytes() {
         let mut cursor = Cursor::new(b"/#D0#90", 0, PdfReaderLimits::default());
         assert_eq!(cursor.parse_name().unwrap(), "А");
-        cursor.set_position(0);
+        cursor.position = 0;
         cursor.exact = true;
         assert_eq!(cursor.parse_name().unwrap(), "\u{d0}\u{90}");
     }
