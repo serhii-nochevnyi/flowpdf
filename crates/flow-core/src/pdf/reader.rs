@@ -353,7 +353,7 @@ impl PdfValue {
 
     pub(crate) fn as_name(&self) -> Option<&str> {
         match self {
-            Self::Name(value) => Some(value),
+            Self::Name(value) => scene_name_label(value),
             _ => None,
         }
     }
@@ -1236,7 +1236,20 @@ fn decode_pdf_name_bytes(bytes: &[u8]) -> Result<Vec<u8>, PdfReadError> {
 
 pub(super) fn read_scene_name(bytes: &[u8], position: &mut usize) -> Result<String, PdfReadError> {
     let bytes = take_pdf_name(bytes, position)?;
-    String::from_utf8(decode_pdf_name_bytes(bytes)?).map_err(|_| PdfReadError::Syntax)
+    Ok(scene_name_identity(decode_pdf_name_bytes(bytes)?))
+}
+
+fn scene_name_identity(bytes: Vec<u8>) -> String {
+    String::from_utf8(bytes).unwrap_or_else(|invalid| {
+        let mut name = String::with_capacity(1 + invalid.as_bytes().len() * 2);
+        name.push('\0');
+        name.extend(invalid.into_bytes().into_iter().map(char::from));
+        name
+    })
+}
+
+pub(super) fn scene_name_label(name: &str) -> Option<&str> {
+    (!name.starts_with('\0')).then_some(name)
 }
 
 fn refs_from_array(value: &PdfValue) -> Result<Vec<PdfObjectRef>, PdfReadError> {
@@ -1954,7 +1967,7 @@ impl<'a> Cursor<'a> {
         self.charge(bytes.len().min(MAX_PDF_IDENTITY_BYTES))?;
         let output = decode_pdf_name_bytes(bytes)?;
         if !self.exact {
-            return String::from_utf8(output).map_err(|_| PdfReadError::Syntax);
+            return Ok(scene_name_identity(output));
         }
         let utf8_len = output.len() + output.iter().filter(|byte| !byte.is_ascii()).count();
         self.charge(utf8_len)?;
@@ -2192,6 +2205,37 @@ mod retained_reader_tests {
         cursor.set_position(0);
         cursor.exact = true;
         assert_eq!(cursor.parse_name().unwrap(), "\u{d0}\u{90}");
+    }
+
+    #[test]
+    fn scene_name_identity_is_lossless_and_bounded() {
+        let mut cursor = Cursor::new(
+            b"<< /Logo#E9 1 /Logo#C3#A9 2 >>",
+            0,
+            PdfReaderLimits::default(),
+        );
+        let dictionary = cursor.parse_dictionary(0).unwrap();
+        let byte_name = read_scene_name(b"#4Cogo#e9", &mut 0).unwrap();
+        let utf8_name = read_scene_name("Logoé".as_bytes(), &mut 0).unwrap();
+        assert_eq!(dictionary[&byte_name].as_integer(), Some(1));
+        assert_eq!(dictionary[&utf8_name].as_integer(), Some(2));
+        assert_eq!(scene_name_label(&byte_name), None);
+        assert_eq!(scene_name_label(&utf8_name), Some("Logoé"));
+
+        for invalid in [b"Logo#".as_slice(), b"Logo#00", b"Logo#XZ"] {
+            assert_eq!(read_scene_name(invalid, &mut 0), Err(PdfReadError::Syntax));
+        }
+        let maximum = b"#E9".repeat(MAX_PDF_IDENTITY_BYTES);
+        assert!(read_scene_name(&maximum, &mut 0).is_ok());
+        let too_long = [maximum.as_slice(), b"X"].concat();
+        assert_eq!(
+            read_scene_name(&too_long, &mut 0),
+            Err(PdfReadError::Syntax)
+        );
+        assert_eq!(
+            read_scene_name(&vec![b'X'; MAX_PDF_IDENTITY_BYTES + 1], &mut 0),
+            Err(PdfReadError::Syntax)
+        );
     }
 
     #[test]
