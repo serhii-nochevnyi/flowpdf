@@ -1641,9 +1641,10 @@ describe('native redaction quarantine', () => {
 })
 
 describe('native PDF runtime composition', () => {
-  it.each(['setup', 'disposal'] as const)('terminates a page reader after scheduler %s fails and extracts on a fresh worker', async (stage) => {
+  it.each(['setup', 'disposal', 'abort', 'native teardown', 'default teardown'] as const)('releases page read workers after a scheduler fault during %s', async (stage) => {
     await initializeWasm()
-    const { createNativePdfRuntime } = await import('../src/layout/layout-runtime.js')
+    const { createDefaultWorkerRuntime, createNativePdfRuntime } = await import('../src/layout/layout-runtime.js')
+    const { PdfSourceStore } = await import('../persistence/pdf-source-store.js')
     const { createWasmPdfReaderEngine, installPdfReaderWorker, RevisionAwarePdfReaderScheduler } =
       await import('../src/pdf/pdf-reader-worker.js')
     const content = 'BT /F1 12 Tf 20 80 Td (Page text) Tj ET\n'
@@ -1671,6 +1672,10 @@ describe('native PDF runtime composition', () => {
     const failure = new Error(`reader scheduler ${stage} failed`)
     const reader = createWasmPdfReaderEngine(wasm)
     const workers: PageReaderWorker[] = []
+    const ownedWorkers: PageReaderWorker[] = []
+    const tearingDown = stage === 'native teardown' || stage === 'default teardown'
+    let capturePageReads = false
+    let holdReads = stage === 'abort' || tearingDown
     class PageReaderWorker implements PdfReaderWorkerPort {
       onmessage: PdfReaderWorkerPort['onmessage'] = null
       onerror = null
@@ -1681,11 +1686,13 @@ describe('native PDF runtime composition', () => {
         postMessage: (data) => this.onmessage?.({ data }),
       }
       postMessage(message: PdfReaderWorkerInboundMessage) {
+        if (holdReads && message.type === 'read') return
         this.scope.onmessage?.({ data: message })
       }
 
       constructor(url: URL) {
-        if (!url.pathname.endsWith('/pdf-reader-worker-entry.ts')) return
+        ownedWorkers.push(this)
+        if (!capturePageReads || !url.pathname.endsWith('/pdf-reader-worker-entry.ts')) return
         workers.push(this)
         installPdfReaderWorker(this.scope, reader.run, reader.verifyResultHash)
         if (stage === 'setup' && workers.length === 1) {
@@ -1694,14 +1701,40 @@ describe('native PDF runtime composition', () => {
       }
     }
     const dispose = vi.spyOn(RevisionAwarePdfReaderScheduler.prototype, 'dispose')
-    if (stage === 'disposal') dispose.mockImplementationOnce(() => { throw failure })
-    const runtime = createNativePdfRuntime(PageReaderWorker as unknown as typeof Worker)
+    if (stage !== 'setup') dispose.mockImplementationOnce(() => { throw failure })
+    const WorkerClass = PageReaderWorker as unknown as typeof Worker
+    const catalog = { identity: 'fonts', faces: [], hyphenation: { identity: 'hyphenation', bytes: new Uint8Array() } }
+    const owner = stage === 'default teardown'
+      ? createDefaultWorkerRuntime(catalog, WorkerClass)
+      : createNativePdfRuntime(WorkerClass)
+    const runtime = 'nativePdf' in owner ? owner.nativePdf : owner
+    const closeStore = vi.spyOn(PdfSourceStore.prototype, 'close')
+    capturePageReads = true
     try {
       const failedRead = new AbortController()
-      await expect(runtime.extractPageText!(snapshot, pageId, failedRead.signal)).rejects.toBe(failure)
+      const active = runtime.extractPageText!(snapshot, pageId, failedRead.signal)
+      if (tearingDown) {
+        const second = runtime.extractPageText!(snapshot, pageId, new AbortController().signal)
+        expect(workers).toHaveLength(2)
+        expect(() => owner.dispose()).toThrow(failure)
+        await expect(Promise.all([active, second])).resolves.toEqual([null, null])
+        failedRead.abort()
+        owner.dispose()
+        expect(closeStore).toHaveBeenCalledOnce()
+        expect(dispose).toHaveBeenCalledTimes(stage === 'default teardown' ? 4 : 2)
+        for (const worker of ownedWorkers) expect(worker.terminate).toHaveBeenCalledOnce()
+        return
+      }
+      if (stage === 'abort') {
+        failedRead.abort()
+        await expect(active).resolves.toBeNull()
+      } else {
+        await expect(active).rejects.toBe(failure)
+      }
       expect(workers).toHaveLength(1)
       expect(workers[0]?.terminate).toHaveBeenCalledOnce()
       failedRead.abort()
+      holdReads = false
 
       await expect(runtime.extractPageText!(snapshot, pageId, new AbortController().signal)).resolves.toMatchObject({
         outputHash, pageId, text: [{ value: 'Page text' }],
@@ -1710,7 +1743,8 @@ describe('native PDF runtime composition', () => {
       for (const worker of workers) expect(worker.terminate).toHaveBeenCalledOnce()
     } finally {
       dispose.mockRestore()
-      runtime.dispose()
+      owner.dispose()
+      closeStore.mockRestore()
     }
   })
 
