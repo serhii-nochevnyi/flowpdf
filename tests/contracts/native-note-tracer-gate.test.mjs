@@ -18,6 +18,8 @@ const olderPageRevision = '793ff4c687a71210205258e58003400c7738affa'
 const recoveryNoteRevision = '6f4b7ea593f2efd3ac3237cf8c3f1660ad0d4263'
 const accessibleTextRevision = 'e6fb68578bc5d70358d0d4e9f20f78c61015ad6e'
 const previousAccessibleTextRevision = 'f5fac52c09641cdd80bdd7883d9a4ff4c90276a7'
+const readbackRevision = '6acf576f5d5e7957af6cfa9e2492e6c3a3edbcee'
+const objectsSuite = 'web/tests/pdf-native-objects.browser.test.ts'
 const pagesSuite = 'web/tests/pdf-native-pages.browser.test.ts'
 const redactionSuite = 'web/tests/pdf-native-redaction.browser.test.ts'
 
@@ -133,6 +135,7 @@ for (const [profile, revision, expanded] of [
   ['reviewed accessible page text', accessibleTextRevision, true],
   ['reviewed worker quarantine and accessible text', 'fb250eb5e22f5c2220eb79c94a08e08a006faaed', true],
   ['previous reviewed worker quarantine and accessible text', previousAccessibleTextRevision, true],
+  ['reviewed readback', readbackRevision, true],
 ]) {
   test(`accepts the exact ${profile} harness`, (t) => {
     const paths = ['.github/workflows/pdf-native-note-tracer.yml', 'package.json',
@@ -141,7 +144,7 @@ for (const [profile, revision, expanded] of [
     if (!historicalFiles) return
     const { command, state } = fixture({ expanded, historicalFiles, revision })
     assert.deepEqual(requirePassedCi('HEAD', command), { repository: repo, sha: revision, run: 7, attempt: 3, job: 73 })
-    for (const path of expanded ? [browserSuites[0], pagesSuite, redactionSuite] : [browserSuites[0]]) {
+    for (const path of expanded ? [browserSuites[0], objectsSuite, pagesSuite, redactionSuite] : [browserSuites[0]]) {
       state.changedPath = path
       assert.throws(() => requirePassedCi('HEAD', command), { message: 'NATIVE_NOTE_TRACER_HARNESS_NOT_APPROVED' })
     }
@@ -215,6 +218,7 @@ const refusals = [
   ['modified build definition', ({ state }) => { state.changedPath = 'package.json' }],
   ['modified browser configuration', ({ state }) => { state.changedPath = 'vitest.config.ts' }],
   ['modified bilingual browser assertions', ({ state }) => { state.changedPath = 'web/tests/pdf-native-edit.browser.test.ts' }],
+  ['modified expanded object assertions', ({ state }) => { state.changedPath = objectsSuite }],
   ['modified expanded page assertions', ({ state }) => { state.changedPath = 'web/tests/pdf-native-pages.browser.test.ts' }],
   ['modified expanded redaction assertions', ({ state }) => { state.changedPath = 'web/tests/pdf-native-redaction.browser.test.ts' }],
   ['modified built smoke assertions', ({ state }) => { state.changedPath = 'scripts/check-native-note-built.mjs' }],
