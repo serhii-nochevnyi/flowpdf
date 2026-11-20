@@ -1,6 +1,5 @@
 import { createHash } from 'node:crypto'
-import { accessSync, constants, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { accessSync, constants, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { delimiter, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { isDeepStrictEqual } from 'node:util'
@@ -446,12 +445,14 @@ function redact(session, operation) {
   }
   const staged = session.redact({ kind: 'stage' })
   if (staged.code) return staged
-  const candidate = staged.redaction.candidate
+  const candidate = staged.redaction?.candidate
   requireInput(candidate, 'native-redaction-candidate')
   let published
   return withCleanup(() => {
     const verified = session.redact({ kind: 'verify', candidate }, true)
-    requireInput(verified.redaction?.verification?.status === 'passed', 'native-redaction-verification')
+    const verdict = verified.redaction?.verification?.status
+    requireMatch(verdict !== 'failed', 'native-redaction-verification')
+    requireInput(verdict === 'passed', 'native-redaction-verification')
     published = session.redact({ kind: 'publish', candidate }, true)
     requireMatch(published.status === 'published' && same(published.snapshot.outputHash, candidate.hash), 'native-redaction-publication')
     return published
@@ -873,7 +874,9 @@ export async function verifyExternal() {
     requireInput(build.status === 0, 'wasm-build')
     const { wasm, wasmHash } = await loadNative()
     evidence.runtime = { node: process.versions.node, npm: '11.9.0', rust: '1.97.1', wasmHash }
-    directory = mkdtempSync(join(tmpdir(), 'flowpdf-phase9-'))
+    const work = join(root, 'work')
+    mkdirSync(work, { recursive: true })
+    directory = mkdtempSync(join(work, 'flowpdf-phase9-'))
     compareFixtures(fixtures, wasm, directory, comparisonInvoker(executables, directory, env, evidence.commands), evidence)
   } catch (error) {
     recordComparisonError(evidence, error)
