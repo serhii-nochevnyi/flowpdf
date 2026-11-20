@@ -12,6 +12,7 @@ const url = `https://api.github.com/repos/${repo}/check-runs/73`
 const root = new URL('../../', import.meta.url)
 const browserSuites = ['edit', 'text', 'objects', 'pages', 'forms', 'redaction']
   .map((suite) => `web/tests/pdf-native-${suite}.browser.test.ts`)
+const historicalExpandedRevision = '09ae65788a803835395e07beaa9240ab78239426'
 const baselineRevision = '5683541fe572a4d88d36df15db37ff6cde85f828'
 const verifiedRasterRevision = 'b3340c7aa5919715320d65548463fdff68cb2e43'
 const olderPageRevision = '793ff4c687a71210205258e58003400c7738affa'
@@ -19,6 +20,7 @@ const recoveryNoteRevision = '6f4b7ea593f2efd3ac3237cf8c3f1660ad0d4263'
 const accessibleTextRevision = 'e6fb68578bc5d70358d0d4e9f20f78c61015ad6e'
 const previousAccessibleTextRevision = 'f5fac52c09641cdd80bdd7883d9a4ff4c90276a7'
 const readbackRevision = '6acf576f5d5e7957af6cfa9e2492e6c3a3edbcee'
+const redactionFeedbackRevision = '37552e44d853fe1a37bbf1e42d3431ef81302095'
 const objectsSuite = 'web/tests/pdf-native-objects.browser.test.ts'
 const pagesSuite = 'web/tests/pdf-native-pages.browser.test.ts'
 const redactionSuite = 'web/tests/pdf-native-redaction.browser.test.ts'
@@ -125,7 +127,7 @@ test('requires the expanded workflow and package for the current browser harness
 
 for (const [profile, revision, expanded] of [
   ['historical note-only', '1e6cbafbcdbe1cd8d74fdcaca71dbcf24665a358', false],
-  ['historical expanded', '09ae65788a803835395e07beaa9240ab78239426', true],
+  ['historical expanded', historicalExpandedRevision, true],
   ['previous reviewed page and redaction', '9a14e505d07f341beaa0af023da2c2ae4b095758', true],
   ['previous reviewed page and stroke', olderPageRevision, true],
   ['previous reviewed preview and redaction', '956ae26938bb952bba2339a18db3d8b46db7b88e', true],
@@ -136,6 +138,8 @@ for (const [profile, revision, expanded] of [
   ['reviewed worker quarantine and accessible text', 'fb250eb5e22f5c2220eb79c94a08e08a006faaed', true],
   ['previous reviewed worker quarantine and accessible text', previousAccessibleTextRevision, true],
   ['reviewed readback', readbackRevision, true],
+  ['reviewed image replacement', 'ad75722669c534a081dceb3069b16f7b17b78a0c', true],
+  ['reviewed image replacement and redaction feedback', redactionFeedbackRevision, true],
 ]) {
   test(`accepts the exact ${profile} harness`, (t) => {
     const paths = ['.github/workflows/pdf-native-note-tracer.yml', 'package.json',
@@ -148,6 +152,18 @@ for (const [profile, revision, expanded] of [
       state.changedPath = path
       assert.throws(() => requirePassedCi('HEAD', command), { message: 'NATIVE_NOTE_TRACER_HARNESS_NOT_APPROVED' })
     }
+  })
+}
+
+for (const [profile, revision] of [['historical expanded', historicalExpandedRevision], ['reviewed readback', readbackRevision]]) {
+  test(`refuses the reviewed redaction feedback suite with the ${profile} object suite`, (t) => {
+    const historicalFiles = harnessFilesFrom(t, redactionFeedbackRevision, ['.github/workflows/pdf-native-note-tracer.yml',
+      'package.json', ...browserSuites])
+    const olderObjects = harnessFilesFrom(t, revision, [objectsSuite])
+    if (!historicalFiles || !olderObjects) return
+    historicalFiles.set(objectsSuite, olderObjects.get(objectsSuite))
+    const { command } = fixture({ historicalFiles, revision: redactionFeedbackRevision })
+    assert.throws(() => requirePassedCi('HEAD', command), { message: 'NATIVE_NOTE_TRACER_HARNESS_NOT_APPROVED' })
   })
 }
 
