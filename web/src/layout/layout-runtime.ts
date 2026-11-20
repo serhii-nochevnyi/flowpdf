@@ -37,6 +37,18 @@ import type { RuntimeFontCatalog } from '../runtime/font-catalog.js'
 
 export type WorkerConstructor = typeof Worker
 
+function releaseAll(releases: Iterable<() => void>): void {
+  const failures: unknown[] = []
+  for (const release of releases) {
+    try {
+      release()
+    } catch (error) {
+      failures.push(error)
+    }
+  }
+  if (failures.length > 0) throw failures[0]
+}
+
 export function createNativePdfRuntime(
   workerConstructor?: WorkerConstructor,
   sourceStore = new PdfSourceStore(),
@@ -105,24 +117,43 @@ export function createNativePdfRuntime(
           ? new Worker(new URL('../pdf/pdf-reader-worker-entry.ts', import.meta.url), { type: 'module' })
           : new workerConstructor(new URL('../pdf/pdf-reader-worker-entry.ts', import.meta.url), { type: 'module' })
       ) as unknown as PdfReaderWorkerPort
-      const scheduler = createWorkerPdfReaderScheduler(worker)
+      let scheduler: RevisionAwarePdfReaderScheduler | undefined
+      let cancelRead!: (value: null) => void
+      const cancelled = new Promise<null>((resolve) => { cancelRead = resolve })
       const stop = () => {
         if (!pageReads.delete(stop)) return
-        signal.removeEventListener('abort', stop)
-        scheduler.dispose()
-        worker.terminate()
+        cancelRead(null)
+        try {
+          signal.removeEventListener('abort', abort)
+          scheduler?.dispose()
+        } finally {
+          worker.terminate()
+        }
+      }
+      const abort = () => {
+        try {
+          stop()
+        } catch {
+          // @invariant: Cancellation settles the read even when cleanup fails.
+        }
       }
       pageReads.add(stop)
-      signal.addEventListener('abort', stop, { once: true })
       try {
-        const outcome = await scheduler.request({
+        scheduler = createWorkerPdfReaderScheduler(worker)
+        if (signal.aborted) {
+          abort()
+          return null
+        }
+        signal.addEventListener('abort', abort, { once: true })
+        const read = scheduler.request({
           protocolVersion: PDF_READER_PROTOCOL_VERSION,
           requestId: `native-page-text-${++pageReadNumber}`,
           bytesHex: snapshot.outputHex,
           firstPage,
           pageCount: 1,
         })
-        if (!pageReads.has(stop) || outcome.kind !== 'published') return null
+        const outcome = await Promise.race([cancelled, read])
+        if (!pageReads.has(stop) || outcome?.kind !== 'published') return null
         const { scene } = outcome.accepted.result
         const readPage = scene.pages[0]
         // @invariant: The reader hashes the input bytes and resolves the page from that PDF's page tree.
@@ -151,9 +182,9 @@ export function createNativePdfRuntime(
       if (disposed) return
       disposed = true
       initial = undefined
-      for (const stop of pageReads) stop()
-      for (const coordinator of coordinators) coordinator.dispose()
-      sourceStore.close()
+      const releaseCoordinators = Array.from(coordinators, (coordinator) => () => coordinator.dispose())
+      coordinators.clear()
+      releaseAll([...pageReads, ...releaseCoordinators, () => sourceStore.close()])
     },
   }
 }
@@ -229,7 +260,7 @@ export function createDefaultWorkerRuntime(
 
   const cleanup: (() => void)[] = []
   function dispose() {
-    for (const release of cleanup.splice(0).reverse()) release()
+    releaseAll(cleanup.splice(0).reverse())
   }
 
   try {

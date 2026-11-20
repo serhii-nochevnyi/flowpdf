@@ -7,7 +7,9 @@ use super::super::reader::{PdfObjectRef, PdfReaderLimits, PdfStream, PdfValue, s
 use super::super::scene::{ContentCursor, ContentToken, separated_content_streams};
 use super::graph::{NativeEditError, NativePdfGraph, spend};
 use super::text::{RedactionText, redaction_number, reserve_content_tokens};
-use super::verifier::{NativeRedactionGeometry, NativeRedactionMark, Reservation, Workspace};
+use super::verifier::{
+    NativeRedactionGeometry, NativeRedactionMark, NativeVerificationFailure, Reservation, Workspace,
+};
 use super::verify_raster;
 use super::verify_structure::MAX_INPUT;
 
@@ -16,6 +18,9 @@ const MAX_COORD: i64 = 1_000_000 * POINT;
 const MAX_STREAM: usize = 512 * 1024;
 const MAX_FORM_DEPTH: usize = 8;
 const MAX_PAGES: usize = 256;
+const ENTRY_BYTES: usize = 128;
+const RESOURCE_ENTRY_BYTES: usize = 256;
+const PAGE_EDIT_BYTES: usize = 512;
 pub(super) const MAX_MARKS: usize = 1024;
 
 type Object = PdfObjectRef;
@@ -245,7 +250,7 @@ impl<'a> Inventory<'a> {
                 Entry::Occupied(entry) if *entry.get() == role => continue,
                 Entry::Occupied(_) => return Err(Unsupported),
                 Entry::Vacant(entry) => {
-                    spend(&mut inventory.memory, 128)?;
+                    spend(&mut inventory.memory, ENTRY_BYTES)?;
                     entry.insert(role);
                 }
             }
@@ -952,6 +957,12 @@ fn pixel_span(
 
 type UsedResources = BTreeMap<(&'static str, String), Object>;
 
+fn resource_bytes(used: &UsedResources) -> usize {
+    used.keys()
+        .map(|(_, name)| RESOURCE_ENTRY_BYTES + name.capacity())
+        .sum()
+}
+
 fn used_resources(used: UsedResources) -> Dict {
     let mut groups = BTreeMap::<String, Dict>::new();
     for ((group, name), id) in used {
@@ -1308,12 +1319,36 @@ struct PageEdit {
     notes: Vec<Object>,
 }
 
+impl PageEdit {
+    fn retained(&self) -> usize {
+        PAGE_EDIT_BYTES
+            + resource_bytes(&self.resources)
+            + self.notes.capacity() * size_of::<Object>()
+    }
+}
+
 struct Edits {
     streams: BTreeMap<Object, Vec<u8>>,
     forms: BTreeMap<Object, UsedResources>,
     pages: BTreeMap<Object, PageEdit>,
     sensitive_content: BTreeSet<Digest>,
     sensitive_images: BTreeSet<Digest>,
+}
+
+impl Edits {
+    fn retained(&self) -> usize {
+        self.streams
+            .values()
+            .map(|data| ENTRY_BYTES + data.capacity())
+            .sum::<usize>()
+            + self
+                .forms
+                .values()
+                .map(|used| ENTRY_BYTES + resource_bytes(used))
+                .sum::<usize>()
+            + self.pages.values().map(PageEdit::retained).sum::<usize>()
+            + (self.sensitive_content.len() + self.sensitive_images.len()) * ENTRY_BYTES
+    }
 }
 
 struct Scan<'a, 'w> {
@@ -1355,11 +1390,15 @@ impl<'a, 'w> Scan<'a, 'w> {
     fn page(&mut self, id: Object, page_id: u64, marks: &[NativeRedactionMark]) -> Result<()> {
         let graph = self.graph;
         let page = page(graph, id, &mut self.work)?;
-        spend(&mut self.work, marks.len())?;
-        let page_marks: Vec<_> = marks
-            .iter()
-            .filter(|mark| mark.page_id == page_id)
-            .collect();
+        spend(&mut self.work, 2 * marks.len())?;
+        let selected = || marks.iter().filter(|mark| mark.page_id == page_id);
+        let mark_count = selected().count();
+        let _selection = self
+            .workspace
+            .reserve(mark_count * size_of::<&NativeRedactionMark>())
+            .map_err(|_| Budget)?;
+        let mut page_marks = Vec::<&NativeRedactionMark>::with_capacity(mark_count);
+        page_marks.extend(selected());
         if page_marks.iter().any(|mark| {
             mark.geometry != page.geometry
                 || !valid_rect(mark.rect)
@@ -1367,7 +1406,7 @@ impl<'a, 'w> Scan<'a, 'w> {
         }) {
             return Err(Unsupported);
         }
-        self.memory.grow(512).map_err(|_| Budget)?;
+        self.memory.grow(PAGE_EDIT_BYTES).map_err(|_| Budget)?;
         let mut used = UsedResources::new();
         let mut notes = Vec::new();
         let node = dict(graph, id)?;
@@ -1401,7 +1440,7 @@ impl<'a, 'w> Scan<'a, 'w> {
         }
         if let Some(list) = node.get("Annots") {
             for item in resolve(graph, list)?.as_array().ok_or(Malformed)? {
-                self.memory.grow(128).map_err(|_| Budget)?;
+                self.memory.grow(ENTRY_BYTES).map_err(|_| Budget)?;
                 let note = reference(item)?;
                 let entries = dict(graph, note)?;
                 if entries
@@ -1616,7 +1655,9 @@ impl<'a, 'w> Scan<'a, 'w> {
         group: &'static str,
         name: &str,
     ) -> Result<Object> {
-        self.memory.grow(256 + name.len()).map_err(|_| Budget)?;
+        self.memory
+            .grow(RESOURCE_ENTRY_BYTES + name.len())
+            .map_err(|_| Budget)?;
         let id = resolve_resource(self.graph, resources, group, name)?;
         same_use(used, (group, name.into()), id)?;
         Ok(id)
@@ -1814,10 +1855,15 @@ pub(super) fn check_input_budget(graph: &NativePdfGraph, origin_len: Option<usiz
         return Err(Budget);
     }
     let pages = graph.pages.len();
-    (pages <= MAX_PAGES
-        && verify_raster::within_pixel_budget((0..pages).map(|index| geometry(graph, index))))
-    .then_some(())
-    .ok_or(Budget)
+    if pages > MAX_PAGES {
+        return Err(Budget);
+    }
+    verify_raster::check_pixel_budget((0..pages).map(|index| geometry(graph, index)), |error| {
+        match error {
+            NativeVerificationFailure::Budget => Budget,
+            _ => Unsupported,
+        }
+    })
 }
 
 pub(super) fn check_document(
@@ -1863,9 +1909,34 @@ fn apply(
     roles: BTreeMap<Object, Role>,
     mut edits: Edits,
 ) -> Result<()> {
+    let role_bytes = roles.len() * ENTRY_BYTES;
+    graph.charge_page_retained(role_bytes + edits.retained())?;
     graph.trailer.remove("Info");
     graph.trailer.remove("ID");
     for (&id, &role) in &roles {
+        let replacement_bytes = match role {
+            Role::Page => {
+                let page = edits.pages.get(&id).ok_or(Malformed)?;
+                let notes = page.notes.len();
+                let resources = if page.resources.is_empty() {
+                    0
+                } else {
+                    512 + resource_bytes(&page.resources)
+                };
+                let annots = if notes == 0 {
+                    0
+                } else {
+                    (1 + notes) * ENTRY_BYTES
+                };
+                resources + annots
+            }
+            Role::XObject => edits
+                .forms
+                .get(&id)
+                .map_or(0, |used| 512 + resource_bytes(used)),
+            _ => 0,
+        };
+        graph.charge_page_retained(replacement_bytes)?;
         match (role, graph.objects.get_mut(&id).ok_or(Malformed)?) {
             (Role::Catalog, PdfValue::Dictionary(dict)) => {
                 dict.remove("Metadata");
@@ -1876,6 +1947,7 @@ fn apply(
             }
             (Role::Page, PdfValue::Dictionary(dict)) => {
                 let page = edits.pages.remove(&id).ok_or(Malformed)?;
+                let page_bytes = page.retained();
                 dict.remove("Metadata");
                 dict.remove("Annots");
                 dict.remove("Resources");
@@ -1891,22 +1963,24 @@ fn apply(
                         PdfValue::Dictionary(used_resources(page.resources)),
                     );
                 }
+                graph.release_page_retained(page_bytes);
             }
             (Role::XObject, PdfValue::Stream(stream))
                 if name(&stream.dict, "Subtype") == Some("Form") =>
             {
                 if let Some(resources) = edits.forms.remove(&id) {
+                    let form_bytes = ENTRY_BYTES + resource_bytes(&resources);
                     stream.dict.insert(
                         "Resources".into(),
                         PdfValue::Dictionary(used_resources(resources)),
                     );
+                    graph.release_page_retained(form_bytes);
                 }
             }
             _ => {}
         }
     }
     graph.refresh_page_graph(&BTreeSet::new())?;
-    let mut streams = Vec::new();
     for (&id, value) in &graph.objects {
         if !matches!(value, PdfValue::Stream(_)) {
             continue;
@@ -1916,12 +1990,22 @@ fn apply(
             Role::Content | Role::XObject if !edits.streams.contains_key(&id) => {
                 return Err(Unsupported);
             }
-            _ => streams.push(id),
+            _ => {}
         }
     }
-    for id in streams {
+    for &id in roles.keys() {
         let replacement = edits.streams.remove(&id);
-        let before = stream(graph, id)?;
+        if replacement.is_some() {
+            graph.release_page_retained(ENTRY_BYTES);
+        }
+        let Some(PdfValue::Stream(before)) = graph.objects.get(&id) else {
+            if let Some(data) = replacement {
+                let capacity = data.capacity();
+                drop(data);
+                graph.release_page_retained(capacity);
+            }
+            continue;
+        };
         let bytes = replacement.as_deref().unwrap_or(&before.data);
         let digest = *blake3::hash(bytes).as_bytes();
         let forbidden = if name(&before.dict, "Subtype") == Some("Image") {
@@ -1933,8 +2017,12 @@ fn apply(
             return Err(Unsupported);
         }
         let size = bytes.len();
-        graph.reserve_replacement_stream(size)?;
         graph.charge_page_work(size.div_ceil(16) + 1)?;
+        if replacement.is_some() {
+            // @invariant: The replacement reservation takes over the live data charge up to its length.
+            graph.release_page_retained(size);
+        }
+        graph.reserve_replacement_stream(size)?;
         let Some(PdfValue::Stream(stream)) = graph.objects.get_mut(&id) else {
             return Err(Malformed);
         };
@@ -1950,6 +2038,7 @@ fn apply(
                     .insert("Filter".into(), PdfValue::Name("FlateDecode".into()));
                 compressed
             } else {
+                drop(compressed);
                 stream.data.clone()
             }
         } else {
@@ -1960,6 +2049,10 @@ fn apply(
             PdfValue::Integer(stream.encoded.len() as i64),
         );
     }
+    let edit_bytes = edits.retained();
+    drop(edits);
+    drop(roles);
+    graph.release_page_retained(role_bytes + edit_bytes);
     graph.refresh_page_graph(&BTreeSet::new())
 }
 
@@ -1997,6 +2090,27 @@ mod tests {
             }),
         );
         writer::rewrite(&graph).unwrap()
+    }
+
+    #[test]
+    fn graph_application_refuses_when_live_scan_allocations_exhaust_the_budget() {
+        let pdf = redaction_fixture("10 10 10 10 re f 40 40 10 10 re f");
+        let mut graph = NativePdfGraph::open(&pdf, NativeEditLimits::default()).unwrap();
+        let mark = NativeRedactionMark {
+            page_id: 1,
+            geometry: geometry(&graph, 0).unwrap(),
+            rect: [12_000, 12_000, 13_000, 13_000],
+        };
+        let (roles, edits, _) =
+            scan_document(&graph, &[1], &[mark], graph.remaining_retained()).unwrap();
+        let available = roles.len() * ENTRY_BYTES + edits.retained() - 1;
+        graph
+            .charge_page_retained(graph.remaining_retained() - available)
+            .unwrap();
+        let work = graph.remaining_work();
+        assert_eq!(apply(&mut graph, roles, edits), Err(Budget));
+        assert_eq!(graph.remaining_work(), work);
+        assert_eq!(graph.remaining_retained(), available);
     }
 
     #[test]
