@@ -511,6 +511,61 @@ fn public_scene_preserves_indirect_arrays_after_note_edit() {
 }
 
 #[test]
+fn public_scene_preserves_distinct_resource_aliases_after_note_rewrite() {
+    use flow_core::pdf::{PdfSceneElement, PdfSceneRequest, open_pdf, read_pdf_scene};
+
+    let form = |paint: &str| {
+        format!(
+            "<< /Type /XObject /Subtype /Form /BBox [0 0 100 100] /Length {} >>\nstream\n{paint}\nendstream",
+            paint.len()
+        )
+    };
+    let paint = "/Logo#e9 Do /Logo#c3#a9 Do";
+    let source = pdf_with_objects(&[
+        "<< /Type /Catalog /Pages 2 0 R >>",
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Contents 4 0 R /Resources << /XObject << /Logo#E9 5 0 R /Logo#C3#A9 6 0 R >> >> >>",
+        &format!("<< /Length {} >>\nstream\n{paint}\nendstream", paint.len()),
+        &form("10 20 5 5 re f"),
+        &form("30 40 5 5 re f"),
+    ]);
+    let painted_positions = |bytes: &[u8]| {
+        let reader = open_pdf(bytes, Default::default()).unwrap();
+        let scene = read_pdf_scene(&reader, &PdfSceneRequest::default()).unwrap();
+        scene.pages[0]
+            .elements
+            .iter()
+            .filter_map(|element| match element {
+                PdfSceneElement::Path { value } if value.fill => Some(value.rect.x.raw()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(painted_positions(source.as_bytes()), [10 * 64, 30 * 64]);
+
+    let mut session =
+        NativePdfSession::open_scoped(source.as_bytes(), NativeEditLimits::default(), [1; 16])
+            .unwrap();
+    let snapshot = session.snapshot();
+    session
+        .apply(
+            snapshot.binding,
+            1,
+            &NativeNoteCommand::Add {
+                page: snapshot.scene.pages[0].id,
+                rect: [60, 60, 80, 80],
+                contents: "Review artwork".into(),
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        painted_positions(session.output_bytes()),
+        [10 * 64, 30 * 64]
+    );
+    assert_eq!(session.origin_bytes(), source.as_bytes());
+}
+
+#[test]
 fn public_reader_keeps_null_contents_pages_blank_after_note_edit() {
     use flow_core::pdf::{PdfSceneElement, PdfSceneRequest, open_pdf, read_pdf_scene};
 

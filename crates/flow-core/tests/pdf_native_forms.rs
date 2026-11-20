@@ -1,6 +1,7 @@
 use flow_core::pdf::native::{
     NATIVE_MAX_FIELD_NAME_BYTES, NativeEditLimits, NativeFieldCommand, NativeFieldRefusal,
-    NativePageCommand, NativePdfSession, NativeRequestLookup, NativeSessionError,
+    NativeNoteCommand, NativePageCommand, NativePdfSession, NativeRequestLookup,
+    NativeSessionError,
 };
 use flow_core::pdf::{PdfReaderLimits, PdfSceneElement, PdfSceneRequest, open_pdf, read_pdf_scene};
 use serde_json::json;
@@ -733,6 +734,77 @@ fn embedded_appearance_round_trips_ukrainian_and_refuses_unmapped_glyphs() {
     );
     assert_eq!(pdf.output_bytes(), accepted);
     assert_eq!(pdf.snapshot().binding.revision, 1);
+}
+
+#[test]
+fn saved_pdf_17_field_text_and_defaults_survive_native_rewrites() {
+    let font = include_bytes!("../data/NotoSans-Regular.ttf");
+    let face = ttf_parser::Face::parse(font, 0).unwrap();
+    let bullet_gid = face.glyph_index('•').unwrap();
+    let upem = u32::from(face.units_per_em());
+    let advance = u32::from(face.glyph_hor_advance(bullet_gid).unwrap());
+    let bullet_width = (advance * 1000 + upem / 2) / upem;
+    let cmap = b"/CIDInit /ProcSet findresource begin 12 dict begin begincmap\n/CMapType 2 def\n/CMapName /Example def\n1 begincodespacerange\n<0000> <FFFF>\nendcodespacerange\n2 beginbfchar\n<0001> <0407>\n<0002> <2022>\nendbfchar\nendcmap\nCMapName currentdict /CMap defineresource pop\nend end";
+    for (saved, default, operand, expected) in [
+        ("<80>", "<FEFF0407>", "0002", "•"),
+        ("<FEFF0407>", "<80>", "0001", "Ї"),
+    ] {
+        let mut objects = embedded_form_objects(&format!("[1 [339 {bullet_width}]]"));
+        objects[6] = stream("", cmap);
+        let mut glyphs = vec![0, 0];
+        for gid in [face.glyph_index('Ї').unwrap(), bullet_gid] {
+            glyphs.extend(gid.0.to_be_bytes());
+        }
+        objects[9] = stream("", &glyphs);
+        objects[10] = format!("<< /Type /Annot /Subtype /Widget /FT /Tx /T (recipient) /V {saved} /DV {default} /P 3 0 R /Rect [10 10 150 40] /AP << /N 12 0 R >> >>").into_bytes();
+        let paint = format!(
+            "q 1 g 0 0 140 30 re f 0 G 1 w 1 1 138 28 re S\nBT /FlowField 10 Tf 0 g 2 4 Td <{operand}> Tj ET\nQ\n"
+        );
+        objects[11] = stream(
+            "/Type /XObject /Subtype /Form /BBox [0 0 140 30] /Resources << /Font << /FlowField 5 0 R >> >>",
+            paint.as_bytes(),
+        );
+        let bytes = build_pdf(&objects);
+        assert_saved_value(&bytes, "recipient", "Tx", expected);
+        let assert_field = |pdf: &NativePdfSession| {
+            let field = &pdf.snapshot().fields[0];
+            assert!(field.can_edit_appearance, "{:?}", field.refusal);
+            assert_eq!(field.value.as_deref(), Some(expected));
+        };
+        let mut pdf = session(&bytes);
+        assert_field(&pdf);
+        let snapshot = pdf.snapshot();
+        pdf.apply(
+            snapshot.binding,
+            1,
+            &NativeNoteCommand::Add {
+                page: snapshot.scene.pages[0].id,
+                rect: [170, 60, 190, 80],
+                contents: "Review recipient".into(),
+            },
+        )
+        .unwrap();
+        assert_saved_value(pdf.output_bytes(), "recipient", "Tx", expected);
+
+        let mut reopened = session(pdf.output_bytes());
+        assert_field(&reopened);
+        let field = reopened.snapshot().fields[0].id;
+        apply(
+            &mut reopened,
+            json!({"kind":"moveField","field":field,"page":0,"rect":[15,15,155,45]}),
+        )
+        .unwrap();
+        assert_field(&session(reopened.output_bytes()));
+        assert_saved_value(reopened.output_bytes(), "recipient", "Tx", expected);
+        let default_token = format!("/DV {default}");
+        assert!(
+            reopened
+                .output_bytes()
+                .windows(default_token.len())
+                .any(|bytes| bytes == default_token.as_bytes())
+        );
+        assert_eq!(pdf.origin_bytes(), bytes);
+    }
 }
 
 #[test]

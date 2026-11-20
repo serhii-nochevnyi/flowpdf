@@ -14,7 +14,7 @@ use super::reader::{
     PdfObjectRef, PdfPageRecord, PdfReadDiagnostic, PdfReadDiagnosticCode, PdfReadError,
     PdfReadReport, PdfReader, PdfReaderLimits, PdfStream, PdfValue, decode_pdf_text_string,
     map_widget_label, read_scene_name, report_active_content, resolve_annotation_value,
-    single_filter,
+    scene_name_label, single_filter,
 };
 
 use super::native::{NativeNoteId, NativePageGeometry, NativePageId, NativeTextPage};
@@ -626,7 +626,7 @@ enum RawPathCommand {
 
 #[derive(Debug, Clone)]
 struct FontMap {
-    name: String,
+    name: Option<String>,
     to_unicode: BTreeMap<Vec<u8>, String>,
     simple_encoding: bool,
     widths: BTreeMap<u8, LayoutUnit>,
@@ -1290,8 +1290,8 @@ impl<'a> SceneBuilder<'a> {
         let base_name = dictionary
             .get("BaseFont")
             .and_then(PdfValue::as_name)
-            .unwrap_or(name)
-            .to_owned();
+            .or_else(|| scene_name_label(name))
+            .map(str::to_owned);
         let mut to_unicode = BTreeMap::new();
         if let Some(to_unicode_value) = dictionary.get("ToUnicode") {
             let to_unicode_ref = to_unicode_value
@@ -1453,7 +1453,7 @@ impl<'a> SceneBuilder<'a> {
                 value: PdfTextElement {
                     text,
                     rect,
-                    font_name: Some(font.name),
+                    font_name: font.name,
                     mapping,
                     glyphs,
                     provenance,
@@ -1816,8 +1816,11 @@ impl<'a> SceneBuilder<'a> {
                         .is_none_or(|flags| matches!(flags.as_integer(), Some(0..=7)))
                 {
                     saved.and_then(PdfValue::as_name).map(str::to_owned)
+                } else if let Some(bytes) = saved.and_then(PdfValue::as_bytes) {
+                    let mut available = limit.saturating_mul(3);
+                    decode_pdf_text_string(bytes, limit, &mut available)?
                 } else {
-                    string_value(saved, self.limits.max_string_bytes)
+                    None
                 };
                 self.push_element(PdfSceneElement::Form {
                     value: PdfFormElement {
@@ -2314,17 +2317,6 @@ fn parse_bbox(value: &PdfValue) -> Result<LayoutRect, PdfReadError> {
         width: x1.checked_sub(x)?,
         height: y1.checked_sub(y)?,
     })
-}
-
-fn string_value(value: Option<&PdfValue>, limit: usize) -> Option<String> {
-    let bytes = value?.as_bytes()?;
-    let text = if let Some(utf16) = bytes.strip_prefix(&[0xfe, 0xff]) {
-        decode_utf16_be(utf16).ok()?
-    } else {
-        let utf8 = bytes.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(bytes);
-        std::str::from_utf8(utf8).ok()?.to_owned()
-    };
-    (text.len() <= limit).then_some(text)
 }
 
 fn next_code(bytes: &[u8], index: usize, mapping: &BTreeMap<Vec<u8>, String>) -> (Vec<u8>, u8) {

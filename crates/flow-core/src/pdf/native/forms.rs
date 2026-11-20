@@ -198,30 +198,12 @@ fn dictionary<const N: usize>(entries: [(&str, Value); N]) -> Dict {
         .collect()
 }
 
-fn decode(bytes: &[u8], limit: usize) -> Option<String> {
-    if bytes.len() > limit.saturating_mul(2).saturating_add(2) {
-        return None;
-    }
-    let value = if let Some(utf16) = bytes.strip_prefix(&[0xfe, 0xff]) {
-        if utf16.len() % 2 != 0 {
-            return None;
-        }
-        String::from_utf16(
-            &utf16
-                .chunks_exact(2)
-                .map(|b| u16::from_be_bytes([b[0], b[1]]))
-                .collect::<Vec<_>>(),
-        )
-        .ok()?
-    } else if let Some(utf8) = bytes.strip_prefix(&[0xef, 0xbb, 0xbf]) {
-        std::str::from_utf8(utf8).ok()?.to_owned()
-    } else {
-        if !bytes.is_ascii() {
-            return None;
-        }
-        std::str::from_utf8(bytes).ok()?.to_owned()
-    };
-    (value.len() <= limit).then_some(value)
+fn decode_saved_text(value: &Value, remaining: &mut usize) -> Result<String, NativeSessionError> {
+    let bytes = value.as_bytes().ok_or(Profile)?;
+    decode_pdf_text_string(bytes, MAX_TEXT, remaining)
+        .map_err(|_| NativeEditError::Budget)?
+        .filter(|value| valid_text(value))
+        .ok_or_else(|| Profile.into())
 }
 
 fn text_string(value: &str) -> Value {
@@ -729,14 +711,6 @@ fn recognize_appearance(
         .filter(|ap| ap.len() == 1)
         .and_then(|ap| ap.get("N"))
         .ok_or(Appearance)?;
-    let get_text = |key: &str| {
-        fields
-            .get(key)
-            .and_then(Value::as_bytes)
-            .and_then(|bytes| decode(bytes, MAX_TEXT))
-            .filter(|value| valid_text(value))
-            .ok_or(Profile)
-    };
     let value = match fields.get("FT").and_then(Value::as_name) {
         Some("Tx") => {
             if widget_data.contains_key("AS")
@@ -750,7 +724,9 @@ fn recognize_appearance(
             else {
                 return Err(Appearance.into());
             };
-            let text = get_text("V")?;
+            let mut available = *remaining;
+            spend(&mut available, field_name.capacity())?;
+            let text = decode_saved_text(fields.get("V").ok_or(Profile)?, &mut available)?;
             let reference = form_font_reference(graph, form)?;
             let prefix = text_appearance_prefix(size);
             let expected =
@@ -773,17 +749,10 @@ fn recognize_appearance(
             drop(expected);
             drop(prefix);
             let default = fields
-                .contains_key("DV")
-                .then(|| get_text("DV"))
+                .get("DV")
+                .map(|value| decode_saved_text(value, &mut available))
                 .transpose()?;
             if form.font.is_none() {
-                let mut available = *remaining;
-                spend(
-                    &mut available,
-                    field_name.capacity()
-                        + text.capacity()
-                        + default.as_ref().map_or(0, String::capacity),
-                )?;
                 let before = available;
                 admit_form_font(graph, form, reference, &mut available)?;
                 spend(remaining, before - available)?;
@@ -970,7 +939,11 @@ pub(super) fn project(
         };
         if let Ok(admitted) = admitted {
             spend(remaining, admitted.name.capacity())?;
-            spend(remaining, MAX_TEXT)?;
+            let text_capacity = match &admitted.value {
+                FieldValue::Text(value) => value.capacity(),
+                FieldValue::Checkbox { .. } => 0,
+            };
+            spend(remaining, MAX_TEXT.max(text_capacity))?;
             view.name = Some(admitted.name);
             view.kind = Some(admitted.value.kind());
             match admitted.value {
@@ -1323,12 +1296,11 @@ fn stage_form(
             (MoveField { page, rect, .. }, value) => {
                 let destination = page_at(*page)?;
                 let size = dimensions(destination, *rect)?;
-                if matches!(value, FieldValue::Text(_)) {
+                if let FieldValue::Text(text) = &value {
                     if let Some(default) = dict(graph, admitted.field)?.get("DV") {
-                        let default = default
-                            .as_bytes()
-                            .and_then(|bytes| decode(bytes, MAX_TEXT))
-                            .ok_or(Profile)?;
+                        let mut available = graph.remaining_retained();
+                        spend(&mut available, admitted.name.capacity() + text.capacity())?;
+                        let default = decode_saved_text(default, &mut available)?;
                         form.text_font()?.operand(&default, size)?;
                     }
                 }
