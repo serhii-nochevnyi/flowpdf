@@ -303,7 +303,7 @@ struct Form {
     owner: Option<Ref>,
     fields: Vec<Ref>,
     names: BTreeMap<String, Ref>,
-    font: FieldResult<Font>,
+    font: Option<FieldResult<Font>>,
     trailer_refs: BTreeSet<Ref>,
 }
 
@@ -348,7 +348,7 @@ fn load_form(
             owner: None,
             fields: vec![],
             names: BTreeMap::new(),
-            font: Ok(Font::Simple),
+            font: None,
             trailer_refs,
         });
     };
@@ -408,7 +408,28 @@ fn load_form(
             NativeEditError::Budget => NativeSessionError::Budget,
             _ => Reference.into(),
         })?;
+    Ok(Form {
+        owner: Some(owner),
+        fields,
+        names,
+        font: None,
+        trailer_refs,
+    })
+}
+
+fn admit_form_font(
+    graph: &NativePdfGraph,
+    form: &mut Form,
+    remaining: &mut usize,
+) -> Result<(), NativeSessionError> {
+    if form.font.is_some() {
+        return Ok(());
+    }
     let font = match (|| -> Result<Font, NativeSessionError> {
+        let Some(owner) = form.owner else {
+            return Ok(Font::Simple);
+        };
+        let values = pages::form_dict(graph, owner).map_err(|_| Reference)?;
         let Some(resources) = values.get("DR") else {
             return Ok(Font::Simple);
         };
@@ -435,13 +456,26 @@ fn load_form(
         Err(NativeSessionError::Text(_)) => Err(Appearance),
         Err(error) => return Err(error),
     };
-    Ok(Form {
-        owner: Some(owner),
-        fields,
-        names,
-        font,
-        trailer_refs,
-    })
+    form.font = Some(font);
+    Ok(())
+}
+
+impl Form {
+    fn text_font(&self) -> FieldResult<&Font> {
+        self.font
+            .as_ref()
+            .ok_or(Appearance)?
+            .as_ref()
+            .map_err(|&reason| reason)
+    }
+}
+
+fn is_text_field(graph: &NativePdfGraph, field: Ref) -> bool {
+    dict(graph, field)
+        .ok()
+        .and_then(|data| data.get("FT"))
+        .and_then(Value::as_name)
+        == Some("Tx")
 }
 
 fn simple_font(value: &Value) -> bool {
@@ -518,7 +552,7 @@ fn appearances(
     );
     match value {
         FieldValue::Text(text) => {
-            let font = form.font.as_ref().map_err(|&error| error)?;
+            let font = form.text_font()?;
             let hex = font.operand(text, size)?;
             let data =
                 format!("{background}BT /{FONT} 10 Tf 0 g 2 4 Td <{hex}> Tj ET\nQ\n").into_bytes();
@@ -692,10 +726,7 @@ fn recognize_appearance(
                 return Err(Appearance);
             }
             if fields.contains_key("DV") {
-                form.font
-                    .as_ref()
-                    .map_err(|&error| error)?
-                    .operand(&get_text("DV")?, size)?;
+                form.text_font()?.operand(&get_text("DV")?, size)?;
             }
             FieldValue::Text(get_text("V")?)
         }
@@ -826,7 +857,7 @@ pub(super) fn project(
     }
     let mut work = graph.remaining_work();
     let mut available = *remaining;
-    let (form, form_bytes) = match load_form(graph, &mut work, &mut available) {
+    let (mut form, mut form_bytes) = match load_form(graph, &mut work, &mut available) {
         Ok(form) => (Ok(form), *remaining - available),
         Err(NativeSessionError::Field(reason)) => (Err(reason), 0),
         Err(error) => return Err(error),
@@ -841,11 +872,20 @@ pub(super) fn project(
             spend(&mut work, data.get("AP").map_or(0, |_| MAX_TEXT))?;
         }
         let admitted = form
-            .as_ref()
-            .map_err(|&error| error.into())
+            .as_mut()
+            .map_err(|error| NativeSessionError::from(*error))
             .and_then(|form| {
                 let identity =
                     recognize_identity(graph, form, page, object, &mut work, *remaining)?;
+                if is_text_field(graph, identity.0) {
+                    let mut font_remaining = *remaining;
+                    spend(&mut font_remaining, identity.1.capacity())?;
+                    let available = font_remaining;
+                    admit_form_font(graph, form, &mut font_remaining)?;
+                    let bytes = available - font_remaining;
+                    spend(remaining, bytes)?;
+                    form_bytes += bytes;
+                }
                 recognize_appearance(graph, form, page, object, identity).map_err(Into::into)
             });
         let admitted = match admitted {
@@ -1132,9 +1172,9 @@ pub(super) fn stage(
     let mut remaining = available;
     let form = load_form(graph, &mut work, &mut remaining)?;
     graph.charge_page_work(budget - work)?;
-    let form_bytes = available - remaining;
+    let mut form_bytes = available - remaining;
     graph.charge_page_retained(form_bytes)?;
-    let result = stage_form(graph, pages, current, command, form);
+    let result = stage_form(graph, pages, current, command, form, &mut form_bytes);
     graph.release_page_retained(form_bytes);
     result
 }
@@ -1145,6 +1185,7 @@ fn stage_form(
     current: &[NativeFieldView],
     command: &NativeFieldCommand,
     mut form: Form,
+    form_bytes: &mut usize,
 ) -> Result<ExpectedField, NativeSessionError> {
     use NativeFieldCommand::*;
     let page_at = |page: u32| pages.get(page as usize).ok_or(Geometry);
@@ -1162,6 +1203,19 @@ fn stage_form(
             Ok(view)
         })
         .transpose()?;
+    let mut admit_text_font = |graph: &mut NativePdfGraph,
+                               form: &mut Form,
+                               live_bytes|
+     -> Result<(), NativeSessionError> {
+        let mut remaining = graph.remaining_retained();
+        spend(&mut remaining, live_bytes)?;
+        let available = remaining;
+        admit_form_font(graph, form, &mut remaining)?;
+        let bytes = available - remaining;
+        graph.charge_page_retained(bytes)?;
+        *form_bytes += bytes;
+        Ok(())
+    };
     let (field, widget, page, name, bounds, value) = if let Some(view) = target {
         let old_page = page_at(view.page)?;
         graph.charge_page_work(old_page.annotations.len() + form.fields.len())?;
@@ -1175,6 +1229,9 @@ fn stage_form(
             &mut work,
             graph.remaining_retained(),
         )?;
+        if is_text_field(graph, identity.0) {
+            admit_text_font(graph, &mut form, identity.1.capacity())?;
+        }
         form.names.clear();
         let admitted = recognize_appearance(graph, &form, old_page, view.object, identity)?;
         graph.charge_page_work(budget - work)?;
@@ -1216,10 +1273,7 @@ fn stage_form(
                             .as_bytes()
                             .and_then(|bytes| decode(bytes, MAX_TEXT))
                             .ok_or(Profile)?;
-                        form.font
-                            .as_ref()
-                            .map_err(|&reason| reason)?
-                            .operand(&default, size)?;
+                        form.text_font()?.operand(&default, size)?;
                     }
                 }
                 if *page != view.page {
@@ -1272,6 +1326,9 @@ fn stage_form(
         if form.names.contains_key(field_name) {
             return Err(Reference.into());
         }
+        if let FieldValue::Text(text) = &value {
+            admit_text_font(graph, &mut form, text.capacity())?;
+        }
         form.names.clear();
         let owner = install_form(graph, &form)?;
         form.owner = Some(owner);
@@ -1295,7 +1352,7 @@ fn stage_form(
     };
 
     if value.kind() == NativeFieldKind::Text {
-        let font = form.font.as_ref().map_err(|&reason| reason)?;
+        let font = form.text_font()?;
         ensure_default_font(graph, form.owner.ok_or(Reference)?, font)?;
         dict_mut(graph, field)?.insert("DA".into(), Value::String(DA.to_vec()));
     }

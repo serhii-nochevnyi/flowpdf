@@ -569,12 +569,12 @@ fn read_only_label_does_not_shadow_an_editable_field_name() {
     assert_eq!(fields[0].refusal, Some(NativeFieldRefusal::Profile));
 }
 
-fn embedded_appearance(field_widths: &str) -> Vec<u8> {
+fn embedded_form_objects(field_widths: &str) -> Vec<Vec<u8>> {
     let font = include_bytes!("../data/NotoSans-Regular.ttf");
     let face = ttf_parser::Face::parse(font, 0).unwrap();
     let gid = face.glyph_index('Ї').unwrap().0.to_be_bytes();
     let cmap = b"/CIDInit /ProcSet findresource begin 12 dict begin begincmap\n/CMapType 2 def\n/CMapName /Example def\n1 begincodespacerange\n<0000> <FFFF>\nendcodespacerange\n1 beginbfchar\n<0001> <0407>\nendbfchar\nendcmap\nCMapName currentdict /CMap defineresource pop\nend end";
-    let objects = vec![
+    vec![
         b"<< /Type /Catalog /Pages 2 0 R /AcroForm 4 0 R >>".to_vec(),
         b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
         b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 500] /Annots [11 0 R] >>".to_vec(),
@@ -588,8 +588,46 @@ fn embedded_appearance(field_widths: &str) -> Vec<u8> {
         b"<< /Type /Annot /Subtype /Widget /FT /Tx /T (recipient) /V () /DV () /P 3 0 R /Rect [10 10 150 40] /AP << /N 12 0 R >> >>".to_vec(),
         stream("/Type /XObject /Subtype /Form /BBox [0 0 140 30] /Resources << /Font << /FlowField 5 0 R >> >>",
             b"q 1 g 0 0 140 30 re f 0 G 1 w 1 1 138 28 re S\nBT /FlowField 10 Tf 0 g 2 4 Td <> Tj ET\nQ\n"),
-    ];
-    build_pdf(&objects)
+    ]
+}
+
+fn embedded_appearance(field_widths: &str) -> Vec<u8> {
+    build_pdf(&embedded_form_objects(field_widths))
+}
+
+#[test]
+fn checkbox_edit_skips_unused_embedded_default_font() {
+    let mut objects = embedded_form_objects("[1 [339] 2 4096 339]");
+    objects[10] = b"<< /Type /Annot /Subtype /Widget /FT /Btn /T (agreement) /V /Off /DV /Off /AS /Off /P 3 0 R /Rect [10 10 30 30] /AP << /N << /Off 12 0 R /Yes 13 0 R >> >> >>".to_vec();
+    let appearance = "/Type /XObject /Subtype /Form /BBox [0 0 20 20] /Resources <<>>";
+    objects[11] = stream(
+        appearance,
+        b"q 1 g 0 0 20 20 re f 0 G 1 w 1 1 18 18 re S\nQ\n",
+    );
+    objects.push(stream(
+        appearance,
+        b"q 1 g 0 0 20 20 re f 0 G 1 w 1 1 18 18 re S\n2 w 2 2 m 18 18 l 2 18 m 18 2 l S\nQ\n",
+    ));
+    let bytes = build_pdf(&objects);
+    let limits = NativeEditLimits {
+        max_retained_bytes: 6 * 1024 * 1024,
+        ..NativeEditLimits::default()
+    };
+    let mut pdf = NativePdfSession::open_scoped(&bytes, limits, [7; 16]).unwrap();
+    let field = &pdf.snapshot().fields[0];
+    assert!(field.can_edit_appearance);
+    assert_eq!(field.checked, Some(false));
+    let command = NativeFieldCommand::SetFieldChecked {
+        field: field.id,
+        checked: true,
+    };
+    let receipt = pdf
+        .apply_field(pdf.snapshot().binding, 1, &command)
+        .unwrap();
+    assert_eq!(receipt.binding.revision, 1);
+    let reopened = NativePdfSession::open_scoped(pdf.output_bytes(), limits, [8; 16]).unwrap();
+    assert!(reopened.snapshot().fields[0].can_edit_appearance);
+    assert_eq!(reopened.snapshot().fields[0].checked, Some(true));
 }
 
 #[test]
