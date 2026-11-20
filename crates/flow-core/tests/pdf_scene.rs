@@ -196,8 +196,8 @@ fn nested_forms_resolve_equivalent_names_and_report_uncertain_clipping() {
         (3, b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Resources << /XObject << /Outer 5 0 R /Later 9 0 R >> >> /Contents 4 0 R >>".to_vec()),
         stream(4, "", b"q 0 0 65 100 re W n /#4Futer Do Q /Later Do 90 5 5 5 re f"),
         stream(5, "/Type /XObject /Subtype /Form /BBox [10 10 40 40] /Matrix [2 0 0 1 5 0] /Resources << /XObject << /In#6Eer 6 0 R >> >>", b"/Inner Do"),
-        stream(6, "/Type /XObject /Subtype /Form /BBox [0 0 100 100] /Resources << /Font << /F#31 7 0 R >> >>", b"BT /#461 10 Tf 15 25 Td (A) Tj ET 28 20 8 5 re f 35 30 2 2 re f 2 20 3 3 re f"),
-        (7, b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /MissingWidth 500 /ToUnicode 8 0 R >>".to_vec()),
+        stream(6, "/Type /XObject /Subtype /Form /BBox [0 0 100 100] /Resources << /Font << /F#E9 7 0 R >> >>", b"BT /#46#e9 10 Tf 15 25 Td (A) Tj ET 28 20 8 5 re f 35 30 2 2 re f 2 20 3 3 re f"),
+        (7, b"<< /Type /Font /Subtype /Type1 /BaseFont /#D0#A8#D1#80#D0#B8#D1#84#D1#82 /MissingWidth 500 /ToUnicode 8 0 R >>".to_vec()),
         stream(8, "", b"begincmap\n1 beginbfchar\n<41> <0041>\nendbfchar\nendcmap\n"),
         stream(9, "/Type /XObject /Subtype /Form /BBox [70 0 90 20]", b"75 5 5 5 re f"),
     ]);
@@ -222,7 +222,8 @@ fn nested_forms_resolve_equivalent_names_and_report_uncertain_clipping() {
     )));
     assert!(page.elements.iter().any(|element| matches!(
         element,
-        PdfSceneElement::Text { value } if value.text == "A" && value.mapping == PdfTextMapping::ToUnicode
+        PdfSceneElement::Text { value } if value.text == "A"
+            && value.mapping == PdfTextMapping::ToUnicode && value.font_name.as_deref() == Some("Шрифт")
     )));
     let painted_x: Vec<_> = page
         .elements
@@ -431,6 +432,30 @@ fn widget_readback_requires_a_registered_split_field_with_a_single_matching_chil
         assert_eq!(value.value.as_deref(), expected);
         assert_eq!(value.name.as_deref(), expected.map(|_| "recipient"));
         assert_eq!(value.provenance.object_ref.object_number, 4);
+    }
+}
+
+#[test]
+fn widget_readback_decodes_saved_pdf_17_text_and_requires_a_saved_value() {
+    for (saved, expected) in [
+        ("/V (Caf\\351 \\200)", Some("Café •")),
+        ("/V <FEFF0407>", Some("Ї")),
+        ("/V <9F>", None),
+        ("/V <FEFFD800>", None),
+        ("", None),
+    ] {
+        let bytes = pdf(vec![
+            (1, b"<< /Type /Catalog /Pages 2 0 R >>".to_vec()),
+            (2, b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec()),
+            (3, b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Annots [4 0 R] >>".to_vec()),
+            (4, format!("<< /Subtype /Widget /FT /Tx /T (recipient) /Rect [10 10 40 30] /DV (Default) {saved} >>").into_bytes()),
+        ]);
+        let reader = open_pdf(&bytes, Default::default()).unwrap();
+        let scene = read_pdf_scene(&reader, &PdfSceneRequest::default()).unwrap();
+        let [PdfSceneElement::Form { value }] = scene.pages[0].elements.as_slice() else {
+            panic!("expected a widget");
+        };
+        assert_eq!(value.value.as_deref(), expected, "{saved}");
     }
 }
 
