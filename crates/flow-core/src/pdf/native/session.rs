@@ -1262,6 +1262,9 @@ impl NativePdfSession {
             Expected::Page(_) => (NativeNoteId(0), None, None),
             Expected::Field(expected) => {
                 expected.verify(&fields)?;
+                let text_bytes = expected.retained_text_bytes();
+                drop(expected);
+                scene_remaining += text_bytes;
                 (NativeNoteId(0), None, None)
             }
             Expected::Note(expected) => {
