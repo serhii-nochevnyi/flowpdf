@@ -1,4 +1,3 @@
-
 use std::{
     collections::{BTreeMap, BTreeSet},
     ops::Range,
@@ -11,8 +10,10 @@ use super::super::{
     reader::{PdfObjectRef, PdfReaderLimits, PdfStream, PdfValue},
     scene::{ContentCursor, ContentToken, NativePdfNotePage},
 };
-use super::graph::{NativeEditError, NativePdfGraph, spend};
-use super::{NativeBinding, NativePageId};
+use super::graph::{NativeEditError, NativePdfGraph};
+use super::verifier::{Reservation, Workspace};
+use super::{NativeBinding, NativePageId, NativeSessionError};
+use NativeSessionError::Budget;
 
 pub const NATIVE_MAX_TEXT_BYTES: usize = 16 * 1024;
 const SCALE: i64 = 1_000;
@@ -26,6 +27,7 @@ const MAX_TOKENS: usize = 16_384;
 type Dict = BTreeMap<String, PdfValue>;
 type Bounds = [i64; 4];
 type TextResult<T> = Result<T, NativeTextRefusal>;
+type RecognitionResult<T> = Result<T, NativeSessionError>;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
@@ -268,8 +270,18 @@ fn milli(raw: &[u8]) -> Option<i64> {
     (magnitude <= MAX_COORDINATE).then_some(if negative { -magnitude } else { magnitude })
 }
 
-fn shows(data: &[u8]) -> TextResult<Vec<Show>> {
+fn shows(
+    data: &[u8],
+    workspace: &Workspace,
+    retained: &mut Reservation<'_>,
+) -> RecognitionResult<Vec<Show>> {
     use NativeTextRefusal::Layout;
+    let _parser = reserve_content_tokens(
+        workspace,
+        data,
+        MAX_TOKENS,
+        6 * size_of::<(ContentToken, Range<usize>, Option<i64>)>(),
+    )?;
     let limits = PdfReaderLimits {
         max_content_tokens: MAX_TOKENS,
         max_array_items: MAX_TOKENS,
@@ -279,7 +291,7 @@ fn shows(data: &[u8]) -> TextResult<Vec<Show>> {
     };
     let mut cursor = ContentCursor::new(data, limits);
     let mut result = Vec::new();
-    let mut operands = Vec::new();
+    let mut operands = Vec::with_capacity(6);
     let mut font = None;
     let mut origin = [0, 0];
     let mut positioned = false;
@@ -290,7 +302,7 @@ fn shows(data: &[u8]) -> TextResult<Vec<Show>> {
         let span = start..cursor.position();
         let ContentToken::Word(op) = token else {
             if operands.len() >= 6 {
-                return Err(Layout);
+                return Err(Layout.into());
             }
             let number = match token {
                 ContentToken::Integer(_) | ContentToken::Number(_) => milli(&data[span.clone()]),
@@ -318,14 +330,16 @@ fn shows(data: &[u8]) -> TextResult<Vec<Show>> {
             }
             "ET" if in_text && operands.is_empty() => in_text = false,
             "Tf" if in_text && !shown => {
-                let [(ContentToken::Name(name), _, _), (_, _, Some(size))] = operands.as_slice()
+                let [(ContentToken::Name(name), span, _), (_, _, Some(size))] = operands.as_slice()
                 else {
-                    return Err(Layout);
+                    return Err(Layout.into());
                 };
                 if name.is_empty() || name.contains('#') || *size <= 0 {
-                    return Err(Layout);
+                    return Err(Layout.into());
                 }
-                font = Some((name.clone(), *size));
+                let raw_name =
+                    std::str::from_utf8(&data[span.start + 1..span.end]).map_err(|_| Layout)?;
+                font = Some((raw_name, *size));
             }
             "Td" | "Tm" if in_text && !shown && !positioned => {
                 let offset = if op == "Tm" {
@@ -337,55 +351,63 @@ fn shows(data: &[u8]) -> TextResult<Vec<Show>> {
                             Some(SCALE),
                         ])
                     {
-                        return Err(Layout);
+                        return Err(Layout.into());
                     }
                     4
                 } else {
                     0
                 };
                 let [(_, _, Some(x)), (_, _, Some(y))] = &operands[offset..] else {
-                    return Err(Layout);
+                    return Err(Layout.into());
                 };
                 origin = [*x, *y];
                 positioned = true;
             }
             "Tj" | "TJ" if in_text && !shown => {
                 let [(token, span, _)] = operands.as_slice() else {
-                    return Err(Layout);
+                    return Err(Layout.into());
                 };
                 let array = op == "TJ";
                 let codes = match (array, token) {
-                    (false, ContentToken::String(bytes)) => bytes.clone(),
+                    (false, ContentToken::String(bytes)) => bytes,
                     (true, ContentToken::Array(items)) => {
                         let mut bytes = None;
                         for item in items {
                             match item {
                                 ContentToken::String(chunk) => {
                                     if bytes.is_some() || chunk.len() > NATIVE_MAX_TEXT_BYTES {
-                                        return Err(Layout);
+                                        return Err(Layout.into());
                                     }
-                                    bytes = Some(chunk.clone());
+                                    bytes = Some(chunk);
                                 }
                                 ContentToken::Integer(0) => {}
-                                _ => return Err(Layout),
+                                _ => return Err(Layout.into()),
                             }
                         }
                         bytes.ok_or(Layout)?
                     }
-                    _ => return Err(Layout),
+                    _ => return Err(Layout.into()),
                 };
                 let (font, size) = font.take().ok_or(Layout)?;
                 if codes.is_empty() || result.len() >= MAX_ISLANDS_PER_PAGE {
-                    return Err(Layout);
+                    return Err(Layout.into());
                 }
-                result.push(Show {
-                    operand: span.clone(),
-                    font,
-                    size,
-                    origin,
-                    codes,
-                    array,
-                });
+                retained
+                    .grow(font.len() + codes.len())
+                    .map_err(|_| Budget)?;
+                retained
+                    .push(
+                        &mut result,
+                        Show {
+                            operand: span.clone(),
+                            font: font.to_owned(),
+                            size,
+                            origin,
+                            codes: codes.clone(),
+                            array,
+                        },
+                    )
+                    .map_err(|_| Budget)?;
                 shown = true;
             }
             "Tr" | "Tc" | "Tw" | "Ts" if in_text && numbers(&[0]) => {}
@@ -398,18 +420,77 @@ fn shows(data: &[u8]) -> TextResult<Vec<Show>> {
                     _ => 4,
                 };
                 if operands.len() != count || !operands.iter().all(|(_, _, n)| n.is_some()) {
-                    return Err(Layout);
+                    return Err(Layout.into());
                 }
             }
-            "Do" => return Err(NativeTextRefusal::Ownership),
-            _ => return Err(Layout),
+            "Do" => return Err(NativeTextRefusal::Ownership.into()),
+            _ => return Err(Layout.into()),
         }
         operands.clear();
     }
     if in_text || saves != 0 || !operands.is_empty() {
-        return Err(Layout);
+        return Err(Layout.into());
     }
     Ok(result)
+}
+
+pub(super) fn reserve_content_tokens<'a>(
+    workspace: &'a Workspace,
+    input: &[u8],
+    max_tokens: usize,
+    operand_bytes: usize,
+) -> Result<Reservation<'a>, NativeEditError> {
+    let array_bytes = 4 * possible_array_items(input, max_tokens) * size_of::<ContentToken>();
+    workspace
+        .reserve(array_bytes + 8 * input.len() + operand_bytes)
+        .map_err(|_| NativeEditError::Budget)
+}
+
+fn possible_array_items(input: &[u8], limit: usize) -> usize {
+    let mut bytes = input.iter().copied();
+    let mut arrays = 0_usize;
+    let mut items = 0_usize;
+    while let Some(byte) = bytes.next() {
+        match byte {
+            b'%' => {
+                bytes.by_ref().find(|byte| matches!(byte, b'\r' | b'\n'));
+            }
+            b'(' => {
+                let mut parentheses = 1_usize;
+                while let Some(byte) = bytes.next() {
+                    match byte {
+                        b'\\' => {
+                            bytes.next();
+                        }
+                        b'(' => parentheses += 1,
+                        b')' => {
+                            parentheses -= 1;
+                            if parentheses == 0 {
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                items += usize::from(arrays != 0);
+            }
+            b'<' => {
+                bytes.by_ref().find(|&byte| byte == b'>');
+                items += usize::from(arrays != 0);
+            }
+            b'[' => {
+                items += usize::from(arrays != 0);
+                arrays += 1;
+            }
+            b']' => arrays = arrays.saturating_sub(1),
+            0 | b'\t' | b'\n' | 12 | b'\r' | b' ' => {}
+            _ => items += usize::from(arrays != 0),
+        }
+        if items >= limit {
+            return limit;
+        }
+    }
+    items
 }
 
 struct CMap<'a> {
@@ -495,91 +576,127 @@ fn unicode(width: usize, raw: u32) -> Option<char> {
     .then_some(text)
 }
 
-fn parse_cmap(bytes: &[u8], width: usize) -> Option<BTreeMap<u16, char>> {
+fn parse_cmap(
+    bytes: &[u8],
+    width: usize,
+    mappings_memory: &mut Reservation<'_>,
+    workspace: &Workspace,
+) -> RecognitionResult<BTreeMap<u16, char>> {
+    use NativeTextRefusal::Mapping;
     if bytes.len() > MAX_CMAP_BYTES || !bytes.is_ascii() {
-        return None;
+        return Err(Mapping.into());
     }
     let mut cmap = CMap { rest: bytes };
-    cmap.expect(&[b"/CIDInit", b"/ProcSet", b"findresource", b"begin"])?;
-    cmap.number().filter(|count| *count <= 100)?;
-    cmap.expect(&[b"dict", b"begin", b"begincmap"])?;
+    cmap.expect(&[b"/CIDInit", b"/ProcSet", b"findresource", b"begin"])
+        .ok_or(Mapping)?;
+    cmap.number().filter(|count| *count <= 100).ok_or(Mapping)?;
+    cmap.expect(&[b"dict", b"begin", b"begincmap"])
+        .ok_or(Mapping)?;
     let mut seen = BTreeSet::new();
     let mut space = false;
     let mut mappings = BTreeMap::new();
     let mut reverse = BTreeSet::new();
+    let mut reverse_memory = workspace.scope();
     loop {
-        let token = cmap.next()?;
-        if token.starts_with(b"/") && !seen.insert(token) {
-            return None;
+        let token = cmap.next().ok_or(Mapping)?;
+        if token.starts_with(b"/")
+            && !reverse_memory
+                .insert(&mut seen, token)
+                .map_err(|_| Budget)?
+        {
+            return Err(Mapping.into());
         }
         match token {
             b"endcmap" => break,
-            b"/CMapType" => cmap.expect(&[b"2", b"def"])?,
+            b"/CMapType" => cmap.expect(&[b"2", b"def"]).ok_or(Mapping)?,
             b"/CMapName" => {
-                let name = cmap.next()?.strip_prefix(b"/")?;
+                let name = cmap
+                    .next()
+                    .and_then(|token| token.strip_prefix(b"/"))
+                    .ok_or(Mapping)?;
                 if name.is_empty()
                     || !name
                         .iter()
                         .all(|byte| byte.is_ascii_alphanumeric() || b"_.-".contains(byte))
                 {
-                    return None;
+                    return Err(Mapping.into());
                 }
-                cmap.expect(&[b"def"])?;
+                cmap.expect(&[b"def"]).ok_or(Mapping)?;
             }
             b"/CIDSystemInfo" => {
-                cmap.expect(&[b"<<", b"/Registry"])?;
+                cmap.expect(&[b"<<", b"/Registry"]).ok_or(Mapping)?;
                 for (index, next) in [b"/Ordering".as_slice(), b"/Supplement"]
                     .into_iter()
                     .enumerate()
                 {
-                    let string = cmap.next()?.strip_prefix(b"(")?.strip_suffix(b")")?;
+                    let string = cmap
+                        .next()
+                        .and_then(|token| token.strip_prefix(b"(")?.strip_suffix(b")"))
+                        .ok_or(Mapping)?;
                     if string.is_empty() || !string.iter().all(u8::is_ascii_alphanumeric) {
-                        return None;
+                        return Err(Mapping.into());
                     }
-                    cmap.expect(&[next])?;
+                    cmap.expect(&[next]).ok_or(Mapping)?;
                     if index == 1 {
-                        cmap.number()?;
+                        cmap.number().ok_or(Mapping)?;
                     }
                 }
-                cmap.expect(&[b">>", b"def"])?;
+                cmap.expect(&[b">>", b"def"]).ok_or(Mapping)?;
             }
             _ => {
-                let count =
-                    decimal_count(token).filter(|count| (1..=MAX_MAP_ENTRIES).contains(count))?;
-                match cmap.next()? {
+                let count = decimal_count(token)
+                    .filter(|count| (1..=MAX_MAP_ENTRIES).contains(count))
+                    .ok_or(Mapping)?;
+                match cmap.next().ok_or(Mapping)? {
                     b"begincodespacerange" if !space && count == 1 && mappings.is_empty() => {
                         let full = if width == 1 { 0xff } else { 0xffff };
-                        if cmap.hex()? != (width, 0) || cmap.hex()? != (width, full) {
-                            return None;
+                        if cmap.hex().ok_or(Mapping)? != (width, 0)
+                            || cmap.hex().ok_or(Mapping)? != (width, full)
+                        {
+                            return Err(Mapping.into());
                         }
-                        cmap.expect(&[b"endcodespacerange"])?;
+                        cmap.expect(&[b"endcodespacerange"]).ok_or(Mapping)?;
                         space = true;
                     }
                     kind @ (b"beginbfchar" | b"beginbfrange") if space => {
                         let range = kind == b"beginbfrange";
                         for _ in 0..count {
-                            let (size, low) = cmap.hex()?;
-                            let (high_size, high) = if range { cmap.hex()? } else { (size, low) };
+                            let (size, low) = cmap.hex().ok_or(Mapping)?;
+                            let (high_size, high) = if range {
+                                cmap.hex().ok_or(Mapping)?
+                            } else {
+                                (size, low)
+                            };
                             if size != width
                                 || high_size != width
                                 || high < low
                                 || high - low + 1 > (MAX_MAP_ENTRIES - mappings.len()) as u32
                             {
-                                return None;
+                                return Err(Mapping.into());
                             }
-                            let (utf_size, start) = cmap.hex()?;
+                            let (utf_size, start) = cmap.hex().ok_or(Mapping)?;
                             for code in low..=high {
-                                let text = unicode(utf_size, start.checked_add(code - low)?)?;
-                                if mappings.insert(code as u16, text).is_some()
-                                    || !reverse.insert(text)
+                                let text = start
+                                    .checked_add(code - low)
+                                    .and_then(|scalar| unicode(utf_size, scalar))
+                                    .ok_or(Mapping)?;
+                                if mappings.contains_key(&(code as u16))
+                                    || !reverse_memory
+                                        .insert(&mut reverse, text)
+                                        .map_err(|_| Budget)?
                                 {
-                                    return None;
+                                    return Err(Mapping.into());
                                 }
+                                mappings_memory
+                                    .tree_entry::<(u16, char)>()
+                                    .map_err(|_| Budget)?;
+                                mappings.insert(code as u16, text);
                             }
                         }
-                        cmap.expect(&[if range { b"endbfrange" } else { b"endbfchar" }])?;
+                        cmap.expect(&[if range { b"endbfrange" } else { b"endbfchar" }])
+                            .ok_or(Mapping)?;
                     }
-                    _ => return None,
+                    _ => return Err(Mapping.into()),
                 }
             }
         }
@@ -592,7 +709,8 @@ fn parse_cmap(bytes: &[u8], width: usize) -> Option<BTreeMap<u16, char>> {
         b"pop",
         b"end",
         b"end",
-    ])?;
+    ])
+    .ok_or(Mapping)?;
     while let Some(end) = cmap
         .rest
         .iter()
@@ -600,7 +718,7 @@ fn parse_cmap(bytes: &[u8], width: usize) -> Option<BTreeMap<u16, char>> {
     {
         let line = cmap.rest[..end].trim_ascii();
         if !line.is_empty() && !line.starts_with(b"%") {
-            return None;
+            return Err(Mapping.into());
         }
         cmap.rest = &cmap.rest[end + 1..];
     }
@@ -610,6 +728,7 @@ fn parse_cmap(bytes: &[u8], width: usize) -> Option<BTreeMap<u16, char>> {
         && seen.contains(b"/CMapType".as_slice())
         && (tail.is_empty() || tail.starts_with(b"%")))
     .then_some(mappings)
+    .ok_or_else(|| Mapping.into())
 }
 
 fn font_width(value: &PdfValue) -> Option<i64> {
@@ -621,49 +740,67 @@ fn font_width(value: &PdfValue) -> Option<i64> {
     (width > 0 && width <= 10_000 * SCALE).then_some(width)
 }
 
-fn cid_widths(graph: &NativePdfGraph, dict: &Dict) -> Option<(i64, BTreeMap<u16, i64>)> {
+fn cid_widths(
+    graph: &NativePdfGraph,
+    dict: &Dict,
+    memory: &mut Reservation<'_>,
+) -> RecognitionResult<(i64, BTreeMap<u16, i64>)> {
+    use NativeTextRefusal::Font;
     let default = if dict.contains_key("DW") {
-        font_width(entry(graph, dict, "DW")?)?
+        entry(graph, dict, "DW").and_then(font_width).ok_or(Font)?
     } else {
         1_000 * SCALE
     };
     let mut widths = BTreeMap::new();
     let mut items = if dict.contains_key("W") {
-        entry(graph, dict, "W")?.as_array()?
+        entry(graph, dict, "W")
+            .and_then(PdfValue::as_array)
+            .ok_or(Font)?
     } else {
         &[]
     };
     while let [start, next, tail @ ..] = items {
-        let start = u16::try_from(start.as_integer()?).ok()?;
+        let start = start
+            .as_integer()
+            .and_then(|start| u16::try_from(start).ok())
+            .ok_or(Font)?;
         if let Some(list) = next.as_array() {
             if list.is_empty() || list.len() > MAX_MAP_ENTRIES - widths.len() {
-                return None;
+                return Err(Font.into());
             }
             for (index, width) in list.iter().enumerate() {
-                let cid = start.checked_add(u16::try_from(index).ok()?)?;
-                if widths.insert(cid, font_width(width)?).is_some() {
-                    return None;
+                let cid = start.checked_add(index as u16).ok_or(Font)?;
+                memory.tree_entry::<(u16, i64)>().map_err(|_| Budget)?;
+                if widths.insert(cid, font_width(width).ok_or(Font)?).is_some() {
+                    return Err(Font.into());
                 }
             }
             items = tail;
         } else {
-            let end = u16::try_from(next.as_integer()?).ok()?;
+            let end = next
+                .as_integer()
+                .and_then(|end| u16::try_from(end).ok())
+                .ok_or(Font)?;
             let [width, tail @ ..] = tail else {
-                return None;
+                return Err(Font.into());
             };
-            let width = font_width(width)?;
+            let width = font_width(width).ok_or(Font)?;
             if end < start || usize::from(end - start) + 1 > MAX_MAP_ENTRIES - widths.len() {
-                return None;
+                return Err(Font.into());
             }
             for cid in start..=end {
+                memory.tree_entry::<(u16, i64)>().map_err(|_| Budget)?;
                 if widths.insert(cid, width).is_some() {
-                    return None;
+                    return Err(Font.into());
                 }
             }
             items = tail;
         }
     }
-    items.is_empty().then_some((default, widths))
+    items
+        .is_empty()
+        .then_some((default, widths))
+        .ok_or_else(|| Font.into())
 }
 
 fn win_ansi(code: u16) -> Option<char> {
@@ -698,7 +835,12 @@ enum GidMap<'a> {
     Stream(&'a [u8]),
 }
 
-fn font_profile(graph: &NativePdfGraph, font: &Dict) -> TextResult<Font> {
+fn font_profile(
+    graph: &NativePdfGraph,
+    font: &Dict,
+    workspace: &Workspace,
+    retained: &mut Reservation<'_>,
+) -> RecognitionResult<Font> {
     use NativeTextRefusal::{Font as FontError, Mapping};
     let (profile, widths_dict, code_width, gid_map) =
         match (name(graph, font, "Subtype"), name(graph, font, "Encoding")) {
@@ -709,7 +851,7 @@ fn font_profile(graph: &NativePdfGraph, font: &Dict) -> TextResult<Font> {
                 let Some([child]) =
                     entry(graph, font, "DescendantFonts").and_then(PdfValue::as_array)
                 else {
-                    return Err(FontError);
+                    return Err(FontError.into());
                 };
                 let child = value(graph, child)
                     .and_then(PdfValue::as_dictionary)
@@ -725,7 +867,7 @@ fn font_profile(graph: &NativePdfGraph, font: &Dict) -> TextResult<Font> {
                         .and_then(PdfValue::as_integer)
                         .is_some_and(|supplement| supplement >= 0)
                 {
-                    return Err(FontError);
+                    return Err(FontError.into());
                 }
                 let map = if !child.contains_key("CIDToGIDMap")
                     || name(graph, child, "CIDToGIDMap") == Some("Identity")
@@ -738,13 +880,13 @@ fn font_profile(graph: &NativePdfGraph, font: &Dict) -> TextResult<Font> {
                         .ok_or(Mapping)?;
                     let data = &stream.data;
                     if data.is_empty() || data.len() % 2 != 0 || data.len() > 2 * 65_536 {
-                        return Err(Mapping);
+                        return Err(Mapping.into());
                     }
                     GidMap::Stream(data)
                 };
                 (NativeTextProfile::IdentityHCidFontType2, child, 2, map)
             }
-            _ => return Err(FontError),
+            _ => return Err(FontError.into()),
         };
     let descriptor = entry(graph, widths_dict, "FontDescriptor")
         .and_then(PdfValue::as_dictionary)
@@ -754,14 +896,14 @@ fn font_profile(graph: &NativePdfGraph, font: &Dict) -> TextResult<Font> {
         || descriptor.contains_key("FontFile3")
         || name(graph, descriptor, "FontName") != Some(base_font)
     {
-        return Err(FontError);
+        return Err(FontError.into());
     }
     if code_width == 1 {
         let flags = entry(graph, descriptor, "Flags")
             .and_then(PdfValue::as_integer)
             .ok_or(FontError)?;
         if flags & 36 != 32 {
-            return Err(FontError);
+            return Err(FontError.into());
         }
     }
     let embedded = entry(graph, descriptor, "FontFile2")
@@ -772,7 +914,7 @@ fn font_profile(graph: &NativePdfGraph, font: &Dict) -> TextResult<Font> {
             != i64::try_from(embedded.data.len()).ok()
         || !embedded.data.starts_with(&[0, 1, 0, 0])
     {
-        return Err(FontError);
+        return Err(FontError.into());
     }
     let face = Face::parse(&embedded.data, 0).map_err(|_| FontError)?;
     let tables = face.tables();
@@ -784,28 +926,38 @@ fn font_profile(graph: &NativePdfGraph, font: &Dict) -> TextResult<Font> {
     .iter()
     .any(|tag| raw.table(ttf_parser::Tag::from_bytes(tag)).is_some())
     {
-        return Err(FontError);
+        return Err(FontError.into());
     }
     let cmap = tables.cmap.ok_or(FontError)?;
     if cmap.subtables.len() > 32 {
-        return Err(FontError);
+        return Err(FontError.into());
     }
     let cmap_stream = entry(graph, font, "ToUnicode")
         .and_then(stream)
         .ok_or(Mapping)?;
     if !local_stream(cmap_stream) || cmap_stream.dict.contains_key("UseCMap") {
-        return Err(Mapping);
+        return Err(Mapping.into());
     }
     if let GidMap::Stream(bytes) = gid_map {
         let mut seen = BTreeSet::new();
+        let mut memory = workspace.scope();
         for pair in bytes.chunks_exact(2) {
             let glyph = u16::from_be_bytes([pair[0], pair[1]]);
-            if glyph >= face.number_of_glyphs() || (glyph != 0 && !seen.insert(glyph)) {
-                return Err(Mapping);
+            if glyph >= face.number_of_glyphs()
+                || (glyph != 0 && !memory.insert(&mut seen, glyph).map_err(|_| Budget)?)
+            {
+                return Err(Mapping.into());
             }
         }
     }
-    let unicode = parse_cmap(&cmap_stream.data, code_width).ok_or(Mapping)?;
+    let mut unicode_memory = workspace.scope();
+    let unicode = parse_cmap(
+        &cmap_stream.data,
+        code_width,
+        &mut unicode_memory,
+        workspace,
+    )?;
+    let mut widths_memory = workspace.scope();
     let (default_width, widths) = if code_width == 1 {
         let first = entry(graph, widths_dict, "FirstChar")
             .and_then(PdfValue::as_integer)
@@ -820,20 +972,26 @@ fn font_profile(graph: &NativePdfGraph, font: &Dict) -> TextResult<Font> {
             || !(first..=255).contains(&last)
             || values.len() as i64 != last - first + 1
         {
-            return Err(FontError);
+            return Err(FontError.into());
         }
-        let widths = (first..=last)
-            .zip(values)
-            .filter_map(|(code, value)| Some((code as u16, font_width(value)?)))
-            .collect();
+        let mut widths = BTreeMap::new();
+        for (code, value) in (first..=last).zip(values) {
+            if let Some(width) = font_width(value) {
+                widths_memory
+                    .tree_entry::<(u16, i64)>()
+                    .map_err(|_| Budget)?;
+                widths.insert(code as u16, width);
+            }
+        }
         (0, widths)
     } else {
-        cid_widths(graph, widths_dict).ok_or(FontError)?
+        cid_widths(graph, widths_dict, &mut widths_memory)?
     };
 
     let mut codes = BTreeMap::new();
     let mut reverse = BTreeMap::new();
     let mut gids = BTreeSet::new();
+    let mut gids_memory = workspace.scope();
     let loca = ttf_parser::loca::Table::parse(
         tables.maxp.number_of_glyphs,
         tables.head.index_to_location_format,
@@ -849,7 +1007,7 @@ fn font_profile(graph: &NativePdfGraph, font: &Dict) -> TextResult<Font> {
         let pdf_gid = match gid_map {
             GidMap::Unicode => {
                 if win_ansi(code) != Some(scalar) {
-                    return Err(Mapping);
+                    return Err(Mapping.into());
                 }
                 cmap.subtables
                     .into_iter()
@@ -869,7 +1027,9 @@ fn font_profile(graph: &NativePdfGraph, font: &Dict) -> TextResult<Font> {
         };
         if pdf_gid.0 == 0
             || pdf_gid.0 >= face.number_of_glyphs()
-            || !gids.insert(pdf_gid.0)
+            || !gids_memory
+                .insert(&mut gids, pdf_gid.0)
+                .map_err(|_| Budget)?
             || face.glyph_index(scalar) != Some(pdf_gid)
             || cmap
                 .subtables
@@ -878,14 +1038,14 @@ fn font_profile(graph: &NativePdfGraph, font: &Dict) -> TextResult<Font> {
                 .filter_map(|table| table.glyph_index(u32::from(scalar)))
                 .any(|glyph| glyph != pdf_gid)
         {
-            return Err(Mapping);
+            return Err(Mapping.into());
         }
         let width = widths.get(&code).copied().unwrap_or(default_width);
         let advance = i64::from(face.glyph_hor_advance(pdf_gid).ok_or(FontError)?);
         let upem = i64::from(face.units_per_em());
         if width == 0 || advance == 0 || (width * upem - advance * SCALE * SCALE).abs() > 500 * upem
         {
-            return Err(FontError);
+            return Err(FontError.into());
         }
         let ink = if scalar == ' ' && empty_glyph(loca, pdf_gid) {
             None
@@ -900,10 +1060,12 @@ fn font_profile(graph: &NativePdfGraph, font: &Dict) -> TextResult<Font> {
                 || header.x_min >= header.x_max
                 || header.y_min >= header.y_max
             {
-                return Err(FontError);
+                return Err(FontError.into());
             }
             Some(header)
         };
+        retained.tree_entry::<(char, u16)>().map_err(|_| Budget)?;
+        retained.tree_entry::<(u16, Glyph)>().map_err(|_| Budget)?;
         reverse.insert(scalar, code);
         codes.insert(code, Glyph { scalar, width, ink });
     }
@@ -997,23 +1159,25 @@ fn intersects(a: Bounds, b: Bounds) -> bool {
 }
 
 impl Font {
-    fn decode(&self, bytes: &[u8]) -> TextResult<Vec<u16>> {
+    fn decode<'a>(&self, bytes: &'a [u8]) -> TextResult<impl Iterator<Item = u16> + use<'a>> {
         if bytes.len() % self.code_width != 0 {
             return Err(NativeTextRefusal::Mapping);
         }
-        Ok(bytes
-            .chunks_exact(self.code_width)
-            .map(|chunk| {
-                if let [a, b] = *chunk {
-                    u16::from_be_bytes([a, b])
-                } else {
-                    u16::from(chunk[0])
-                }
-            })
-            .collect())
+        Ok(bytes.chunks_exact(self.code_width).map(|chunk| {
+            if let [a, b] = *chunk {
+                u16::from_be_bytes([a, b])
+            } else {
+                u16::from(chunk[0])
+            }
+        }))
     }
 
-    fn measure(&self, show: &Show, codes: &[u16]) -> TextResult<(String, Metrics)> {
+    fn measure(
+        &self,
+        show: &Show,
+        codes: impl Iterator<Item = u16>,
+        mut emit: impl FnMut(char),
+    ) -> TextResult<Metrics> {
         use NativeTextRefusal::{Layout, Mapping};
 
         let upem = i128::from(self.upem);
@@ -1024,10 +1188,13 @@ impl Font {
         let (mut left, mut right) = (x, x);
         let (mut bottom, mut top) = (i128::MAX, i128::MIN);
         let mut advance = 0;
-        let mut text = String::new();
+        let mut text_bytes = 0;
         for code in codes {
-            let glyph = self.codes.get(code).ok_or(Mapping)?;
-            text.push(glyph.scalar);
+            let glyph = self.codes.get(&code).ok_or(Mapping)?;
+            text_bytes += glyph.scalar.len_utf8();
+            if text_bytes <= NATIVE_MAX_TEXT_BYTES {
+                emit(glyph.scalar);
+            }
             if let Some(ink) = glyph.ink {
                 let from_font = |edge| i128::from(edge) * size * width_scale;
                 left = left.min(x + advance + from_font(ink.x_min));
@@ -1037,36 +1204,42 @@ impl Font {
             }
             advance += i128::from(glyph.width) * size * upem;
         }
-        if bottom >= top || text.len() > NATIVE_MAX_TEXT_BYTES {
+        if bottom >= top || text_bytes > NATIVE_MAX_TEXT_BYTES {
             return Err(Layout);
         }
-        Ok((
-            text,
-            Metrics {
-                bounds: [left, bottom, right.max(x + advance), top],
-                advance,
-                denominator,
-            },
-        ))
+        Ok(Metrics {
+            bounds: [left, bottom, right.max(x + advance), top],
+            advance,
+            denominator,
+        })
     }
 }
 
-struct Recognition<'a> {
+struct ReservedFont<'w> {
+    font: Font,
+    _memory: Reservation<'w>,
+}
+
+struct Recognition<'a, 'w> {
     graph: &'a NativePdfGraph,
-    fonts: BTreeMap<*const Dict, TextResult<Font>>,
+    workspace: &'w Workspace,
+    fonts: BTreeMap<*const Dict, TextResult<ReservedFont<'w>>>,
+    cache_memory: Reservation<'w>,
     work: usize,
 }
 
-impl<'a> Recognition<'a> {
-    fn new(graph: &'a NativePdfGraph) -> Self {
+impl<'a, 'w> Recognition<'a, 'w> {
+    fn new(graph: &'a NativePdfGraph, workspace: &'w Workspace) -> Self {
         Self {
             graph,
+            workspace,
             fonts: BTreeMap::new(),
+            cache_memory: workspace.scope(),
             work: graph.remaining_work(),
         }
     }
 
-    fn font(&mut self, resources: &Dict, name: &str) -> TextResult<&Font> {
+    fn font(&mut self, resources: &Dict, name: &str) -> RecognitionResult<&Font> {
         use NativeTextRefusal::Font;
         let fonts = entry(self.graph, resources, "Font")
             .and_then(PdfValue::as_dictionary)
@@ -1079,10 +1252,25 @@ impl<'a> Recognition<'a> {
             std::collections::btree_map::Entry::Occupied(entry) => entry.into_mut(),
             std::collections::btree_map::Entry::Vacant(entry) => {
                 self.work = self.work.checked_sub(250_000).ok_or(Font)?;
-                entry.insert(font_profile(self.graph, dictionary))
+                self.cache_memory
+                    .tree_entry::<(*const Dict, TextResult<ReservedFont<'w>>)>()
+                    .map_err(|_| Budget)?;
+                let mut memory = self.workspace.scope();
+                let font = match font_profile(self.graph, dictionary, self.workspace, &mut memory) {
+                    Ok(font) => Ok(ReservedFont {
+                        font,
+                        _memory: memory,
+                    }),
+                    Err(NativeSessionError::Text(error)) => Err(error),
+                    Err(error) => return Err(error),
+                };
+                entry.insert(font)
             }
         };
-        cached.as_ref().map_err(|error| *error)
+        cached
+            .as_ref()
+            .map(|cached| &cached.font)
+            .map_err(|error| (*error).into())
     }
 
     fn page(
@@ -1090,7 +1278,8 @@ impl<'a> Recognition<'a> {
         page: &NativePdfNotePage,
         output_hash: [u8; 32],
         binding: NativeBinding,
-    ) -> TextResult<Option<(Content<'a>, Vec<Island>)>> {
+        memory: &mut Reservation<'_>,
+    ) -> RecognitionResult<Option<(Content<'a>, Vec<Island>)>> {
         use NativeTextRefusal::Layout;
         let Some(content) = content(self.graph, page)? else {
             return Ok(None);
@@ -1099,7 +1288,7 @@ impl<'a> Recognition<'a> {
             .work
             .checked_sub(content.stream.data.len())
             .ok_or(Layout)?;
-        let shows = shows(&content.stream.data)?;
+        let shows = shows(&content.stream.data, self.workspace, memory)?;
         if shows.is_empty() {
             return Ok(None);
         }
@@ -1112,14 +1301,17 @@ impl<'a> Recognition<'a> {
         for show in shows {
             let font = self.font(content.resources, &show.font)?;
             let codes = font.decode(&show.codes)?;
-            let (text, metrics) = font.measure(&show, &codes)?;
+            let max_text = (show.codes.len() / font.code_width * 4).min(NATIVE_MAX_TEXT_BYTES);
+            memory.grow(max_text).map_err(|_| Budget)?;
+            let mut text = String::with_capacity(max_text);
+            let metrics = font.measure(&show, codes, |scalar| text.push(scalar))?;
             let bounds = metrics.wire_bounds()?;
             if !contains(crop, bounds)
                 || islands
                     .iter()
                     .any(|neighbor| intersects(neighbor.view.bounds, bounds))
             {
-                return Err(Layout);
+                return Err(Layout.into());
             }
             let mut id = blake3::Hasher::new();
             id.update(b"flowpdf:native-text-island:v1");
@@ -1135,23 +1327,28 @@ impl<'a> Recognition<'a> {
             id.update(&0_u32.to_le_bytes());
             id.update(&(show.operand.start as u64).to_le_bytes());
             id.update(&(show.operand.end as u64).to_le_bytes());
-            islands.push(Island {
-                view: NativeTextIsland {
-                    id: *id.finalize().as_bytes(),
-                    text,
-                    bounds,
-                    profile: font.profile,
-                    operator: if show.array {
-                        NativeTextOperator::TJ
-                    } else {
-                        NativeTextOperator::Tj
+            memory
+                .push(
+                    &mut islands,
+                    Island {
+                        view: NativeTextIsland {
+                            id: *id.finalize().as_bytes(),
+                            text,
+                            bounds,
+                            profile: font.profile,
+                            operator: if show.array {
+                                NativeTextOperator::TJ
+                            } else {
+                                NativeTextOperator::Tj
+                            },
+                            max_advance: i64::try_from(metrics.advance / metrics.denominator)
+                                .map_err(|_| Layout)?,
+                        },
+                        show,
+                        metrics,
                     },
-                    max_advance: i64::try_from(metrics.advance / metrics.denominator)
-                        .map_err(|_| Layout)?,
-                },
-                show,
-                metrics,
-            });
+                )
+                .map_err(|_| Budget)?;
         }
         Ok(Some((content, islands)))
     }
@@ -1163,34 +1360,44 @@ pub(super) fn project(
     output_hash: [u8; 32],
     binding: NativeBinding,
     retained: &mut usize,
-) -> Result<Vec<NativeTextPage>, NativeEditError> {
-    let mut recognition = Recognition::new(graph);
+) -> RecognitionResult<Vec<NativeTextPage>> {
+    let workspace = Workspace::new(*retained);
+    let mut recognition = Recognition::new(graph, &workspace);
+    let mut projected = workspace.scope();
     let mut result = Vec::new();
     for page in pages {
-        let (islands, refusal) = match recognition.page(page, output_hash, binding) {
-            Ok(Some((_, islands))) => (
-                islands
-                    .into_iter()
-                    .map(|island| island.view)
-                    .collect::<Vec<_>>(),
-                None,
-            ),
+        let mut memory = workspace.scope();
+        let (islands, refusal) = match recognition.page(page, output_hash, binding, &mut memory) {
+            Ok(Some((_, islands))) => {
+                projected
+                    .grow(
+                        islands
+                            .iter()
+                            .map(|island| 128 + island.view.text.capacity())
+                            .sum(),
+                    )
+                    .map_err(|_| Budget)?;
+                let mut views = Vec::with_capacity(islands.len());
+                views.extend(islands.into_iter().map(|island| island.view));
+                (views, None)
+            }
             Ok(None) => continue,
-            Err(error) => (Vec::new(), Some(error)),
+            Err(NativeSessionError::Text(error)) => (Vec::new(), Some(error)),
+            Err(error) => return Err(error),
         };
-        spend(
-            retained,
-            128 + islands
-                .iter()
-                .map(|island| 128 + island.text.len())
-                .sum::<usize>(),
-        )?;
-        result.push(NativeTextPage {
-            page: page.id,
-            islands,
-            refusal,
-        });
+        projected
+            .push(
+                &mut result,
+                NativeTextPage {
+                    page: page.id,
+                    islands,
+                    refusal,
+                },
+            )
+            .map_err(|_| Budget)?;
     }
+    drop(recognition);
+    *retained = workspace.remaining();
     Ok(result)
 }
 
@@ -1208,65 +1415,79 @@ pub(super) fn stage<'a>(
     binding: NativeBinding,
     output_hash: [u8; 32],
     command: &'a NativeTextCommand,
-) -> Result<ExpectedText<'a>, super::NativeSessionError> {
-    use super::NativeSessionError::{Budget, TargetUnavailable};
+    workspace: &Workspace,
+) -> RecognitionResult<ExpectedText<'a>> {
+    use super::NativeSessionError::TargetUnavailable;
     use NativeTextRefusal::{Layout, Mapping, Overflow};
 
     let NativeTextCommand::ReplaceText { island: id, text } = command;
     if text.is_empty() || text.len() > NATIVE_MAX_TEXT_BYTES {
         return Err(Layout.into());
     }
-    let mut recognition = Recognition::new(graph);
-    let (content, islands) = recognition
-        .page(page, output_hash, binding)?
-        .ok_or(TargetUnavailable)?;
-    let (index, island) = islands
-        .iter()
-        .enumerate()
-        .find(|(_, island)| island.view.id == *id)
-        .ok_or(TargetUnavailable)?;
-    let font = recognition.font(content.resources, &island.show.font)?;
-    let codes = text
-        .chars()
-        .map(|scalar| font.reverse.get(&scalar).copied().ok_or(Mapping))
-        .collect::<Result<Vec<_>, _>>()?;
-    let (_, replacement) = font.measure(&island.show, &codes)?;
-    if replacement.advance > island.metrics.advance
-        || !contains(island.metrics.bounds, replacement.bounds)
-    {
-        return Err(Overflow.into());
-    }
-    let mut operand = Vec::new();
-    if island.show.array {
-        operand.push(b'[');
-    }
-    operand.push(b'<');
-    const HEX: &[u8; 16] = b"0123456789ABCDEF";
-    for code in codes {
-        for &byte in &code.to_be_bytes()[2 - font.code_width..] {
-            operand.push(HEX[usize::from(byte >> 4)]);
-            operand.push(HEX[usize::from(byte & 15)]);
+    let mut operand_memory = workspace.scope();
+    let (index, span, size, original_reference, copy_on_write, original_bounds, operand) = {
+        let mut memory = workspace.scope();
+        let mut recognition = Recognition::new(graph, workspace);
+        let (content, islands) = recognition
+            .page(page, output_hash, binding, &mut memory)?
+            .ok_or(TargetUnavailable)?;
+        let (index, island) = islands
+            .iter()
+            .enumerate()
+            .find(|(_, island)| island.view.id == *id)
+            .ok_or(TargetUnavailable)?;
+        let font = recognition.font(content.resources, &island.show.font)?;
+        let code_count = text.chars().count();
+        memory
+            .grow(code_count * size_of::<u16>())
+            .map_err(|_| Budget)?;
+        let mut codes = Vec::with_capacity(code_count);
+        for scalar in text.chars() {
+            codes.push(*font.reverse.get(&scalar).ok_or(Mapping)?);
         }
-    }
-    operand.push(b'>');
-    if island.show.array {
-        operand.push(b']');
-    }
-    let span = island.show.operand.clone();
-    let size = content
-        .stream
-        .data
-        .len()
-        .checked_sub(span.len())
-        .and_then(|bytes| bytes.checked_add(operand.len()))
-        .ok_or(Budget)?;
-    if size > MAX_CONTENT_BYTES || size > graph.limits.max_decoded_stream_bytes {
+        let replacement = font.measure(&island.show, codes.iter().copied(), |_| {})?;
+        if replacement.advance > island.metrics.advance
+            || !contains(island.metrics.bounds, replacement.bounds)
+        {
+            return Err(Overflow.into());
+        }
+        let operand_len = code_count * font.code_width * 2 + if island.show.array { 4 } else { 2 };
+        let span = island.show.operand.clone();
+        let size = content.stream.data.len() - span.len() + operand_len;
+        if size > MAX_CONTENT_BYTES || size > graph.limits.max_decoded_stream_bytes {
+            return Err(Budget);
+        }
+        operand_memory.grow(operand_len).map_err(|_| Budget)?;
+        let mut operand = Vec::with_capacity(operand_len);
+        if island.show.array {
+            operand.push(b'[');
+        }
+        operand.push(b'<');
+        const HEX: &[u8; 16] = b"0123456789ABCDEF";
+        for code in codes {
+            for &byte in &code.to_be_bytes()[2 - font.code_width..] {
+                operand.push(HEX[usize::from(byte >> 4)]);
+                operand.push(HEX[usize::from(byte & 15)]);
+            }
+        }
+        operand.push(b'>');
+        if island.show.array {
+            operand.push(b']');
+        }
+        (
+            index,
+            span,
+            size,
+            content.reference,
+            content.copy_on_write,
+            island.view.bounds,
+            operand,
+        )
+    };
+    graph.reserve_replacement_stream(size)?;
+    if operand.capacity() > graph.remaining_retained() {
         return Err(Budget);
     }
-    let original_reference = content.reference;
-    let copy_on_write = content.copy_on_write;
-    let original_bounds = island.view.bounds;
-    graph.reserve_replacement_stream(size)?;
     let Some(PdfValue::Stream(original)) = graph.objects.get(&original_reference) else {
         return Err(TargetUnavailable);
     };
@@ -1275,6 +1496,8 @@ pub(super) fn stage<'a>(
     updated.extend_from_slice(&data[..span.start]);
     updated.extend_from_slice(&operand);
     updated.extend_from_slice(&data[span.end..]);
+    drop(operand);
+    drop(operand_memory);
     let stream = PdfValue::Stream(PdfStream {
         dict: BTreeMap::from([("Length".into(), PdfValue::Integer(size as i64))]),
         encoded: updated.clone(),
@@ -1345,10 +1568,17 @@ mod tests {
                 "/CIDInit /ProcSet findresource begin 12 dict begin begincmap\n                 /CMapType 2 def /CMapName /Example def\n                 1 begincodespacerange <00><FF> endcodespacerange\n                 {map}\nendcmap CMapName currentdict /CMap defineresource pop end end"
             )
         };
+        let workspace = Workspace::new(4096);
+        let parse = |bytes: &[u8]| parse_cmap(bytes, 1, &mut workspace.scope(), &workspace);
         let valid = cmap("1 beginbfrange % contiguous\n <41><43><0041> endbfrange");
         assert_eq!(
-            parse_cmap(valid.as_bytes(), 1).unwrap(),
+            parse(valid.as_bytes()).unwrap(),
             BTreeMap::from([(65, 'A'), (66, 'B'), (67, 'C')])
+        );
+        let constrained = Workspace::new(1024);
+        assert_eq!(
+            parse_cmap(valid.as_bytes(), 1, &mut constrained.scope(), &constrained),
+            Err(Budget)
         );
         for bad in [
             "1 beginbfchar <41><0041> <42><0042> endbfchar",
@@ -1356,18 +1586,44 @@ mod tests {
             "2 beginbfchar <41><0041> <42><0041> endbfchar",
             "/Untrusted usecmap 1 beginbfchar <41><0041> endbfchar",
         ] {
-            assert!(parse_cmap(cmap(bad).as_bytes(), 1).is_none());
+            assert_eq!(
+                parse(cmap(bad).as_bytes()),
+                Err(NativeTextRefusal::Mapping.into())
+            );
         }
     }
 
     #[test]
     fn retained_span_excludes_comments_and_neighbor_tokens() {
         let content = b"q\nBT /F1 12 Tf 1 0 0 1 20.125 100 Tm % (decoy)\n[(AA) 0]TJ ET\nQ";
-        let shows = shows(content).unwrap();
+        let workspace = Workspace::new(32 * 1024);
+        let shows = shows(content, &workspace, &mut workspace.scope()).unwrap();
         assert_eq!(shows.len(), 1);
         assert_eq!(shows[0].codes, b"AA");
         assert_eq!(&content[shows[0].operand.clone()], b"[(AA) 0]");
         assert_eq!(shows[0].origin, [20_125, 100_000]);
+    }
+
+    #[test]
+    fn array_workspace_bounds_array_operands_only() {
+        assert_eq!(possible_array_items(b"% chart [bars]\r1 2 m", 16), 0);
+        assert_eq!(
+            possible_array_items(br"(escaped \) [x] (nested)) <5b> 1 2 m", 16),
+            0
+        );
+        assert_eq!(possible_array_items(b"[(a[b]) [] <5b> 7] TJ", 16), 4);
+        assert_eq!(possible_array_items(b"[(a[b]) [] <5b> 7] TJ", 2), 2);
+    }
+
+    #[test]
+    fn text_operands_require_workspace_before_parsing() {
+        let content = b"BT /F1 12 Tf [(AA) 0] TJ ET";
+        let workspace = Workspace::new(128);
+        assert!(matches!(
+            shows(content, &workspace, &mut workspace.scope()),
+            Err(Budget)
+        ));
+        assert_eq!(workspace.remaining(), 128);
     }
 
     #[test]
@@ -1376,7 +1632,11 @@ mod tests {
             b"BT /F1 12 Tf [() (AA)] TJ ET".as_slice(),
             b"BT /F1 12 Tf [(AA) ()] TJ ET".as_slice(),
         ] {
-            assert!(matches!(shows(content), Err(NativeTextRefusal::Layout)));
+            let workspace = Workspace::new(32 * 1024);
+            assert!(matches!(
+                shows(content, &workspace, &mut workspace.scope()),
+                Err(NativeSessionError::Text(NativeTextRefusal::Layout))
+            ));
         }
     }
 }

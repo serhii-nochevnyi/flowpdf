@@ -14,11 +14,11 @@ mod text {
 
     pub(super) struct FieldFont(Font);
 
-    pub(super) struct RedactionText<'a>(Recognition<'a>);
+    pub(super) struct RedactionText<'a, 'w>(Recognition<'a, 'w>);
 
-    impl<'a> RedactionText<'a> {
-        pub(super) fn new(graph: &'a NativePdfGraph) -> Self {
-            Self(Recognition::new(graph))
+    impl<'a, 'w> RedactionText<'a, 'w> {
+        pub(super) fn new(graph: &'a NativePdfGraph, workspace: &'w Workspace) -> Self {
+            Self(Recognition::new(graph, workspace))
         }
 
         pub(super) fn measure(
@@ -26,9 +26,14 @@ mod text {
             resources: Option<&Dict>,
             block: &[u8],
             work: &mut usize,
-        ) -> Result<Option<(String, Bounds)>, super::NativeEditError> {
+        ) -> Result<Option<(String, Bounds, Reservation<'w>)>, super::NativeEditError> {
             use super::NativeEditError::Unsupported;
-            let mut shows = shows(block).map_err(|_| Unsupported)?;
+            let refusal = |error| match error {
+                NativeSessionError::Budget => NativeEditError::Budget,
+                _ => Unsupported,
+            };
+            let mut memory = self.0.workspace.scope();
+            let mut shows = shows(block, self.0.workspace, &mut memory).map_err(refusal)?;
             let Some(show) = shows.pop() else {
                 return Ok(None);
             };
@@ -40,12 +45,14 @@ mod text {
             let font = self
                 .0
                 .font(resources.ok_or(Unsupported)?, &show.font)
-                .map_err(|_| Unsupported)?;
+                .map_err(refusal)?;
             let codes = font.decode(&show.codes).map_err(|_| Unsupported)?;
-            let (_, metrics) = font.measure(&show, &codes).map_err(|_| Unsupported)?;
+            let metrics = font
+                .measure(&show, codes, |_| {})
+                .map_err(|_| Unsupported)?;
             let bounds = metrics.wire_bounds().map_err(|_| Unsupported)?;
             *work = self.0.work;
-            Ok(Some((show.font, bounds)))
+            Ok(Some((show.font, bounds, memory)))
         }
     }
 
@@ -55,7 +62,11 @@ mod text {
 
     impl FieldFont {
         pub(super) fn admit(graph: &NativePdfGraph, dict: &Dict) -> Option<Self> {
-            font_profile(graph, dict).ok().map(Self)
+            let workspace = Workspace::new(graph.remaining_retained());
+            let mut memory = workspace.scope();
+            font_profile(graph, dict, &workspace, &mut memory)
+                .ok()
+                .map(Self)
         }
 
         pub(super) fn operand(
@@ -81,7 +92,9 @@ mod text {
                     array: false,
                 };
                 if value.chars().any(|scalar| scalar != ' ') {
-                    let (_, metrics) = font.measure(&show, &codes).map_err(|_| Geometry)?;
+                    let metrics = font
+                        .measure(&show, codes.iter().copied(), |_| {})
+                        .map_err(|_| Geometry)?;
                     if !contains(
                         [0, 0, width * SCALE, height * SCALE],
                         metrics.wire_bounds().map_err(|_| Geometry)?,

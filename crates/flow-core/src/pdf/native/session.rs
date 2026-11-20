@@ -1133,12 +1133,14 @@ impl NativePdfSession {
                     .find(|page| page.islands.iter().any(|target| target.id == *island))
                     .and_then(|page| self.snapshot.scene.pages.get(page.page.0 as usize))
                     .ok_or(NativeSessionError::TargetUnavailable)?;
+                let workspace = Workspace::new(staged.remaining_retained());
                 let expected = text::stage(
                     &mut staged,
                     page,
                     binding,
                     self.snapshot.output_hash,
                     command,
+                    &workspace,
                 )?;
                 if let Some(object) = expected.new_object {
                     ids.insert(object, NativeNoteId(0));
