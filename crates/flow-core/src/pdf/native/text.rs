@@ -440,7 +440,6 @@ pub(super) fn reserve_content_tokens(
     max_tokens: usize,
     operand_bytes: usize,
 ) -> Result<Reservation<'_>, NativeEditError> {
-    // Include spare array slots, token payload growth, and the parser's operand stack.
     let array_bytes = 4 * input_bytes.min(max_tokens) * size_of::<ContentToken>();
     workspace
         .reserve(array_bytes + 8 * input_bytes + operand_bytes)
