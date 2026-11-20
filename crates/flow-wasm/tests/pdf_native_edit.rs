@@ -1957,6 +1957,70 @@ fn serialized_image_crud_rejects_forged_profiles_and_malformed_assets() {
     );
 }
 
+#[test]
+fn serialized_object_operations_keep_the_supported_order_at_the_graphics_limit() {
+    let paint = format!(
+        "{}10 10 10 10 re f q 25 10 10 10 re f q 40 10 10 10 re f 10 0 0 10 60 10 cm /I Do\n{}",
+        "q\n".repeat(30),
+        "Q\n".repeat(32),
+    );
+    let source = fixture_pdf(&[
+        "<< /Type /Catalog /Pages 2 0 R >>",
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Contents 4 0 R /Resources << /XObject << /I 5 0 R >> >> >>",
+        &format!("<< /Length {} >>\nstream\n{paint}\nendstream", paint.len()),
+        "<< /Type /XObject /Subtype /Image /ColorSpace /DeviceGray /Width 1 /Height 1 /BitsPerComponent 8 /Length 1 >>\nstream\nA\nendstream",
+    ]);
+    let opened = call(native_pdf_open, open_request(source.as_bytes()));
+    assert_eq!(opened["status"], "opened", "{opened}");
+    let snapshot = &opened["snapshot"];
+    let objects = &snapshot["scene"]["objectPages"][0]["objects"];
+    assert_eq!(
+        objects[0]["operations"],
+        json!(["replace", "move", "remove"])
+    );
+    assert_eq!(objects[1]["operations"], json!(["move", "remove"]));
+    assert_eq!(objects[2]["operations"], json!(["remove"]));
+    assert_eq!(objects[3]["operations"], json!(["replace", "remove"]));
+    let target = |object: &Value| json!({"page":0,"id":object["id"],"profile":object["profile"]});
+    let refused = page_edit(
+        snapshot,
+        2,
+        json!({"kind":"moveObject","target":target(&objects[3]),"transform":[1,0,0,1,1,0]}),
+    );
+    assert_eq!(refused["status"], "failed");
+    assert_eq!(refused["code"], "FLOW_PDF_NATIVE_OBJECT_STATE");
+    let current = call(native_pdf_snapshot, bound("snapshot", 2, snapshot));
+    assert_eq!(current["status"], "unseen");
+    assert_eq!(&current["snapshot"], snapshot);
+
+    let asset = concat!(
+        "89504e470d0a1a0a0000000d49484452000000010000000108000000003a7e9b55",
+        "0000000a49444154789c63880600005d005cdc83ebd80000000049454e44ae426082"
+    );
+    let replaced = page_edit(
+        snapshot,
+        2,
+        json!({"kind":"replaceImage","target":target(&objects[3]),"assetHex":asset}),
+    );
+    assert_eq!(replaced["status"], "applied", "{replaced}");
+    let snapshot = &replaced["snapshot"];
+    let after = &snapshot["scene"]["objectPages"][0]["objects"];
+    assert_eq!(after[3]["bounds"], objects[3]["bounds"]);
+    assert_eq!(after[3]["operations"], objects[3]["operations"]);
+    let removed = page_edit(
+        snapshot,
+        3,
+        json!({"kind":"removeObject","target":target(&after[2])}),
+    );
+    assert_eq!(removed["status"], "applied", "{removed}");
+    let after = removed["snapshot"]["scene"]["objectPages"][0]["objects"]
+        .as_array()
+        .unwrap();
+    assert_eq!(after.len(), 3);
+    assert_eq!(after[2]["operations"], json!(["replace", "remove"]));
+}
+
 fn page_edit(snapshot: &Value, request_id: u64, command: Value) -> Value {
     let mut request = bound("command", request_id, snapshot);
     request["outputHash"] = snapshot["outputHash"].clone();

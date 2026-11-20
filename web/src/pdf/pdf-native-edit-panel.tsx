@@ -953,8 +953,13 @@ export function PdfNativeEditPanel({
   const objectPage = snapshot?.scene.objectPages?.find((entry) => entry.page === pageId)
   const selectedObject = objectPage?.objects.find((entry) => objectId && sameNativeBytes(entry.id, objectId))
   const objectTarget = selectedObject && { page: pageId, id: selectedObject.id, profile: selectedObject.profile }
+  const canReplaceObject = selectedObject?.operations.includes('replace')
+  const canMoveObject = selectedObject?.operations.includes('move')
+  const canRemoveObject = selectedObject?.operations.includes('remove')
+  const editObjectAppearance = !selectedObject || canReplaceObject
+  const editObjectGeometry = !selectedObject || canMoveObject || (selectedObject.kind === 'graphic' && canReplaceObject)
   const objectBounds = geometry && nativeObjectBounds(coordinates, geometry.bounds)
-  const objectMove = selectedObject && objectBounds && moveObjectTransform(selectedObject.bounds, objectBounds)
+  const objectMove = canMoveObject && selectedObject && objectBounds && moveObjectTransform(selectedObject.bounds, objectBounds)
   const strokeWidth = objectProfile === 'line' ? objectUnits(stroke) : 0
   const strokeValid = strokeWidth >= 1 && strokeWidth <= NATIVE_PDF_LIMITS.graphicStrokeWidth
     && (!objectBounds || 2 * Math.ceil(strokeWidth / 2) < Math.min(
@@ -1494,11 +1499,11 @@ export function PdfNativeEditPanel({
   function submitObject(operation: 'add' | 'replace' | 'move', invoker: HTMLElement) {
     if (!canEdit || !objectPage || asset?.status === 'loading') return
     if (operation === 'move') {
-      if (!objectTarget || !objectMove || !selectedObject?.operations.includes('move')) return
+      if (!objectTarget || !objectMove) return
       void act({ kind: 'moveObject', target: objectTarget, transform: objectMove }, invoker)
       return
     }
-    if (operation === 'add' ? !objectPage.canAdd || !!objectTarget : !selectedObject?.operations.includes('replace')) return
+    if (operation === 'add' ? !objectPage.canAdd || !!objectTarget : !canReplaceObject) return
     if (objectProfile === 'image') {
       if (imageCommand) void act(imageCommand, invoker)
     } else if (objectBounds && canPaint) {
@@ -2316,8 +2321,8 @@ export function PdfNativeEditPanel({
               </select>
             </label>}
             {objectForm && <fieldset className="native-stack" disabled={!canEdit || navigationBlocked}>
-              <legend>{t('object.geometry')}</legend>
-              <label>{t('object.profile.label')}
+              <legend>{t(editObjectGeometry ? 'object.geometry' : 'object.title')}</legend>
+              {editObjectAppearance && <label>{t('object.profile.label')}
                 <select value={objectProfile} disabled={selectedObject?.kind === 'image'} onChange={(event) => {
                   const next = objectProfiles.find((profile) => profile === event.target.value)
                   if (next) {
@@ -2330,22 +2335,24 @@ export function PdfNativeEditPanel({
                     || (profile === 'image') === (selectedObject.kind === 'image')).map((profile) =>
                     <option key={profile} value={profile}>{t(`object.profile.${profile}`)}</option>)}
                 </select>
-              </label>
-              <p id={`${id}-object-bounds`} className="native-help">{t('object.geometry.help')}</p>
-              <div className="native-coordinates">
-                {coordinateLabels.map((label, index) => <label key={label}>{t(`object.${label}`)}
-                  <input type="text" inputMode="decimal" className="native-text-line" value={coordinates[index] ?? ''}
-                    aria-invalid={!objectBounds} aria-describedby={`${id}-object-bounds${objectBounds ? '' : ` ${id}-object-invalid`}`}
-                    onChange={(event) => {
-                      const next = [...coordinates] as [string, string, string, string]
-                      next[index] = event.currentTarget.value
-                      setCoordinates(next)
-                      clearFeedback()
-                    }} />
-                </label>)}
-              </div>
-              {!objectBounds && <p id={`${id}-object-invalid`} className="native-help">{t('object.geometry.invalid')}</p>}
-              {objectProfile === 'image' ? <>
+              </label>}
+              {editObjectGeometry && <>
+                <p id={`${id}-object-bounds`} className="native-help">{t('object.geometry.help')}</p>
+                <div className="native-coordinates">
+                  {coordinateLabels.map((label, index) => <label key={label}>{t(`object.${label}`)}
+                    <input type="text" inputMode="decimal" className="native-text-line" value={coordinates[index] ?? ''}
+                      aria-invalid={!objectBounds} aria-describedby={`${id}-object-bounds${objectBounds ? '' : ` ${id}-object-invalid`}`}
+                      onChange={(event) => {
+                        const next = [...coordinates] as [string, string, string, string]
+                        next[index] = event.currentTarget.value
+                        setCoordinates(next)
+                        clearFeedback()
+                      }} />
+                  </label>)}
+                </div>
+                {!objectBounds && <p id={`${id}-object-invalid`} className="native-help">{t('object.geometry.invalid')}</p>}
+              </>}
+              {editObjectAppearance && (objectProfile === 'image' ? <>
                 <label className="native-file">{t('object.file')}
                   <input type="file" accept=".png,.jpg,.jpeg,image/png,image/jpeg"
                     aria-describedby={`${id}-object-file-help ${id}-object-file-feedback`}
@@ -2359,7 +2366,7 @@ export function PdfNativeEditPanel({
                   bytes: NATIVE_PDF_LIMITS.imageBytes, dimension: NATIVE_PDF_LIMITS.imageDimension,
                   pixels: NATIVE_PDF_LIMITS.imagePixels,
                 })}</p>
-                {selectedObject && <p className="native-help">{t('object.replaceImage.help')}</p>}
+                {selectedObject && canMoveObject && <p className="native-help">{t('object.replaceImage.help')}</p>}
                 <p id={`${id}-object-file-feedback`} className="native-help" aria-live="polite">{asset && <>
                   <bdi>{asset.name}</bdi>{' — '}{t(asset.status === 'failed' ? asset.reason : `object.file.${asset.status}`)}
                 </>}</p>
@@ -2374,29 +2381,29 @@ export function PdfNativeEditPanel({
                 </label>}
                 {objectProfile === 'line' && !strokeValid &&
                   <p id={`${id}-object-stroke-error`} className="native-help">{t('object.stroke.invalid')}</p>}
-              </>}
-              {selectedObject && objectBounds && !objectMove && <p className="native-help">{t('object.reason.geometry')}</p>}
+              </>)}
+              {canMoveObject && objectBounds && !objectMove && <p className="native-help">{t('object.reason.geometry')}</p>}
               {unavailable && <p className="native-help">{unavailable}</p>}
               {operationError?.code && operationError.code in objectRefusalReasons &&
                 <p className="native-help">{t(operationError.reason)}</p>}
               <div className="native-actions">
                 {!selectedObject && objectPage.canAdd && <button type="button" disabled={!canPaint}
                   onClick={(event) => submitObject('add', event.currentTarget)}>{t('object.add')}</button>}
-                {selectedObject?.operations.includes('replace') && <button type="button" id={`${id}-object-replace`} disabled={!canPaint}
+                {canReplaceObject && <button type="button" id={`${id}-object-replace`} disabled={!canPaint}
                   onClick={(event) => submitObject('replace', event.currentTarget)}>{t('object.replace')}</button>}
-                {selectedObject?.operations.includes('move') && <button type="button" id={`${id}-object-move`}
+                {canMoveObject && <button type="button" id={`${id}-object-move`}
                   disabled={!objectMove || asset?.status === 'loading'}
                   onClick={(event) => submitObject('move', event.currentTarget)}>{t('object.move')}</button>}
-                {selectedObject?.operations.includes('remove') && <button type="button"
+                {canRemoveObject && <button type="button"
                   disabled={asset?.status === 'loading'} onClick={(event) => {
-                  if (!snapshot || !objectTarget || locked.current || composition.current) return
+                  if (!snapshot || !selectedObject || !objectTarget || locked.current || composition.current) return
                   removeTrigger.current = event.currentTarget
                   setConfirm({ snapshot, target: objectTarget, label: t('object.target', {
                     number: objectPage.objects.indexOf(selectedObject) + 1, page: pageIndex + 1,
                     profile: t(`object.profile.${selectedObject.profile}`),
                   }) })
                 }}>{t('object.remove')}</button>}
-                <button type="button" onClick={() => {
+                {(editObjectAppearance || editObjectGeometry) && <button type="button" onClick={() => {
                   const saved = recoveredObject.current
                   if (saved?.pageId === pageId && matchesObjectDraftTarget(saved.target, selectedObject)) {
                     recoveredObject.current = null
@@ -2405,7 +2412,7 @@ export function PdfNativeEditPanel({
                   if (pageDraft && matchesObjectDraftTarget(pageDraft.target, selectedObject)) pageObjectDrafts.current.delete(pageId)
                   resetObject(selectedObject)
                   clearFeedback()
-                }}>{t('object.cancel')}</button>
+                }}>{t('object.cancel')}</button>}
               </div>
             </fieldset>}
           </section>}
@@ -2710,7 +2717,7 @@ export function PdfNativeEditPanel({
                 return
               }
               if ('target' in confirm) {
-                if (!objectTarget || objectTarget.page !== confirm.target.page
+                if (!canRemoveObject || !objectTarget || objectTarget.page !== confirm.target.page
                   || !sameNativeBytes(objectTarget.id, confirm.target.id)) {
                   setError(['error.stale'])
                   return

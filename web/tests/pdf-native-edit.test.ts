@@ -1,7 +1,7 @@
 import * as wasm from '../generated/flow_wasm.js'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { hashPdfSourceBytes } from '../persistence/pdf-source-store.js'
-import { nativeCropBounds } from '../src/pdf/pdf-native-edit-panel.js'
+import { nativeCropBounds, nativeImageCommand } from '../src/pdf/pdf-native-edit-panel.js'
 import {
   NATIVE_PDF_LIMITS,
   nativeBytesHex,
@@ -449,6 +449,46 @@ describe('native PDF edit coordinator', () => {
     expect(lane.coordinator.snapshot()).toMatchObject({ phase: 'ready', accepted: snapshot })
     expect(lane.sent).toEqual([])
     lane.coordinator.dispose()
+  })
+
+  it('accepts only the ordered object capabilities that fit the graphics-state limit', () => {
+    const reply = openReply({
+      protocolVersion: 1, operation: 'open', requestId: 1,
+      epoch: Array<number>(16).fill(1), originStoreHash: storeHash, bytesHex: '010203',
+    })
+    const graphic = { id: hash(51), kind: 'graphic', profile: 'rectangle', bounds: [1000, 1000, 3000, 4000] } as const
+    const image = { ...graphic, id: hash(52), kind: 'image', profile: 'rasterGray8' } as const
+    const withObjects = (objects: readonly unknown[]) => readNativeResponse(JSON.stringify({
+      ...reply, snapshot: { ...reply.snapshot, scene: { ...reply.snapshot.scene,
+        objectPages: [{ page: 0, canAdd: true, refusal: null, objects }],
+      } },
+    }))
+    const full = ['replace', 'move', 'remove']
+    const objects = [
+      { ...graphic, operations: full },
+      { ...graphic, id: hash(53), operations: ['move', 'remove'] },
+      { ...graphic, id: hash(54), operations: ['remove'] },
+      { ...image, operations: ['replace', 'remove'] },
+      { ...image, id: hash(55), operations: full },
+    ]
+    const decoded = withObjects(objects)
+    if (decoded?.status !== 'opened') throw new Error('expected admitted object capabilities')
+    expect(decoded.snapshot.scene.objectPages?.[0]?.objects).toEqual(objects)
+    const selected = decoded.snapshot.scene.objectPages?.[0]?.objects[3]
+    const asset = { name: 'replacement.png', status: 'ready',
+      hex: '89504e470d0a1a0a0000000d49484452000000010000000108000000003a7e9b55'
+        + '0000000a49444154789c63880600005d005cdc83ebd80000000049454e44ae426082' } as const
+    expect(nativeImageCommand(0, selected, null, asset)).toEqual({
+      kind: 'replaceImage', target: { page: 0, id: image.id, profile: image.profile }, assetHex: asset.hex,
+    })
+
+    for (const operations of [[], ['move'], ['remove', 'move'], ['move', 'move', 'remove'],
+      ['replace', 'move', 'remove', 'remove'], ['rotate', 'remove'], ['replace', 'remove']]) {
+      expect(withObjects([{ ...graphic, operations }])).toBeNull()
+    }
+    for (const operations of [['remove'], ['move', 'remove'], ['move', 'replace', 'remove']]) {
+      expect(withObjects([{ ...image, operations }])).toBeNull()
+    }
   })
 
   it.each([

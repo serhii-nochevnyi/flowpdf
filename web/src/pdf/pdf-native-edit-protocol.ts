@@ -170,7 +170,7 @@ export interface NativePdfObjectPage {
     readonly kind: 'image' | 'graphic'
     readonly profile: NativePdfObjectProfile
     readonly bounds: NativePdfRect
-    readonly operations: readonly ['replace', 'move', 'remove']
+    readonly operations: readonly ('replace' | 'move' | 'remove')[]
   }[]
   readonly refusal: typeof objectRefusals[number] | null
 }
@@ -742,6 +742,16 @@ function textPages(value: unknown, pageCount: number): boolean {
   return true
 }
 
+function objectOperations(value: unknown, kind: 'image' | 'graphic'): boolean {
+  if (!Array.isArray(value) || value.at(-1) !== 'remove') return false
+  switch (value.length) {
+    case 3: return value[0] === 'replace' && value[1] === 'move'
+    case 2: return value[0] === (kind === 'image' ? 'replace' : 'move')
+    case 1: return kind === 'graphic'
+    default: return false
+  }
+}
+
 function objectPages(value: unknown, count: number): boolean {
   return Array.isArray(value) && value.length === count && value.every((page: unknown, index) =>
     shape(page, 'page', 'canAdd', 'objects', 'refusal') && page.page === index
@@ -750,11 +760,9 @@ function objectPages(value: unknown, count: number): boolean {
     && (page.refusal === null
       ? page.objects.every((object: unknown) =>
         shape(object, 'id', 'kind', 'profile', 'bounds', 'operations') && hash(object.id)
-        && (object.kind === 'image' ? rasterProfile(object.profile)
-          : object.kind === 'graphic' && graphicShape(object.profile))
-        && objectBounds(object.bounds) && Array.isArray(object.operations)
-        && object.operations.length === 3 && object.operations[0] === 'replace'
-        && object.operations[1] === 'move' && object.operations[2] === 'remove')
+        && (object.kind === 'image' || object.kind === 'graphic')
+        && (object.kind === 'image' ? rasterProfile(object.profile) : graphicShape(object.profile))
+        && objectBounds(object.bounds) && objectOperations(object.operations, object.kind))
       : page.canAdd === false && page.objects.length === 0 && typeof page.refusal === 'string'
         && objectRefusalCodes.has(page.refusal)))
 }
