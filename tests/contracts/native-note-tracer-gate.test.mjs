@@ -17,6 +17,7 @@ const verifiedRasterRevision = 'b3340c7aa5919715320d65548463fdff68cb2e43'
 const olderPageRevision = '793ff4c687a71210205258e58003400c7738affa'
 const recoveryNoteRevision = '6f4b7ea593f2efd3ac3237cf8c3f1660ad0d4263'
 const accessibleTextRevision = 'e6fb68578bc5d70358d0d4e9f20f78c61015ad6e'
+const previousAccessibleTextRevision = 'f5fac52c09641cdd80bdd7883d9a4ff4c90276a7'
 const pagesSuite = 'web/tests/pdf-native-pages.browser.test.ts'
 const redactionSuite = 'web/tests/pdf-native-redaction.browser.test.ts'
 
@@ -131,6 +132,7 @@ for (const [profile, revision, expanded] of [
   ['reviewed recovery note', recoveryNoteRevision, true],
   ['reviewed accessible page text', accessibleTextRevision, true],
   ['reviewed worker quarantine and accessible text', 'fb250eb5e22f5c2220eb79c94a08e08a006faaed', true],
+  ['previous reviewed worker quarantine and accessible text', previousAccessibleTextRevision, true],
 ]) {
   test(`accepts the exact ${profile} harness`, (t) => {
     const paths = ['.github/workflows/pdf-native-note-tracer.yml', 'package.json',
@@ -158,8 +160,13 @@ for (const [profile, revision] of [['5683541', baselineRevision], ['b3340c7', ve
   })
 }
 
-for (const [suite, revision] of [[pagesSuite, olderPageRevision], [redactionSuite, verifiedRasterRevision]]) {
-  test(`refuses accessible page text with a different reviewed ${suite} suite`, (t) => {
+for (const [description, suite, revision] of [
+  ['the older page suite', pagesSuite, olderPageRevision],
+  ['the verified raster suite', redactionSuite, verifiedRasterRevision],
+  ['the previous navigation suite', browserSuites[0], previousAccessibleTextRevision],
+  ['the previous redaction suite', redactionSuite, previousAccessibleTextRevision],
+]) {
+  test(`refuses the current accessible page text profile with ${description}`, (t) => {
     const historicalFiles = harnessFilesFrom(t, revision, [suite])
     if (!historicalFiles) return
     const { command } = fixture({ historicalFiles })

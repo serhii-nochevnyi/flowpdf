@@ -196,6 +196,12 @@ for (const locale of ['uk', 'en'] satisfies NativePdfLocale[]) {
         return request.type === 'cancel' && request.requestId === firstRead?.request.requestId
       })).toBe(true)
       staleReply?.()
+      await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())))
+      const pageSelect = workspace.getByRole('combobox', { name: t('navigation.select'), exact: true })
+      expect((pageSelect.element() as HTMLSelectElement).selectedIndex).toBe(1)
+      await expect.element(projection).toHaveAttribute('aria-busy', 'false')
+      await expect.element(text(secondReadback)).toBeVisible()
+      expect(text(limitedText).query()).not.toBeNull()
       expect(text(firstText).query()).toBeNull()
 
       await navigate('navigation.previous')
