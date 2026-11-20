@@ -643,6 +643,15 @@ fn redaction_admission_follows_the_accepted_pdf() {
     );
     assert_eq!(refused["code"], "FLOW_PDF_NATIVE_UNSUPPORTED");
     status_only(&refused);
+    let unchanged = call(native_pdf_snapshot, bound("snapshot", 3, after));
+    assert_eq!(unchanged["status"], "unseen");
+    assert_eq!(unchanged["snapshot"], *after);
+    let cleared = call(
+        native_pdf_redaction,
+        redaction_request(3, after, json!({"kind":"clearMarks"})),
+    );
+    assert_eq!(cleared["status"], "redaction");
+    assert_eq!(cleared["redaction"]["markCount"], 0);
     assert_eq!(
         call(native_pdf_close, bound("close", 4, after))["status"],
         "closed"
@@ -653,6 +662,7 @@ fn redaction_admission_follows_the_accepted_pdf() {
 fn marked_snapshot_survives_live_redaction_budget_refusal() {
     use flow_core::pdf::native::{
         NATIVE_REQUEST_HISTORY, NativeEditLimits, NativePdfSession, NativeRedactionMark,
+        NativeSessionError,
     };
 
     let fixture = |height: usize| {
@@ -700,22 +710,17 @@ fn marked_snapshot_survives_live_redaction_budget_refusal() {
     let page_id = session.snapshot().page_state.order[0];
     let geometry = session.redaction_mark_geometry(page_id).unwrap();
     let rect = |index: i64| [1000 + 2 * index, 1000, 1001 + 2 * index, 1100];
+    let mark = |index| NativeRedactionMark {
+        page_id,
+        geometry,
+        rect: rect(index),
+    };
     let mut marks = 0;
     while session.redaction_admitted() {
         assert!(marks < 128);
-        session
-            .add_redaction_mark(
-                binding,
-                NativeRedactionMark {
-                    page_id,
-                    geometry,
-                    rect: rect(marks),
-                },
-            )
-            .unwrap();
+        session.add_redaction_mark(binding, mark(marks)).unwrap();
         marks += 1;
     }
-    drop(session);
 
     let opened = call(native_pdf_open, open_request(&source));
     assert_eq!(opened["status"], "opened");
@@ -746,12 +751,17 @@ fn marked_snapshot_survives_live_redaction_budget_refusal() {
     }
 
     let request_id = marks as u64 + 2;
+    let error = session
+        .add_redaction_mark(binding, mark(marks))
+        .unwrap_err();
+    assert_eq!(error, NativeSessionError::Budget);
+    assert_eq!(session.redaction_marks().len(), marks as usize);
     let refused = call(
         native_pdf_redaction,
         mark_request("addMark", request_id, marks),
     );
     assert_eq!(refused["status"], "failed");
-    assert_eq!(refused["code"], "FLOW_PDF_NATIVE_BUDGET_EXHAUSTED");
+    assert_eq!(refused["code"], error.code());
     assert!(refused.get("redaction").is_none());
     assert!(refused.get("preview").is_none());
     status_only(&refused);
@@ -778,13 +788,25 @@ fn marked_snapshot_survives_live_redaction_budget_refusal() {
         .join()
         .unwrap();
 
+    session.add_redaction_mark(binding, mark(0)).unwrap();
+    let duplicate = call(native_pdf_redaction, mark_request("addMark", request_id, 0));
+    assert_eq!(duplicate["status"], "redaction");
+    assert_eq!(
+        duplicate["redaction"]["markCount"],
+        session.redaction_marks().len()
+    );
+
     for index in 0..marks {
+        session.remove_redaction_mark(binding, mark(index)).unwrap();
         let removed = call(
             native_pdf_redaction,
             mark_request("removeMark", request_id + 1 + index as u64, index),
         );
         assert_eq!(removed["status"], "redaction");
-        assert_eq!(removed["redaction"]["markCount"], marks - index - 1);
+        assert_eq!(
+            removed["redaction"]["markCount"],
+            session.redaction_marks().len()
+        );
     }
 }
 
