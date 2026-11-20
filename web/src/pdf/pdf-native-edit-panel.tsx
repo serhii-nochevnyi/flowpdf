@@ -51,6 +51,16 @@ type RedactedOutput = {
 }
 const redactionLanes = ['structure', 'text', 'raster'] as const
 
+export function verifiedRedactionMarkSnapshot(
+  before: NativePdfSnapshot, current: NativePdfSnapshot | null, result: NativePdfRedactionResult | null,
+  action: NativePdfRedactionMarkAction['kind'], markCount: number,
+): NativePdfSnapshot | null {
+  return current && result?.action === action && !result.published && result.candidate === null
+    && result.verification === null && result.markCount === markCount
+    && sameNativeBytes(result.acceptedHash, before.outputHash)
+    && current.consumedRequest === before.consumedRequest && sameNativeAcceptedOutput(before, current) ? current : null
+}
+
 export function verifiedRedactionCandidate(
   before: NativePdfSnapshot, accepted: NativePdfSnapshot, result: NativePdfRedactionResult | null,
   affectedPages: readonly number[],
@@ -944,15 +954,16 @@ export function PdfNativeEditPanel({
   const previewVerified = raster !== null && raster === paintedPreview
   const markCrop = previewVerified ? raster.cropBox : null
   const previewPending = !!(previewCoordinator && geometry && stableId !== undefined && !currentPreview)
-  const redactionAvailable = !!coordinator && typeof coordinator.markRedaction === 'function'
+  const redactionBound = !!coordinator && typeof coordinator.markRedaction === 'function'
     && typeof coordinator.applyRedaction === 'function' && pageState !== undefined
-    && !invalidated && service?.accepted === snapshot && snapshot?.redactionAdmission === 'supported'
+    && !invalidated && service?.accepted === snapshot
+  const redactionAvailable = redactionBound && snapshot?.redactionAdmission === 'supported'
   const markRect = markCrop && nativeCropBounds(redactionCoordinates, markCrop)
   const pageMarks = marks.filter((mark) => mark.pageId === stableId)
   const duplicateMark = markRect !== null && pageMarks.some((mark) => sameNativeBytes(mark.rect, markRect))
   const markInputs = redactionAvailable && previewVerified && sessionReady && !navigationBlocked
   const markControls = markInputs && !composing
-  const markCleanup = redactionAvailable && sessionReady && !navigationBlocked && !composing
+  const markCleanup = redactionBound && sessionReady && !navigationBlocked && !composing
   const markError = markCrop !== null && markRect === null && redactionCoordinates.some(Boolean) ? 'redaction.geometry.invalid'
     : duplicateMark ? 'redaction.geometry.duplicate' : null
   const attempt = pendingRedaction.current
@@ -1123,11 +1134,14 @@ export function PdfNativeEditPanel({
     attempt: RedactionAttempt, result: NativePdfRedactionResult | null, current: NativePdfSnapshot | null,
   ): boolean {
     if (attempt.action.kind !== 'stage') {
-      if (!result || result.action !== attempt.action.kind || result.published || result.candidate !== null
-        || result.verification !== null || result.markCount !== attempt.nextMarks.length || current !== attempt.before
-        || !sameNativeBytes(result.acceptedHash, attempt.before.outputHash)) {
+      const settled = verifiedRedactionMarkSnapshot(attempt.before, current, result, attempt.action.kind, attempt.nextMarks.length)
+      if (!settled) {
         refuseRedaction(attempt, null, undefined, true)
         return true
+      }
+      if (settled !== attempt.before) {
+        setAccepted((document) => document && { ...document, snapshot: settled })
+        setPreviewRead((read) => read?.snapshot === attempt.before ? { ...read, snapshot: settled } : read)
       }
       setMarks(attempt.nextMarks)
       setRedactionRefusal(null)
@@ -2149,9 +2163,9 @@ export function PdfNativeEditPanel({
               <p>{t('redaction.markSummary', markSummary)}</p>
               {redactionAvailable && <p className="native-help">{t('redaction.editLock')}</p>}
             </>}
-            {redactionAvailable && <>
-              {marks.length === 0 && !currentRedacted && <p>{t('redaction.empty')}</p>}
-              {markCrop && stableId !== undefined && <form className="native-stack" onSubmit={(event) => {
+            {redactionBound && <>
+              {redactionAvailable && marks.length === 0 && !currentRedacted && <p>{t('redaction.empty')}</p>}
+              {(redactionAvailable || marks.length > 0) && markCrop && stableId !== undefined && <form className="native-stack" onSubmit={(event) => {
                 event.preventDefault()
                 if (!markRect || duplicateMark) return
                 void runRedaction({ kind: 'addMark', pageId: stableId, rect: markRect }, document.getElementById(`${id}-redaction-add`))

@@ -22,6 +22,7 @@ import {
   nativeReplacementError,
   rebindNativeTextDrafts,
   verifiedRedactionCandidate,
+  verifiedRedactionMarkSnapshot,
   type NativePdfAcceptedDocument,
 } from '../src/pdf/pdf-native-edit-panel.js'
 import { nativePdfMessages, nativePdfText } from '../src/pdf/pdf-native-edit-messages.js'
@@ -133,6 +134,33 @@ describe('exact redacted output', () => {
       expect(markup).not.toContain(nativePdfText(locale, 'redaction.success'))
     })
   }
+})
+
+describe('verified redaction mark settlement', () => {
+  const before = { ...documentWith([]).snapshot, redactionAdmission: 'supported' } as const
+  const unavailable = { ...before, redactionAdmission: 'unavailable' } as const
+  const added = {
+    action: 'addMark', acceptedHash: before.outputHash, markCount: 1,
+    published: false, candidate: null, verification: null,
+  } as const satisfies NativePdfRedactionResult
+
+  it('accepts admission changes in either direction for the same accepted file', () => {
+    expect(verifiedRedactionMarkSnapshot(before, unavailable, added, 'addMark', 1)).toBe(unavailable)
+    for (const action of ['removeMark', 'clearMarks'] as const) {
+      expect(verifiedRedactionMarkSnapshot(unavailable, before, { ...added, action, markCount: 0 }, action, 0)).toBe(before)
+    }
+  })
+
+  it('requires an unchanged accepted file and a matching status-only mark receipt', () => {
+    for (const snapshot of [null, { ...unavailable, outputHex: '26' },
+      { ...unavailable, binding: { ...before.binding, revision: 3 } }, { ...unavailable, consumedRequest: 4 }]) {
+      expect(verifiedRedactionMarkSnapshot(before, snapshot, added, 'addMark', 1)).toBeNull()
+    }
+    for (const result of [null, { ...added, published: true }, { ...added, markCount: 0 },
+      { ...added, action: 'clearMarks' } as const, { ...added, acceptedHash: Array<number>(32).fill(43) }]) {
+      expect(verifiedRedactionMarkSnapshot(before, unavailable, result, 'addMark', 1)).toBeNull()
+    }
+  })
 })
 
 describe('redaction mark geometry', () => {
