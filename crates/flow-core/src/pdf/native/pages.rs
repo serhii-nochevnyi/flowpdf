@@ -8,8 +8,11 @@ use super::super::scene::NativePdfNotePage;
 use super::forms::{
     FIELD_NAME_ENTRY_BYTES, MAX_FIELDS, NATIVE_MAX_FIELD_NAME_BYTES, field_name_inventory,
 };
-use super::graph::{NativeEditError, NativePdfGraph, PageTreeEdges, collect_refs, spend};
+use super::graph::{
+    NativeEditError, NativePdfGraph, PageTreeEdges, collect_reference_set, spend, visit_refs,
+};
 use super::session::NativeSessionError;
+use super::verifier::{Reservation, Workspace};
 
 type Dict = BTreeMap<String, PdfValue>;
 type Ref = PdfObjectRef;
@@ -144,7 +147,7 @@ const DUPLICATE_KEYS: &[&str] = &[
     "UserUnit",
 ];
 
-fn positions_locked(graph: &NativePdfGraph) -> Result<bool, NativeEditError> {
+fn positions_locked(graph: &NativePdfGraph, work: &mut usize) -> Result<bool, NativeEditError> {
     let values = dict(graph, catalog(graph)?)?;
     if values.contains_key("PageLabels") {
         return Ok(true);
@@ -152,52 +155,96 @@ fn positions_locked(graph: &NativePdfGraph) -> Result<bool, NativeEditError> {
     let Some(preferences) = values.get("ViewerPreferences") else {
         return Ok(false);
     };
-    let mut work = graph.remaining_work();
-    Ok(match graph.resolve_metered(preferences, &mut work) {
-        Ok(PdfValue::Null) => false,
-        Ok(PdfValue::Dictionary(preferences)) => {
-            preferences.get("PrintPageRange").is_some_and(|range| {
-                !matches!(graph.resolve_metered(range, &mut work), Ok(PdfValue::Null))
-            })
+    let preferences = match graph.resolve_metered(preferences, work) {
+        Ok(PdfValue::Null) => return Ok(false),
+        Ok(PdfValue::Dictionary(preferences)) => preferences,
+        Err(Budget) => return Err(Budget),
+        _ => return Ok(true),
+    };
+    let Some(range) = preferences.get("PrintPageRange") else {
+        return Ok(false);
+    };
+    match graph.resolve_metered(range, work) {
+        Ok(PdfValue::Null) => Ok(false),
+        Err(Budget) => Err(Budget),
+        _ => Ok(true),
+    }
+}
+
+fn scoped_entry<'a, K: Ord, V: Default>(
+    map: &'a mut BTreeMap<K, V>,
+    key: K,
+    reservation: &mut Reservation<'_>,
+) -> Result<&'a mut V, NativeEditError> {
+    use std::collections::btree_map::Entry;
+
+    Ok(match map.entry(key) {
+        Entry::Occupied(entry) => entry.into_mut(),
+        Entry::Vacant(entry) => {
+            reservation.tree_entry::<(K, V)>().map_err(|_| Budget)?;
+            entry.insert(V::default())
         }
-        _ => true,
     })
 }
 
-fn named_destination_pages(
+fn named_destination_pages<'a>(
     graph: &NativePdfGraph,
     catalog: &Dict,
+    page_refs: &BTreeSet<Ref>,
     work: &mut usize,
-) -> Result<BTreeSet<Ref>, NativeEditError> {
+    workspace: &'a Workspace,
+) -> Result<(BTreeSet<Ref>, Reservation<'a>), NativeEditError> {
+    let mut stack = workspace.scope();
     let mut references = Vec::new();
-    let mut temporary = graph.limits.max_retained_bytes / 8;
-    if let Some(destinations) = catalog.get("Dests") {
-        collect_refs(destinations, &mut references, work, &mut temporary)?;
-    }
-    if let Some(names) = catalog.get("Names") {
-        if let Some(destinations) = graph
+    let names = if let Some(names) = catalog.get("Names") {
+        graph
             .resolve_metered(names, work)?
             .as_dictionary()
             .and_then(|names| names.get("Dests"))
-        {
-            collect_refs(destinations, &mut references, work, &mut temporary)?;
-        }
+    } else {
+        None
+    };
+    for destinations in catalog.get("Dests").into_iter().chain(names) {
+        visit_refs(destinations, work, &mut |reference| {
+            stack.push(&mut references, reference).map_err(|_| Budget)
+        })?;
     }
-    let page_refs: BTreeSet<_> = graph.pages.iter().copied().collect();
+    let mut visited_bytes = workspace.scope();
     let mut visited = BTreeSet::new();
+    let mut target_bytes = workspace.scope();
     let mut targets = BTreeSet::new();
     while let Some(reference) = references.pop() {
-        if !visited.insert(reference) {
+        if !visited_bytes
+            .insert(&mut visited, reference)
+            .map_err(|_| Budget)?
+        {
             continue;
         }
         if page_refs.contains(&reference) {
-            targets.insert(reference);
+            target_bytes
+                .insert(&mut targets, reference)
+                .map_err(|_| Budget)?;
         } else {
             let value = graph.objects.get(&reference).ok_or(Malformed)?;
-            collect_refs(value, &mut references, work, &mut temporary)?;
+            visit_refs(value, work, &mut |reference| {
+                stack.push(&mut references, reference).map_err(|_| Budget)
+            })?;
         }
     }
-    Ok(targets)
+    Ok((targets, target_bytes))
+}
+
+fn page_reference_set(
+    graph: &NativePdfGraph,
+    work: &mut usize,
+    reservation: &mut Reservation<'_>,
+) -> Result<BTreeSet<Ref>, NativeEditError> {
+    spend(work, graph.pages.len())?;
+    let mut pages = BTreeSet::new();
+    for &page in &graph.pages {
+        reservation.insert(&mut pages, page).map_err(|_| Budget)?;
+    }
+    Ok(pages)
 }
 
 fn page_widget_count(
@@ -205,34 +252,68 @@ fn page_widget_count(
     page: Ref,
     work: &mut usize,
 ) -> Result<usize, NativeEditError> {
-    let items = annotations(graph, page)?;
+    let items = annotation_refs(graph, page, work)?;
     let cost_per_annotation = items.len() + MAX_FIELDS + graph.limits.max_nesting;
     spend(work, items.len().saturating_mul(cost_per_annotation))?;
-    items.into_iter().try_fold(0, |count, annot| {
-        let is_widget = annotation_ownership(graph, page, annot)?.is_some();
+    items.iter().try_fold(0, |count, annot| {
+        let annot = annot.as_reference().ok_or(Unsupported)?;
+        let is_widget = annotation_membership_metered(graph, page, annot, true, work)?.is_some();
         Ok(count + usize::from(is_widget))
     })
+}
+
+fn copyable_fields(
+    graph: &NativePdfGraph,
+    work: &mut usize,
+    workspace: &Workspace,
+) -> Result<Option<usize>, NativeEditError> {
+    let (_, values) = match form_field_refs(graph, work, Unsupported) {
+        Ok(fields) => fields,
+        Err(Budget) => return Err(Budget),
+        Err(_) => return Ok(None),
+    };
+    let _field_bytes = workspace
+        .reserve(values.len() * size_of::<Ref>())
+        .map_err(|_| Budget)?;
+    let mut fields = Vec::new();
+    fields.try_reserve_exact(values.len()).map_err(|_| Budget)?;
+    fields.extend(values.iter().filter_map(PdfValue::as_reference));
+    let mut available = workspace.remaining();
+    match field_name_inventory(graph, &fields, work, &mut available) {
+        Ok(_) => Ok(Some(fields.len())),
+        Err(Budget) => Err(Budget),
+        Err(_) => Ok(None),
+    }
 }
 
 pub(super) fn restrictions(
     graph: &NativePdfGraph,
     projected: &[NativePdfNotePage],
-    remaining: usize,
+    workspace: &Workspace,
 ) -> Result<Option<NativePageRestrictions>, NativeEditError> {
     use NativePageRefusal::{Geometry, Structure};
 
-    let positions_locked = positions_locked(graph)?;
+    let mut work = graph.remaining_work();
+    let positions_locked = positions_locked(graph, &mut work)?;
     let catalog = catalog(graph)?;
     let catalog_values = dict(graph, catalog)?;
-    let mut work = graph.remaining_work();
-    let named_targets = named_destination_pages(graph, catalog_values, &mut work);
-    let outlines = outline_index(graph, &mut work);
+    let mut page_bytes = workspace.scope();
+    let page_refs = page_reference_set(graph, &mut work, &mut page_bytes)?;
+    let named_targets =
+        named_destination_pages(graph, catalog_values, &page_refs, &mut work, workspace);
+    if matches!(named_targets, Err(Budget)) {
+        return Err(Budget);
+    }
+    let mut trailer_bytes = workspace.scope();
+    let trailer = graph.trailer_references(&mut work, &mut trailer_bytes)?;
+    let incoming_links = incoming_link_index(graph, &page_refs, &trailer, &mut work, workspace)?;
+    drop(page_refs);
+    drop(page_bytes);
+    let outlines = outline_index(graph, &mut work, workspace);
     if matches!(outlines, Err(Budget)) {
         return Err(Budget);
     }
-    let trailer = graph.trailer_references(&mut work)?;
-    let incoming_links = incoming_link_index(graph, &trailer, &mut work)?;
-    let mut parent_refs = PageParentReferences::new(graph);
+    let mut parent_refs = PageParentReferences::new(workspace);
     let mut copyable_field_count = None;
     let pages: Vec<_> = projected
         .iter()
@@ -247,25 +328,16 @@ pub(super) fn restrictions(
                 Ok(0) => true,
                 Ok(count) => {
                     if copyable_field_count.is_none() {
-                        let count = if let Ok((_, fields)) = form_fields(graph) {
-                            let mut available = remaining;
-                            match field_name_inventory(graph, &fields, &mut work, &mut available) {
-                                Ok(_) => Some(fields.len()),
-                                Err(Budget) => return Err(Budget),
-                                Err(_) => None,
-                            }
-                        } else {
-                            None
-                        };
-                        copyable_field_count = Some(count);
+                        copyable_field_count = Some(copyable_fields(graph, &mut work, workspace)?);
                     }
                     copyable_field_count
                         .flatten()
                         .is_some_and(|fields| fields + count <= MAX_FIELDS)
                 }
+                Err(Budget) => return Err(Budget),
                 Err(_) => false,
             };
-            let catalog_dependency = named_targets.as_ref().map_or(true, |pages| {
+            let catalog_dependency = named_targets.as_ref().map_or(true, |(pages, _)| {
                 pages.contains(&page.object)
                     || graph
                         .reverse
@@ -397,15 +469,23 @@ fn array_refs(
     value: &PdfValue,
     work: &mut usize,
 ) -> Result<Vec<Ref>, NativeEditError> {
+    reference_array(graph, value, work)?
+        .iter()
+        .map(|value| value.as_reference().ok_or(Unsupported))
+        .collect()
+}
+
+fn reference_array<'a>(
+    graph: &'a NativePdfGraph,
+    value: &'a PdfValue,
+    work: &mut usize,
+) -> Result<&'a [PdfValue], NativeEditError> {
     let array = graph
         .resolve_metered(value, work)?
         .as_array()
         .ok_or(Malformed)?;
     spend(work, array.len())?;
-    array
-        .iter()
-        .map(|value| value.as_reference().ok_or(Unsupported))
-        .collect()
+    Ok(array)
 }
 
 pub(super) fn refs(values: impl IntoIterator<Item = Ref>) -> PdfValue {
@@ -483,14 +563,9 @@ fn change_count(
 ) -> Result<(), NativeEditError> {
     loop {
         let values = dict_mut(graph, node)?;
-        let count = values
-            .get("Count")
-            .and_then(PdfValue::as_integer)
-            .ok_or(Malformed)?;
-        values.insert(
-            "Count".into(),
-            PdfValue::Integer(count.checked_add(delta).ok_or(Budget)?),
-        );
+        let value = values.get_mut("Count").ok_or(Malformed)?;
+        let count = value.as_integer().ok_or(Malformed)?;
+        *value = PdfValue::Integer(count.checked_add(delta).ok_or(Budget)?);
         match values.get("Parent") {
             Some(parent) => node = parent.as_reference().ok_or(Malformed)?,
             None => return Ok(()),
@@ -522,6 +597,16 @@ pub(super) fn annotations(graph: &NativePdfGraph, page: Ref) -> Result<Vec<Ref>,
         .map_or(Ok(Vec::new()), |annots| {
             array_refs(graph, annots, &mut graph.remaining_work())
         })
+}
+
+fn annotation_refs<'a>(
+    graph: &'a NativePdfGraph,
+    page: Ref,
+    work: &mut usize,
+) -> Result<&'a [PdfValue], NativeEditError> {
+    dict(graph, page)?
+        .get("Annots")
+        .map_or(Ok(&[][..]), |annots| reference_array(graph, annots, work))
 }
 
 fn exclusive_array_member(
@@ -581,6 +666,18 @@ pub(super) fn form_dict(graph: &NativePdfGraph, owner: Ref) -> Result<&Dict, Nat
 }
 
 pub(super) fn form_fields(graph: &NativePdfGraph) -> Result<(Ref, Vec<Ref>), NativeEditError> {
+    let (owner, fields) = form_field_refs(graph, &mut graph.remaining_work(), Budget)?;
+    Ok((
+        owner,
+        fields.iter().filter_map(PdfValue::as_reference).collect(),
+    ))
+}
+
+fn form_field_refs<'a>(
+    graph: &'a NativePdfGraph,
+    work: &mut usize,
+    field_limit_error: NativeEditError,
+) -> Result<(Ref, &'a [PdfValue]), NativeEditError> {
     let catalog = catalog(graph)?;
     let form = dict(graph, catalog)?.get("AcroForm").ok_or(Unsupported)?;
     let owner = form.as_reference().unwrap_or(catalog);
@@ -590,12 +687,13 @@ pub(super) fn form_fields(graph: &NativePdfGraph) -> Result<(Ref, Vec<Ref>), Nat
         .as_array()
         .ok_or(Unsupported)?;
     if array.len() > MAX_FIELDS {
-        return Err(Budget);
+        return Err(field_limit_error);
     }
-    Ok((
-        owner,
-        array_refs(graph, fields, &mut graph.remaining_work())?,
-    ))
+    let refs = reference_array(graph, fields, work)?;
+    if refs.iter().any(|value| value.as_reference().is_none()) {
+        return Err(Unsupported);
+    }
+    Ok((owner, refs))
 }
 
 pub(super) fn replace_form_fields(
@@ -613,16 +711,19 @@ fn set_form_fields(
     direct: bool,
     fields: Vec<Ref>,
 ) -> Result<(), NativeEditError> {
-    let form = if direct {
+    mutable_form(values, direct)?.insert("Fields".into(), refs(fields));
+    Ok(())
+}
+
+fn mutable_form(values: &mut Dict, direct: bool) -> Result<&mut Dict, NativeEditError> {
+    Ok(if direct {
         match values.get_mut("AcroForm") {
             Some(PdfValue::Dictionary(form)) => form,
             _ => return Err(Malformed),
         }
     } else {
         values
-    };
-    form.insert("Fields".into(), refs(fields));
-    Ok(())
+    })
 }
 
 fn widget_field(graph: &NativePdfGraph, annot: Ref) -> Result<Ref, NativeEditError> {
@@ -735,14 +836,43 @@ pub(super) fn annotation_membership(
     annot: Ref,
     for_page_operation: bool,
 ) -> Result<Option<Ref>, NativeEditError> {
+    annotation_membership_metered(
+        graph,
+        page,
+        annot,
+        for_page_operation,
+        &mut graph.remaining_work(),
+    )
+}
+
+fn annotation_membership_metered(
+    graph: &NativePdfGraph,
+    page: Ref,
+    annot: Ref,
+    for_page_operation: bool,
+    work: &mut usize,
+) -> Result<Option<Ref>, NativeEditError> {
     let field = annotation_profile(graph, page, annot)?;
+    let form = field
+        .map(|_| {
+            form_field_refs(
+                graph,
+                work,
+                if for_page_operation {
+                    Unsupported
+                } else {
+                    Budget
+                },
+            )
+        })
+        .transpose()?;
     let extra_owner = match field {
         Some(field) if field != annot => {
             let children = &dict(graph, field)?["Kids"];
             Some(children.as_reference().unwrap_or(field))
         }
         Some(_) => {
-            let (form, _) = form_fields(graph)?;
+            let (form, _) = form.ok_or(Malformed)?;
             Some(
                 form_dict(graph, form)?["Fields"]
                     .as_reference()
@@ -765,8 +895,13 @@ pub(super) fn annotation_membership(
     }
     exclusive_array_member(graph, page, annots, annot, extra_owner)?;
     if let Some(field) = field {
-        let (form, fields) = form_fields(graph)?;
-        if fields.iter().filter(|&&entry| entry == field).count() != 1 {
+        let (form, fields) = form.ok_or(Malformed)?;
+        if fields
+            .iter()
+            .filter(|entry| entry.as_reference() == Some(field))
+            .count()
+            != 1
+        {
             return Err(Unsupported);
         }
         let values = form_dict(graph, form)?;
@@ -775,7 +910,7 @@ pub(super) fn annotation_membership(
                 return Err(Unsupported);
             }
             if let Some(order) = values.get("CO") {
-                let resolved = graph.resolve_metered(order, &mut graph.remaining_work())?;
+                let resolved = graph.resolve_metered(order, work)?;
                 if !matches!(resolved, PdfValue::Null)
                     && !resolved.as_array().is_some_and(<[_]>::is_empty)
                 {
@@ -918,13 +1053,13 @@ fn navigation_target(dest: &[PdfValue]) -> Option<Ref> {
 
 type LinkCleanup = BTreeMap<Ref, BTreeSet<Ref>>;
 
-#[derive(Default)]
-struct IncomingLinkIndex {
+struct IncomingLinkIndex<'a> {
     removable: BTreeMap<Ref, LinkCleanup>,
     blocked: BTreeSet<Ref>,
+    bytes: Reservation<'a>,
 }
 
-impl IncomingLinkIndex {
+impl IncomingLinkIndex<'_> {
     fn cleanup_for(&self, page: Ref) -> Result<Option<&LinkCleanup>, NativeEditError> {
         if self.blocked.contains(&page) {
             return Err(Unsupported);
@@ -933,17 +1068,24 @@ impl IncomingLinkIndex {
     }
 }
 
-fn incoming_link_index(
+fn incoming_link_index<'a>(
     graph: &NativePdfGraph,
+    page_refs: &BTreeSet<Ref>,
     trailer_refs: &BTreeSet<Ref>,
     work: &mut usize,
-) -> Result<IncomingLinkIndex, NativeEditError> {
-    let mut index = IncomingLinkIndex::default();
-    spend(work, graph.pages.len())?;
-    let page_refs: BTreeSet<_> = graph.pages.iter().copied().collect();
-    index
-        .blocked
-        .extend(page_refs.intersection(trailer_refs).copied());
+    workspace: &'a Workspace,
+) -> Result<IncomingLinkIndex<'a>, NativeEditError> {
+    let mut index = IncomingLinkIndex {
+        removable: BTreeMap::new(),
+        blocked: BTreeSet::new(),
+        bytes: workspace.scope(),
+    };
+    for &page in page_refs.intersection(trailer_refs) {
+        index
+            .bytes
+            .insert(&mut index.blocked, page)
+            .map_err(|_| Budget)?;
+    }
     for &source in &graph.pages {
         let source_values = dict(graph, source)?;
         let Some(annots) = source_values.get("Annots") else {
@@ -960,6 +1102,7 @@ fn incoming_link_index(
             && exclusive_container(graph, source, annots)
                 .is_ok_and(|value| value.as_array().is_some())
             && items.iter().all(|item| item.as_reference().is_some());
+        let mut reference_bytes = workspace.scope();
         let mut retained_refs = None;
         for item in items {
             let values = graph
@@ -988,18 +1131,20 @@ fn incoming_link_index(
                     && matches!(annotation_profile(graph, source, annot), Ok(None))
                     && exclusive_array_member(graph, source, annots, annot, None).is_ok()
             }) else {
-                index.blocked.insert(target);
+                index
+                    .bytes
+                    .insert(&mut index.blocked, target)
+                    .map_err(|_| Budget)?;
                 continue;
             };
             if retained_refs.is_none() {
-                let mut refs = Vec::new();
-                let mut remaining = graph.remaining_retained();
+                let mut refs = BTreeSet::new();
                 for (key, value) in source_values {
                     if key != "Annots" {
-                        collect_refs(value, &mut refs, work, &mut remaining)?;
+                        collect_reference_set(value, &mut refs, work, &mut reference_bytes)?;
                     }
                 }
-                retained_refs = Some(refs.into_iter().collect::<BTreeSet<_>>());
+                retained_refs = Some(refs);
             }
             let retained_refs = retained_refs.as_ref().unwrap();
             if retained_refs.contains(&annot)
@@ -1007,88 +1152,139 @@ fn incoming_link_index(
                     .as_reference()
                     .is_some_and(|container| retained_refs.contains(&container))
             {
-                index.blocked.insert(target);
+                index
+                    .bytes
+                    .insert(&mut index.blocked, target)
+                    .map_err(|_| Budget)?;
                 continue;
             }
-            let drops = index.removable.entry(target).or_default().entry(source);
-            if !drops.or_default().insert(annot) {
-                index.blocked.insert(target);
+            let sources = scoped_entry(&mut index.removable, target, &mut index.bytes)?;
+            let drops = scoped_entry(sources, source, &mut index.bytes)?;
+            if !index.bytes.insert(drops, annot).map_err(|_| Budget)? {
+                index
+                    .bytes
+                    .insert(&mut index.blocked, target)
+                    .map_err(|_| Budget)?;
             }
         }
     }
     Ok(index)
 }
 
-struct PageOwnedRemovals {
-    removed: BTreeSet<Ref>,
-    fields: BTreeSet<Ref>,
-}
-
-fn page_owned_removals(
-    graph: &NativePdfGraph,
-    page: Ref,
-    work: &mut usize,
-) -> Result<PageOwnedRemovals, NativeEditError> {
-    let mut removed = BTreeSet::from([page]);
-    let mut fields_to_remove = BTreeSet::new();
-    let page_annotations = annotations(graph, page)?;
-    spend(
-        work,
-        page_annotations
-            .len()
-            .saturating_mul(page_annotations.len()),
-    )?;
-    for annot in page_annotations {
-        if !removed.insert(annot) {
-            return Err(Unsupported);
-        }
-        if let Some(field) = annotation_ownership(graph, page, annot)? {
-            fields_to_remove.insert(field);
-            removed.insert(field);
-        }
-    }
-    Ok(PageOwnedRemovals {
-        removed,
-        fields: fields_to_remove,
-    })
-}
-
-struct PageDeletion {
+struct PageDeletion<'a> {
     removed: BTreeSet<Ref>,
     replacements: BTreeMap<Ref, Dict>,
-    retained: usize,
+    removal_bytes: Reservation<'a>,
+    entry_bytes: Reservation<'a>,
+    value_bytes: Reservation<'a>,
+    installed_bytes: usize,
 }
 
-impl PageDeletion {
-    fn edit<'a>(
-        &'a mut self,
+impl<'a> PageDeletion<'a> {
+    fn new(workspace: &'a Workspace) -> Self {
+        Self {
+            removed: BTreeSet::new(),
+            replacements: BTreeMap::new(),
+            removal_bytes: workspace.scope(),
+            entry_bytes: workspace.scope(),
+            value_bytes: workspace.scope(),
+            installed_bytes: 0,
+        }
+    }
+
+    fn remove(&mut self, target: Ref) -> Result<bool, NativeEditError> {
+        self.removal_bytes
+            .insert(&mut self.removed, target)
+            .map_err(|_| Budget)
+    }
+
+    fn edit(
+        &mut self,
         graph: &NativePdfGraph,
         owner: Ref,
         work: &mut usize,
-    ) -> Result<&'a mut Dict, NativeEditError> {
+    ) -> Result<&mut Dict, NativeEditError> {
         use std::collections::btree_map::Entry;
         Ok(match self.replacements.entry(owner) {
             Entry::Occupied(entry) => entry.into_mut(),
             Entry::Vacant(entry) => {
-                graph.reserve_page_value(owner, work, &mut self.retained)?;
+                self.entry_bytes
+                    .tree_entry::<(Ref, Dict)>()
+                    .map_err(|_| Budget)?;
+                let available = self.value_bytes.workspace().remaining();
+                let mut remaining = available;
+                graph.reserve_page_value(owner, work, &mut remaining)?;
+                let bytes = available - remaining;
+                self.value_bytes.grow(bytes).map_err(|_| Budget)?;
+                self.installed_bytes += bytes;
                 entry.insert(dict(graph, owner)?.clone())
             }
         })
     }
+
+    fn keep_array_members(
+        &mut self,
+        graph: &NativePdfGraph,
+        owner: Ref,
+        key: &str,
+        direct_form: bool,
+        keep: impl Fn(Ref) -> bool,
+        work: &mut usize,
+    ) -> Result<(), NativeEditError> {
+        let values = if direct_form {
+            form_dict(graph, owner)?
+        } else {
+            dict(graph, owner)?
+        };
+        let original = values.get(key).ok_or(Malformed)?;
+        let source = reference_array(graph, original, work)?;
+        if source.iter().any(|value| value.as_reference().is_none()) {
+            return Err(Unsupported);
+        }
+        let indirect = if original.as_reference().is_some() {
+            let retained = source
+                .iter()
+                .filter_map(PdfValue::as_reference)
+                .filter(|&item| keep(item));
+            spend(work, source.len())?;
+            let count = retained.clone().count();
+            let bytes = count * size_of::<PdfValue>();
+            self.value_bytes.grow(bytes).map_err(|_| Budget)?;
+            self.installed_bytes += bytes;
+            let mut values = Vec::new();
+            values.try_reserve_exact(count).map_err(|_| Budget)?;
+            values.extend(retained.map(PdfValue::Reference));
+            Some(values)
+        } else {
+            None
+        };
+        let values = self.edit(graph, owner, work)?;
+        let array = mutable_form(values, direct_form)?
+            .get_mut(key)
+            .ok_or(Malformed)?;
+        if let Some(indirect) = indirect {
+            *array = PdfValue::Array(indirect);
+        } else if let PdfValue::Array(items) = array {
+            items.retain(|item| item.as_reference().is_some_and(&keep));
+        } else {
+            return Err(Malformed);
+        }
+        Ok(())
+    }
 }
 
-struct PageParentReferences {
+struct PageParentReferences<'a> {
     outside_kids: BTreeMap<Ref, BTreeSet<Ref>>,
     indirect_kids: BTreeMap<Ref, BTreeSet<Ref>>,
-    retained: usize,
+    bytes: Reservation<'a>,
 }
 
-impl PageParentReferences {
-    fn new(graph: &NativePdfGraph) -> Self {
+impl<'a> PageParentReferences<'a> {
+    fn new(workspace: &'a Workspace) -> Self {
         Self {
             outside_kids: BTreeMap::new(),
             indirect_kids: BTreeMap::new(),
-            retained: graph.remaining_retained(),
+            bytes: workspace.scope(),
         }
     }
 
@@ -1104,15 +1300,17 @@ impl PageParentReferences {
         let refs = match self.outside_kids.entry(parent) {
             Entry::Occupied(entry) => entry.into_mut(),
             Entry::Vacant(entry) => {
-                spend(&mut self.retained, 128)?;
-                let mut refs = Vec::new();
+                self.bytes
+                    .tree_entry::<(Ref, BTreeSet<Ref>)>()
+                    .map_err(|_| Budget)?;
+                let mut refs = BTreeSet::new();
                 for (key, value) in values {
                     spend(work, 1)?;
                     if key != "Kids" {
-                        collect_refs(value, &mut refs, work, &mut self.retained)?;
+                        collect_reference_set(value, &mut refs, work, &mut self.bytes)?;
                     }
                 }
-                entry.insert(refs.into_iter().collect())
+                entry.insert(refs)
             }
         };
         Ok(refs.contains(&target))
@@ -1129,65 +1327,95 @@ impl PageParentReferences {
         Ok(match self.indirect_kids.entry(array) {
             Entry::Occupied(entry) => entry.into_mut(),
             Entry::Vacant(entry) => {
-                spend(&mut self.retained, 128)?;
                 let array = graph.objects.get(&array).ok_or(Malformed)?;
                 let resolved = graph.resolve_metered(array, work)?;
-                let mut children = Vec::new();
-                collect_refs(resolved, &mut children, work, &mut self.retained)?;
-                entry.insert(children.into_iter().collect())
+                self.bytes
+                    .tree_entry::<(Ref, BTreeSet<Ref>)>()
+                    .map_err(|_| Budget)?;
+                let mut children = BTreeSet::new();
+                collect_reference_set(resolved, &mut children, work, &mut self.bytes)?;
+                entry.insert(children)
             }
         })
     }
 }
 
-fn deletion_preflight(
+fn deletion_preflight<'a>(
     graph: &NativePdfGraph,
     page: Ref,
-    outlines: &OutlineIndex,
-    links: &IncomingLinkIndex,
+    outlines: &OutlineIndex<'_>,
+    links: &IncomingLinkIndex<'_>,
     trailer: &BTreeSet<Ref>,
-    parent_refs: &mut PageParentReferences,
+    parent_refs: &mut PageParentReferences<'a>,
     work: &mut usize,
     materialize_links: bool,
-) -> Result<PageDeletion, NativeEditError> {
+) -> Result<PageDeletion<'a>, NativeEditError> {
     let cleanup = links.cleanup_for(page)?;
     if outlines.blocked.contains(&page) {
         return Err(Unsupported);
     }
-    let PageOwnedRemovals { removed, fields } = page_owned_removals(graph, page, work)?;
-    let mut plan = PageDeletion {
-        removed,
-        replacements: BTreeMap::new(),
-        retained: graph.remaining_retained(),
-    };
+    let workspace = parent_refs.bytes.workspace();
+    let mut plan = PageDeletion::new(workspace);
+    plan.remove(page)?;
+    {
+        let mut field_bytes = workspace.scope();
+        let mut fields = BTreeSet::new();
+        let annotations = annotation_refs(graph, page, work)?;
+        spend(work, annotations.len().saturating_mul(annotations.len()))?;
+        for annot in annotations {
+            let annot = annot.as_reference().ok_or(Unsupported)?;
+            if !plan.remove(annot)? {
+                return Err(Unsupported);
+            }
+            if let Some(field) = annotation_membership_metered(graph, page, annot, true, work)? {
+                field_bytes.insert(&mut fields, field).map_err(|_| Budget)?;
+                plan.remove(field)?;
+            }
+        }
+        if !fields.is_empty() {
+            let (form, _) = form_field_refs(graph, work, Unsupported)?;
+            let direct = form == catalog(graph)?;
+            plan.keep_array_members(
+                graph,
+                form,
+                "Fields",
+                direct,
+                |field| !fields.contains(&field),
+                work,
+            )?;
+        }
+    }
     let parent = reference(dict(graph, page)?, "Parent")?;
     let parent_values = dict(graph, parent)?;
     let kids = parent_values.get("Kids").ok_or(Malformed)?;
-    if !fields.is_empty() {
-        let (form, mut keep) = form_fields(graph)?;
-        spend(work, keep.len())?;
-        keep.retain(|field| !fields.contains(field));
-        let direct = form == catalog(graph)?;
-        set_form_fields(plan.edit(graph, form, work)?, direct, keep)?;
-    }
     plan_outline_cleanup(graph, outlines, page, &mut plan, work)?;
+    let mut link_bytes = workspace.scope();
     let mut removed_link_edges = BTreeSet::new();
     if let Some(cleanup) = cleanup {
         for (&source, drops) in cleanup {
             let annots = dict(graph, source)?.get("Annots").ok_or(Malformed)?;
             if materialize_links || plan.replacements.contains_key(&source) {
-                let mut keep = array_refs(graph, annots, work)?;
-                keep.retain(|annot| !drops.contains(annot));
-                plan.edit(graph, source, work)?
-                    .insert("Annots".into(), refs(keep));
+                plan.keep_array_members(
+                    graph,
+                    source,
+                    "Annots",
+                    false,
+                    |annot| !drops.contains(&annot),
+                    work,
+                )?;
             } else {
                 // @invariant: The link index admits only edges exclusive to this annotation array.
                 let container = annots.as_reference().unwrap_or(source);
                 spend(work, drops.len())?;
-                spend(&mut plan.retained, drops.len().saturating_mul(64))?;
-                removed_link_edges.extend(drops.iter().map(|&annot| (container, annot)));
+                for &annot in drops {
+                    link_bytes
+                        .insert(&mut removed_link_edges, (container, annot))
+                        .map_err(|_| Budget)?;
+                }
             }
-            plan.removed.extend(drops);
+            for &annot in drops {
+                plan.remove(annot)?;
+            }
         }
     }
     let mut page_tree_edges = if !plan.replacements.contains_key(&parent) {
@@ -1205,10 +1433,7 @@ fn deletion_preflight(
             removed_links: None,
         }
     } else {
-        let mut children = array_refs(graph, kids, work)?;
-        children.retain(|&child| child != page);
-        plan.edit(graph, parent, work)?
-            .insert("Kids".into(), refs(children));
+        plan.keep_array_members(graph, parent, "Kids", false, |child| child != page, work)?;
         PageTreeEdges::default()
     };
     page_tree_edges.removed_links = (!removed_link_edges.is_empty()).then_some(&removed_link_edges);
@@ -1218,7 +1443,7 @@ fn deletion_preflight(
         page_tree_edges,
         trailer,
         work,
-        plan.retained,
+        workspace,
     )?;
     Ok(plan)
 }
@@ -1259,15 +1484,17 @@ pub(super) fn stage(
     projected: &[NativePdfNotePage],
 ) -> Result<Ref, NativeSessionError> {
     use NativePageCommand::*;
-    let mut order = graph.pages.clone();
-    let page = order[index];
-    let parent = reference(dict(graph, page)?, "Parent")?;
-    let mut removed = BTreeSet::new();
     if !matches!(command, RotatePage { .. })
         && dict(graph, catalog(graph)?)?.contains_key("PageLabels")
     {
         return Err(Unsupported.into());
     }
+    let page = graph.pages[index];
+    let parent = reference(dict(graph, page)?, "Parent")?;
+    if matches!(command, DeletePage { .. }) {
+        return stage_delete(graph, index, page, parent);
+    }
+    let mut order = graph.pages.clone();
     let selected = match command {
         RotatePage { degrees, .. } if matches!(degrees, -90 | 90) => {
             let rotation = projected[index]
@@ -1328,71 +1555,108 @@ pub(super) fn stage(
             change_count(graph, parent, 1)?;
             new
         }
-        DeletePage { .. } => {
-            if order.len() == 1 {
-                return Err(NativeSessionError::FinalPage);
-            }
-            let budget = graph.remaining_work();
-            let mut work = budget;
-            let outlines = outline_index(graph, &mut work)?;
-            let trailer = graph.trailer_references(&mut work)?;
-            let links = incoming_link_index(graph, &trailer, &mut work)?;
-            let plan = deletion_preflight(
-                graph,
-                page,
-                &outlines,
-                &links,
-                &trailer,
-                &mut PageParentReferences::new(graph),
-                &mut work,
-                true,
-            )?;
-            let children = if plan.replacements.contains_key(&parent) {
-                None
-            } else {
-                let mut children = array_refs(
-                    graph,
-                    dict(graph, parent)?.get("Kids").ok_or(Malformed)?,
-                    &mut work,
-                )?;
-                children.retain(|&child| child != page);
-                Some(children)
-            };
-            graph.charge_page_work(budget - work)?;
-            graph.charge_page_retained(graph.remaining_retained() - plan.retained)?;
-            removed = plan.removed;
-            if let Some(children) = children {
-                replace_kids(graph, parent, children)?;
-            }
-            for (owner, values) in plan.replacements {
-                *dict_mut(graph, owner)? = values;
-            }
-            change_count(graph, parent, -1)?;
-            order.remove(index);
-            order[index.min(order.len() - 1)]
-        }
+        DeletePage { .. } => unreachable!(),
     };
-    graph.refresh_page_graph(&removed)?;
+    graph.refresh_page_graph(&BTreeSet::new())?;
     if graph.pages != order {
         return Err(NativeSessionError::Postcondition);
     }
     Ok(selected)
 }
 
-#[derive(Default)]
-struct OutlineIndex {
-    root: Option<Ref>,
-    siblings: BTreeMap<Ref, Vec<Ref>>,
-    removable: BTreeMap<Ref, BTreeMap<Ref, BTreeSet<usize>>>,
-    blocked: BTreeSet<Ref>,
+fn stage_delete(
+    graph: &mut NativePdfGraph,
+    index: usize,
+    page: Ref,
+    parent: Ref,
+) -> Result<Ref, NativeSessionError> {
+    if graph.pages.len() == 1 {
+        return Err(NativeSessionError::FinalPage);
+    }
+    let allowance = graph.remaining_retained();
+    let workspace = Workspace::new(allowance);
+    let order_bytes = workspace
+        .reserve(graph.pages.len() * size_of::<Ref>())
+        .map_err(|_| Budget)?;
+    let mut order = graph.pages.clone();
+    order.remove(index);
+    let selected = order[index.min(order.len() - 1)];
+    let budget = graph.remaining_work();
+    let mut work = budget;
+    let mut plan = {
+        let outlines = outline_index(graph, &mut work, &workspace)?;
+        let mut trailer_bytes = workspace.scope();
+        let trailer = graph.trailer_references(&mut work, &mut trailer_bytes)?;
+        let links = {
+            let mut page_bytes = workspace.scope();
+            let page_refs = page_reference_set(graph, &mut work, &mut page_bytes)?;
+            incoming_link_index(graph, &page_refs, &trailer, &mut work, &workspace)?
+        };
+        deletion_preflight(
+            graph,
+            page,
+            &outlines,
+            &links,
+            &trailer,
+            &mut PageParentReferences::new(&workspace),
+            &mut work,
+            true,
+        )?
+    };
+    if !plan.replacements.contains_key(&parent) {
+        plan.keep_array_members(
+            graph,
+            parent,
+            "Kids",
+            false,
+            |child| child != page,
+            &mut work,
+        )?;
+    }
+    graph.charge_page_work(budget - work)?;
+    let PageDeletion {
+        removed,
+        replacements,
+        removal_bytes,
+        entry_bytes,
+        value_bytes,
+        installed_bytes,
+    } = plan;
+    graph.charge_page_retained(installed_bytes)?;
+    for (owner, values) in replacements {
+        *dict_mut(graph, owner)? = values;
+    }
+    drop((entry_bytes, value_bytes));
+    change_count(graph, parent, -1)?;
+    let refresh_scratch = allowance - workspace.remaining();
+    graph.charge_page_retained(refresh_scratch)?;
+    let refresh = graph.refresh_page_graph(&removed);
+    let matched_order = graph.pages == order;
+    drop((removed, order));
+    drop((removal_bytes, order_bytes));
+    graph.release_page_retained(refresh_scratch);
+    refresh?;
+    if !matched_order {
+        return Err(NativeSessionError::Postcondition);
+    }
+    Ok(selected)
 }
 
-impl OutlineIndex {
+struct OutlineIndex<'a> {
+    root: Option<Ref>,
+    siblings: BTreeMap<Ref, (Vec<Ref>, Reservation<'a>)>,
+    removable: BTreeMap<Ref, BTreeMap<Ref, BTreeSet<usize>>>,
+    blocked: BTreeSet<Ref>,
+    bytes: Reservation<'a>,
+}
+
+impl OutlineIndex<'_> {
     fn count_changes(
         &self,
         graph: &NativePdfGraph,
         page: Ref,
         work: &mut usize,
+        bytes: &mut Reservation<'_>,
     ) -> Result<BTreeMap<Ref, i64>, NativeEditError> {
         if self.blocked.contains(&page) {
             return Err(Unsupported);
@@ -1423,7 +1687,8 @@ impl OutlineIndex {
                     .and_then(|count| count.checked_sub(delta))
                     .filter(|&count| count >= 0)
                     .ok_or(Unsupported)?;
-                counts.insert(ancestor, if count < 0 { -magnitude } else { magnitude });
+                *scoped_entry(&mut counts, ancestor, bytes)? =
+                    if count < 0 { -magnitude } else { magnitude };
                 if ancestor == root || count < 0 {
                     break;
                 }
@@ -1434,11 +1699,18 @@ impl OutlineIndex {
     }
 }
 
-fn outline_index(
+fn outline_index<'a>(
     graph: &NativePdfGraph,
     work: &mut usize,
-) -> Result<OutlineIndex, NativeEditError> {
-    let mut index = OutlineIndex::default();
+    workspace: &'a Workspace,
+) -> Result<OutlineIndex<'a>, NativeEditError> {
+    let mut index = OutlineIndex {
+        root: None,
+        siblings: BTreeMap::new(),
+        removable: BTreeMap::new(),
+        blocked: BTreeSet::new(),
+        bytes: workspace.scope(),
+    };
     let catalog = catalog(graph)?;
     let Some(root) = dict(graph, catalog)?
         .get("Outlines")
@@ -1447,8 +1719,12 @@ fn outline_index(
         return Ok(index);
     };
     index.root = Some(root);
-    let mut pending = vec![(root, 0)];
-    let mut seen = BTreeSet::from([root]);
+    let mut stack = workspace.scope();
+    let mut pending = Vec::new();
+    stack.push(&mut pending, (root, 0)).map_err(|_| Budget)?;
+    let mut seen_bytes = workspace.scope();
+    let mut seen = BTreeSet::new();
+    seen_bytes.insert(&mut seen, root).map_err(|_| Budget)?;
     while let Some((parent, depth)) = pending.pop() {
         if depth > graph.limits.max_nesting {
             return Err(Unsupported);
@@ -1457,11 +1733,12 @@ fn outline_index(
         let last = values.get("Last").and_then(PdfValue::as_reference);
         let mut current = values.get("First").and_then(PdfValue::as_reference);
         let mut previous = None;
+        let mut child_bytes = workspace.scope();
         let mut children = Vec::new();
         let mut has_removable = false;
         while let Some(child) = current {
             spend(work, 1)?;
-            if !seen.insert(child) {
+            if !seen_bytes.insert(&mut seen, child).map_err(|_| Budget)? {
                 return Err(Unsupported);
             }
             let values = dict(graph, child)?;
@@ -1475,35 +1752,41 @@ fn outline_index(
             if let Some(page) =
                 explicit_destination(graph, values, work)?.and_then(navigation_target)
             {
-                let mut owners = BTreeSet::new();
-                owners.extend(previous);
-                owners.extend(current);
-                if previous.is_none() || current.is_none() {
-                    owners.insert(parent);
-                }
+                let owners = [
+                    previous,
+                    current,
+                    (previous.is_none() || current.is_none()).then_some(parent),
+                ];
                 let removable = !branch
                     && values
                         .get("Count")
                         .and_then(PdfValue::as_integer)
                         .unwrap_or(0)
                         == 0
-                    && graph.reverse.get(&child) == Some(&owners);
+                    && graph.reverse.get(&child).is_some_and(|actual| {
+                        owners.iter().flatten().all(|owner| actual.contains(owner))
+                            && actual.iter().all(|&owner| owners.contains(&Some(owner)))
+                    });
                 if removable {
+                    let groups = scoped_entry(&mut index.removable, page, &mut index.bytes)?;
+                    let drops = scoped_entry(groups, parent, &mut index.bytes)?;
                     index
-                        .removable
-                        .entry(page)
-                        .or_default()
-                        .entry(parent)
-                        .or_default()
-                        .insert(children.len());
+                        .bytes
+                        .insert(drops, children.len())
+                        .map_err(|_| Budget)?;
                     has_removable = true;
                 } else {
-                    index.blocked.insert(page);
+                    index
+                        .bytes
+                        .insert(&mut index.blocked, page)
+                        .map_err(|_| Budget)?;
                 }
             }
-            children.push(child);
+            child_bytes.push(&mut children, child).map_err(|_| Budget)?;
             if branch {
-                pending.push((child, depth + 1));
+                stack
+                    .push(&mut pending, (child, depth + 1))
+                    .map_err(|_| Budget)?;
             }
             previous = Some(child);
         }
@@ -1511,7 +1794,11 @@ fn outline_index(
             return Err(Unsupported);
         }
         if has_removable {
-            index.siblings.insert(parent, children);
+            index
+                .bytes
+                .tree_entry::<(Ref, (Vec<Ref>, Reservation<'_>))>()
+                .map_err(|_| Budget)?;
+            index.siblings.insert(parent, (children, child_bytes));
         }
     }
     Ok(index)
@@ -1519,23 +1806,24 @@ fn outline_index(
 
 fn plan_outline_cleanup(
     graph: &NativePdfGraph,
-    index: &OutlineIndex,
+    index: &OutlineIndex<'_>,
     page: Ref,
-    plan: &mut PageDeletion,
+    plan: &mut PageDeletion<'_>,
     work: &mut usize,
 ) -> Result<(), NativeEditError> {
-    let counts = index.count_changes(graph, page, work)?;
+    let mut count_bytes = index.bytes.workspace().scope();
+    let counts = index.count_changes(graph, page, work, &mut count_bytes)?;
     if let Some(groups) = index.removable.get(&page) {
         for (&parent, drops) in groups {
-            let siblings = index.siblings.get(&parent).ok_or(Malformed)?;
+            let (siblings, _) = index.siblings.get(&parent).ok_or(Malformed)?;
             spend(work, drops.len())?;
             let mut positions = drops.iter().copied().peekable();
             while let Some(first) = positions.next() {
                 let mut last = first;
-                plan.removed.insert(siblings[first]);
+                plan.remove(siblings[first])?;
                 while positions.next_if_eq(&(last + 1)).is_some() {
                     last += 1;
-                    plan.removed.insert(siblings[last]);
+                    plan.remove(siblings[last])?;
                 }
                 let previous = first.checked_sub(1).map(|position| siblings[position]);
                 let next = siblings.get(last + 1).copied();
@@ -1553,16 +1841,63 @@ fn plan_outline_cleanup(
         }
     }
     for (ancestor, count) in counts {
-        plan.edit(graph, ancestor, work)?
-            .insert("Count".into(), PdfValue::Integer(count));
+        let value = plan
+            .edit(graph, ancestor, work)?
+            .get_mut("Count")
+            .ok_or(Malformed)?;
+        *value = PdfValue::Integer(count);
     }
     Ok(())
 }
 
 fn set_ref(dict: &mut Dict, key: &str, target: Option<Ref>) {
     if let Some(target) = target {
-        dict.insert(key.into(), PdfValue::Reference(target));
+        if let Some(value) = dict.get_mut(key) {
+            *value = PdfValue::Reference(target);
+        } else {
+            dict.insert(key.into(), PdfValue::Reference(target));
+        }
     } else {
         dict.remove(key);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::{NativeEditLimits, NativePdfSession, tests::redaction_fixture};
+    use super::*;
+
+    #[test]
+    fn indirect_print_preferences_share_the_page_projection_work_budget() {
+        let limits = NativeEditLimits::default();
+        let source = redaction_fixture("");
+        let mut graph = NativePdfGraph::open(&source, limits).unwrap();
+        let range = allocate_value(&mut graph, PdfValue::Null).unwrap();
+        let preferences = allocate(
+            &mut graph,
+            BTreeMap::from([("PrintPageRange".into(), PdfValue::Reference(range))]),
+        )
+        .unwrap();
+        let root = catalog(&graph).unwrap();
+        dict_mut(&mut graph, root)
+            .unwrap()
+            .insert("ViewerPreferences".into(), PdfValue::Reference(preferences));
+        graph.refresh_page_graph(&BTreeSet::new()).unwrap();
+        let bytes = graph.rewrite().unwrap();
+        let session = NativePdfSession::open_scoped(&bytes, limits, [3; 16]).unwrap();
+        let projected = &session.snapshot().scene.pages;
+        let check = |work| {
+            let mut graph = NativePdfGraph::open(&bytes, limits).unwrap();
+            graph
+                .charge_page_work(graph.remaining_work() - work)
+                .unwrap();
+            let workspace = Workspace::new(graph.remaining_retained());
+            restrictions(&graph, projected, &workspace)
+        };
+        for mut work in [0, 1] {
+            assert_eq!(positions_locked(&graph, &mut work), Err(Budget));
+        }
+        assert!(matches!(check(11), Err(Budget)));
+        assert!(check(12).unwrap().is_none());
     }
 }

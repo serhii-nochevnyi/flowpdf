@@ -771,6 +771,154 @@ fn deleting_page_removes_a_link_and_bookmark_with_a_shared_destination() {
     assert!(!String::from_utf8_lossy(session.output_bytes()).contains("/Dest"));
 }
 
+fn deletion_workspace_pdf() -> Vec<u8> {
+    const ENTRIES: usize = 24;
+    const FIRST_BOOKMARK: usize = 9;
+    const FIRST_LINK: usize = FIRST_BOOKMARK + ENTRIES;
+    let annots = (FIRST_LINK..FIRST_LINK + ENTRIES)
+        .map(|object| format!("{object} 0 R "))
+        .collect::<String>();
+    let mut objects = vec![
+        "<< /Type /Catalog /Pages 2 0 R /Outlines 7 0 R /Dests << /Appendix [5 0 R /Fit] >> >>"
+            .to_owned(),
+        "<< /Type /Pages /Kids 6 0 R /Count 3 /MediaBox [0 0 300 500] >>".to_owned(),
+        "<< /Type /Page /Parent 2 0 R >>".to_owned(),
+        format!("<< /Type /Page /Parent 2 0 R /Annots [{annots}] >>"),
+        "<< /Type /Page /Parent 2 0 R >>".to_owned(),
+        "[3 0 R 4 0 R 5 0 R]".to_owned(),
+        format!(
+            "<< /Type /Outlines /First {FIRST_BOOKMARK} 0 R /Last {} 0 R /Count {ENTRIES} >>",
+            FIRST_LINK - 1
+        ),
+        "[3 0 R /Fit]".to_owned(),
+    ];
+    for object in FIRST_BOOKMARK..FIRST_LINK {
+        let mut entry = "<< /Title (Chapter) /Parent 7 0 R /Dest 8 0 R ".to_owned();
+        if object > FIRST_BOOKMARK {
+            entry.push_str(&format!("/Prev {} 0 R ", object - 1));
+        }
+        if object + 1 < FIRST_LINK {
+            entry.push_str(&format!("/Next {} 0 R ", object + 1));
+        }
+        entry.push_str(">>");
+        objects.push(entry);
+    }
+    objects.extend((0..ENTRIES).map(|_| {
+        "<< /Type /Annot /Subtype /Link /P 4 0 R /Rect [20 30 50 60] /Dest 8 0 R >>".to_owned()
+    }));
+    let refs: Vec<_> = objects.iter().map(|value| (0, value.as_str())).collect();
+    build_pdf(&refs)
+}
+
+fn first_retained_limit(mut accepts: impl FnMut(NativeEditLimits) -> bool) -> NativeEditLimits {
+    let limits = |kib: usize| NativeEditLimits {
+        max_retained_bytes: kib * 1024,
+        ..NativeEditLimits::default()
+    };
+    let (mut low, mut high) = (1, 1024);
+    assert!(accepts(limits(high)));
+    while low < high {
+        let middle = (low + high) / 2;
+        if accepts(limits(middle)) {
+            high = middle;
+        } else {
+            low = middle + 1;
+        }
+    }
+    limits(low)
+}
+
+#[test]
+fn deletion_preflight_shares_workspace_with_links_bookmarks_and_parent_refs() {
+    let bytes = deletion_workspace_pdf();
+    let mut pdf =
+        NativePdfSession::open_scoped(&bytes, NativeEditLimits::default(), [3; 16]).unwrap();
+    let accepted = pdf.snapshot().clone();
+    let caps = &accepted.page_state.restrictions.as_ref().unwrap().pages;
+    assert!(caps[0].delete.is_none());
+    assert!(caps[2].delete.is_some());
+    assert!(caps[2].geometry.is_none());
+
+    let scene_limit = first_retained_limit(|limits| {
+        NativePdfSession::verify_edit_projection(
+            &bytes,
+            limits,
+            accepted.binding,
+            &accepted.scene.text_pages,
+            &accepted.scene.object_pages,
+        ) == Ok(true)
+    });
+    let verify_pages = |limits| {
+        NativePdfSession::verify_page_projection(
+            &bytes,
+            limits,
+            accepted.binding,
+            accepted.scene.scene_hash,
+            &accepted.page_state,
+        )
+    };
+    assert_eq!(verify_pages(NativeEditLimits::default()), Ok(true));
+    assert_eq!(
+        verify_pages(NativeEditLimits {
+            max_retained_bytes: scene_limit.max_retained_bytes + 24 * 1024,
+            ..scene_limit
+        }),
+        Err(NativeSessionError::Budget)
+    );
+
+    let delete_limit = first_retained_limit(|limits| {
+        let Ok(mut pdf) = NativePdfSession::open_scoped(&bytes, limits, [3; 16]) else {
+            return false;
+        };
+        let before = pdf.snapshot();
+        pdf.apply_page(before.binding, 1, &command("deletePage", 0, before))
+            .is_ok()
+    });
+    let constrained = NativeEditLimits {
+        max_retained_bytes: delete_limit.max_retained_bytes - 1024,
+        ..delete_limit
+    };
+    let mut limited = NativePdfSession::open_scoped(&bytes, constrained, [3; 16]).unwrap();
+    let before = limited.snapshot().clone();
+    assert_eq!(before.page_state, accepted.page_state);
+    assert_eq!(
+        limited.apply_page(before.binding, 1, &command("deletePage", 0, &before)),
+        Err(NativeSessionError::Budget)
+    );
+    assert_eq!(limited.output_bytes(), bytes);
+    assert_eq!(limited.snapshot().binding, before.binding);
+    assert_eq!(limited.snapshot().page_state, before.page_state);
+    assert_eq!(limited.snapshot().consumed_request, before.consumed_request);
+    assert_eq!(
+        limited.lookup(before.binding, 1),
+        Ok(NativeRequestLookup::Unseen)
+    );
+
+    pdf.apply_page(accepted.binding, 1, &command("deletePage", 0, &accepted))
+        .unwrap();
+    assert_eq!(
+        pdf.snapshot().page_state.order,
+        accepted.page_state.order[1..]
+    );
+    assert!(pdf.snapshot().scene.pages[0].annotations.is_empty());
+    let rewritten = String::from_utf8_lossy(pdf.output_bytes());
+    assert!(!rewritten.contains("/Title "));
+    assert!(!rewritten.contains("/Dest "));
+    assert!(rewritten.contains("/Appendix"));
+    let rotate = NativePageCommand::RotatePage {
+        target: NativePageTarget {
+            page: 1,
+            stable_id: accepted.page_state.order[2],
+        },
+        degrees: 90,
+    };
+    pdf.apply_page(pdf.snapshot().binding, 2, &rotate).unwrap();
+    assert_eq!(
+        pdf.snapshot().scene.pages[1].geometry.unwrap().rotation(),
+        90
+    );
+}
+
 #[test]
 fn retained_bookmark_destination_blocks_only_its_target() {
     for annotations in ["[14 0 R]", "[6 0 R 14 0 R]"] {
