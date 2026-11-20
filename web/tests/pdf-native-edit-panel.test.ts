@@ -11,6 +11,7 @@ import {
   nativeImageCommand,
   nativeObjectBounds,
   nativeFieldBounds,
+  redactionAttemptFeedback,
   redactedDownloadFor,
   rebindNativeField,
   rebindNativeObject,
@@ -38,10 +39,12 @@ import {
   type NativePdfAnnotation,
   type NativePdfFieldView,
   type NativePdfObjectPage,
+  type NativePdfRedactionAction,
   type NativePdfRedactionResult,
   type NativePdfSnapshot,
   type NativePdfTextIsland,
 } from '../src/pdf/pdf-native-edit-protocol.js'
+import { NativePdfWorkerError } from '../src/pdf/pdf-native-edit-worker.js'
 
 const geometry = { bounds: [-10, 20, 190, 120], rotation: 90 } as const
 const hash = Array<number>(32).fill(42)
@@ -106,7 +109,7 @@ describe('exact redacted output', () => {
 
   it('keeps the download and its evidence through an equivalent accepted readback', () => {
     const candidate = verifiedRedactionCandidate(previous, next, result, [10, 20])!
-    const verified = { snapshot: next, candidate }
+    const verified = { snapshot: next, candidate, checks: redactionAttemptFeedback(result, false).checks }
     const readback = structuredClone(next)
     expect(redactedDownloadFor(verified, readback)).toBe(verified)
     expect(redactedDownloadFor(verified, { ...readback, outputHex: '26' })).toBeNull()
@@ -136,8 +139,131 @@ describe('exact redacted output', () => {
       expect(markup).not.toContain('<canvas')
       expect(markup).not.toContain(nativePdfText(locale, 'redaction.download'))
       expect(markup).not.toContain(nativePdfText(locale, 'redaction.success'))
+      expect(markup).not.toContain('data-redaction-check')
     })
   }
+})
+
+describe('redaction staging and check feedback', () => {
+  it.each([
+    ['FLOW_PDF_NATIVE_UNSUPPORTED', 'redaction.unsupported'],
+    ['FLOW_PDF_NATIVE_BUDGET_EXHAUSTED', 'error.budget'],
+    ['FLOW_PDF_NATIVE_POSTCONDITION_FAILED', 'redaction.stageRefused'],
+    ['FLOW_PDF_NATIVE_WORKER_FAILED', 'redaction.stageUnavailable'],
+  ])('shows the operation refusal %s without post-save check rows', (code, reason) => {
+    expect(redactionAttemptFeedback(null, true).checks).toBeNull()
+    expect(redactionAttemptFeedback(null, false, new NativePdfWorkerError(code))).toEqual({ checks: null, reason })
+  })
+
+  it('shows a genuine pending rewrite after a pre-candidate refusal and can stage again after cancellation', async () => {
+    const { readFileSync } = await vi.importActual<{ readFileSync(path: URL): Uint8Array }>('node:fs')
+    const module = new Uint8Array(readFileSync(new URL('../generated/flow_wasm_bg.wasm', import.meta.url)))
+    wasm.initSync({ module })
+    const paint = '10 10 10 10 re f 40 40 10 10 re f'
+    const objects = [
+      '<< /Type /Catalog /Pages 2 0 R >>',
+      '<< /Type /Pages /Kids [3 0 R 5 0 R] /Count 2 /MediaBox [0 0 100 100] >>',
+      '<< /Type /Page /Parent 2 0 R /Contents 4 0 R >>',
+      `<< /Length ${paint.length} >>\nstream\n${paint}\nendstream`,
+      '<< /Type /Page /Parent 2 0 R >>',
+    ]
+    let pdf = '%PDF-1.7\n'
+    const offsets = objects.map((object, index) => {
+      const offset = pdf.length
+      pdf += `${index + 1} 0 obj\n${object}\nendobj\n`
+      return offset
+    })
+    const xref = pdf.length
+    const size = objects.length + 1
+    pdf += `xref\n0 ${size}\n0000000000 65535 f \n`
+    for (const offset of offsets) pdf += `${String(offset).padStart(10, '0')} 00000 n \n`
+    pdf += `trailer\n<< /Root 1 0 R /Size ${size} >>\nstartxref\n${xref}\n%%EOF\n`
+    const bytes = new TextEncoder().encode(pdf)
+    const originStoreHash = (await hashPdfSourceBytes(bytes)).slice('sha256:v1:'.length)
+    const identity = { protocolVersion: NATIVE_PDF_PROTOCOL_VERSION, originStoreHash }
+    const opening = readNativeResponse(wasm.native_pdf_open(JSON.stringify({
+      ...identity, operation: 'open', requestId: 1, epoch: Array<number>(16).fill(1), bytesHex: nativeBytesHex(bytes),
+    })))
+    if (opening?.status !== 'opened') throw new Error('expected the redaction fixture to open')
+    const before = opening.snapshot
+    const request = (requestId: number, action: NativePdfRedactionAction) => readNativeResponse(wasm.native_pdf_redaction(JSON.stringify({
+      ...identity, operation: 'redaction', requestId, binding: before.binding, acceptedHash: before.outputHash, action,
+    })))
+
+    try {
+      const refused = request(2, { kind: 'stage' })
+      if (refused?.status !== 'failed') throw new Error('expected staging to refuse a request without marks')
+      expect(refused.code).toBe('FLOW_PDF_NATIVE_REDACTION_MARK_INVALID')
+      expect(redactionAttemptFeedback(null, false, new NativePdfWorkerError(refused.code))).toEqual({
+        reason: 'redaction.unsupported', checks: null,
+      })
+
+      const [pageId] = before.pageState.order
+      if (pageId === undefined) throw new Error('expected a page in the redaction fixture')
+      const marked = request(3, { kind: 'addMark', pageId, rect: [12_000, 12_000, 13_000, 13_000] })
+      if (marked?.status !== 'redaction') throw new Error('expected a mark on the fixture page')
+      expect(marked.redaction.markCount).toBe(1)
+      expect(redactionAttemptFeedback(marked.redaction, true).checks).toBeNull()
+
+      const staged = request(4, { kind: 'stage' })
+      if (staged?.status !== 'redaction') throw new Error('expected a staged rewrite of the fixture')
+      const { candidate, verification } = staged.redaction
+      if (!candidate || !verification) throw new Error('expected a candidate with verification pending')
+      expect(candidate.affectedPages).toEqual([pageId])
+      expect(staged.snapshot).toBeNull()
+      expect(staged.redaction).toMatchObject({ action: 'stage', published: false, markCount: 1 })
+      expect(verification.status).toBe('pending')
+      expect(redactionAttemptFeedback(staged.redaction, true).checks).toEqual({
+        internal: 'passed', structure: 'pending', text: 'pending', raster: 'pending',
+      })
+      expect(redactionAttemptFeedback(staged.redaction, false).checks).toEqual({
+        internal: 'passed', structure: 'inconclusive', text: 'inconclusive', raster: 'inconclusive',
+      })
+      expect(verifiedRedactionCandidate(before, before, staged.redaction, [pageId])).toBeNull()
+
+      const verified = request(4, { kind: 'verify', candidate })
+      expect(verified).toMatchObject({
+        status: 'redaction', snapshot: null,
+        redaction: { action: 'verify', candidate, markCount: 1, published: false, verification: { status: 'passed' } },
+      })
+
+      const cancelled = request(4, { kind: 'cancel', candidate })
+      expect(cancelled).toMatchObject({ status: 'redaction', snapshot: null, redaction: { markCount: 1, published: false } })
+      const retry = request(5, { kind: 'stage' })
+      if (retry?.status !== 'redaction' || !retry.redaction.candidate) throw new Error('expected a new staged rewrite')
+      expect(retry).toMatchObject({
+        snapshot: null, redaction: { action: 'stage', markCount: 1, published: false, verification: { status: 'pending' } },
+      })
+      expect(request(5, { kind: 'cancel', candidate: retry.redaction.candidate })?.status).toBe('redaction')
+    } finally {
+      wasm.native_pdf_close(JSON.stringify({ ...identity, operation: 'close', requestId: 6, binding: before.binding }))
+    }
+  })
+
+  it('reports failed checks from a mocked verification reply without enabling publication', () => {
+    const before = documentWith([]).snapshot
+    const failed: NativePdfRedactionResult = {
+      action: 'verify', acceptedHash: before.outputHash, markCount: 1, published: false,
+      candidate: {
+        hash: Array<number>(32).fill(43), affectedPages: [0],
+        validatorVersion: 1, validatorProfile: 'classic-xref-owned-144dpi-v1',
+      },
+      verification: {
+        status: 'failed',
+        structure: { status: 'failed', coveredPages: 0 },
+        text: { status: 'inconclusive', coveredPages: 0 },
+        raster: { status: 'inconclusive', coveredPages: 0 },
+      },
+    }
+    expect(redactionAttemptFeedback(failed, false)).toEqual({
+      reason: 'redaction.failed', checks: { internal: 'passed', structure: 'failed', text: 'inconclusive', raster: 'inconclusive' },
+    })
+    const identityFailed: NativePdfRedactionResult = {
+      ...failed, verification: { ...failed.verification!, structure: { status: 'inconclusive', coveredPages: 0 } },
+    }
+    expect(redactionAttemptFeedback(identityFailed, false).checks?.internal).toBe('failed')
+    expect(verifiedRedactionCandidate(before, before, failed, [0])).toBeNull()
+  })
 })
 
 describe('verified redaction mark settlement', () => {
