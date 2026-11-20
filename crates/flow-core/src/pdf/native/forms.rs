@@ -759,10 +759,10 @@ fn recognize_appearance(
                 .data
                 .strip_prefix(prefix.as_bytes())
                 .and_then(|data| data.strip_suffix(TEXT_APPEARANCE_SUFFIX.as_bytes()));
-            let width = if reference.is_some() { 4 } else { 2 };
+            let scalars = text.chars().count();
             if !same_appearance_dictionary(&stream.dict, &expected)
                 || !hex.is_some_and(|hex| {
-                    hex.len() == text.chars().count() * width
+                    [scalars * 2, scalars * 4].contains(&hex.len())
                         && hex
                             .iter()
                             .all(|byte| matches!(byte, b'0'..=b'9' | b'A'..=b'F'))

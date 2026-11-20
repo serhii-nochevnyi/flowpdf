@@ -701,6 +701,44 @@ fn embedded_appearance_round_trips_ukrainian_and_refuses_unmapped_glyphs() {
 }
 
 #[test]
+fn embedded_winansi_form_text_remains_editable_after_reopening() {
+    let cmap = b"/CIDInit /ProcSet findresource begin 12 dict begin begincmap\n/CMapType 2 def\n/CMapName /Example def\n1 begincodespacerange\n<00> <FF>\nendcodespacerange\n1 beginbfchar\n<41> <0041>\nendbfchar\nendcmap\nCMapName currentdict /CMap defineresource pop\nend end";
+    for (initial, operand, replacement) in [("", "", "A"), ("A", "41", "")] {
+        let mut objects = embedded_form_objects("[1 [339]]");
+        objects[4] = b"<< /Type /Font /Subtype /TrueType /BaseFont /NotoSans-Regular /Encoding /WinAnsiEncoding /FirstChar 65 /LastChar 65 /Widths [639] /FontDescriptor 8 0 R /ToUnicode 7 0 R >>".to_vec();
+        objects[6] = stream("", cmap);
+        objects[10] = format!("<< /Type /Annot /Subtype /Widget /FT /Tx /T (recipient) /V ({initial}) /DV () /P 3 0 R /Rect [10 10 150 40] /AP << /N 12 0 R >> >>").into_bytes();
+        let paint = format!(
+            "q 1 g 0 0 140 30 re f 0 G 1 w 1 1 138 28 re S\nBT /FlowField 10 Tf 0 g 2 4 Td <{operand}> Tj ET\nQ\n"
+        );
+        objects[11] = stream(
+            "/Type /XObject /Subtype /Form /BBox [0 0 140 30] /Resources << /Font << /FlowField 5 0 R >> >>",
+            paint.as_bytes(),
+        );
+        let bytes = build_pdf(&objects);
+        let mut pdf = session(&bytes);
+        let field = &pdf.snapshot().fields[0];
+        assert!(field.can_edit_appearance);
+        assert_eq!(field.value.as_deref(), Some(initial));
+        let command = NativeFieldCommand::SetFieldText {
+            field: field.id,
+            value: replacement.into(),
+        };
+        let receipt = pdf
+            .apply_field(pdf.snapshot().binding, 1, &command)
+            .unwrap();
+        assert_eq!(receipt.binding.revision, 1);
+        let reopened = session(pdf.output_bytes());
+        assert!(reopened.snapshot().fields[0].can_edit_appearance);
+        assert_eq!(
+            reopened.snapshot().fields[0].value.as_deref(),
+            Some(replacement)
+        );
+        assert_eq!(pdf.origin_bytes(), bytes);
+    }
+}
+
+#[test]
 fn embedded_font_uses_the_live_projection_and_command_budgets() {
     let bytes = embedded_appearance("[1 [339] 2 4096 339]");
     let open = |max_retained_bytes| {
