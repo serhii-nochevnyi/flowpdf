@@ -1239,7 +1239,7 @@ impl NativePdfSession {
         let output_capacity = output.capacity();
         drop(staged);
         drop(output);
-        let scene_limit = reopened.limits.max_retained_bytes + output_capacity;
+        let mut scene_limit = reopened.limits.max_retained_bytes + output_capacity;
         let next_binding = NativeBinding {
             revision,
             ..binding
@@ -1262,6 +1262,10 @@ impl NativePdfSession {
             Expected::Page(_) => (NativeNoteId(0), None, None),
             Expected::Field(expected) => {
                 expected.verify(&fields)?;
+                let text_bytes = expected.retained_text_bytes();
+                drop(expected);
+                scene_limit += text_bytes;
+                scene_remaining += text_bytes;
                 (NativeNoteId(0), None, None)
             }
             Expected::Note(expected) => {
@@ -1670,6 +1674,51 @@ enum FailurePoint {
 mod tests {
     use super::super::notes::NativePageId;
     use super::*;
+
+    #[test]
+    fn accepted_text_field_balance_matches_fresh_projection() {
+        let source = super::super::tests::redaction_fixture("q Q");
+        let limits = NativeEditLimits::default();
+        let mut session = NativePdfSession::open_scoped(&source, limits, [7; 16]).unwrap();
+        let value = "Approved";
+        let receipt = session
+            .apply_field(
+                session.snapshot.binding,
+                1,
+                &NativeFieldCommand::AddTextField {
+                    page: 0,
+                    rect: [5, 5, 98, 24],
+                    name: "decision".into(),
+                    value: value.into(),
+                },
+            )
+            .unwrap();
+        assert_eq!(receipt.binding.revision, 1);
+        assert_eq!(session.snapshot.fields[0].value.as_deref(), Some(value));
+
+        let fresh = NativePdfGraph::open(session.output_bytes(), limits).unwrap();
+        let (scene, mut remaining) = accepted_scene(
+            &fresh,
+            &session.ids,
+            session.snapshot.output_hash,
+            session.snapshot.binding,
+            session.origin_bytes().len(),
+            session.records.len(),
+            fresh.remaining_retained(),
+        )
+        .unwrap();
+        let fields = forms::project(
+            &fresh,
+            &scene.pages,
+            session.snapshot.binding,
+            &mut remaining,
+        )
+        .unwrap();
+        let state = page_state(&fresh, &session.ids, None, &scene, &mut remaining).unwrap();
+        assert_eq!(fields, session.snapshot.fields);
+        assert_eq!(state, session.snapshot.page_state);
+        assert_eq!(session.remaining_retained, remaining);
+    }
 
     #[test]
     fn rewrite_spare_capacity_stays_charged_during_reopen_and_remap() {

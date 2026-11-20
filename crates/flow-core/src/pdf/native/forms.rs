@@ -292,6 +292,7 @@ struct Form {
     owner: Option<Ref>,
     fields: Vec<Ref>,
     names: BTreeMap<String, Ref>,
+    name_inventory_bytes: usize,
     font: Option<FieldResult<Font>>,
     trailer_refs: BTreeSet<Ref>,
 }
@@ -337,6 +338,7 @@ fn load_form(
             owner: None,
             fields: vec![],
             names: BTreeMap::new(),
+            name_inventory_bytes: 0,
             font: None,
             trailer_refs,
         });
@@ -392,6 +394,8 @@ fn load_form(
             return Err(Profile.into());
         }
     }
+    spend(remaining, fields.capacity() * std::mem::size_of::<Ref>())?;
+    let before_names = *remaining;
     let names =
         field_name_inventory(graph, &fields, work, remaining).map_err(|error| match error {
             NativeEditError::Budget => NativeSessionError::Budget,
@@ -401,6 +405,7 @@ fn load_form(
         owner: Some(owner),
         fields,
         names,
+        name_inventory_bytes: before_names - *remaining,
         font: None,
         trailer_refs,
     })
@@ -457,6 +462,13 @@ fn admit_form_font(
 }
 
 impl Form {
+    fn release_name_inventory(&mut self, graph: &mut NativePdfGraph, form_bytes: &mut usize) {
+        drop(std::mem::take(&mut self.names));
+        let bytes = std::mem::take(&mut self.name_inventory_bytes);
+        graph.release_page_retained(bytes);
+        *form_bytes -= bytes;
+    }
+
     fn text_font(&self) -> FieldResult<&Font> {
         self.font
             .as_ref()
@@ -483,6 +495,13 @@ enum FieldValue {
 }
 
 impl FieldValue {
+    fn retained_text_bytes(&self) -> usize {
+        match self {
+            Self::Text(text) => text.capacity(),
+            _ => 0,
+        }
+    }
+
     fn kind(&self) -> NativeFieldKind {
         match self {
             Self::Text(_) => NativeFieldKind::Text,
@@ -992,6 +1011,12 @@ fn read_only_name_count(fields: &[NativeFieldView], name: &str) -> usize {
 }
 
 impl ExpectedField {
+    pub(super) fn retained_text_bytes(&self) -> usize {
+        self.value
+            .as_ref()
+            .map_or(0, FieldValue::retained_text_bytes)
+    }
+
     pub(super) fn verify(&self, fields: &[NativeFieldView]) -> Result<(), NativeSessionError> {
         let mut matching = fields
             .iter()
@@ -1212,6 +1237,38 @@ pub(super) fn stage(
     result
 }
 
+fn owned_field_text(
+    graph: &mut NativePdfGraph,
+    value: &str,
+) -> Result<FieldValue, NativeSessionError> {
+    graph.charge_page_retained(value.len())?;
+    let mut text = String::new();
+    text.try_reserve_exact(value.len())
+        .map_err(|_| NativeSessionError::Budget)?;
+    graph.charge_page_retained(text.capacity() - value.len())?;
+    text.push_str(value);
+    Ok(FieldValue::Text(text))
+}
+
+fn replace_fields(
+    graph: &mut NativePdfGraph,
+    owner: Ref,
+    fields: Vec<Ref>,
+    adding: bool,
+) -> Result<(), NativeEditError> {
+    let indirect = pages::form_dict(graph, owner)?
+        .get("Fields")
+        .and_then(Value::as_reference)
+        .is_some();
+    let slots = if indirect {
+        fields.len()
+    } else {
+        usize::from(adding)
+    };
+    graph.charge_page_retained(slots * std::mem::size_of::<Value>())?;
+    pages::replace_form_fields(graph, owner, fields)
+}
+
 fn stage_form(
     graph: &mut NativePdfGraph,
     pages: &[NativePdfNotePage],
@@ -1249,7 +1306,7 @@ fn stage_form(
             &mut work,
             graph.remaining_retained(),
         )?;
-        form.names.clear();
+        form.release_name_inventory(graph, form_bytes);
         let available = graph.remaining_retained();
         let mut remaining = available;
         let admitted = recognize_appearance(
@@ -1261,7 +1318,8 @@ fn stage_form(
             &mut remaining,
         )?;
         let bytes = available - remaining;
-        graph.charge_page_retained(bytes)?;
+        let text_bytes = admitted.value.retained_text_bytes();
+        graph.charge_page_retained(bytes + admitted.name.capacity() + text_bytes)?;
         *form_bytes += bytes;
         graph.charge_page_work(budget - work)?;
         graph.reserve_page_copy(admitted.field)?;
@@ -1269,10 +1327,12 @@ fn stage_form(
             graph.reserve_page_copy(view.object)?;
         }
         let (page, bounds, value) = match (command, admitted.value) {
-            (RemoveField { .. }, _) => {
+            (RemoveField { .. }, previous) => {
+                drop(previous);
+                graph.release_page_retained(text_bytes);
                 replace_annots(graph, &form, old_page.object, view.object, false)?;
                 form.fields.retain(|&entry| entry != admitted.field);
-                pages::replace_form_fields(graph, form.owner.ok_or(Reference)?, form.fields)?;
+                replace_fields(graph, form.owner.ok_or(Reference)?, form.fields, false)?;
                 graph.refresh_page_graph(&BTreeSet::from([admitted.field, view.object]))?;
                 return Ok(ExpectedField {
                     read_only_name_count: read_only_name_count(current, &admitted.name),
@@ -1282,8 +1342,10 @@ fn stage_form(
                     value: None,
                 });
             }
-            (SetFieldText { value, .. }, FieldValue::Text(_)) => {
-                (view.page, admitted.rect, FieldValue::Text(value.clone()))
+            (SetFieldText { value, .. }, FieldValue::Text(previous)) => {
+                drop(previous);
+                graph.release_page_retained(text_bytes);
+                (view.page, admitted.rect, owned_field_text(graph, value)?)
             }
             (SetFieldChecked { checked, .. }, FieldValue::Checkbox { on, .. }) => (
                 view.page,
@@ -1296,13 +1358,12 @@ fn stage_form(
             (MoveField { page, rect, .. }, value) => {
                 let destination = page_at(*page)?;
                 let size = dimensions(destination, *rect)?;
-                if let FieldValue::Text(text) = &value {
-                    if let Some(default) = dict(graph, admitted.field)?.get("DV") {
-                        let mut available = graph.remaining_retained();
-                        spend(&mut available, admitted.name.capacity() + text.capacity())?;
-                        let default = decode_saved_text(default, &mut available)?;
-                        form.text_font()?.operand(&default, size)?;
-                    }
+                if value.kind() == NativeFieldKind::Text
+                    && let Some(default) = dict(graph, admitted.field)?.get("DV")
+                {
+                    let mut available = graph.remaining_retained();
+                    let default = decode_saved_text(default, &mut available)?;
+                    form.text_font()?.operand(&default, size)?;
                 }
                 if *page != view.page {
                     replace_annots(graph, &form, old_page.object, view.object, false)?;
@@ -1323,27 +1384,13 @@ fn stage_form(
             value,
         )
     } else {
-        let (page, rect, field_name, value) = match command {
+        let (page, rect, field_name) = match command {
             AddTextField {
-                page,
-                rect,
-                name,
-                value,
-            } => (*page, *rect, name, FieldValue::Text(value.clone())),
-            AddCheckboxField {
-                page,
-                rect,
-                name,
-                checked,
-            } => (
-                *page,
-                *rect,
-                name,
-                FieldValue::Checkbox {
-                    checked: *checked,
-                    on: "Yes".into(),
-                },
-            ),
+                page, rect, name, ..
+            }
+            | AddCheckboxField {
+                page, rect, name, ..
+            } => (*page, *rect, name),
             _ => return Err(Reference.into()),
         };
         let destination = page_at(page)?;
@@ -1354,9 +1401,17 @@ fn stage_form(
         if form.names.contains_key(field_name) {
             return Err(Reference.into());
         }
-        if let FieldValue::Text(text) = &value {
+        form.release_name_inventory(graph, form_bytes);
+        let value = match command {
+            AddTextField { value, .. } => owned_field_text(graph, value)?,
+            AddCheckboxField { checked, .. } => FieldValue::Checkbox {
+                checked: *checked,
+                on: "Yes".into(),
+            },
+            _ => return Err(Reference.into()),
+        };
+        if value.kind() == NativeFieldKind::Text {
             let mut remaining = graph.remaining_retained();
-            spend(&mut remaining, text.capacity())?;
             let available = remaining;
             let reference = form_font_reference(graph, &form)?;
             admit_form_font(graph, &mut form, reference, &mut remaining)?;
@@ -1364,7 +1419,19 @@ fn stage_form(
             graph.charge_page_retained(bytes)?;
             *form_bytes += bytes;
         }
-        form.names.clear();
+        graph.charge_page_retained(field_name.len() * 2)?;
+        let mut fields = std::mem::take(&mut form.fields);
+        if fields.len() == fields.capacity() {
+            let ref_bytes = std::mem::size_of::<Ref>();
+            let old_bytes = fields.capacity() * ref_bytes;
+            let new_bytes = (fields.len() + 1) * ref_bytes;
+            graph.charge_page_retained(new_bytes)?;
+            fields
+                .try_reserve_exact(1)
+                .map_err(|_| NativeSessionError::Budget)?;
+            graph.release_page_retained(old_bytes);
+            *form_bytes += new_bytes - old_bytes;
+        }
         let owner = install_form(graph, &form)?;
         form.owner = Some(owner);
         let ft = match value.kind() {
@@ -1380,8 +1447,8 @@ fn stage_form(
             ("T", Value::String(field_name.as_bytes().to_vec())),
         ]);
         let widget = pages::allocate(graph, widget)?;
-        form.fields.push(widget);
-        pages::replace_form_fields(graph, owner, form.fields.clone())?;
+        fields.push(widget);
+        replace_fields(graph, owner, fields, true)?;
         replace_annots(graph, &form, destination.object, widget, true)?;
         (widget, widget, page, field_name.clone(), rect, value)
     };
@@ -1409,4 +1476,117 @@ fn stage_form(
         rect: bounds,
         value: Some(value),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::{NativeEditLimits, NativePdfSession, tests::redaction_fixture};
+    use super::*;
+
+    #[test]
+    fn owned_field_text_charges_before_allocation() {
+        let source = redaction_fixture("");
+        let mut graph = NativePdfGraph::open(&source, NativeEditLimits::default()).unwrap();
+        let label = "Approved for delivery";
+        graph
+            .charge_page_retained(graph.remaining_retained() - label.len() + 1)
+            .unwrap();
+        assert!(matches!(
+            owned_field_text(&mut graph, label),
+            Err(NativeSessionError::Budget)
+        ));
+        assert_eq!(graph.remaining_retained(), label.len() - 1);
+        graph.release_page_retained(1);
+        let FieldValue::Text(value) = owned_field_text(&mut graph, label).unwrap() else {
+            unreachable!()
+        };
+        assert_eq!(value, label);
+        assert_eq!(graph.remaining_retained(), 0);
+    }
+
+    #[test]
+    fn indirect_fields_reserve_the_new_array_while_the_old_array_is_live() {
+        let source = redaction_fixture("");
+        for short_by in [1, 0] {
+            let mut graph = NativePdfGraph::open(&source, NativeEditLimits::default()).unwrap();
+            let old_field = pages::allocate(&mut graph, dictionary([("FT", name("Btn"))])).unwrap();
+            let new_field = pages::allocate(&mut graph, dictionary([("FT", name("Btn"))])).unwrap();
+            let old_array = pages::allocate_value(&mut graph, refs([old_field])).unwrap();
+            let owner = pages::catalog(&graph).unwrap();
+            dict_mut(&mut graph, owner).unwrap().insert(
+                "AcroForm".into(),
+                Value::Dictionary(dictionary([("Fields", Value::Reference(old_array))])),
+            );
+            let mut available = graph.remaining_retained();
+            let mut work = graph.remaining_work();
+            graph
+                .reserve_page_value(owner, &mut work, &mut available)
+                .unwrap();
+            let copy_bytes = graph.remaining_retained() - available;
+            let needed = copy_bytes + 2 * std::mem::size_of::<Value>();
+            graph
+                .charge_page_retained(graph.remaining_retained() - needed + short_by)
+                .unwrap();
+            let result = replace_fields(&mut graph, owner, vec![old_field, new_field], true);
+            if short_by == 0 {
+                result.unwrap();
+                let fields = pages::form_dict(&graph, owner).unwrap()["Fields"]
+                    .as_array()
+                    .unwrap();
+                assert_eq!(fields.len(), 2);
+                assert_eq!(graph.objects[&old_array].as_array().unwrap().len(), 1);
+                assert_eq!(graph.remaining_retained(), 0);
+            } else {
+                assert_eq!(result, Err(NativeEditError::Budget));
+                assert_eq!(
+                    pages::form_dict(&graph, owner).unwrap()["Fields"].as_reference(),
+                    Some(old_array)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn staging_reuses_inventory_allowance_for_new_field_appearances() {
+        let bytes = redaction_fixture("");
+        let limits = NativeEditLimits::default();
+        let session = NativePdfSession::open_scoped(&bytes, limits, [7; 16]).unwrap();
+        let mut graph = NativePdfGraph::open(&bytes, limits).unwrap();
+        let field = pages::allocate(
+            &mut graph,
+            dictionary([
+                ("FT", name("Tx")),
+                ("Ff", Value::Integer(1)),
+                ("T", Value::String(vec![b'a'; 8 * 1024])),
+            ]),
+        )
+        .unwrap();
+        let catalog = pages::catalog(&graph).unwrap();
+        dict_mut(&mut graph, catalog).unwrap().insert(
+            "AcroForm".into(),
+            Value::Dictionary(dictionary([("Fields", refs([field]))])),
+        );
+        graph.refresh_page_graph(&BTreeSet::new()).unwrap();
+        graph
+            .charge_page_retained(graph.remaining_retained() - 25 * 1024)
+            .unwrap();
+
+        let expected = stage(
+            &mut graph,
+            &session.snapshot().scene.pages,
+            &[],
+            &NativeFieldCommand::AddCheckboxField {
+                page: 0,
+                rect: [10, 10, 30, 30],
+                name: "approval".into(),
+                checked: true,
+            },
+        )
+        .unwrap();
+        assert_eq!(expected.name, "approval");
+        assert!(matches!(
+            expected.value,
+            Some(FieldValue::Checkbox { checked: true, .. })
+        ));
+    }
 }

@@ -507,9 +507,10 @@ fn form_name_inventory_uses_the_live_projection_and_command_budgets() {
         b"<< /Type /Catalog /Pages 2 0 R /AcroForm 4 0 R >>".to_vec(),
         b"<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 300 500] >>".to_vec(),
         b"<< /Type /Page /Parent 2 0 R /Annots [5 0 R 6 0 R] >>".to_vec(),
-        b"<< /Fields [5 0 R 6 0 R] >>".to_vec(),
+        b"<< /Fields 7 0 R >>".to_vec(),
         b"<< /Type /Annot /Subtype /Widget /FT /Btn /Ff 1 /T (reserved) /P 3 0 R /Rect [10 10 30 30] >>".to_vec(),
         format!("<< /Type /Annot /Subtype /Widget /FT /Btn /Ff 1 /T ({long_name}) /P 3 0 R /Rect [40 10 60 30] >>").into_bytes(),
+        b"[5 0 R 6 0 R]".to_vec(),
     ]);
     let add: NativeFieldCommand = serde_json::from_value(json!({
         "kind": "addCheckboxField", "page": 0, "rect": [70,10,90,30],
@@ -542,11 +543,23 @@ fn form_name_inventory_uses_the_live_projection_and_command_budgets() {
     assert_eq!(accepted.fields[0].name.as_deref(), Some("reserved"));
     assert!(!accepted.fields[0].can_edit_appearance);
     assert_eq!(accepted.fields[1].name, None);
+    let add_distinct = NativeFieldCommand::AddCheckboxField {
+        page: 0,
+        rect: [70, 10, 90, 30],
+        name: "approval".into(),
+        checked: true,
+    };
     assert_eq!(
         pdf.apply_field(accepted.binding, 1, &add),
         Err(NativeSessionError::Budget)
     );
+    assert_eq!(
+        pdf.apply_field(accepted.binding, 1, &add_distinct),
+        Err(NativeSessionError::Budget)
+    );
     assert_eq!(pdf.snapshot().binding, accepted.binding);
+    assert_eq!(pdf.snapshot().output_hash, accepted.output_hash);
+    assert_eq!(pdf.snapshot().scene.scene_hash, accepted.scene.scene_hash);
     assert_eq!(pdf.snapshot().consumed_request, accepted.consumed_request);
     assert_eq!(pdf.snapshot().fields, accepted.fields);
     assert_eq!(
@@ -554,6 +567,24 @@ fn form_name_inventory_uses_the_live_projection_and_command_budgets() {
         Ok(NativeRequestLookup::Unseen)
     );
     assert_eq!(pdf.output_bytes(), bytes);
+    assert_eq!(pdf.origin_bytes(), bytes);
+
+    let mut near_limit = NativePdfSession::open_scoped(
+        &bytes,
+        NativeEditLimits {
+            max_retained_bytes: 512 * 1024,
+            ..limits
+        },
+        [7; 16],
+    )
+    .unwrap();
+    let receipt = near_limit
+        .apply_field(near_limit.snapshot().binding, 1, &add_distinct)
+        .unwrap();
+    assert_eq!(receipt.binding.revision, 1);
+    assert_eq!(near_limit.snapshot().fields.len(), 3);
+    assert_saved_value(near_limit.output_bytes(), "approval", "Btn", "Yes");
+    assert_eq!(near_limit.origin_bytes(), bytes);
 }
 
 #[test]
@@ -911,6 +942,82 @@ fn unsupported_embedded_font_keeps_the_appearance_refusal() {
         Err(NativeSessionError::Field(NativeFieldRefusal::Appearance))
     );
     assert_eq!(pdf.output_bytes(), bytes);
+}
+
+#[test]
+fn ordinary_text_field_addition_refuses_atomically_under_a_constrained_allowance() {
+    let source = imported_checkbox("[10 10 30 30]", "", "Off");
+    let open = |max_retained_bytes| {
+        NativePdfSession::open_scoped(
+            &source,
+            NativeEditLimits {
+                max_retained_bytes,
+                ..NativeEditLimits::default()
+            },
+            [7; 16],
+        )
+        .unwrap()
+    };
+    let value = "Approved for delivery";
+    let command = NativeFieldCommand::AddTextField {
+        page: 0,
+        rect: [40, 40, 290, 65],
+        name: "decision".into(),
+        value: value.into(),
+    };
+    let mut constrained = open(64 * 1024);
+    let accepted = constrained.snapshot().clone();
+    assert_eq!(
+        constrained.apply_field(accepted.binding, 1, &command),
+        Err(NativeSessionError::Budget)
+    );
+    assert_eq!(constrained.snapshot().binding, accepted.binding);
+    assert_eq!(constrained.snapshot().output_hash, accepted.output_hash);
+    assert_eq!(
+        constrained.snapshot().scene.scene_hash,
+        accepted.scene.scene_hash
+    );
+    assert_eq!(
+        constrained.snapshot().consumed_request,
+        accepted.consumed_request
+    );
+    assert_eq!(constrained.snapshot().fields, accepted.fields);
+    assert_eq!(
+        constrained.lookup(accepted.binding, 1),
+        Ok(NativeRequestLookup::Unseen)
+    );
+    assert_eq!(constrained.output_bytes(), source);
+    assert_eq!(constrained.origin_bytes(), source);
+
+    let mut fitting = open(192 * 1024);
+    let receipt = fitting
+        .apply_field(fitting.snapshot().binding, 1, &command)
+        .unwrap();
+    assert_eq!(receipt.binding.revision, 1);
+    assert_saved_value(fitting.output_bytes(), "decision", "Tx", value);
+    assert_eq!(fitting.origin_bytes(), source);
+
+    let updated = "Approved for pickup";
+    let field = fitting
+        .snapshot()
+        .fields
+        .iter()
+        .find(|field| field.name.as_deref() == Some("decision"))
+        .unwrap()
+        .id;
+    let receipt = fitting
+        .apply_field(
+            receipt.binding,
+            2,
+            &NativeFieldCommand::SetFieldText {
+                field,
+                value: updated.into(),
+            },
+        )
+        .unwrap();
+    assert_eq!(receipt.binding.revision, 2);
+    assert_saved_value(fitting.output_bytes(), "decision", "Tx", updated);
+    assert_eq!(fitting.origin_bytes(), source);
 }
 
 #[test]
