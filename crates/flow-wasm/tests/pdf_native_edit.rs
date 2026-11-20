@@ -1257,10 +1257,11 @@ fn redaction_wire_retains_marks_when_only_some_checks_pass() {
     let staged = call(native_pdf_redaction, request(json!({"kind":"stage"})));
     status_only(&staged);
     let candidate = &staged["redaction"]["candidate"];
-    let verdict = call(
-        native_pdf_redaction,
-        request(json!({"kind":"verify","candidate":candidate})),
-    );
+    let snapshot = || call(native_pdf_snapshot, bound("snapshot", 4, base));
+    let before_verification = snapshot();
+    assert_eq!(before_verification["snapshot"], *base);
+    let verify = request(json!({"kind":"verify","candidate":candidate}));
+    let verdict = call(native_pdf_redaction, verify.clone());
     status_only(&verdict);
     assert_eq!(
         verdict["redaction"]["verification"]["status"], "inconclusive",
@@ -1278,14 +1279,13 @@ fn redaction_wire_retains_marks_when_only_some_checks_pass() {
         verdict["redaction"]["verification"]["raster"]["status"],
         "inconclusive"
     );
+    assert_eq!(snapshot(), before_verification);
+    assert_eq!(call(native_pdf_redaction, verify), verdict);
     let publish = request(json!({"kind":"publish","candidate":candidate}));
     let refused = call(native_pdf_redaction, publish.clone());
     assert_eq!(refused["code"], "FLOW_PDF_NATIVE_REDACTION_UNVERIFIED");
     status_only(&refused);
-    assert_eq!(
-        call(native_pdf_snapshot, bound("snapshot", 4, base))["snapshot"],
-        *base
-    );
+    assert_eq!(snapshot(), before_verification);
     let cancelled = call(
         native_pdf_redaction,
         request(json!({"kind":"cancel","candidate":candidate})),
@@ -1304,6 +1304,13 @@ fn redaction_wire_retains_marks_when_only_some_checks_pass() {
         "FLOW_PDF_NATIVE_REDACTION_CANDIDATE_UNAVAILABLE"
     );
     status_only(&stale);
+    let cleared = call(
+        native_pdf_redaction,
+        redaction_request(4, base, json!({"kind":"clearMarks"})),
+    );
+    status_only(&cleared);
+    assert_eq!(cleared["redaction"]["markCount"], 0);
+    assert_eq!(snapshot(), before_verification);
 }
 
 #[test]

@@ -618,6 +618,9 @@ impl NativePdfSession {
             .candidate
             .as_mut()
             .ok_or(NativeSessionError::RedactionCandidateUnavailable)?;
+        if candidate.status().evidence.is_none() {
+            self.redaction_admission.take();
+        }
         Ok(candidate.verify(origin, accepted, context, &self.redaction_marks, remaining))
     }
 
@@ -1773,13 +1776,23 @@ mod tests {
             session.add_redaction_mark(binding, mark).unwrap();
             session.stage_redaction(binding, 1).unwrap();
             let before_verification = session.redaction_workspace().unwrap();
+            assert_eq!(session.check_redaction_admission(), Ok(()));
+            assert!(session.redaction_admission.get().is_some());
             let evidence = session.verify_redaction(binding, 1).unwrap();
             assert!(evidence.checks_passed(), "{evidence:?}");
             let evidence_bytes = evidence.retained();
+            assert!(evidence_bytes > 0);
+            assert!(session.redaction_admission.get().is_none());
             assert_eq!(
                 session.redaction_workspace().unwrap() + evidence_bytes,
                 before_verification
             );
+            assert_eq!(session.check_redaction_admission(), Ok(()));
+            assert_eq!(
+                session.verify_redaction(binding, 1).unwrap().retained(),
+                evidence_bytes
+            );
+            assert!(session.redaction_admission.get().is_some());
             session
         };
 
