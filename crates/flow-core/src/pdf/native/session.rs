@@ -390,7 +390,7 @@ impl NativePdfSession {
         if self.redaction_marks.contains(&mark) {
             return Ok(());
         }
-        redaction::check_input_budget(&self.graph, Some(self.origin_bytes().len()))?;
+        self.check_redaction_admission()?;
         if self.redaction_marks.len() == redaction::MAX_MARKS {
             return Err(NativeSessionError::Budget);
         }
@@ -553,7 +553,6 @@ impl NativePdfSession {
         if self.redaction_marks_binding != Some(binding) {
             return Err(NativeSessionError::InvalidRedactionMark);
         }
-        self.last_redaction_request = request_id;
         let max_input = super::verify_structure::MAX_INPUT;
         let pages = self.snapshot.page_state.order.len();
         let mut remaining = self.remaining_retained;
@@ -598,6 +597,7 @@ impl NativePdfSession {
         spend(&mut remaining, self.mark_bytes() + candidate.retained())?;
         let result = NativeRedactionStage::Pending(candidate.status().identity);
         self.candidate = Some(candidate);
+        self.last_redaction_request = request_id;
         self.redaction_admission.take();
         Ok(result)
     }

@@ -2466,9 +2466,6 @@ impl NativeRegistryEntry {
                     };
                     if matches!(action, AddMark { .. }) {
                         self.session
-                            .check_redaction_admission()
-                            .map_err(map_error)?;
-                        self.session
                             .add_redaction_mark(binding, mark)
                             .map_err(map_error)?;
                     } else {

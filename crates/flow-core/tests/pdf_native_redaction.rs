@@ -275,6 +275,11 @@ fn marks_and_quarantine_keep_accepted_bytes_and_scene_until_exact_publication() 
     let NativeRedactionStage::Pending(identity) = staged else {
         panic!("expected pending status")
     };
+    assert_eq!(
+        session.lookup(base.binding, 1),
+        Ok(NativeRequestLookup::ReconciliationRequired)
+    );
+    session.add_redaction_mark(base.binding, first).unwrap();
     assert_eq!(session.stage_redaction(base.binding, 1), Ok(staged));
     assert_eq!(
         session.redaction_candidate_status().unwrap().status(),
@@ -390,14 +395,14 @@ fn shared_image_requires_equal_scrubbing_for_every_use() {
         assert_accepted(&session, &source, 0, &source);
         assert_eq!(session.redaction_marks().len(), 1);
         add(&mut session, 1, rect);
-        session.stage_redaction(binding, 2).unwrap();
+        session.stage_redaction(binding, 1).unwrap();
         assert!(
             session
-                .verify_redaction(binding, 2)
+                .verify_redaction(binding, 1)
                 .unwrap()
                 .checks_passed()
         );
-        session.publish_redaction(binding, 2).unwrap();
+        session.publish_redaction(binding, 1).unwrap();
         assert!(
             session
                 .output_bytes()
@@ -478,11 +483,21 @@ fn valid_form_storage_is_outside_the_scrub_profile() {
     );
     let mut session = open(&source);
     let binding = session.snapshot().binding;
-    add(&mut session, 0, [11_000, 11_000, 13_000, 13_000]);
-    assert!(session.stage_redaction(binding, 1).is_err());
+    let mark = mark(&session, 0, [11_000, 11_000, 13_000, 13_000]);
+    let refusal = Err(NativeSessionError::Graph(NativeEditError::Unsupported));
+    assert_eq!(session.check_redaction_admission(), refusal);
+    assert_eq!(session.add_redaction_mark(binding, mark), refusal);
+    assert_eq!(
+        session.stage_redaction(binding, 1),
+        Err(NativeSessionError::InvalidRedactionMark)
+    );
+    assert_eq!(session.lookup(binding, 1), Ok(NativeRequestLookup::Unseen));
     assert_accepted(&session, &source, 0, &source);
-    assert_eq!(session.redaction_marks().len(), 1);
+    assert_eq!(session.snapshot().binding, binding);
+    assert!(session.redaction_marks().is_empty());
+    assert!(session.redaction_marks_binding().is_none());
     assert!(session.redaction_candidate_status().is_none());
+    session.clear_redaction_marks(binding).unwrap();
 }
 
 fn raster_fixture(size: u32, paint: &str) -> Vec<u8> {
@@ -570,12 +585,25 @@ fn admission_tracks_the_workspace_left_by_the_live_session() {
     assert_eq!(verify_projection(&session, false, false), Ok(true));
     assert_eq!(verify_projection(&session, true, false), Ok(true));
     assert_eq!(
+        session.add_redaction_mark(
+            binding,
+            NativeRedactionMark {
+                rect: [42_000, 42_000, 43_000, 43_000],
+                ..mark
+            },
+        ),
+        Err(NativeSessionError::Budget)
+    );
+    session.add_redaction_mark(binding, mark).unwrap();
+    assert_eq!(
         session.stage_redaction(binding, 1),
         Err(NativeSessionError::Budget)
     );
+    assert_eq!(session.lookup(binding, 1), Ok(NativeRequestLookup::Unseen));
     assert!(session.redaction_candidate_status().is_none());
     assert_eq!(session.redaction_marks(), &[mark]);
     assert_eq!(session.redaction_marks_binding(), Some(binding));
+    assert_eq!(session.snapshot().binding, binding);
     assert_eq!(session.snapshot().consumed_request, consumed_request);
     assert_accepted(&session, &source, 0, &source);
 
@@ -1047,12 +1075,23 @@ fn output_budget_refusal_creates_no_candidate() {
     )
     .unwrap();
     let binding = session.snapshot().binding;
+    let consumed_request = session.snapshot().consumed_request;
+    let mark = mark(&session, 0, [11_000, 11_000, 13_000, 13_000]);
     assert!(session.redaction_admitted());
-    add(&mut session, 0, [11_000, 11_000, 13_000, 13_000]);
-    assert!(session.stage_redaction(binding, 1).is_err());
+    session.add_redaction_mark(binding, mark).unwrap();
+    for _ in 0..2 {
+        assert_eq!(
+            session.stage_redaction(binding, 1),
+            Err(NativeSessionError::Budget)
+        );
+        assert_eq!(session.lookup(binding, 1), Ok(NativeRequestLookup::Unseen));
+    }
     assert_accepted(&session, &source, 0, &source);
+    assert_eq!(session.snapshot().binding, binding);
+    assert_eq!(session.snapshot().consumed_request, consumed_request);
     assert!(session.redaction_candidate_status().is_none());
-    assert_eq!(session.redaction_marks().len(), 1);
+    assert_eq!(session.redaction_marks(), &[mark]);
+    assert_eq!(session.redaction_marks_binding(), Some(binding));
 }
 
 #[test]
