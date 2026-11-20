@@ -278,7 +278,7 @@ fn shows(
     use NativeTextRefusal::Layout;
     let _parser = reserve_content_tokens(
         workspace,
-        data.len(),
+        data,
         MAX_TOKENS,
         6 * size_of::<(ContentToken, Range<usize>, Option<i64>)>(),
     )?;
@@ -434,15 +434,19 @@ fn shows(
     Ok(result)
 }
 
-pub(super) fn reserve_content_tokens(
-    workspace: &Workspace,
-    input_bytes: usize,
+pub(super) fn reserve_content_tokens<'a>(
+    workspace: &'a Workspace,
+    input: &[u8],
     max_tokens: usize,
     operand_bytes: usize,
-) -> Result<Reservation<'_>, NativeEditError> {
-    let array_bytes = 4 * input_bytes.min(max_tokens) * size_of::<ContentToken>();
+) -> Result<Reservation<'a>, NativeEditError> {
+    let possible_array_item_bytes = input
+        .iter()
+        .position(|&byte| byte == b'[')
+        .map_or(0, |start| input.len() - start - 1);
+    let array_bytes = 4 * possible_array_item_bytes.min(max_tokens) * size_of::<ContentToken>();
     workspace
-        .reserve(array_bytes + 8 * input_bytes + operand_bytes)
+        .reserve(array_bytes + 8 * input.len() + operand_bytes)
         .map_err(|_| NativeEditError::Budget)
 }
 
