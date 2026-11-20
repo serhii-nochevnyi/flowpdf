@@ -608,26 +608,43 @@ fn checkbox_edit_skips_unused_embedded_default_font() {
         appearance,
         b"q 1 g 0 0 20 20 re f 0 G 1 w 1 1 18 18 re S\n2 w 2 2 m 18 18 l 2 18 m 18 2 l S\nQ\n",
     ));
-    let bytes = build_pdf(&objects);
-    let limits = NativeEditLimits {
-        max_retained_bytes: 6 * 1024 * 1024,
-        ..NativeEditLimits::default()
-    };
-    let mut pdf = NativePdfSession::open_scoped(&bytes, limits, [7; 16]).unwrap();
-    let field = &pdf.snapshot().fields[0];
-    assert!(field.can_edit_appearance);
-    assert_eq!(field.checked, Some(false));
-    let command = NativeFieldCommand::SetFieldChecked {
-        field: field.id,
-        checked: true,
-    };
-    let receipt = pdf
-        .apply_field(pdf.snapshot().binding, 1, &command)
-        .unwrap();
-    assert_eq!(receipt.binding.revision, 1);
-    let reopened = NativePdfSession::open_scoped(pdf.output_bytes(), limits, [8; 16]).unwrap();
-    assert!(reopened.snapshot().fields[0].can_edit_appearance);
-    assert_eq!(reopened.snapshot().fields[0].checked, Some(true));
+    for centered in [false, true] {
+        let mut objects = objects.clone();
+        if centered {
+            objects[2] =
+                b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 500] /Annots [11 0 R 14 0 R] >>"
+                    .to_vec();
+            objects[3] =
+                b"<< /Fields [11 0 R 14 0 R] /DR << /Font << /FlowField 5 0 R >> >> >>".to_vec();
+            objects.push(b"<< /Type /Annot /Subtype /Widget /FT /Tx /Q 1 /T (recipient) /V () /DV () /P 3 0 R /Rect [50 50 190 80] /AP << /N 15 0 R >> >>".to_vec());
+            objects.push(embedded_form_objects("[1 [339]]").pop().unwrap());
+        }
+        let bytes = build_pdf(&objects);
+        let limits = NativeEditLimits {
+            max_retained_bytes: 6 * 1024 * 1024,
+            ..NativeEditLimits::default()
+        };
+        let mut pdf = NativePdfSession::open_scoped(&bytes, limits, [7; 16]).unwrap();
+        let field = &pdf.snapshot().fields[0];
+        assert!(field.can_edit_appearance);
+        assert_eq!(field.checked, Some(false));
+        let command = NativeFieldCommand::SetFieldChecked {
+            field: field.id,
+            checked: true,
+        };
+        let receipt = pdf
+            .apply_field(pdf.snapshot().binding, 1, &command)
+            .unwrap();
+        assert_eq!(receipt.binding.revision, 1);
+        let reopened = NativePdfSession::open_scoped(pdf.output_bytes(), limits, [8; 16]).unwrap();
+        assert!(reopened.snapshot().fields[0].can_edit_appearance);
+        assert_eq!(reopened.snapshot().fields[0].checked, Some(true));
+        if centered {
+            let other = &reopened.snapshot().fields[1];
+            assert_eq!(other.name.as_deref(), Some("recipient"));
+            assert_eq!(other.refusal, Some(NativeFieldRefusal::Profile));
+        }
+    }
 }
 
 #[test]

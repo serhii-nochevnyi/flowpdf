@@ -470,14 +470,6 @@ impl Form {
     }
 }
 
-fn is_text_field(graph: &NativePdfGraph, field: Ref) -> bool {
-    dict(graph, field)
-        .ok()
-        .and_then(|data| data.get("FT"))
-        .and_then(Value::as_name)
-        == Some("Tx")
-}
-
 fn simple_font(value: &Value) -> bool {
     value.as_dictionary().is_some_and(|font| {
         font.len() == 4
@@ -680,11 +672,12 @@ fn recognize_identity(
 
 fn recognize_appearance(
     graph: &NativePdfGraph,
-    form: &Form,
+    form: &mut Form,
     page: &NativePdfNotePage,
     widget: Ref,
     (field, field_name): (Ref, String),
-) -> FieldResult<Admitted> {
+    remaining: &mut usize,
+) -> Result<Admitted, NativeSessionError> {
     let widget_data = dict(graph, widget).map_err(|_| Reference)?;
     let fields = dict(graph, field).map_err(|_| Reference)?;
     if fields.get("Q").is_some_and(|v| v.as_integer() != Some(0))
@@ -700,7 +693,7 @@ fn recognize_appearance(
                 .iter()
                 .any(|key| widget_data.contains_key(*key))
     {
-        return Err(Profile);
+        return Err(Profile.into());
     }
     let bounds = rect(widget_data.get("Rect").ok_or(Geometry)?).ok_or(Geometry)?;
     let size = dimensions(page, bounds)?;
@@ -723,12 +716,36 @@ fn recognize_appearance(
             if widget_data.contains_key("AS")
                 || fields.get("DA").is_some_and(|v| v.as_bytes() != Some(DA))
             {
-                return Err(Appearance);
+                return Err(Appearance.into());
             }
-            if fields.contains_key("DV") {
-                form.text_font()?.operand(&get_text("DV")?, size)?;
+            if !matches!(
+                ap.as_reference()
+                    .and_then(|reference| graph.objects.get(&reference)),
+                Some(Value::Stream(_))
+            ) {
+                return Err(Appearance.into());
             }
-            FieldValue::Text(get_text("V")?)
+            let text = get_text("V")?;
+            let default = fields
+                .contains_key("DV")
+                .then(|| get_text("DV"))
+                .transpose()?;
+            if form.font.is_none() {
+                let mut available = *remaining;
+                spend(
+                    &mut available,
+                    field_name.capacity()
+                        + text.capacity()
+                        + default.as_ref().map_or(0, String::capacity),
+                )?;
+                let before = available;
+                admit_form_font(graph, form, &mut available)?;
+                spend(remaining, before - available)?;
+            }
+            if let Some(default) = default {
+                form.text_font()?.operand(&default, size)?;
+            }
+            FieldValue::Text(text)
         }
         Some("Btn") => {
             let states = ap
@@ -747,14 +764,14 @@ fn recognize_appearance(
                     .get("DV")
                     .is_some_and(|v| !v.as_name().is_some_and(|v| states.contains_key(v)))
             {
-                return Err(Appearance);
+                return Err(Appearance.into());
             }
             FieldValue::Checkbox {
                 checked: state == on,
                 on: on.clone(),
             }
         }
-        _ => return Err(Profile),
+        _ => return Err(Profile.into()),
     };
     for (state, stream) in appearances(form, size, &value)? {
         let actual = match &value {
@@ -765,7 +782,7 @@ fn recognize_appearance(
                 .ok_or(Appearance)?,
         };
         if !stream_matches(graph, actual, &stream) {
-            return Err(Appearance);
+            return Err(Appearance.into());
         }
     }
     Ok(Admitted {
@@ -877,16 +894,13 @@ pub(super) fn project(
             .and_then(|form| {
                 let identity =
                     recognize_identity(graph, form, page, object, &mut work, *remaining)?;
-                if is_text_field(graph, identity.0) {
-                    let mut font_remaining = *remaining;
-                    spend(&mut font_remaining, identity.1.capacity())?;
-                    let available = font_remaining;
-                    admit_form_font(graph, form, &mut font_remaining)?;
-                    let bytes = available - font_remaining;
-                    spend(remaining, bytes)?;
-                    form_bytes += bytes;
-                }
-                recognize_appearance(graph, form, page, object, identity).map_err(Into::into)
+                let mut available = *remaining;
+                let admitted =
+                    recognize_appearance(graph, form, page, object, identity, &mut available);
+                let bytes = *remaining - available;
+                spend(remaining, bytes)?;
+                form_bytes += bytes;
+                admitted
             });
         let admitted = match admitted {
             Ok(admitted) => Ok(admitted),
@@ -1203,19 +1217,6 @@ fn stage_form(
             Ok(view)
         })
         .transpose()?;
-    let mut admit_text_font = |graph: &mut NativePdfGraph,
-                               form: &mut Form,
-                               live_bytes|
-     -> Result<(), NativeSessionError> {
-        let mut remaining = graph.remaining_retained();
-        spend(&mut remaining, live_bytes)?;
-        let available = remaining;
-        admit_form_font(graph, form, &mut remaining)?;
-        let bytes = available - remaining;
-        graph.charge_page_retained(bytes)?;
-        *form_bytes += bytes;
-        Ok(())
-    };
     let (field, widget, page, name, bounds, value) = if let Some(view) = target {
         let old_page = page_at(view.page)?;
         graph.charge_page_work(old_page.annotations.len() + form.fields.len())?;
@@ -1229,11 +1230,20 @@ fn stage_form(
             &mut work,
             graph.remaining_retained(),
         )?;
-        if is_text_field(graph, identity.0) {
-            admit_text_font(graph, &mut form, identity.1.capacity())?;
-        }
         form.names.clear();
-        let admitted = recognize_appearance(graph, &form, old_page, view.object, identity)?;
+        let available = graph.remaining_retained();
+        let mut remaining = available;
+        let admitted = recognize_appearance(
+            graph,
+            &mut form,
+            old_page,
+            view.object,
+            identity,
+            &mut remaining,
+        )?;
+        let bytes = available - remaining;
+        graph.charge_page_retained(bytes)?;
+        *form_bytes += bytes;
         graph.charge_page_work(budget - work)?;
         graph.reserve_page_copy(admitted.field)?;
         if admitted.field != view.object {
@@ -1327,7 +1337,13 @@ fn stage_form(
             return Err(Reference.into());
         }
         if let FieldValue::Text(text) = &value {
-            admit_text_font(graph, &mut form, text.capacity())?;
+            let mut remaining = graph.remaining_retained();
+            spend(&mut remaining, text.capacity())?;
+            let available = remaining;
+            admit_form_font(graph, &mut form, &mut remaining)?;
+            let bytes = available - remaining;
+            graph.charge_page_retained(bytes)?;
+            *form_bytes += bytes;
         }
         form.names.clear();
         let owner = install_form(graph, &form)?;
