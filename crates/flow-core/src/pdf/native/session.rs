@@ -1275,8 +1275,16 @@ impl NativePdfSession {
                 (NativeNoteId(0), Some(island), None)
             }
             Expected::Object(expected) => {
-                let object =
-                    objects::verify(&reopened, &scene.pages, &scene.object_pages, &expected)?;
+                let object = objects::verify(
+                    &reopened,
+                    &scene.pages,
+                    &scene.object_pages,
+                    &expected,
+                    scene_remaining,
+                )?;
+                let expected_bytes = expected.retained_bytes();
+                drop(expected);
+                scene_remaining += expected_bytes;
                 (NativeNoteId(0), None, object)
             }
         };

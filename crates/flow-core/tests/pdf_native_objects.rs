@@ -373,6 +373,111 @@ fn added_graphic_paints_after_shared_streams_in_initial_graphics_state() {
 }
 
 #[test]
+fn object_allowance_insertion_accounts_for_the_enclosing_graphics_save() {
+    let graphic = json!({
+        "shape":"rectangle", "points":[[25000,5000],[35000,15000]],
+        "stroke":null, "fill":[255,0,0], "strokeWidth":0
+    });
+    for (depth, translated, can_add) in [(31, true, true), (32, false, true), (32, true, false)] {
+        let mut first = b"q\n".repeat(depth);
+        first.extend_from_slice(b"0 1 0 rg 24 5 10 10 re f\n");
+        let mut second = b"Q\n".repeat(depth);
+        if translated {
+            second.extend_from_slice(b"1 0 0 1 20 0 cm\n");
+        }
+        second.extend_from_slice(b"0 0 1 rg 3 5 10 10 re f");
+        let source = fixture_with_slots(&first, false, "", &[stream("", &second)], "[5 0 R 6 0 R]");
+        let mut session = open(&source);
+        let before = session.snapshot().binding;
+        let original = objects(&session, 0);
+        let page = &session.snapshot().scene.object_pages[0];
+        assert_eq!(page.refusal, None);
+        assert_eq!(
+            page.can_add, can_add,
+            "depth {depth}, translated {translated}"
+        );
+        assert_eq!(original.as_array().unwrap().len(), 2);
+
+        let result = apply(
+            &mut session,
+            json!({"kind":"addGraphic","page":0,"graphic":graphic}),
+        );
+        if can_add {
+            result.unwrap();
+            let edited = objects(&open(session.output_bytes()), 0);
+            assert_eq!(edited.as_array().unwrap().len(), 3);
+            assert_eq!(edited[0]["bounds"], original[0]["bounds"]);
+            assert_eq!(edited[1]["bounds"], original[1]["bounds"]);
+            assert_eq!(edited[2]["bounds"], json!([25000, 5000, 35000, 15000]));
+            for original in [&first, &second] {
+                let body = [b"stream\n".as_slice(), original, b"\nendstream"].concat();
+                assert!(
+                    session
+                        .output_bytes()
+                        .windows(body.len())
+                        .any(|bytes| bytes == body)
+                );
+            }
+        } else {
+            assert_eq!(result, Err(NativeSessionError::Budget));
+            assert_eq!(session.snapshot().binding, before);
+            assert_eq!(session.lookup(before, 1), Ok(NativeRequestLookup::Unseen));
+            assert_eq!(session.output_bytes(), source);
+        }
+    }
+}
+
+#[test]
+fn object_allowance_refusal_preserves_accepted_graphic_edit_state() {
+    let mut content = Vec::new();
+    for x in 0..96 {
+        use std::io::Write;
+        writeln!(&mut content, "0 1 0 rg {x} 20 4 4 re f").unwrap();
+    }
+    let source = fixture(&content, false, "", &[]);
+    let command = |session: &NativePdfSession| {
+        json!({
+            "kind":"moveObject", "target":target(session, 0, 0),
+            "transform":[1,0,0,1,0,10]
+        })
+    };
+    let mut roomy = open(&source);
+    let move_graphic = command(&roomy);
+    apply(&mut roomy, move_graphic).unwrap();
+    assert_eq!(
+        objects(&roomy, 0)[0]["bounds"],
+        json!([0, 30000, 4000, 34000])
+    );
+
+    let limits = NativeEditLimits {
+        max_retained_bytes: 128 * 1024,
+        ..NativeEditLimits::default()
+    };
+    let mut constrained = NativePdfSession::open_scoped(&source, limits, [7; 16]).unwrap();
+    let before = constrained.snapshot().clone();
+    assert_eq!(before.scene.object_pages[0].objects.len(), 96);
+    let move_graphic = command(&constrained);
+    assert_eq!(
+        apply(&mut constrained, move_graphic),
+        Err(NativeSessionError::Budget)
+    );
+    assert_eq!(constrained.output_bytes(), source);
+    assert_eq!(constrained.snapshot().binding, before.binding);
+    assert_eq!(
+        constrained.snapshot().consumed_request,
+        before.consumed_request
+    );
+    assert_eq!(
+        constrained.snapshot().scene.object_pages,
+        before.scene.object_pages
+    );
+    assert_eq!(
+        constrained.lookup(before.binding, 1),
+        Ok(NativeRequestLookup::Unseen)
+    );
+}
+
+#[test]
 fn topmost_insertion_keeps_redaction_admission_after_translation_and_scale() {
     let transform = b"3 0 0 3 12 6 cm\n";
     let paint = b"0 1 0 rg 2 2 5 5 re f";
