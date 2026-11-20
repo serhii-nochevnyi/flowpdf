@@ -951,7 +951,9 @@ fn readback_budgets_both_rasters_and_preserves_partial_evidence() {
     session.add_redaction_mark(binding, mark).unwrap();
 
     for request in 1..=2 {
-        session.stage_redaction(binding, request).unwrap();
+        let staged = session.stage_redaction(binding, request).unwrap();
+        let admission_before_verification = session.check_redaction_admission();
+        assert_eq!(admission_before_verification, Ok(()));
         let evidence = session.verify_redaction(binding, request).unwrap();
         assert_eq!(evidence.identity_failure(), None);
         assert_eq!(
@@ -977,6 +979,13 @@ fn readback_budgets_both_rasters_and_preserves_partial_evidence() {
             serde_json::json!({"status": "inconclusive", "failure": "budget", "coveredPages": []})
         );
         assert_eq!(
+            session.check_redaction_admission(),
+            admission_before_verification
+        );
+        assert_eq!(session.stage_redaction(binding, request).unwrap(), staged);
+        let retry = session.verify_redaction(binding, request).unwrap();
+        assert_eq!(serde_json::to_value(retry).unwrap(), wire["evidence"]);
+        assert_eq!(
             session.publish_redaction(binding, request),
             Err(NativeSessionError::RedactionUnverified)
         );
@@ -985,7 +994,13 @@ fn readback_budgets_both_rasters_and_preserves_partial_evidence() {
         assert_eq!(session.redaction_marks_binding(), Some(binding));
         assert!(session.accepted_redaction_evidence().is_none());
         session.cancel_redaction(binding, request).unwrap();
+        assert!(session.redaction_candidate_status().is_none());
+        assert_eq!(session.redaction_marks(), &[mark]);
     }
+    session.clear_redaction_marks(binding).unwrap();
+    assert!(session.redaction_marks().is_empty());
+    assert!(session.redaction_marks_binding().is_none());
+    assert_eq!(session.check_redaction_admission(), Ok(()));
 }
 
 #[test]
