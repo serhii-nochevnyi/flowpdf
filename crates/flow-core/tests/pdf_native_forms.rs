@@ -542,11 +542,23 @@ fn form_name_inventory_uses_the_live_projection_and_command_budgets() {
     assert_eq!(accepted.fields[0].name.as_deref(), Some("reserved"));
     assert!(!accepted.fields[0].can_edit_appearance);
     assert_eq!(accepted.fields[1].name, None);
+    let add_distinct = NativeFieldCommand::AddCheckboxField {
+        page: 0,
+        rect: [70, 10, 90, 30],
+        name: "approval".into(),
+        checked: true,
+    };
     assert_eq!(
         pdf.apply_field(accepted.binding, 1, &add),
         Err(NativeSessionError::Budget)
     );
+    assert_eq!(
+        pdf.apply_field(accepted.binding, 1, &add_distinct),
+        Err(NativeSessionError::Budget)
+    );
     assert_eq!(pdf.snapshot().binding, accepted.binding);
+    assert_eq!(pdf.snapshot().output_hash, accepted.output_hash);
+    assert_eq!(pdf.snapshot().scene.scene_hash, accepted.scene.scene_hash);
     assert_eq!(pdf.snapshot().consumed_request, accepted.consumed_request);
     assert_eq!(pdf.snapshot().fields, accepted.fields);
     assert_eq!(
@@ -554,6 +566,24 @@ fn form_name_inventory_uses_the_live_projection_and_command_budgets() {
         Ok(NativeRequestLookup::Unseen)
     );
     assert_eq!(pdf.output_bytes(), bytes);
+    assert_eq!(pdf.origin_bytes(), bytes);
+
+    let mut near_limit = NativePdfSession::open_scoped(
+        &bytes,
+        NativeEditLimits {
+            max_retained_bytes: 512 * 1024,
+            ..limits
+        },
+        [7; 16],
+    )
+    .unwrap();
+    let receipt = near_limit
+        .apply_field(near_limit.snapshot().binding, 1, &add_distinct)
+        .unwrap();
+    assert_eq!(receipt.binding.revision, 1);
+    assert_eq!(near_limit.snapshot().fields.len(), 3);
+    assert_saved_value(near_limit.output_bytes(), "approval", "Btn", "Yes");
+    assert_eq!(near_limit.origin_bytes(), bytes);
 }
 
 #[test]
