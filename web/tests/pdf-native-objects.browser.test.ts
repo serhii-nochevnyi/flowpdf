@@ -9,7 +9,7 @@ import { mountEditorApp } from '../src/editor/editor-app.js'
 import { createNativePdfRuntime } from '../src/layout/layout-runtime.js'
 import { nativePdfText, type NativePdfMessage } from '../src/pdf/pdf-native-edit-messages.js'
 import { PDF_READER_PROTOCOL_VERSION, type PdfReaderResultDto } from '../src/pdf/pdf-protocol.js'
-import { NATIVE_PDF_LIMITS, nativeHexBytes, type NativePdfObjectPage, type NativePdfGraphic, type NativePdfRect, type NativePdfWorkerRequest } from '../src/pdf/pdf-native-edit-protocol.js'
+import { NATIVE_PDF_LIMITS, nativeBytesHex, nativeHexBytes, type NativePdfObjectPage, type NativePdfGraphic, type NativePdfRect, type NativePdfWorkerRequest } from '../src/pdf/pdf-native-edit-protocol.js'
 
 function objectPdf(transform = '30 0 0 40 100 120', clip = '', blankFirstPage = false) {
   const encoder = new TextEncoder()
@@ -111,8 +111,11 @@ for (const locale of ['uk', 'en'] as const) {
       const button = (key: NativePdfMessage) => panel.getByRole('button', { name: t(key), exact: true })
       const edited = button('download.edited')
       const outputHash = () => edited.element().getAttribute('data-output-hash')
-      const commandCount = () => worker.mock.calls.filter(([message]) =>
-        (message as Partial<NativePdfWorkerRequest> | undefined)?.request?.operation === 'command').length
+      const commands = () => worker.mock.calls.flatMap(([message]) => {
+        const request = (message as Partial<NativePdfWorkerRequest> | undefined)?.request
+        return request?.operation === 'command' ? [request.command] : []
+      })
+      const commandCount = () => commands().length
 
       async function open(bytes: Uint8Array<ArrayBuffer>, name: string) {
         const input = root.querySelector('[data-pdf-native-edit] input[type=file]')
@@ -254,7 +257,8 @@ for (const locale of ['uk', 'en'] as const) {
       chooseFile(asset(), new File([grayPng], 'gray.png', { type: 'image/png' }))
       await expect.element(objects.getByText(t('object.file.ready'), { exact: false })).toBeVisible()
       const addedImage = image([10000, 20000, 40000, 60000])
-      await accepted('object.add', [baseImage, baseGraphic, addedImage], 2, selector)
+      const added = await accepted('object.add', [baseImage, baseGraphic, addedImage], 2, selector)
+      expect(imageSamples(nativeHexBytes(added.outputHex))).toEqual([['555657', '88'], ['555657']])
 
       await selector.selectOptions((selector.element() as HTMLSelectElement).options[1]!.value)
       const originalTarget = (selector.element() as HTMLSelectElement).value
@@ -293,9 +297,19 @@ for (const locale of ['uk', 'en'] as const) {
       await expect.element(objects.getByRole('textbox', { name: t('object.y') })).toHaveValue('121')
       await expect.element(objects.getByRole('textbox', { name: t('object.width') })).toHaveValue('31')
       await expect.element(objects.getByRole('textbox', { name: t('object.height') })).toHaveValue('41')
+      await expect.element(button('object.move')).toBeEnabled()
+      await objects.getByRole('textbox', { name: t('object.x'), exact: true }).fill('310')
+      await expect.element(objects.getByText(t('object.geometry.invalid'))).toBeVisible()
+      await expect.element(objects.getByText(t('object.file.ready'), { exact: false })).toBeVisible()
+      await expect.element(button('object.move')).toBeDisabled()
       await expect.element(button('object.replace')).toBeEnabled()
       expect(commandCount()).toBe(beforeReconcile + 1)
       const replaced = await accepted('object.replace', [image([...baseImage.bounds]), baseGraphic, addedImage], 0, selector)
+      expect(commands().slice(beforeReconcile + 1)).toStrictEqual([{
+        kind: 'replaceImage',
+        target: { page: 0, id: Array.from(nativeHexBytes(recoveredTarget)), profile: baseImage.profile },
+        assetHex: nativeBytesHex(replacementPng),
+      }])
       expect(imageSamples(nativeHexBytes(replaced.outputHex))).toEqual([['40', '88'], ['555657']])
       expect(replaced.scene.pages[1]?.annotations).toContainEqual(expect.objectContaining({
         kind: 'plainNote', contents: 'Page two note',
