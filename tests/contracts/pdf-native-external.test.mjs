@@ -12,21 +12,27 @@ import {
 const fixture = (name) => readFileSync(new URL(`../../fixtures/pdf-native/${name}`, import.meta.url))
 const editFamilies = JSON.parse(fixture('edit-families.expected.json'))
 
+function scratchDirectory(t, prefix) {
+  const directory = realpathSync(mkdtempSync(join(tmpdir(), prefix)))
+  t.after(() => rmSync(directory, { recursive: true, force: true }))
+  return directory
+}
+
 test('the external verifier loads and validates the pinned fixture corpus', () => {
   const fixtures = loadFixtures()
   assert.deepEqual(fixtures.map(({ id }) => id), JSON.parse(fixture('manifest.json')).fixtures.map(({ id }) => id))
   assert.ok(fixtures.some(({ spec }) => spec.operations.some(({ operation }) => operation === 'deletePage')))
 })
 
-test('strict external rejects unavailable or failed checks', () => {
+test('both CLI modes reject failed checks and only strict external rejects unavailable checks', () => {
   assert.equal(externalExitCode('unavailable', true), 2)
   assert.equal(externalExitCode('fail', true), 1)
   assert.equal(externalExitCode('unavailable', false), 0)
+  assert.equal(externalExitCode('fail', false), 1)
 })
 
 test('external comparisons use the executables probed before changing directories', (t) => {
-  const scratch = realpathSync(mkdtempSync(join(tmpdir(), 'flowpdf-executable-contract-')))
-  t.after(() => rmSync(scratch, { recursive: true, force: true }))
+  const scratch = scratchDirectory(t, 'flowpdf-executable-contract-')
   const probeDirectory = join(scratch, 'probe')
   const directory = join(scratch, 'comparison')
   const tools = ['qpdf', 'pdftotext', 'pdftoppm']
@@ -91,12 +97,19 @@ test('external comparisons use the executables probed before changing directorie
     { cwd: probeDirectory, env: { PATH: 'unavailable' } }), null)
   assert.equal(probeTool('qpdf', () => ({ error: { code: 'ENOENT' } }), options), null)
   assert.equal(probeTool('pdftoppm', () => ({ status: 0, stderr: 'private payload' }), options), null)
-  const missing = comparisonInvoker(executables, directory, env, evidence.commands, ([executable]) => {
+  const missingDirectory = scratchDirectory(t, 'flowpdf-missing-tool-contract-')
+  const unavailable = { status: 'pass', commands: {}, fixtures: [] }
+  const missing = comparisonInvoker(executables, missingDirectory, env, unavailable.commands, ([executable]) => {
     assert.equal(executable, join(probeDirectory, 'bin', 'qpdf'))
     return { error: { code: 'ENOENT' } }
   })
-  assert.throws(() => missing('qpdf-check', ['qpdf', '--check']), { message: 'tool-disappeared', status: 'unavailable' })
-  assert.deepEqual(evidence.commands['qpdf-check'], { pass: 1, fail: 0, unavailable: 1 })
+  compareFixtures([refused], wasm, missingDirectory, missing, unavailable)
+  assert.equal(unavailable.status, 'unavailable')
+  assert.equal(unavailable.reason, 'tool-disappeared')
+  assert.deepEqual(unavailable.commands.structure, { pass: 0, fail: 0, unavailable: 1 })
+  assert.deepEqual(readdirSync(missingDirectory), ['source.pdf'])
+  assert.equal(externalExitCode(unavailable.status, false), 0)
+  assert.equal(externalExitCode(unavailable.status, true), 2)
 })
 
 test('raster parsing and comparison cover the entire page including controls', () => {
@@ -197,7 +210,7 @@ test('a refused open retains the source without requesting a session snapshot', 
   assert.equal(operationOutput(session, { id: 'refused', input }, { outcome }), input)
 })
 
-test('an inconclusive redaction retains unavailable evidence through fixture cleanup', (t) => {
+test('redaction refusal preserves the verifier classification through bounded cleanup', (t) => {
   const redaction = loadFixtures().find(({ id }) => id === 'redaction')
   const { input, sourceHash, spec } = redaction
   const [operation] = spec.operations
@@ -206,7 +219,7 @@ test('an inconclusive redaction retains unavailable evidence through fixture cle
   const binding = { epoch, sessionId: 1, originHash, revision: 0 }
   const outputHex = input.toString('hex')
   const snapshot = { originStoreHash: sourceHash, binding, outputHash: originHash, outputHex,
-    pageState: { order: [42] } }
+    pageState: { order: [42, 43] } }
   const candidate = { hash: Array(32).fill(7), validatorVersion: 1,
     validatorProfile: 'classic-xref-owned-144dpi-v1', affectedPages: [42] }
   const { json: sourceStructure } = structuralReadback(operation.pages)
@@ -216,9 +229,20 @@ test('an inconclusive redaction retains unavailable evidence through fixture cle
     ...request('redaction', requestId), binding, acceptedHash: originHash, action,
   })
 
-  for (const cleanupFailure of ['none', 'close', 'cancel']) {
-    const directory = mkdtempSync(join(tmpdir(), 'flowpdf-redaction-contract-'))
-    t.after(() => rmSync(directory, { recursive: true, force: true }))
+  for (const [verdict, cleanupFailure, status, exitCodes] of [
+    ['failed', 'none', 'fail', [1, 1]],
+    ['failed', 'close', 'fail', [1, 1]],
+    ['failed', 'cancel', 'fail', [1, 1]],
+    ['inconclusive', 'none', 'unavailable', [0, 2]],
+    ['inconclusive', 'close', 'unavailable', [0, 2]],
+    ['inconclusive', 'cancel', 'unavailable', [0, 2]],
+    ['unavailable', 'none', 'unavailable', [0, 2]],
+    ['missing-verdict', 'none', 'unavailable', [0, 2]],
+    ['missing-candidate', 'none', 'unavailable', [0, 2]],
+  ]) {
+    const label = `${verdict}, ${cleanupFailure} cleanup failure`
+    const hasCandidate = verdict !== 'missing-candidate'
+    const directory = scratchDirectory(t, 'flowpdf-redaction-contract-')
     const requests = []
     const invocations = []
     let pending = false
@@ -234,10 +258,14 @@ test('an inconclusive redaction retains unavailable evidence through fixture cle
         switch (action.kind) {
           case 'addMark': return { status: 'redaction' }
           case 'stage':
+            if (!hasCandidate) return { status: 'redaction' }
             pending = true
             return { status: 'redaction', redaction: { candidate, verification: { status: 'pending' } } }
           case 'verify':
-            return { status: 'redaction', redaction: { candidate, verification: { status: 'inconclusive' } } }
+            if (verdict === 'missing-verdict') {
+              return { status: 'failed', code: 'FLOW_PDF_NATIVE_REDACTION_CANDIDATE_UNAVAILABLE' }
+            }
+            return { status: 'redaction', redaction: { candidate, verification: { status: verdict } } }
           case 'cancel':
             if (cleanupFailure === 'cancel') throw new Error('controlled cancellation failure')
             pending = false
@@ -260,17 +288,18 @@ test('an inconclusive redaction retains unavailable evidence through fixture cle
       ...operation.request.marks.map(({ rectPt }, index) =>
         redactRequest(index + 2, { kind: 'addMark', pageId: 42, rect: rectPt.map((point) => point * 1000) })),
       redactRequest(stageId, { kind: 'stage' }),
-      redactRequest(stageId, { kind: 'verify', candidate }),
-      redactRequest(stageId, { kind: 'cancel', candidate }),
+      ...(hasCandidate ? [redactRequest(stageId, { kind: 'verify', candidate }),
+        redactRequest(stageId, { kind: 'cancel', candidate })] : []),
       { ...request('close', stageId + 1), binding },
-    ], cleanupFailure)
-    assert.equal(evidence.status, 'unavailable', cleanupFailure)
-    assert.equal(evidence.reason, 'native-redaction-verification', cleanupFailure)
+    ], label)
+    assert.equal(evidence.status, status, label)
+    assert.equal(evidence.reason, hasCandidate ? 'native-redaction-verification' : 'native-redaction-candidate', label)
+    assert.deepEqual([externalExitCode(evidence.status, false), externalExitCode(evidence.status, true)], exitCodes, label)
     assert.deepEqual(evidence.fixtures[0].operations, [{
-      operation: 'redact', status: 'unavailable', affectedPages: operation.affectedPages, pageChecks: [], checks: {},
-    }], cleanupFailure)
-    assert.deepEqual(invocations, [['structure', join(directory, 'source.pdf')]], cleanupFailure)
-    assert.deepEqual(readdirSync(directory), ['source.pdf'], cleanupFailure)
+      operation: 'redact', status, affectedPages: operation.affectedPages, pageChecks: [], checks: {},
+    }], label)
+    assert.deepEqual(invocations, [['structure', join(directory, 'source.pdf')]], label)
+    assert.deepEqual(readdirSync(directory), ['source.pdf'], label)
   }
 })
 
