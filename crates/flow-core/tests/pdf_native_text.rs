@@ -1,5 +1,5 @@
 use flow_core::pdf::native::{
-    NativeEditLimits, NativePdfSession, NativeTextCommand, NativeTextRefusal,
+    NativeEditLimits, NativePdfSession, NativeSessionError, NativeTextCommand, NativeTextRefusal,
 };
 use flow_core::pdf::{PdfReaderLimits, PdfSceneElement, PdfSceneRequest, open_pdf, read_pdf_scene};
 
@@ -200,6 +200,50 @@ fn core_refuses_missing_codes_and_overflow_atomically() {
         assert_eq!(session.snapshot().binding, binding);
         assert_eq!(session.snapshot().consumed_request, 0);
     }
+}
+
+#[test]
+fn core_refuses_replacement_when_recognition_workspace_is_exhausted() {
+    use std::fmt::Write;
+
+    let mut content = String::new();
+    let codes = format!("0002{}", "0001".repeat(65));
+    for line in 1..=70 {
+        writeln!(content, "BT /F1 12 Tf 20 {} Td <{codes}> Tj ET", 11 * line).unwrap();
+    }
+    let bytes = fixture(&content, false, true, "", false);
+    let limits = NativeEditLimits {
+        max_retained_bytes: 7 * 1024 * 1024,
+        ..NativeEditLimits::default()
+    };
+    let mut session = NativePdfSession::open_scoped(&bytes, limits, [7; 16]).unwrap();
+    let binding = session.snapshot().binding;
+    let islands = &session.snapshot().scene.text_pages[0].islands;
+    assert_eq!(islands.len(), 70);
+    let island = &islands[0];
+    assert_eq!(island.text, format!("Ї{}", "A".repeat(65)));
+    let command = NativeTextCommand::ReplaceText {
+        island: island.id,
+        text: "ЇA".into(),
+    };
+
+    assert_eq!(
+        session.apply_text(binding, 1, &command),
+        Err(NativeSessionError::Budget)
+    );
+    assert_eq!(session.output_bytes(), bytes);
+    assert_eq!(session.snapshot().binding, binding);
+    assert_eq!(session.snapshot().consumed_request, 0);
+
+    let mut roomy = open(&bytes);
+    let command = NativeTextCommand::ReplaceText {
+        island: roomy.snapshot().scene.text_pages[0].islands[0].id,
+        text: "ЇA".into(),
+    };
+    roomy
+        .apply_text(roomy.snapshot().binding, 1, &command)
+        .unwrap();
+    assert_eq!(roomy.snapshot().scene.text_pages[0].islands[0].text, "ЇA");
 }
 
 #[test]

@@ -6,8 +6,8 @@ use miniz_oxide::deflate::compress_to_vec_zlib;
 use super::super::reader::{PdfObjectRef, PdfReaderLimits, PdfStream, PdfValue, single_filter};
 use super::super::scene::{ContentCursor, ContentToken, separated_content_streams};
 use super::graph::{NativeEditError, NativePdfGraph, spend};
-use super::text::{RedactionText, redaction_number};
-use super::verifier::{NativeRedactionGeometry, NativeRedactionMark};
+use super::text::{RedactionText, redaction_number, reserve_content_tokens};
+use super::verifier::{NativeRedactionGeometry, NativeRedactionMark, Reservation, Workspace};
 use super::verify_raster;
 use super::verify_structure::MAX_INPUT;
 
@@ -1316,24 +1316,26 @@ struct Edits {
     sensitive_images: BTreeSet<Digest>,
 }
 
-struct Scan<'a> {
+struct Scan<'a, 'w> {
     graph: &'a NativePdfGraph,
-    text: RedactionText<'a>,
+    workspace: &'w Workspace,
+    text: RedactionText<'a, 'w>,
     edits: Edits,
     content_aliases: BTreeMap<Digest, Digest>,
     image_aliases: BTreeMap<Digest, Digest>,
     note_uses: BTreeMap<Object, bool>,
     active_forms: BTreeSet<Object>,
     work: usize,
-    memory: usize,
+    memory: Reservation<'w>,
 }
 
-impl<'a> Scan<'a> {
-    fn new(inventory: &Inventory<'a>, memory: usize) -> Self {
+impl<'a, 'w> Scan<'a, 'w> {
+    fn new(inventory: &Inventory<'a>, workspace: &'w Workspace) -> Self {
         let graph = inventory.graph;
         Self {
             graph,
-            text: RedactionText::new(graph),
+            workspace,
+            text: RedactionText::new(graph, workspace),
             edits: Edits {
                 streams: BTreeMap::new(),
                 forms: BTreeMap::new(),
@@ -1346,7 +1348,7 @@ impl<'a> Scan<'a> {
             note_uses: BTreeMap::new(),
             active_forms: BTreeSet::new(),
             work: inventory.work,
-            memory,
+            memory: workspace.scope(),
         }
     }
 
@@ -1365,7 +1367,7 @@ impl<'a> Scan<'a> {
         }) {
             return Err(Unsupported);
         }
-        spend(&mut self.memory, 512)?;
+        self.memory.grow(512).map_err(|_| Budget)?;
         let mut used = UsedResources::new();
         let mut notes = Vec::new();
         let node = dict(graph, id)?;
@@ -1399,7 +1401,7 @@ impl<'a> Scan<'a> {
         }
         if let Some(list) = node.get("Annots") {
             for item in resolve(graph, list)?.as_array().ok_or(Malformed)? {
-                spend(&mut self.memory, 128)?;
+                self.memory.grow(128).map_err(|_| Budget)?;
                 let note = reference(item)?;
                 let entries = dict(graph, note)?;
                 if entries
@@ -1440,7 +1442,15 @@ impl<'a> Scan<'a> {
             return Err(Budget);
         }
         spend(&mut self.work, source.len() + 1)?;
-        spend(&mut self.memory, source.len() * 6 + 512)?;
+        self.memory
+            .grow(source.len() * 6 + 512)
+            .map_err(|_| Budget)?;
+        let _parser = reserve_content_tokens(
+            self.workspace,
+            source.len(),
+            16_384,
+            8 * size_of::<(ContentToken, usize, &[u8])>(),
+        )?;
         let mut cursor = ContentCursor::new(
             source,
             PdfReaderLimits {
@@ -1454,7 +1464,7 @@ impl<'a> Scan<'a> {
         let mut output = Vec::new();
         let mut removals = blake3::Hasher::new();
         let mut removed = false;
-        let mut args = Vec::new();
+        let mut args = Vec::with_capacity(8);
         let mut path: Option<Path> = None;
         let mut text: Option<TextBlock> = None;
         while let Some((token, offset)) = cursor.next().map_err(|_| Unsupported)? {
@@ -1478,7 +1488,7 @@ impl<'a> Scan<'a> {
                             &source[block.start..end],
                             &mut self.work,
                         )?;
-                        let drop_text = if let Some((font, bounds)) = measurement {
+                        let drop_text = if let Some((font, bounds, _memory)) = measurement {
                             let remove =
                                 scope.remove(graphics.matrix.bounds(bounds)?, &mut self.work)?;
                             if remove {
@@ -1606,7 +1616,7 @@ impl<'a> Scan<'a> {
         group: &'static str,
         name: &str,
     ) -> Result<Object> {
-        spend(&mut self.memory, 256 + name.len())?;
+        self.memory.grow(256 + name.len()).map_err(|_| Budget)?;
         let id = resolve_resource(self.graph, resources, group, name)?;
         same_use(used, (group, name.into()), id)?;
         Ok(id)
@@ -1620,7 +1630,9 @@ impl<'a> Scan<'a> {
             if !contains(scope.clip, bounds) {
                 return Err(Unsupported);
             }
-            spend(&mut self.memory, object.data.len() + 512)?;
+            self.memory
+                .grow(object.data.len() + 512)
+                .map_err(|_| Budget)?;
             spend(
                 &mut self.work,
                 scope.marks.len() + object.data.len().div_ceil(16) + 1,
@@ -1828,7 +1840,8 @@ fn scan_document(
         return Err(Unsupported);
     }
     let inventory = Inventory::read(graph, workspace / 4)?;
-    let mut scan = Scan::new(&inventory, workspace / 2);
+    let scan_workspace = Workspace::new(workspace / 2);
+    let mut scan = Scan::new(&inventory, &scan_workspace);
     for (&page, &page_id) in graph.pages.iter().zip(order) {
         scan.page(page, page_id, marks)?;
     }
@@ -1984,6 +1997,32 @@ mod tests {
             }),
         );
         writer::rewrite(&graph).unwrap()
+    }
+
+    #[test]
+    fn text_measurement_uses_the_scan_workspace() {
+        let bytes = include_bytes!("../../../../../fixtures/pdf-native/redaction.pdf");
+        let graph = NativePdfGraph::open(bytes, NativeEditLimits::default()).unwrap();
+        let resources = dict(&graph, graph.pages[1])
+            .unwrap()
+            .get("Resources")
+            .and_then(PdfValue::as_dictionary);
+        let block = b"BT /F1 12 Tf 16 76 Td <0002> Tj ET";
+        let workspace = Workspace::new(128);
+        let mut work = graph.remaining_work();
+        assert!(matches!(
+            RedactionText::new(&graph, &workspace).measure(resources, block, &mut work),
+            Err(Budget)
+        ));
+        assert_eq!(workspace.remaining(), 128);
+
+        let workspace = Workspace::new(32 * 1024);
+        let mut text = RedactionText::new(&graph, &workspace);
+        let (font, _, memory) = text.measure(resources, block, &mut work).unwrap().unwrap();
+        assert_eq!(font, "F1");
+        assert!(workspace.remaining() < 32 * 1024);
+        drop((font, memory, text));
+        assert_eq!(workspace.remaining(), 32 * 1024);
     }
 
     #[test]
