@@ -1,4 +1,4 @@
-import { createElement } from 'react'
+import { Children, createElement, isValidElement, type ReactElement, type ReactNode } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it, vi } from 'vitest'
 import * as wasm from '../generated/flow_wasm.js'
@@ -28,6 +28,7 @@ import {
   verifiedRedactionCandidate,
   verifiedRedactionMarkSnapshot,
   type NativePdfAcceptedDocument,
+  type PdfNativeEditPanelProps,
 } from '../src/pdf/pdf-native-edit-panel.js'
 import { nativePdfMessages, nativePdfText } from '../src/pdf/pdf-native-edit-messages.js'
 import {
@@ -35,6 +36,7 @@ import {
   NATIVE_PDF_PROTOCOL_VERSION,
   isNativeFieldCommand,
   nativeBytesHex,
+  nativeHexBytes,
   readNativeResponse,
   type NativePdfAnnotation,
   type NativePdfFieldView,
@@ -43,8 +45,9 @@ import {
   type NativePdfRedactionResult,
   type NativePdfSnapshot,
   type NativePdfTextIsland,
+  type NativePdfVerifiedSnapshot,
 } from '../src/pdf/pdf-native-edit-protocol.js'
-import { NativePdfWorkerError } from '../src/pdf/pdf-native-edit-worker.js'
+import { NativePdfWorkerError, type NativePdfCoordinatorState } from '../src/pdf/pdf-native-edit-worker.js'
 
 const geometry = { bounds: [-10, 20, 190, 120], rotation: 90 } as const
 const hash = Array<number>(32).fill(42)
@@ -66,6 +69,165 @@ const dependencies = {
   createCoordinator: () => { throw Error('SSR must not create a worker') },
   sourceStore: { put: async () => { throw Error('unexpected write') }, get: async () => null },
 }
+
+function fixturePdf(objects: readonly string[]): string {
+  let pdf = '%PDF-1.7\n'
+  const offsets = objects.map((object, index) => {
+    const offset = pdf.length
+    pdf += `${index + 1} 0 obj\n${object}\nendobj\n`
+    return offset
+  })
+  const xref = pdf.length
+  const size = offsets.length + 1
+  pdf += `xref\n0 ${size}\n0000000000 65535 f \n`
+  for (const offset of offsets) pdf += `${String(offset).padStart(10, '0')} 00000 n \n`
+  return pdf + `trailer\n<< /Root 1 0 R /Size ${size} >>\nstartxref\n${xref}\n%%EOF\n`
+}
+
+async function mountHandoffPanel(props: PdfNativeEditPanelProps) {
+  const states: unknown[] = []
+  const refs: { current: unknown }[] = []
+  let stateIndex = 0
+  let refIndex = 0
+  let mount: (() => void | (() => void)) | undefined
+  vi.resetModules()
+  vi.doMock('react', async (importOriginal) => ({
+    ...await importOriginal<typeof import('react')>(),
+    useId: () => 'native-test',
+    useCallback: (callback: unknown) => callback,
+    useState: (initial: unknown) => {
+      const index = stateIndex++
+      if (!(index in states)) states[index] = typeof initial === 'function' ? initial() : initial
+      return [states[index], (update: unknown) => {
+        states[index] = typeof update === 'function' ? update(states[index]) : update
+      }]
+    },
+    useRef: (initial: unknown) => {
+      const index = refIndex++
+      return refs[index] ??= { current: initial }
+    },
+    useLayoutEffect: () => undefined,
+    useEffect: (effect: () => void | (() => void), dependencies: readonly unknown[]) => {
+      if (dependencies.length === 0) mount = effect
+    },
+    useSyncExternalStore: (_subscribe: unknown, snapshot: () => unknown) => snapshot(),
+  }))
+  try {
+    const { PdfNativeEditPanel: Panel } = await import('../src/pdf/pdf-native-edit-panel.js')
+    const render = () => {
+      stateIndex = 0
+      refIndex = 0
+      return Panel(props)
+    }
+    render()
+    const unmount = mount?.()
+    if (typeof unmount !== 'function') throw new Error('Expected panel teardown')
+    return { render, unmount }
+  } finally {
+    vi.doUnmock('react')
+  }
+}
+
+type PanelElement = ReactElement<{ readonly children?: ReactNode; readonly [name: string]: unknown }>
+
+function panelElement(node: ReactNode, matches: (element: PanelElement) => boolean): PanelElement | undefined {
+  for (const child of Children.toArray(node)) {
+    if (!isValidElement<PanelElement['props']>(child)) continue
+    if (matches(child)) return child
+    const nested = panelElement(child.props.children, matches)
+    if (nested) return nested
+  }
+  return undefined
+}
+
+it.each(['original', 'accepted'] as const)('keeps imports and %s recovery editable when coordinator cleanup throws', async (recovery) => {
+  const file = (name: string, width: number) => new File([fixturePdf([
+    '<< /Type /Catalog /Pages 2 0 R >>',
+    '<< /Type /Pages /Kids [3 0 R] /Count 1 >>',
+    `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${width} 100] >>`,
+  ])], name, { type: 'application/pdf' })
+  const first = file('first.pdf', 100)
+  const second = file('second.pdf', 200)
+  const base = documentWith([]).snapshot
+  async function importedSnapshot(pdf: File): Promise<NativePdfVerifiedSnapshot> {
+    const bytes = new Uint8Array(await pdf.arrayBuffer())
+    const originStoreHash = (await hashPdfSourceBytes(bytes)).slice('sha256:v1:'.length)
+    const outputHash = Array.from(nativeHexBytes(originStoreHash))
+    return { ...base, originStoreHash, outputHash, outputHex: nativeBytesHex(bytes), consumedRequest: 0,
+      binding: { ...base.binding, originHash: outputHash, revision: 0 }, scene: { ...base.scene, outputHash },
+      pageState: { order: [196608], selected: null, canDelete: false, maxPosition: 0 }, redactionAdmission: 'unavailable' }
+  }
+  const [initial, replacement] = await Promise.all([importedSnapshot(first), importedSnapshot(second)])
+  const recovered = { ...replacement, binding: { ...replacement.binding, epoch: Array<number>(16).fill(2) } }
+  const cleanupFailure = new Error('Coordinator cleanup unavailable')
+  type Coordinator = ReturnType<PdfNativeEditPanelProps['createCoordinator']>
+  const coordinator = (accepted: NativePdfVerifiedSnapshot) => {
+    const state: NativePdfCoordinatorState = {
+      phase: 'ready', accepted, pendingRequestId: null, code: null, reopenOriginal: false, reopenAccepted: false,
+      redaction: null, showingPriorAccepted: false,
+    }
+    return {
+      open: vi.fn<Coordinator['open']>().mockResolvedValue(accepted),
+      snapshot: vi.fn(() => state), subscribe: vi.fn(() => () => undefined),
+      dispose: vi.fn<Coordinator['dispose']>().mockImplementationOnce(() => { throw cleanupFailure }),
+      command: vi.fn(), project: vi.fn(), reconcile: vi.fn(), markRedaction: vi.fn(), applyRedaction: vi.fn(),
+    }
+  }
+  const old = coordinator(initial)
+  const next = coordinator(replacement)
+  const active = coordinator(recovered)
+  const candidate = coordinator(initial)
+  let finishCandidate: (snapshot: NativePdfVerifiedSnapshot) => void = () => { throw new Error('Expected pending open') }
+  candidate.open.mockImplementationOnce(() => new Promise((resolve) => { finishCandidate = resolve }))
+  const createCoordinator = vi.fn<() => Coordinator>().mockReturnValueOnce(old).mockReturnValueOnce(next)
+    .mockReturnValueOnce(active).mockReturnValueOnce(candidate)
+  const sourceStore = { put: vi.fn().mockResolvedValue(undefined),
+    get: vi.fn().mockResolvedValue(nativeHexBytes(replacement.outputHex)) }
+  const { render, unmount } = await mountHandoffPanel({ createCoordinator, sourceStore, locale: 'en' })
+  const control = (name: string) => panelElement(render(), (element) => element.props.id === `native-test-${name}`)
+  const importFile = (file: File) => {
+    const input = panelElement(render(), (element) => element.type === 'input' && element.props.accept === 'application/pdf,.pdf')
+    const change = input?.props.onChange as (event: { currentTarget: { files: File[]; value: string } }) => void
+    change({ currentTarget: { files: [file], value: file.name } })
+  }
+  const state = (role: 'status' | 'alert') => panelElement(render(), (element) => element.props.role === role)?.props.children
+  const expectReady = async (message: 'status.ready' | 'status.reopened' | 'status.reopenedAccepted') => {
+    await vi.waitFor(() => expect(state('status')).toBe(nativePdfText('en', message)))
+    expect(state('alert')).toBe('')
+    expect(control('add')?.props.disabled).toBe(false)
+  }
+
+  importFile(first)
+  await expectReady('status.ready')
+  importFile(second)
+  await expectReady('status.ready')
+  expect(old.dispose).toHaveBeenCalledOnce()
+  expect(next.dispose).not.toHaveBeenCalled()
+  expect(panelElement(render(), (element) => element.type === 'bdi' && element.props.children === second.name)).toBeDefined()
+  expect(panelElement(render(), (element) => element.props['data-output-hash'] === replacement.originStoreHash)).toBeDefined()
+
+  const useAccepted = recovery === 'accepted'
+  next.snapshot.mockReturnValue({ ...next.snapshot(), phase: useAccepted ? 'reconciliationRequired' : 'invalidated',
+    reopenAccepted: useAccepted, reopenOriginal: !useAccepted })
+  const reopen = control('reopen')
+  expect(reopen?.props.children).toBe(nativePdfText('en', useAccepted ? 'session.reopenAccepted' : 'session.reopen'))
+  const click = reopen?.props.onClick as () => void
+  click()
+  await expectReady(useAccepted ? 'status.reopenedAccepted' : 'status.reopened')
+  expect(next.dispose).toHaveBeenCalledOnce()
+  expect(active.dispose).not.toHaveBeenCalled()
+  expect(sourceStore.get.mock.calls).toEqual(useAccepted ? [] : [[replacement.originStoreHash]])
+  expect(active.open).toHaveBeenCalledWith({ bytes: nativeHexBytes(recovered.outputHex), originStoreHash: recovered.originStoreHash })
+  expect(panelElement(render(), (element) => element.props['data-origin-hash'] === replacement.originStoreHash)).toBeDefined()
+
+  importFile(first)
+  await vi.waitFor(() => expect(candidate.open).toHaveBeenCalledOnce())
+  expect(() => unmount()).not.toThrow()
+  finishCandidate(initial)
+  await Promise.resolve()
+  expect(candidate.dispose).toHaveBeenCalledOnce()
+  expect(active.dispose).toHaveBeenCalledOnce()
+})
 
 describe('exact redacted output', () => {
   const before = documentWith([]).snapshot
@@ -167,18 +329,7 @@ describe('redaction staging and check feedback', () => {
       `<< /Length ${paint.length} >>\nstream\n${paint}\nendstream`,
       '<< /Type /Page /Parent 2 0 R >>',
     ]
-    let pdf = '%PDF-1.7\n'
-    const offsets = objects.map((object, index) => {
-      const offset = pdf.length
-      pdf += `${index + 1} 0 obj\n${object}\nendobj\n`
-      return offset
-    })
-    const xref = pdf.length
-    const size = objects.length + 1
-    pdf += `xref\n0 ${size}\n0000000000 65535 f \n`
-    for (const offset of offsets) pdf += `${String(offset).padStart(10, '0')} 00000 n \n`
-    pdf += `trailer\n<< /Root 1 0 R /Size ${size} >>\nstartxref\n${xref}\n%%EOF\n`
-    const bytes = new TextEncoder().encode(pdf)
+    const bytes = new TextEncoder().encode(fixturePdf(objects))
     const originStoreHash = (await hashPdfSourceBytes(bytes)).slice('sha256:v1:'.length)
     const identity = { protocolVersion: NATIVE_PDF_PROTOCOL_VERSION, originStoreHash }
     const opening = readNativeResponse(wasm.native_pdf_open(JSON.stringify({

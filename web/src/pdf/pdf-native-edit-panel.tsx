@@ -823,6 +823,14 @@ function refusal(cause: unknown, pageOperation = false): readonly [string | unde
 
 const unsubscribeIdle = () => undefined
 const idle = () => null
+
+function disposeCoordinator(coordinator: Coordinator | null): void {
+  try {
+    coordinator?.dispose()
+  } catch {
+  }
+}
+
 const pageRefusalDetails = {
   finalPage: ['final-page', 'page.final'],
   geometry: ['page-geometry', 'page.geometry'],
@@ -836,8 +844,9 @@ export function PdfNativeEditPanel({
   const t = (key: NativePdfMessage, parameters?: Message[1]) => nativePdfText(locale, key, parameters)
   const pointFormat = new Intl.NumberFormat(locale, { maximumFractionDigits: 3 })
   const formatPoint = (thousandths: number) => pointFormat.format(thousandths / 1000)
-  const [accepted, setAccepted] = useState(initialDocument)
-  const [coordinator, setCoordinator] = useState<Coordinator | null>(null)
+  const [{ accepted, coordinator }, setSession] = useState<{
+    accepted: NativePdfAcceptedDocument | undefined; coordinator: Coordinator | null
+  }>({ accepted: initialDocument, coordinator: null })
   const coordinatorRef = useRef<Coordinator | null>(null)
   const candidateRef = useRef<Coordinator | null>(null)
   const mounted = useRef(false)
@@ -903,10 +912,12 @@ export function PdfNativeEditPanel({
       mounted.current = false
       navigationRequest.current?.abort()
       pendingRedaction.current = null
-      candidateRef.current?.dispose()
-      coordinatorRef.current?.dispose()
+      const candidate = candidateRef.current
+      const coordinator = coordinatorRef.current
       candidateRef.current = null
       coordinatorRef.current = null
+      disposeCoordinator(candidate)
+      disposeCoordinator(coordinator)
     }
   }, [])
 
@@ -1319,6 +1330,10 @@ export function PdfNativeEditPanel({
     setNavigation(null)
   }
 
+  function setAccepted(update: (document: NativePdfAcceptedDocument | undefined) => NativePdfAcceptedDocument | undefined) {
+    setSession((session) => ({ ...session, accepted: update(session.accepted) }))
+  }
+
   async function open(filename: string, read: () => Promise<Uint8Array>,
     recovery?: { readonly expectedSourceHash: string; readonly originalStoreHash?: never }
       | { readonly expectedSourceHash?: never; readonly originalStoreHash: string },
@@ -1348,10 +1363,11 @@ export function PdfNativeEditPanel({
       const result = await candidate.open({ bytes, originStoreHash: hash })
       if (!mounted.current) return
       const previous = coordinatorRef.current
+      setSession({ coordinator: candidate, accepted: { filename, snapshot: result,
+        ...(recovery?.originalStoreHash !== undefined ? { originalStoreHash: recovery.originalStoreHash } : {}),
+      } })
       coordinatorRef.current = candidate
       candidateRef.current = null
-      setCoordinator(candidate)
-      previous?.dispose()
       uncertain.current = null
       recoveredObject.current = null
       pageObjectDrafts.current.clear()
@@ -1365,9 +1381,6 @@ export function PdfNativeEditPanel({
       setRedactionCoordinates(['', '', '', ''])
       setRedactionRefusal(null)
       setRedactedOutput(null)
-      setAccepted({ filename, snapshot: result,
-        ...(recovery?.originalStoreHash !== undefined ? { originalStoreHash: recovery.originalStoreHash } : {}),
-      })
       setPageId(acceptedPageIndex(result))
       setMovePosition(null)
       setBlankSide('after')
@@ -1378,11 +1391,14 @@ export function PdfNativeEditPanel({
       setComposition(false)
       setStatus([recovery === undefined ? 'status.ready'
         : recovery.originalStoreHash !== undefined ? 'status.reopenedAccepted' : 'status.reopened'])
+      disposeCoordinator(previous)
     } catch (cause) {
-      candidate?.dispose()
+      if (candidate !== null && candidateRef.current === candidate) {
+        candidateRef.current = null
+        disposeCoordinator(candidate)
+      }
       if (mounted.current) setFailure(cause, true)
     } finally {
-      if (candidateRef.current === candidate) candidateRef.current = null
       locked.current = false
       if (mounted.current) setBusy(null)
     }

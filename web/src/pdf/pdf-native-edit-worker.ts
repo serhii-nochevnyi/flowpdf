@@ -757,7 +757,7 @@ export class NativePdfEditCoordinator {
   }
 
   dispose(): void {
-    this.invalidate(WORKER_FAILED)
+    this.invalidate(WORKER_FAILED, true)
   }
 
   private startRedaction(
@@ -1005,18 +1005,23 @@ export class NativePdfEditCoordinator {
     if (this.state.phase === 'invalidated') throw new NativePdfWorkerError(this.state.code ?? WORKER_FAILED, requestId)
   }
 
-  private invalidate(code: string): void {
+  private invalidate(code: string, propagateCleanupError = false): void {
     if (this.state.phase === 'invalidated') return
     this.worker.onmessage = null
     this.worker.onerror = null
     this.worker.onmessageerror = null
-    this.worker.terminate()
-    this.uncertain = null
-    this.redactionJob = null
-    for (const pending of this.pending.values()) pending.reject(new NativePdfWorkerError(code, pending.request.requestId))
-    for (const queued of this.queue.splice(0)) queued.reject(new NativePdfWorkerError(code))
-    this.update('invalidated', null, code, this.state.accepted, null)
-    this.listeners.clear()
+    try {
+      this.worker.terminate()
+    } catch (cause) {
+      if (propagateCleanupError) throw cause
+    } finally {
+      this.uncertain = null
+      this.redactionJob = null
+      for (const pending of this.pending.values()) pending.reject(new NativePdfWorkerError(code, pending.request.requestId))
+      for (const queued of this.queue.splice(0)) queued.reject(new NativePdfWorkerError(code))
+      this.update('invalidated', null, code, this.state.accepted, null)
+      this.listeners.clear()
+    }
   }
 
   private update(
