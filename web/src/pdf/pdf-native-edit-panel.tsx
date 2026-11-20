@@ -231,6 +231,18 @@ export function nativeObjectBounds(values: ObjectCoordinates, page: NativePdfRec
   return nativeCropBounds(values, [page[0] * 1000, page[1] * 1000, page[2] * 1000, page[3] * 1000])
 }
 
+export function nativeImageCommand(
+  page: number, selected: ObjectView | undefined, bounds: NativePdfRect | null, asset: ObjectAsset | null,
+): Extract<NativePdfObjectCommand, { kind: 'addImage' | 'replaceImage' }> | null {
+  if (asset?.status !== 'ready') return null
+  if (selected) {
+    return selected.kind === 'image' && selected.operations.includes('replace')
+      ? { kind: 'replaceImage', target: { page, id: selected.id, profile: selected.profile }, assetHex: asset.hex }
+      : null
+  }
+  return bounds ? { kind: 'addImage', page, bounds, assetHex: asset.hex } : null
+}
+
 export function nativeCropBounds(values: ObjectCoordinates, cropBox: NativePdfRect): NativePdfRect | null {
   const [x, y, width, height] = values
   const [left, bottom, right, top] = cropBox
@@ -911,8 +923,9 @@ export function PdfNativeEditPanel({
     && (!objectBounds || 2 * Math.ceil(strokeWidth / 2) < Math.min(
       objectBounds[2] - objectBounds[0], objectBounds[3] - objectBounds[1],
     ))
-  const canPaint = !!objectBounds && (objectProfile === 'image' ? asset?.status === 'ready'
-    : objectProfile !== 'line' || strokeValid)
+  const imageCommand = objectProfile === 'image' ? nativeImageCommand(pageId, selectedObject, objectBounds, asset) : null
+  const canPaint = objectProfile === 'image' ? imageCommand !== null
+    : !!objectBounds && (objectProfile !== 'line' || strokeValid)
   const objectPageReason = objectPage?.refusal ? objectRefusalReasons[objectPage.refusal]
     : objectPage?.canAdd === false ? 'object.addUnavailable' : null
   const objectForm = !!geometry && (objectPage?.canAdd === true || !!selectedObject)
@@ -1412,12 +1425,12 @@ export function PdfNativeEditPanel({
     return saved === recovered ? 'unseen' : 'draft'
   }
 
-  function resetObject(target?: ObjectView) {
+  function resetObject(target?: ObjectView, draftCoordinates?: ObjectCoordinates) {
     setAsset(null)
     setObjectId(target?.id ?? null)
     setObjectProfile(target?.profile === 'line' || target?.profile === 'polygon' || target?.profile === 'rectangle'
       ? target.profile : 'image')
-    setCoordinates(target && geometry ? objectCoordinates(target.bounds, geometry.bounds) : ['', '', '', ''])
+    setCoordinates(draftCoordinates ?? (target && geometry ? objectCoordinates(target.bounds, geometry.bounds) : ['', '', '', '']))
     setColor('#334155')
     setStroke('1')
   }
@@ -1435,7 +1448,7 @@ export function PdfNativeEditPanel({
   }
 
   function submitObject(operation: 'add' | 'replace' | 'move', invoker: HTMLElement) {
-    if (!canEdit || !objectPage || !objectBounds || asset?.status === 'loading') return
+    if (!canEdit || !objectPage || asset?.status === 'loading') return
     if (operation === 'move') {
       if (!objectTarget || !objectMove || !selectedObject?.operations.includes('move')) return
       void act({ kind: 'moveObject', target: objectTarget, transform: objectMove }, invoker)
@@ -1443,11 +1456,8 @@ export function PdfNativeEditPanel({
     }
     if (operation === 'add' ? !objectPage.canAdd || !!objectTarget : !selectedObject?.operations.includes('replace')) return
     if (objectProfile === 'image') {
-      if (asset?.status !== 'ready') return
-      void act(objectTarget
-        ? { kind: 'replaceImage', target: objectTarget, assetHex: asset.hex }
-        : { kind: 'addImage', page: pageId, bounds: objectBounds, assetHex: asset.hex }, invoker)
-    } else if (canPaint) {
+      if (imageCommand) void act(imageCommand, invoker)
+    } else if (objectBounds && canPaint) {
       const graphic = graphicDraft(objectProfile, objectBounds, color, strokeWidth)
       void act(objectTarget ? { kind: 'replaceGraphic', target: objectTarget, graphic }
         : { kind: 'addGraphic', page: pageId, graphic }, invoker)
@@ -1638,7 +1648,7 @@ export function PdfNativeEditPanel({
     if (selectedObject) {
       const rebound = rebindNativeObject(before, result, pageId, selectedObject, command)
       if (!rebound) resetObject()
-      else if (changesSelection) resetObject(rebound)
+      else if (changesSelection) resetObject(rebound, kind === 'replaceImage' ? coordinates : undefined)
       else setObjectId(rebound.id)
     }
     if (isNativeFieldCommand(command)) return null
