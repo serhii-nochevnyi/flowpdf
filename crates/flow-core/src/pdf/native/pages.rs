@@ -147,7 +147,7 @@ const DUPLICATE_KEYS: &[&str] = &[
     "UserUnit",
 ];
 
-fn positions_locked(graph: &NativePdfGraph) -> Result<bool, NativeEditError> {
+fn positions_locked(graph: &NativePdfGraph, work: &mut usize) -> Result<bool, NativeEditError> {
     let values = dict(graph, catalog(graph)?)?;
     if values.contains_key("PageLabels") {
         return Ok(true);
@@ -155,16 +155,20 @@ fn positions_locked(graph: &NativePdfGraph) -> Result<bool, NativeEditError> {
     let Some(preferences) = values.get("ViewerPreferences") else {
         return Ok(false);
     };
-    let mut work = graph.remaining_work();
-    Ok(match graph.resolve_metered(preferences, &mut work) {
-        Ok(PdfValue::Null) => false,
-        Ok(PdfValue::Dictionary(preferences)) => {
-            preferences.get("PrintPageRange").is_some_and(|range| {
-                !matches!(graph.resolve_metered(range, &mut work), Ok(PdfValue::Null))
-            })
-        }
-        _ => true,
-    })
+    let preferences = match graph.resolve_metered(preferences, work) {
+        Ok(PdfValue::Null) => return Ok(false),
+        Ok(PdfValue::Dictionary(preferences)) => preferences,
+        Err(Budget) => return Err(Budget),
+        _ => return Ok(true),
+    };
+    let Some(range) = preferences.get("PrintPageRange") else {
+        return Ok(false);
+    };
+    match graph.resolve_metered(range, work) {
+        Ok(PdfValue::Null) => Ok(false),
+        Err(Budget) => Err(Budget),
+        _ => Ok(true),
+    }
 }
 
 fn scoped_entry<'a, K: Ord, V: Default>(
@@ -289,10 +293,10 @@ pub(super) fn restrictions(
 ) -> Result<Option<NativePageRestrictions>, NativeEditError> {
     use NativePageRefusal::{Geometry, Structure};
 
-    let positions_locked = positions_locked(graph)?;
+    let mut work = graph.remaining_work();
+    let positions_locked = positions_locked(graph, &mut work)?;
     let catalog = catalog(graph)?;
     let catalog_values = dict(graph, catalog)?;
-    let mut work = graph.remaining_work();
     let mut page_bytes = workspace.scope();
     let page_refs = page_reference_set(graph, &mut work, &mut page_bytes)?;
     let named_targets =
@@ -1855,5 +1859,45 @@ fn set_ref(dict: &mut Dict, key: &str, target: Option<Ref>) {
         }
     } else {
         dict.remove(key);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::{NativeEditLimits, NativePdfSession, tests::redaction_fixture};
+    use super::*;
+
+    #[test]
+    fn indirect_print_preferences_share_the_page_projection_work_budget() {
+        let limits = NativeEditLimits::default();
+        let source = redaction_fixture("");
+        let mut graph = NativePdfGraph::open(&source, limits).unwrap();
+        let range = allocate_value(&mut graph, PdfValue::Null).unwrap();
+        let preferences = allocate(
+            &mut graph,
+            BTreeMap::from([("PrintPageRange".into(), PdfValue::Reference(range))]),
+        )
+        .unwrap();
+        let root = catalog(&graph).unwrap();
+        dict_mut(&mut graph, root)
+            .unwrap()
+            .insert("ViewerPreferences".into(), PdfValue::Reference(preferences));
+        graph.refresh_page_graph(&BTreeSet::new()).unwrap();
+        let bytes = graph.rewrite().unwrap();
+        let session = NativePdfSession::open_scoped(&bytes, limits, [3; 16]).unwrap();
+        let projected = &session.snapshot().scene.pages;
+        let check = |work| {
+            let mut graph = NativePdfGraph::open(&bytes, limits).unwrap();
+            graph
+                .charge_page_work(graph.remaining_work() - work)
+                .unwrap();
+            let workspace = Workspace::new(graph.remaining_retained());
+            restrictions(&graph, projected, &workspace)
+        };
+        for mut work in [0, 1] {
+            assert_eq!(positions_locked(&graph, &mut work), Err(Budget));
+        }
+        assert!(matches!(check(11), Err(Budget)));
+        assert!(check(12).unwrap().is_none());
     }
 }
