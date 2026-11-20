@@ -4,8 +4,8 @@ use flow_core::pdf::native::{
     NativeRedactionMark, NativeRequestLookup, NativeSessionError,
 };
 use flow_core::pdf::{
-    PdfPathCommand, PdfReadDiagnosticCode, PdfSceneElement, PdfSceneRequest, open_pdf,
-    read_pdf_scene,
+    PdfPathCommand, PdfReadDiagnosticCode, PdfReaderLimits, PdfSceneElement, PdfSceneRequest,
+    open_pdf, read_pdf_scene,
 };
 use image::ImageDecoder;
 use serde_json::{Value, json};
@@ -576,10 +576,15 @@ fn fractional_page_crop_matches_content_clip_for_images() {
         "/Type /XObject /Subtype /Image /ColorSpace /DeviceGray /Width 1 /Height 1 /BitsPerComponent 8",
         &[7],
     );
-    for (right, left, partial) in [("10.006", "10.003", true), ("9.997", "9.998", false)] {
+    for (start, width, right, left, partial) in [
+        ("0", "10.006", "10.006", "10.003", true),
+        ("0", "9.997", "9.997", "9.998", false),
+        ("0.1", "0.2", "0.3", "0.3", false),
+    ] {
         let paint = format!("1 0 0 1 {left} 5 cm /I Do");
-        let clip = format!("0 0 {right} 10 re W n {paint}");
-        let crop = format!("/CropBox [0 0 {right} 10] /Resources << /XObject << /I 6 0 R >> >>");
+        let clip = format!("{start} 0 {width} 10 re W n {paint}");
+        let crop =
+            format!("/CropBox [{start} 0 {right} 10] /Resources << /XObject << /I 6 0 R >> >>");
         for (content, dictionary) in [
             (paint.as_bytes(), crop.as_str()),
             (clip.as_bytes(), "/Resources << /XObject << /I 6 0 R >> >>"),
@@ -642,6 +647,32 @@ fn image_diagnostics_account_for_precise_form_clipping() {
             assert!(page.report.diagnostics.is_empty());
         }
     }
+}
+
+#[test]
+fn collapsed_form_diagnostics_do_not_enqueue_discarded_children() {
+    let form = stream(
+        "/Type /XObject /Subtype /Form /BBox [0 0 1 1] /Matrix [0.001 0 0 1 20 20] /Resources << /XObject << /Child 7 0 R >> >>",
+        b"/Child Do",
+    );
+    let child = stream("/Type /XObject /Subtype /Form /BBox [0 0 1 1]", b"");
+    let source = fixture(
+        b"/F Do",
+        false,
+        "/Resources << /XObject << /F 6 0 R >> >>",
+        &[form, child],
+    );
+    let limits = PdfReaderLimits {
+        max_scene_elements: 1,
+        ..PdfReaderLimits::default()
+    };
+    let reader = open_pdf(&source, limits).unwrap();
+    let scene = read_pdf_scene(&reader, &PdfSceneRequest::default()).unwrap();
+    assert!(matches!(
+        scene.pages[0].elements.as_slice(),
+        [PdfSceneElement::Annotation { .. }]
+    ));
+    assert!(!scene.pages[0].partial && !scene.report.partial);
 }
 
 #[test]

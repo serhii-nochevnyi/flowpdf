@@ -512,14 +512,14 @@ impl PaintMatrix {
         Some(numbers)
     }
 
-    fn bounds(self, [x, y, width, height]: [f64; 4]) -> Option<PaintBounds> {
+    fn bounds(self, [x, y, right, top]: [f64; 4]) -> Option<PaintBounds> {
         let [a, b, c, d, e, f] = self.0;
         let point = |x, y| [a * x + c * y + e, b * x + d * y + f];
         let corners = [
             point(x, y),
-            point(x + width, y),
-            point(x, y + height),
-            point(x + width, y + height),
+            point(right, y),
+            point(x, top),
+            point(right, top),
         ];
         if !corners.iter().flatten().all(|value| value.is_finite()) {
             return None;
@@ -596,8 +596,8 @@ impl GraphicsState {
         }
     }
 
-    fn extend_path_paint_bounds(&mut self, rect: [f64; 4]) {
-        let bounds = self.paint_ctm.and_then(|matrix| matrix.bounds(rect));
+    fn extend_path_paint_bounds(&mut self, edges: [f64; 4]) {
+        let bounds = self.paint_ctm.and_then(|matrix| matrix.bounds(edges));
         self.path_paint_bounds = if self.path.is_empty() {
             bounds
         } else {
@@ -634,12 +634,49 @@ struct FontMap {
 
 #[derive(Debug, Clone)]
 pub(super) enum ContentToken {
-    Number((LayoutUnit, f64)),
+    Number((LayoutUnit, SceneDecimal)),
     Integer(i64),
     Name(String),
     String(Vec<u8>),
     Array(Vec<ContentToken>),
     Word(String),
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(super) enum SceneDecimal {
+    Exact { coefficient: i64, scale: u32 },
+    Approximate(f64),
+}
+
+impl SceneDecimal {
+    fn value(self) -> f64 {
+        match self {
+            Self::Exact { coefficient, scale } => coefficient as f64 / 10_i128.pow(scale) as f64,
+            Self::Approximate(value) => value,
+        }
+    }
+
+    fn sum(self, other: Self) -> f64 {
+        if let (
+            Self::Exact {
+                coefficient: left,
+                scale: left_scale,
+            },
+            Self::Exact {
+                coefficient: right,
+                scale: right_scale,
+            },
+        ) = (self, other)
+        {
+            let scale = left_scale.max(right_scale);
+            let left = i128::from(left).checked_mul(10_i128.pow(scale - left_scale));
+            let right = i128::from(right).checked_mul(10_i128.pow(scale - right_scale));
+            if let Some(sum) = left.zip(right).and_then(|(a, b)| a.checked_add(b)) {
+                return sum as f64 / 10_i128.pow(scale) as f64;
+            }
+        }
+        self.value() + other.value()
+    }
 }
 
 #[derive(Debug)]
@@ -651,6 +688,7 @@ struct SceneBuilder<'a> {
     field_counts: &'a BTreeMap<PdfObjectRef, usize>,
     widget_label_work: usize,
     elements: Vec<PdfSceneElement>,
+    emit_elements: bool,
     report: PdfReadReport,
     fonts: BTreeMap<(PdfObjectRef, String), FontMap>,
     page_refs: BTreeMap<PdfObjectRef, u32>,
@@ -675,6 +713,7 @@ impl<'a> SceneBuilder<'a> {
             field_counts,
             widget_label_work: reader.limits().max_content_tokens,
             elements: Vec::new(),
+            emit_elements: true,
             report: PdfReadReport::default(),
             fonts: BTreeMap::new(),
             page_refs: pages
@@ -824,7 +863,7 @@ impl<'a> SceneBuilder<'a> {
                 let (x, y) = two_numbers(operands)?;
                 let [px, py] =
                     std::array::from_fn(|i| operands[operands.len() - 2 + i].precise_number());
-                self.state.extend_path_paint_bounds([px, py, 0., 0.]);
+                self.state.extend_path_paint_bounds([px, py, px, py]);
                 self.state.path.push(RawPathCommand::MoveTo(x, y));
                 self.state.current_point = Some((x, y));
             }
@@ -832,19 +871,15 @@ impl<'a> SceneBuilder<'a> {
                 let (x, y) = two_numbers(operands)?;
                 let [px, py] =
                     std::array::from_fn(|i| operands[operands.len() - 2 + i].precise_number());
-                self.state.extend_path_paint_bounds([px, py, 0., 0.]);
+                self.state.extend_path_paint_bounds([px, py, px, py]);
                 self.state.path.push(RawPathCommand::LineTo(x, y));
                 self.state.current_point = Some((x, y));
             }
             "c" => {
                 let values = six_number_values(operands)?;
                 for point in operands[operands.len() - 6..].chunks_exact(2) {
-                    self.state.extend_path_paint_bounds([
-                        point[0].precise_number(),
-                        point[1].precise_number(),
-                        0.,
-                        0.,
-                    ]);
+                    let [x, y] = [point[0].precise_number(), point[1].precise_number()];
+                    self.state.extend_path_paint_bounds([x, y, x, y]);
                 }
                 self.state.path.push(RawPathCommand::CurveTo(
                     values[0], values[1], values[2], values[3], values[4], values[5],
@@ -854,12 +889,8 @@ impl<'a> SceneBuilder<'a> {
             "v" => {
                 let values = four_number_values(operands)?;
                 for point in operands[operands.len() - 4..].chunks_exact(2) {
-                    self.state.extend_path_paint_bounds([
-                        point[0].precise_number(),
-                        point[1].precise_number(),
-                        0.,
-                        0.,
-                    ]);
+                    let [x, y] = [point[0].precise_number(), point[1].precise_number()];
+                    self.state.extend_path_paint_bounds([x, y, x, y]);
                 }
                 let (x0, y0) = self.state.current_point.ok_or(PdfReadError::Syntax)?;
                 self.state.path.push(RawPathCommand::CurveTo(
@@ -870,12 +901,8 @@ impl<'a> SceneBuilder<'a> {
             "y" => {
                 let values = four_number_values(operands)?;
                 for point in operands[operands.len() - 4..].chunks_exact(2) {
-                    self.state.extend_path_paint_bounds([
-                        point[0].precise_number(),
-                        point[1].precise_number(),
-                        0.,
-                        0.,
-                    ]);
+                    let [x, y] = [point[0].precise_number(), point[1].precise_number()];
+                    self.state.extend_path_paint_bounds([x, y, x, y]);
                 }
                 self.state.path.push(RawPathCommand::CurveTo(
                     values[0], values[1], values[2], values[3], values[2], values[3],
@@ -884,10 +911,14 @@ impl<'a> SceneBuilder<'a> {
             }
             "re" => {
                 let values = four_number_values(operands)?;
-                self.state
-                    .extend_path_paint_bounds(std::array::from_fn(|i| {
-                        operands[operands.len() - 4 + i].precise_number()
-                    }));
+                let [x, y, width, height] =
+                    std::array::from_fn(|i| operands[operands.len() - 4 + i].scene_decimal());
+                self.state.extend_path_paint_bounds([
+                    x.value(),
+                    y.value(),
+                    x.sum(width),
+                    y.sum(height),
+                ]);
                 let (x, y, width, height) = (values[0], values[1], values[2], values[3]);
                 self.state.path.push(RawPathCommand::MoveTo(x, y));
                 self.state
@@ -1509,7 +1540,7 @@ impl<'a> SceneBuilder<'a> {
                     .transpose()?;
                 let precise_bbox = local_bbox.as_ref().and_then(|value| {
                     let [x, y, right, top] = PaintMatrix::pdf_numbers(value)?;
-                    (x < right && y < top).then_some([x, y, right - x, top - y])
+                    (x < right && y < top).then_some([x, y, right, top])
                 });
                 let form_paint_clip = form_paint_ctm
                     .and_then(|matrix| matrix.bounds(precise_bbox?))
@@ -1545,7 +1576,8 @@ impl<'a> SceneBuilder<'a> {
                 if clip.is_empty() && form_paint_clip.is_empty() {
                     return Ok(());
                 }
-                let element_count = self.elements.len();
+                let caller_emit_elements = self.emit_elements;
+                self.emit_elements &= !clip.is_empty();
                 let caller_state = self.state.clone();
                 let caller_stack = std::mem::take(&mut self.state_stack);
                 self.state.ctm = form_ctm;
@@ -1561,9 +1593,7 @@ impl<'a> SceneBuilder<'a> {
                 let result =
                     self.interpret_stream(&stream, xobject_ref, depth + 1, effective_resources);
                 self.invocation_path.pop();
-                if clip.is_empty() {
-                    self.elements.truncate(element_count);
-                }
+                self.emit_elements = caller_emit_elements;
                 if !self.state_stack.is_empty() {
                     self.report_partial(xobject_ref);
                 }
@@ -1861,6 +1891,9 @@ impl<'a> SceneBuilder<'a> {
     }
 
     fn push_element(&mut self, element: PdfSceneElement) -> Result<(), PdfReadError> {
+        if !self.emit_elements {
+            return Ok(());
+        }
         if self.elements.len() >= self.limits.max_scene_elements {
             self.report.push(PdfReadDiagnostic::blocked(
                 PdfReadDiagnosticCode::SceneLimit,
@@ -1971,9 +2004,16 @@ fn is_known_noop(operator: &str) -> bool {
 
 impl ContentToken {
     fn precise_number(&self) -> f64 {
+        self.scene_decimal().value()
+    }
+
+    fn scene_decimal(&self) -> SceneDecimal {
         match self {
             Self::Number((_, value)) => *value,
-            Self::Integer(value) => *value as f64,
+            Self::Integer(value) => SceneDecimal::Exact {
+                coefficient: *value,
+                scale: 0,
+            },
             _ => unreachable!("validated numeric operand"),
         }
     }
@@ -2652,7 +2692,7 @@ fn parse_signed_i64(bytes: &[u8]) -> Result<i64, PdfReadError> {
     i64::try_from(value).map_err(|_| PdfReadError::NumericLimit)
 }
 
-fn parse_decimal(bytes: &[u8]) -> Result<(LayoutUnit, f64), PdfReadError> {
+fn parse_decimal(bytes: &[u8]) -> Result<(LayoutUnit, SceneDecimal), PdfReadError> {
     if bytes.is_empty() || bytes.len() > 32 {
         return Err(PdfReadError::NumericLimit);
     }
@@ -2713,11 +2753,20 @@ fn parse_decimal(bytes: &[u8]) -> Result<(LayoutUnit, f64), PdfReadError> {
     let rounded = i128::try_from(rounded).map_err(|_| PdfReadError::NumericLimit)?;
     let value = if negative { -rounded } else { rounded };
     let rounded = i64::try_from(value).map_err(|_| PdfReadError::NumericLimit)?;
-    let precise = whole as f64 + fraction as f64 / denominator as f64;
-    Ok((
-        LayoutUnit::from_raw(rounded),
-        if negative { -precise } else { precise },
-    ))
+    let mut scale = denominator.ilog10();
+    let mut coefficient = numerator / i128::from(LayoutUnit::UNITS_PER_POINT);
+    if negative {
+        coefficient = -coefficient;
+    }
+    while scale > 0 && coefficient % 10 == 0 {
+        scale -= 1;
+        coefficient /= 10;
+    }
+    let precise = match i64::try_from(coefficient) {
+        Ok(coefficient) => SceneDecimal::Exact { coefficient, scale },
+        Err(_) => SceneDecimal::Approximate(coefficient as f64 / 10_i128.pow(scale) as f64),
+    };
+    Ok((LayoutUnit::from_raw(rounded), precise))
 }
 
 #[cfg(test)]
