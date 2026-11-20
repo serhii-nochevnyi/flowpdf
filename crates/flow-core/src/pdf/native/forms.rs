@@ -816,6 +816,7 @@ pub(super) fn field_name_inventory(
     Ok(names)
 }
 
+// @contract: Match PDF 1.7 note text: UTF-16BE with a BOM, otherwise validated PDFDocEncoding.
 fn decode_field_name(
     bytes: &[u8],
     limit: usize,
@@ -843,20 +844,8 @@ fn decode_field_name(
             name.push(scalar);
         }
         name
-    } else if let Some(utf8) = bytes.strip_prefix(&[0xef, 0xbb, 0xbf]) {
-        let Ok(utf8) = std::str::from_utf8(utf8) else {
-            return Ok(None);
-        };
-        if utf8.len() > limit {
-            return Ok(None);
-        }
-        spend(&mut available, utf8.len())?;
-        let mut name = String::new();
-        name.try_reserve_exact(utf8.len()).map_err(|_| Budget)?;
-        name.push_str(utf8);
-        name
     } else {
-        if bytes.len() > limit {
+        if bytes.len() > limit || bytes.iter().any(|&byte| matches!(byte, 0x7f | 0x9f | 0xad)) {
             return Ok(None);
         }
         spend(&mut available, bytes.len().checked_mul(3).ok_or(Budget)?)?;

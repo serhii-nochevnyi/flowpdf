@@ -1334,13 +1334,13 @@ fn duplicate_skips_copy_names_reserved_by_read_only_fields() {
         (0, "<< /Type /Page /Parent 2 0 R /Annots [5 0 R] >>"),
         (
             0,
-            "<< /Type /Page /Parent 2 0 R /Annots [7 0 R 9 0 R 11 0 R] >>",
+            "<< /Type /Page /Parent 2 0 R /Annots [7 0 R 9 0 R 11 0 R 12 0 R] >>",
         ),
         (
             0,
             "<< /Type /Annot /Subtype /Widget /P 3 0 R /Rect [40 60 80 90] /FT /Btn /T (approval) /V /Off /AS /Off >>",
         ),
-        (0, "<< /Fields [5 0 R 7 0 R 9 0 R 10 0 R] >>"),
+        (0, "<< /Fields [5 0 R 7 0 R 9 0 R 10 0 R 12 0 R] >>"),
         (
             0,
             "<< /Type /Annot /Subtype /Widget /P 4 0 R /Rect [40 60 80 90] /FT /Tx /Ff 1 /T 8 0 R /V (data) >>",
@@ -1360,6 +1360,10 @@ fn duplicate_skips_copy_names_reserved_by_read_only_fields() {
         (
             0,
             "<< /Type /Annot /Subtype /Widget /P 4 0 R /Rect [40 140 80 170] /Parent 10 0 R /T <FEFF0041000A0042> >>",
+        ),
+        (
+            0,
+            "<< /Type /Annot /Subtype /Widget /P 4 0 R /Rect [40 180 80 210] /FT /Tx /Ff 1 /T <EFBBBF466C6F77504446436F7079355F32> /V (data) >>",
         ),
     ]);
     let mut session =
@@ -1381,17 +1385,27 @@ fn duplicate_skips_copy_names_reserved_by_read_only_fields() {
 
     let duplicate = command("duplicatePage", 0, prior);
     session.apply_page(prior.binding, 1, &duplicate).unwrap();
-    let fields = &session.snapshot().fields;
-    assert_eq!(fields.len(), 5);
-    let copy = fields.iter().find(|field| field.page == 1).unwrap();
-    assert_eq!(copy.name.as_deref(), Some("FlowPDFCopy5_2"));
-    let read_only = fields
-        .iter()
-        .find(|field| field.page == 2 && field.name.as_deref() == Some("FlowPDFCopy5_0"))
-        .unwrap();
-    assert!(!read_only.can_edit_appearance);
+    let assert_fields = |pdf: &NativePdfSession| {
+        let fields = &pdf.snapshot().fields;
+        assert_eq!(fields.len(), 6);
+        let copy = fields.iter().find(|field| field.page == 1).unwrap();
+        assert_eq!(copy.name.as_deref(), Some("FlowPDFCopy5_2"));
+        for label in ["FlowPDFCopy5_0", "ï»¿FlowPDFCopy5_2"] {
+            let read_only = fields
+                .iter()
+                .find(|field| field.page == 2 && field.name.as_deref() == Some(label))
+                .unwrap();
+            assert!(!read_only.can_edit_appearance);
+        }
+    };
+    assert_fields(&session);
+    let reopened =
+        NativePdfSession::open_scoped(session.output_bytes(), NativeEditLimits::default(), [3; 16])
+            .unwrap();
+    assert_fields(&reopened);
     let output = String::from_utf8_lossy(session.output_bytes());
     assert!(output.contains(&format!("/T <{}>", "61".repeat(65))));
+    assert!(output.contains("/T <EFBBBF466C6F77504446436F7079355F32>"));
 }
 
 #[test]

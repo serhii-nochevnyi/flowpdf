@@ -3,7 +3,7 @@ mod graph;
 
 use flow_core::{
     NativeEditLimits, NativeNoteCommand, NativePdfAnnotation, NativePdfSession,
-    NativeRequestLookup, NativeSessionError,
+    NativeReadOnlyAnnotation, NativeRequestLookup, NativeSessionError,
 };
 
 #[test]
@@ -212,47 +212,61 @@ fn old_runtime_epoch_cannot_edit_replacement_session() {
 }
 
 #[test]
-fn pdf_17_note_preserves_pdfdocencoding_across_rewrite() {
-    let bytes = graph::fixture_with_contents("", "/Annots 33 0 R", "<EFBBBF4E6F7465>");
-    let mut session =
-        NativePdfSession::open_scoped(&bytes, NativeEditLimits::default(), [1; 16]).unwrap();
-    let NativePdfAnnotation::PlainNote(note) = &session.snapshot().scene.pages[0].annotations[0]
-    else {
-        panic!("expected a plain imported note");
-    };
-    let (id, rect) = (note.id, note.rect);
-    assert_eq!(note.contents, "ï»¿Note");
-
-    session
-        .apply(
-            session.snapshot().binding,
-            1,
-            &NativeNoteCommand::Add {
-                page: session.snapshot().scene.pages[1].id,
-                rect: [20, 30, 40, 50],
-                contents: "Another note".into(),
-            },
-        )
-        .unwrap();
-    let reopened = reopen_accepted(&session);
-    let NativePdfAnnotation::PlainNote(reopened_note) =
-        &reopened.snapshot().scene.pages[0].annotations[0]
-    else {
-        panic!("expected the reopened imported note");
-    };
-    assert_eq!(reopened_note.rect, rect);
-    assert_eq!(reopened_note.contents, "ï»¿Note");
-    assert!(matches!(
-        &session.snapshot().scene.pages[0].annotations[0],
-        NativePdfAnnotation::PlainNote(note) if note.id == id && note.contents == reopened_note.contents
-    ));
-    assert!(
+fn pdf_17_notes_preserve_text_decoding_across_rewrite() {
+    for (encoded, contents) in [
+        ("<EFBBBF436166C3A9>", Some("ï»¿CafÃ©")),
+        ("<18A080>", Some("˘€•")),
+        ("<FEFFD83DDE00>", Some("😀")),
+        ("<417F>", None),
+        ("<419F>", None),
+        ("<41AD>", None),
+        ("<FEFFD800>", None),
+    ] {
+        let bytes = graph::fixture_with_contents("", "/Annots 33 0 R", encoded);
+        let mut session =
+            NativePdfSession::open_scoped(&bytes, NativeEditLimits::default(), [1; 16]).unwrap();
+        let imported_note_id = |pdf: &NativePdfSession| {
+            let annotation = &pdf.snapshot().scene.pages[0].annotations[0];
+            match (annotation, contents) {
+                (NativePdfAnnotation::PlainNote(note), Some(contents)) => {
+                    assert_eq!(note.contents, contents);
+                    assert_eq!(note.rect, [20, 30, 40, 50]);
+                    Some(note.id)
+                }
+                (
+                    NativePdfAnnotation::ReadOnly {
+                        profile: NativeReadOnlyAnnotation::Text,
+                        ..
+                    },
+                    None,
+                ) => None,
+                (annotation, _) => panic!("unexpected note for {encoded}: {annotation:?}"),
+            }
+        };
+        let original_id = imported_note_id(&session);
         session
-            .output_bytes()
-            .windows(b"<EFBBBF4E6F7465>".len())
-            .any(|bytes| bytes == b"<EFBBBF4E6F7465>")
-    );
-    assert_eq!(session.origin_bytes(), bytes);
+            .apply(
+                session.snapshot().binding,
+                1,
+                &NativeNoteCommand::Add {
+                    page: session.snapshot().scene.pages[1].id,
+                    rect: [20, 30, 40, 50],
+                    contents: "Another note".into(),
+                },
+            )
+            .unwrap();
+        let reopened = reopen_accepted(&session);
+        assert_eq!(imported_note_id(&session), original_id);
+        assert_eq!(imported_note_id(&reopened).is_some(), contents.is_some());
+        let token = format!("/Contents {encoded}");
+        assert!(
+            session
+                .output_bytes()
+                .windows(token.len())
+                .any(|bytes| bytes == token.as_bytes())
+        );
+        assert_eq!(session.origin_bytes(), bytes);
+    }
 }
 
 #[test]
