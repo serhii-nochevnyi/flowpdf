@@ -1241,8 +1241,6 @@ pub(super) fn read_scene_name(bytes: &[u8], position: &mut usize) -> Result<Stri
 
 fn scene_name_identity(bytes: Vec<u8>) -> String {
     String::from_utf8(bytes).unwrap_or_else(|invalid| {
-        // Decoded PDF names cannot contain NUL. Reserve it to keep byte names
-        // distinct from every valid UTF-8 name, including Latin-1 lookalikes.
         let mut name = String::with_capacity(1 + invalid.as_bytes().len() * 2);
         name.push('\0');
         name.extend(invalid.into_bytes().into_iter().map(char::from));
