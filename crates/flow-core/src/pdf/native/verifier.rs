@@ -191,6 +191,20 @@ impl NativeVerificationLane {
         }
     }
 
+    fn verify<'w>(
+        retained: &mut Reservation<'w>,
+        expected: &[NativeRedactionPageEvidence],
+        check: impl FnOnce(&mut Reservation<'w>) -> VerifyResult<Vec<NativeRedactionPageEvidence>>,
+    ) -> Self {
+        let mut lane_bytes = retained.workspace().scope();
+        let lane = Self::from_result(check(&mut lane_bytes), expected);
+        if lane.status == NativeVerificationStatus::Passed {
+            // @invariant: The next lane shares the workspace with this result.
+            retained.bytes += std::mem::take(&mut lane_bytes.bytes);
+        }
+        lane
+    }
+
     fn covers(&self, pages: &[NativeRedactionPageEvidence]) -> bool {
         self.status == NativeVerificationStatus::Passed
             && self.failure.is_none()
@@ -209,6 +223,18 @@ pub struct VersionedNativeRedactionEvidence {
 }
 
 impl VersionedNativeRedactionEvidence {
+    pub(super) fn retained(&self) -> usize {
+        let identity = self
+            .identity
+            .as_ref()
+            .map_or(0, |identity| identity.affected_pages.capacity());
+        (identity
+            + self.structure.covered_pages.capacity()
+            + self.text.covered_pages.capacity()
+            + self.raster.covered_pages.capacity())
+            * size_of::<NativeRedactionPageEvidence>()
+    }
+
     pub fn identity(&self) -> Option<&NativeRedactionEvidenceIdentity> {
         self.identity.as_ref()
     }
@@ -287,45 +313,38 @@ pub(super) fn verify_with_workspace(
         text: NativeVerificationLane::pending(),
         raster: NativeVerificationLane::pending(),
     };
-    let identity = match bind(origin, accepted, candidate, context, policy) {
+    let workspace = Workspace::new(allowance);
+    let mut retained = workspace.scope();
+    let identity = match bind(origin, accepted, candidate, context, policy, &mut retained) {
         Ok(identity) => evidence.identity.insert(identity),
         Err(error) => {
             evidence.identity_failure = Some(error);
             return evidence;
         }
     };
-    let workspace = Workspace::new(allowance);
-    evidence.structure = NativeVerificationLane::from_result(
-        verify_structure::verify(
-            accepted,
-            candidate,
-            context.page_order,
-            policy.marks,
-            &workspace,
-        ),
-        &identity.affected_pages,
-    );
+    let expected = &identity.affected_pages;
+    evidence.structure = NativeVerificationLane::verify(&mut retained, expected, |pages| {
+        verify_structure::verify(accepted, candidate, context.page_order, policy.marks, pages)
+    });
     if evidence.structure.status == NativeVerificationStatus::Passed {
-        evidence.text = NativeVerificationLane::from_result(
+        evidence.text = NativeVerificationLane::verify(&mut retained, expected, |pages| {
             verify_text::verify_with_workspace(
                 accepted,
                 candidate,
                 context.page_order,
                 policy.marks,
-                &workspace,
-            ),
-            &identity.affected_pages,
-        );
-        evidence.raster = NativeVerificationLane::from_result(
+                pages,
+            )
+        });
+        evidence.raster = NativeVerificationLane::verify(&mut retained, expected, |pages| {
             verify_raster::verify_with_workspace(
                 accepted,
                 candidate,
                 context.page_order,
                 policy.marks,
-                &workspace,
-            ),
-            &identity.affected_pages,
-        );
+                pages,
+            )
+        });
     }
     evidence
 }
@@ -360,6 +379,7 @@ fn bind(
     candidate: &[u8],
     context: NativeRedactionContext<'_>,
     policy: NativeRedactionPolicy<'_>,
+    retained: &mut Reservation<'_>,
 ) -> VerifyResult<NativeRedactionEvidenceIdentity> {
     use NativeVerificationFailure::{Budget, Coverage, Identity};
     if origin.len().max(accepted.len()).max(candidate.len()) > verify_structure::MAX_INPUT
@@ -382,8 +402,13 @@ fn bind(
     {
         return Err(Identity);
     }
-    let order: BTreeSet<_> = context.page_order.iter().copied().collect();
-    if order.len() != context.page_order.len() || policy.marks.is_empty() {
+    let order = context.page_order;
+    if policy.marks.is_empty()
+        || order
+            .iter()
+            .enumerate()
+            .any(|(index, page)| order[..index].contains(page))
+    {
         return Err(Coverage);
     }
     for mark in policy.marks {
@@ -398,20 +423,7 @@ fn bind(
             return Err(Coverage);
         }
     }
-    let affected_pages = context
-        .page_order
-        .iter()
-        .filter_map(|&page_id| {
-            policy
-                .marks
-                .iter()
-                .find(|mark| mark.page_id == page_id)
-                .map(|mark| NativeRedactionPageEvidence {
-                    page_id,
-                    geometry: mark.geometry,
-                })
-        })
-        .collect();
+    let affected_pages = retained.collect_affected_pages(order, policy.marks)?;
     Ok(NativeRedactionEvidenceIdentity {
         binding: context.binding,
         request_id: context.request_id,
@@ -419,8 +431,23 @@ fn bind(
         candidate_hash,
         validator_version: NATIVE_REDACTION_VALIDATOR_VERSION,
         validator_profile: NATIVE_REDACTION_VALIDATOR_PROFILE,
-        policy_hash: policy_hash(context.page_order, policy.marks),
+        policy_hash: policy_hash(order, policy.marks),
         affected_pages,
+    })
+}
+
+pub(super) fn affected_pages<'a>(
+    order: &'a [u64],
+    marks: &'a [NativeRedactionMark],
+) -> impl Iterator<Item = NativeRedactionPageEvidence> + Clone + 'a {
+    order.iter().filter_map(|&page_id| {
+        marks
+            .iter()
+            .find(|mark| mark.page_id == page_id)
+            .map(|mark| NativeRedactionPageEvidence {
+                page_id,
+                geometry: mark.geometry,
+            })
     })
 }
 
@@ -478,7 +505,34 @@ pub(super) struct Reservation<'a> {
     bytes: usize,
 }
 
-impl Reservation<'_> {
+impl<'a> Reservation<'a> {
+    pub fn workspace(&self) -> &'a Workspace {
+        self.workspace
+    }
+
+    pub fn page_evidence(
+        &mut self,
+        count: usize,
+    ) -> VerifyResult<Vec<NativeRedactionPageEvidence>> {
+        self.grow(count * size_of::<NativeRedactionPageEvidence>())?;
+        let mut pages = Vec::new();
+        pages
+            .try_reserve_exact(count)
+            .map_err(|_| NativeVerificationFailure::Budget)?;
+        Ok(pages)
+    }
+
+    pub fn collect_affected_pages(
+        &mut self,
+        order: &[u64],
+        marks: &[NativeRedactionMark],
+    ) -> VerifyResult<Vec<NativeRedactionPageEvidence>> {
+        let affected = affected_pages(order, marks);
+        let mut pages = self.page_evidence(affected.clone().count())?;
+        pages.extend(affected);
+        Ok(pages)
+    }
+
     pub fn grow(&mut self, bytes: usize) -> VerifyResult<()> {
         let mut remaining = self.workspace.remaining();
         spend(&mut remaining, bytes)?;
@@ -566,5 +620,60 @@ mod tests {
             )
             .covers(&expected)
         );
+    }
+
+    #[test]
+    fn page_evidence_shares_the_workspace_with_later_lanes_and_scratch() {
+        use NativeVerificationFailure::{Budget, Coverage};
+        use NativeVerificationStatus::{Inconclusive, Passed};
+
+        let geometry = NativeRedactionGeometry {
+            media_box: [0, 0, 100_000, 100_000],
+            crop_box: [0, 0, 100_000, 100_000],
+            rotation: 0,
+        };
+        let marks = [NativeRedactionMark {
+            page_id: 6,
+            geometry,
+            rect: [10_000, 10_000, 20_000, 20_000],
+        }];
+        let page_bytes = size_of::<NativeRedactionPageEvidence>();
+        let too_small = Workspace::new(page_bytes - 1);
+        assert_eq!(
+            too_small.scope().collect_affected_pages(&[6], &marks),
+            Err(Budget)
+        );
+
+        let workspace = Workspace::new(3 * page_bytes);
+        let mut retained = workspace.scope();
+        let expected = retained.collect_affected_pages(&[6], &marks).unwrap();
+        let structure = NativeVerificationLane::verify(&mut retained, &expected, |bytes| {
+            bytes.collect_affected_pages(&[6], &marks)
+        });
+        assert_eq!(structure.status(), Passed);
+        assert_eq!(workspace.remaining(), page_bytes);
+
+        let text = NativeVerificationLane::verify(&mut retained, &expected, |bytes| {
+            let covered = bytes.collect_affected_pages(&[6], &marks)?;
+            let _scratch = bytes.workspace().reserve(1)?;
+            Ok(covered)
+        });
+        assert_eq!(text.status(), Inconclusive);
+        assert_eq!(text.failure(), Some(Budget));
+        assert!(text.covered_pages().is_empty());
+        assert_eq!(workspace.remaining(), page_bytes);
+
+        let mismatch = NativeVerificationLane::verify(&mut retained, &expected, |bytes| {
+            bytes.page_evidence(1)
+        });
+        assert_eq!(mismatch.failure(), Some(Coverage));
+        assert_eq!(workspace.remaining(), page_bytes);
+
+        let raster = NativeVerificationLane::verify(&mut retained, &expected, |bytes| {
+            bytes.collect_affected_pages(&[6], &marks)
+        });
+        assert_eq!(raster.status(), Passed);
+        assert_eq!(raster.covered_pages(), expected.as_slice());
+        assert_eq!(workspace.remaining(), 0);
     }
 }
