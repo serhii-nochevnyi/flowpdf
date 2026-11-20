@@ -655,7 +655,6 @@ struct ScannedPage<'w> {
 
 impl ScannedPage<'_> {
     fn insertion(&self) -> Result<bool> {
-        // The insertion saves its own state after the enclosing save has been restored.
         let restore_page = self.matrix.0 != Matrix::IDENTITY.0;
         let enclosing_save = usize::from(restore_page);
         if self.found.len() >= MAX_OBJECTS_PER_PAGE
@@ -1722,7 +1721,6 @@ pub(super) fn stage(
     }
     retain_reachable(graph, &mut remaining)?;
 
-    // The first scan remains live while checking the edited graph.
     let _edit_memory = workspace
         .reserve(workspace.remaining() - remaining)
         .map_err(|_| Budget)?;
