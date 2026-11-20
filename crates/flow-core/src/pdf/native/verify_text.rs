@@ -31,7 +31,7 @@ pub(super) fn verify(
     marks: &[NativeRedactionMark],
 ) -> VerifyResult<Vec<NativeRedactionPageEvidence>> {
     let workspace = Workspace::new(super::verifier::STANDALONE_WORKSPACE);
-    verify_with_workspace(accepted, candidate, order, marks, &workspace)
+    verify_with_workspace(accepted, candidate, order, marks, &mut workspace.scope())
 }
 
 pub(super) fn verify_with_workspace(
@@ -39,12 +39,13 @@ pub(super) fn verify_with_workspace(
     candidate: &[u8],
     order: &[u64],
     marks: &[NativeRedactionMark],
-    workspace: &Workspace,
+    evidence_bytes: &mut Reservation<'_>,
 ) -> VerifyResult<Vec<NativeRedactionPageEvidence>> {
+    let workspace = evidence_bytes.workspace();
     let mut documents = workspace.scope();
     let accepted = Document::open(accepted, Side::Accepted, workspace, &mut documents)?;
     let candidate = Document::open(candidate, Side::Candidate, workspace, &mut documents)?;
-    let covered = coverage(&accepted, &candidate, order, marks, workspace)?;
+    let covered = coverage(&accepted, &candidate, order, marks, evidence_bytes)?;
     let mut retained = workspace.scope();
     let mut before = Extraction::new(workspace);
     let mut after = Extraction::new(workspace);

@@ -1,7 +1,8 @@
 use flow_core::pdf::native::{
-    NativeBinding, NativeRedactionContext, NativeRedactionGeometry, NativeRedactionMark,
-    NativeRedactionPolicy, NativeVerificationFailure, NativeVerificationStatus,
-    verify_native_redaction,
+    NativeBinding, NativeEditLimits, NativePdfSession, NativeRedactionContext,
+    NativeRedactionGeometry, NativeRedactionMark, NativeRedactionPageEvidence,
+    NativeRedactionPolicy, NativeRedactionStage, NativeVerificationFailure,
+    NativeVerificationStatus, verify_native_redaction,
 };
 
 fn stream(dict: &str, bytes: &[u8]) -> Vec<u8> {
@@ -125,6 +126,71 @@ fn fresh_structure_and_full_page_raster_pass_a_scrubbed_pair() {
     assert_eq!(evidence.text().status(), NativeVerificationStatus::Passed);
     assert_eq!(evidence.raster().status(), NativeVerificationStatus::Passed);
     assert_eq!(evidence.raster().covered_pages()[0].page_id, 91);
+}
+
+#[test]
+fn bounded_session_and_standalone_verifier_agree_on_marked_pages() {
+    let marked = format!("{SECRET}{PUBLIC}");
+    let source = pdf(
+        &[(&marked, ""), ("0 g 35 35 5 5 re f", ""), (&marked, "")],
+        vec![],
+        "",
+    );
+    let limits = NativeEditLimits {
+        max_retained_bytes: 1024 * 1024,
+        ..NativeEditLimits::default()
+    };
+    let mut session = NativePdfSession::open_scoped(&source, limits, [3; 16]).unwrap();
+    let binding = session.snapshot().binding;
+    let order = session.snapshot().page_state.order.clone();
+    let marks = [
+        mark(order[2], [11_000, 11_000, 13_000, 13_000]),
+        mark(order[0], [11_000, 11_000, 13_000, 13_000]),
+        mark(order[0], [14_000, 14_000, 16_000, 16_000]),
+    ];
+    for &mark in &marks {
+        session.add_redaction_mark(binding, mark).unwrap();
+    }
+    let NativeRedactionStage::Pending(candidate) = session.stage_redaction(binding, 1).unwrap()
+    else {
+        panic!("expected pending status");
+    };
+    let expected = [order[0], order[2]].map(|page_id| NativeRedactionPageEvidence {
+        page_id,
+        geometry: GEOMETRY,
+    });
+    assert_eq!(
+        session.redaction_candidate_status().unwrap().affected_pages,
+        expected
+    );
+    let evidence = session.verify_redaction(binding, 1).unwrap();
+    assert!(evidence.checks_passed(), "{evidence:?}");
+    assert_eq!(evidence.identity().unwrap().affected_pages(), expected);
+    for lane in [evidence.structure(), evidence.text(), evidence.raster()] {
+        assert_eq!(lane.covered_pages(), expected);
+    }
+
+    let receipt = session.publish_redaction(binding, 1).unwrap();
+    assert_eq!(receipt.output_hash, candidate.candidate_hash);
+    let bytes = session.redacted_output_bytes().unwrap();
+    let context = NativeRedactionContext {
+        binding,
+        request_id: 1,
+        accepted_hash: binding.origin_hash,
+        page_order: &order,
+    };
+    let policy = NativeRedactionPolicy {
+        binding,
+        request_id: 1,
+        candidate_hash: candidate.candidate_hash,
+        marks: &marks,
+    };
+    let standalone = verify_native_redaction(&source, &source, bytes, context, policy);
+    assert!(
+        standalone.eligible_for(bytes, context, policy),
+        "{standalone:?}"
+    );
+    assert_eq!(session.accepted_redaction_evidence(), Some(&standalone));
 }
 
 fn independent_page_streams(
@@ -738,8 +804,6 @@ fn redaction_refuses_a_shared_form_with_conflicting_placements() {
 
 #[test]
 fn session_redacts_embedded_font_text_and_publishes_only_the_verified_hash() {
-    use flow_core::pdf::native::{NativeEditLimits, NativePdfSession, NativeRedactionStage};
-
     let source =
         text_pdf("BT /F 10 Tf 1 0 0 1 10 10 Tm (AB) Tj ET BT /F 10 Tf 60 60 Td (BA) Tj ET");
     let mut session =

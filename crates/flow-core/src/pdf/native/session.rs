@@ -7,9 +7,7 @@ use thiserror::Error;
 
 use super::super::reader::{PdfObjectRef, PdfReadError, PdfValue};
 use super::super::scene::{NativePdfAnnotation, NativePdfNoteScene};
-use super::candidate::{
-    Candidate, NativeRedactionCandidateStatus, NativeRedactionStage, evidence_reserve,
-};
+use super::candidate::{Candidate, NativeRedactionCandidateStatus, NativeRedactionStage};
 use super::forms::{self, NativeFieldCommand, NativeFieldRefusal, NativeFieldView};
 use super::graph::{NativeEditError, NativeEditLimits, NativePdfGraph, collect_refs, spend};
 use super::notes::{self, ExpectedNote, NativeNoteCommand, NativeNoteId};
@@ -554,13 +552,17 @@ impl NativePdfSession {
             return Err(NativeSessionError::InvalidRedactionMark);
         }
         let max_input = super::verify_structure::MAX_INPUT;
-        let pages = self.snapshot.page_state.order.len();
         let mut remaining = self.remaining_retained;
         spend(
             &mut remaining,
-            self.mark_bytes() + evidence_reserve(pages) + pages * 128,
+            self.mark_bytes() + self.ids.len() * OBJECT_ID_BYTES,
         )?;
-        spend(&mut remaining, self.ids.len() * OBJECT_ID_BYTES)?;
+        let workspace = Workspace::new(remaining);
+        let mut page_bytes = workspace.scope();
+        let affected = page_bytes
+            .collect_affected_pages(&self.snapshot.page_state.order, &self.redaction_marks)
+            .map_err(|_| NativeSessionError::Budget)?;
+        let remaining = workspace.remaining();
         let mut limits = accepted_input_limits(self.snapshot.limits, binding);
         let output_budget = limits.max_output_bytes.min(max_input).min(remaining / 5);
         if output_budget == 0 {
@@ -587,12 +589,7 @@ impl NativePdfSession {
         let reopened =
             NativePdfGraph::open(&bytes, reopen_limits).map_err(redaction_graph_error)?;
         let ids = preserve_and_remap(&staged, &reopened, &self.ids)?;
-        let candidate = Candidate::new(
-            bytes,
-            ids,
-            self.redaction_context(request_id),
-            &self.redaction_marks,
-        );
+        let candidate = Candidate::new(bytes, ids, self.redaction_context(request_id), affected);
         let mut remaining = self.remaining_retained;
         spend(&mut remaining, self.mark_bytes() + candidate.retained())?;
         let result = NativeRedactionStage::Pending(candidate.status().identity);
@@ -653,7 +650,6 @@ impl NativePdfSession {
             .verified_bytes(context, &self.redaction_marks)
             .ok_or(NativeSessionError::RedactionUnverified)?;
         let output_hash = candidate.status().identity.candidate_hash;
-        let evidence_bytes = evidence_reserve(candidate.status().affected_pages.len());
         let revision = binding
             .revision
             .checked_add(1)
@@ -679,7 +675,6 @@ impl NativePdfSession {
             record_count,
             reopened.remaining_retained(),
         )?;
-        spend(&mut scene_remaining, evidence_bytes)?;
         let fields = forms::project(&reopened, &scene.pages, next_binding, &mut scene_remaining)?;
         let state = page_state(
             &reopened,
@@ -719,8 +714,11 @@ impl NativePdfSession {
             .and_then(|candidate| candidate.into_verified(context, &self.redaction_marks))
             .ok_or(NativeSessionError::RedactionUnverified)?;
         let source_spare = verified.bytes.capacity() - verified.bytes.len();
-        let retained_refund =
-            self.snapshot.limits.max_retained_bytes - limits.max_retained_bytes - source_spare;
+        // @invariant: The candidate's evidence reservation transfers with the verdict.
+        let retained_refund = self.snapshot.limits.max_retained_bytes
+            - limits.max_retained_bytes
+            - source_spare
+            - verified.evidence.retained();
         reopened.source = verified.bytes;
         let previous = std::mem::replace(&mut self.graph, reopened);
         self.redaction_admission.take();
@@ -1725,8 +1723,14 @@ mod tests {
             };
             session.add_redaction_mark(binding, mark).unwrap();
             session.stage_redaction(binding, 1).unwrap();
+            let before_verification = session.redaction_workspace().unwrap();
             let evidence = session.verify_redaction(binding, 1).unwrap();
             assert!(evidence.checks_passed(), "{evidence:?}");
+            let evidence_bytes = evidence.retained();
+            assert_eq!(
+                session.redaction_workspace().unwrap() + evidence_bytes,
+                before_verification
+            );
             session
         };
 

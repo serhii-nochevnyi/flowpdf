@@ -88,7 +88,7 @@ impl Candidate {
         bytes: Vec<u8>,
         ids: BTreeMap<PdfObjectRef, NativeNoteId>,
         context: NativeRedactionContext<'_>,
-        marks: &[NativeRedactionMark],
+        affected: Vec<NativeRedactionPageEvidence>,
     ) -> Self {
         Self {
             identity: NativeRedactionCandidateIdentity {
@@ -99,18 +99,7 @@ impl Candidate {
                 validator_version: NATIVE_REDACTION_VALIDATOR_VERSION,
                 validator_profile: NATIVE_REDACTION_VALIDATOR_PROFILE,
             },
-            affected: context
-                .page_order
-                .iter()
-                .filter_map(|&id| {
-                    marks.iter().find(|mark| mark.page_id == id).map(|mark| {
-                        NativeRedactionPageEvidence {
-                            page_id: id,
-                            geometry: mark.geometry,
-                        }
-                    })
-                })
-                .collect(),
+            affected,
             bytes,
             ids,
             evidence: None,
@@ -129,7 +118,10 @@ impl Candidate {
         self.bytes.capacity()
             + self.ids.len() * OBJECT_ID_BYTES
             + self.affected.capacity() * size_of::<NativeRedactionPageEvidence>()
-            + evidence_reserve(self.affected.len())
+            + self
+                .evidence
+                .as_ref()
+                .map_or(0, VersionedNativeRedactionEvidence::retained)
     }
 
     fn policy<'a>(&self, marks: &'a [NativeRedactionMark]) -> NativeRedactionPolicy<'a> {
@@ -194,13 +186,9 @@ pub(super) struct PublishedCandidate {
     pub evidence: VersionedNativeRedactionEvidence,
 }
 
-pub(super) fn evidence_reserve(pages: usize) -> usize {
-    1024 + 8 * pages * size_of::<NativeRedactionPageEvidence>()
-}
-
 #[cfg(test)]
 mod tests {
-    use super::super::verifier::STANDALONE_WORKSPACE;
+    use super::super::verifier::{STANDALONE_WORKSPACE, Workspace};
     use super::super::{NativeRedactionGeometry, tests::redaction_fixture};
     use super::*;
 
@@ -229,14 +217,22 @@ mod tests {
             },
             rect: [12_000, 12_000, 13_000, 13_000],
         }];
-        let mut candidate = Candidate::new(exact.clone(), BTreeMap::new(), context, &marks);
+        let workspace = Workspace::new(STANDALONE_WORKSPACE);
+        let mut page_bytes = workspace.scope();
+        let mut new_candidate = |bytes| {
+            let affected = page_bytes
+                .collect_affected_pages(context.page_order, &marks)
+                .unwrap();
+            Candidate::new(bytes, BTreeMap::new(), context, affected)
+        };
+        let mut candidate = new_candidate(exact.clone());
         assert_eq!(
             candidate.status().status(),
             NativeVerificationStatus::Pending
         );
         assert!(candidate.verified_bytes(context, &marks).is_none());
 
-        let mut mismatch = Candidate::new(other.clone(), BTreeMap::new(), context, &marks);
+        let mut mismatch = new_candidate(other.clone());
         assert!(
             !mismatch
                 .verify(&source, &source, context, &marks, STANDALONE_WORKSPACE)

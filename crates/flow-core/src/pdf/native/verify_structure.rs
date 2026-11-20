@@ -14,7 +14,7 @@ use super::verifier::{
     MAX_COORD, MAX_PAGES, NativeRedactionGeometry, NativeRedactionMark,
     NativeRedactionPageEvidence,
     NativeVerificationFailure::{Budget, Coverage, Structure, UnsupportedProfile},
-    POINT, Rect, Reservation, VerifyResult, Workspace, contains, spend, valid_rect,
+    POINT, Rect, Reservation, VerifyResult, Workspace, affected_pages, contains, spend, valid_rect,
 };
 
 pub(super) const MAX_INPUT: usize = 32 * 1024 * 1024;
@@ -77,12 +77,13 @@ pub(super) fn verify(
     candidate: &[u8],
     order: &[u64],
     marks: &[NativeRedactionMark],
-    workspace: &Workspace,
+    evidence_bytes: &mut Reservation<'_>,
 ) -> VerifyResult<Vec<NativeRedactionPageEvidence>> {
+    let workspace = evidence_bytes.workspace();
     let mut documents = workspace.scope();
     let accepted = Document::open(accepted, Side::Accepted, workspace, &mut documents)?;
     let candidate = Document::open(candidate, Side::Candidate, workspace, &mut documents)?;
-    coverage(&accepted, &candidate, order, marks, workspace)
+    coverage(&accepted, &candidate, order, marks, evidence_bytes)
 }
 
 fn read_error(error: PdfReadError) -> super::verifier::NativeVerificationFailure {
@@ -478,12 +479,13 @@ pub(super) fn coverage(
     candidate: &Document,
     order: &[u64],
     marks: &[NativeRedactionMark],
-    workspace: &Workspace,
+    evidence_bytes: &mut Reservation<'_>,
 ) -> VerifyResult<Vec<NativeRedactionPageEvidence>> {
     if order.len() != accepted.pages.len() || order.len() != candidate.pages.len() {
         return Err(Coverage);
     }
-    let mut covered = Vec::new();
+    let workspace = evidence_bytes.workspace();
+    let mut covered = evidence_bytes.page_evidence(affected_pages(order, marks).count())?;
     for (index, &page_id) in order.iter().enumerate() {
         let mut page_bytes = workspace.scope();
         let geometry = accepted.page(index, &mut page_bytes)?.geometry;
@@ -1185,6 +1187,51 @@ mod tests {
         ));
         drop(documents);
         assert_eq!(workspace.remaining(), allowance);
+    }
+
+    #[test]
+    fn coverage_reserves_evidence_while_documents_and_page_scratch_are_live() {
+        use super::super::tests::redaction_fixture;
+        use super::super::verifier::STANDALONE_WORKSPACE;
+
+        let source = redaction_fixture("10 10 10 10 re f 40 40 10 10 re f");
+        let result = redaction_fixture("40 40 10 10 re f");
+        let workspace = Workspace::new(STANDALONE_WORKSPACE);
+        let mut documents = workspace.scope();
+        let accepted = Document::open(&source, Side::Accepted, &workspace, &mut documents).unwrap();
+        let candidate =
+            Document::open(&result, Side::Candidate, &workspace, &mut documents).unwrap();
+        let remaining = workspace.remaining();
+        let mut page_scratch = workspace.scope();
+        let geometry = accepted.page(0, &mut page_scratch).unwrap().geometry;
+        candidate.page(0, &mut page_scratch).unwrap();
+        let scratch = remaining - workspace.remaining();
+        drop(page_scratch);
+        let capacity = size_of::<NativeRedactionPageEvidence>();
+        let marks = [NativeRedactionMark {
+            page_id: 1,
+            geometry,
+            rect: [12_000, 12_000, 13_000, 13_000],
+        }];
+        let _limit = workspace.reserve(remaining - scratch - capacity).unwrap();
+        {
+            let _short = workspace.reserve(1).unwrap();
+            let mut evidence = workspace.scope();
+            assert_eq!(
+                coverage(&accepted, &candidate, &[1], &marks, &mut evidence),
+                Err(Budget)
+            );
+        }
+        let mut evidence = workspace.scope();
+        let covered = coverage(&accepted, &candidate, &[1], &marks, &mut evidence).unwrap();
+        assert_eq!(
+            covered,
+            [NativeRedactionPageEvidence {
+                page_id: 1,
+                geometry
+            }]
+        );
+        assert_eq!(workspace.remaining(), scratch);
     }
 
     #[test]
