@@ -819,10 +819,12 @@ fn fractional_page_crop_matches_content_clip_for_images() {
         "/Type /XObject /Subtype /Image /ColorSpace /DeviceGray /Width 1 /Height 1 /BitsPerComponent 8",
         &[7],
     );
-    for (start, width, right, left, partial) in [
-        ("0", "10.006", "10.006", "10.003", true),
-        ("0", "9.997", "9.997", "9.998", false),
-        ("0.1", "0.2", "0.3", "0.3", false),
+    for (start, width, right, left, partial, image_count) in [
+        ("0", "10.006", "10.006", "10.003", true, 0),
+        ("0", "9.997", "9.997", "9.998", false, 0),
+        ("0.1", "0.2", "0.3", "0.3", false, 0),
+        ("0", "10.121", "10.121", "9.125", true, 1),
+        ("0", "10.125", "10.125", "9.125", false, 1),
     ] {
         let paint = format!("1 0 0 1 {left} 5 cm /I Do");
         let clip = format!("{start} 0 {width} 10 re W n {paint}");
@@ -836,13 +838,59 @@ fn fractional_page_crop_matches_content_clip_for_images() {
             let reader = open_pdf(&source, Default::default()).unwrap();
             let scene = read_pdf_scene(&reader, &PdfSceneRequest::default()).unwrap();
             let page = &scene.pages[0];
-            assert_eq!(page.partial, partial);
+            assert_eq!(page.partial, partial, "{right} {left} {dictionary}");
             assert_eq!(scene.report.partial, partial);
-            assert!(
+            assert_eq!(page.report.diagnostics.len(), usize::from(partial));
+            if let [diagnostic] = page.report.diagnostics.as_slice() {
+                assert_eq!(diagnostic.code, PdfReadDiagnosticCode::PartialPage);
+                assert_eq!(diagnostic.object_number, Some(5));
+            }
+            assert_eq!(
                 page.elements
                     .iter()
-                    .all(|element| matches!(element, PdfSceneElement::Clip { .. }))
+                    .filter(|element| matches!(element, PdfSceneElement::Image { .. }))
+                    .count(),
+                image_count
             );
+        }
+    }
+}
+
+#[test]
+fn image_readback_accounts_for_subunit_skew() {
+    let image = stream(
+        "/Type /XObject /Subtype /Image /ColorSpace /DeviceGray /Width 2 /Height 1 /BitsPerComponent 8",
+        &[7, 200],
+    );
+    for (b, c, partial) in [
+        ("0.004", "0", true),
+        ("0", "-0.004", true),
+        ("0", "0", false),
+    ] {
+        let paint = format!("q 10 {b} {c} 5 20.125 20 cm /I Do Q");
+        let source = fixture(
+            paint.as_bytes(),
+            false,
+            "/Resources << /XObject << /I 6 0 R >> >>",
+            std::slice::from_ref(&image),
+        );
+        let reader = open_pdf(&source, Default::default()).unwrap();
+        let scene = read_pdf_scene(&reader, &PdfSceneRequest::default()).unwrap();
+        let page = &scene.pages[0];
+        assert_eq!(page.partial, partial, "{paint}");
+        assert_eq!(scene.report.partial, partial);
+        if partial {
+            assert!(page.elements.is_empty());
+            assert!(matches!(page.report.diagnostics.as_slice(), [diagnostic]
+                if diagnostic.code == PdfReadDiagnosticCode::PartialPage
+                    && diagnostic.object_number == Some(5)));
+        } else {
+            let [PdfSceneElement::Image { value }] = page.elements.as_slice() else {
+                panic!("expected the axis-aligned image");
+            };
+            assert_eq!(value.data_hex, "07c8");
+            assert_eq!(value.rect.x.raw(), 20 * 64 + 8);
+            assert!(page.report.diagnostics.is_empty());
         }
     }
 }

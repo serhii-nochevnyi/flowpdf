@@ -477,6 +477,12 @@ impl PaintBounds {
         Self([left.max(x0), bottom.max(y0), right.min(x1), top.min(y1)])
     }
 
+    fn contains(self, other: Self) -> bool {
+        let [left, bottom, right, top] = self.0;
+        let [x0, y0, x1, y1] = other.0;
+        left <= x0 && bottom <= y0 && right >= x1 && top >= y1
+    }
+
     fn is_empty(self) -> bool {
         let [left, bottom, right, top] = self.0;
         left >= right || bottom >= top
@@ -487,6 +493,16 @@ impl PaintBounds {
 struct PaintMatrix([f64; 6]);
 
 impl PaintMatrix {
+    fn is_axis_aligned(self) -> bool {
+        let [a, b, c, d, ..] = self.0;
+        (b == 0. && c == 0.) || (a == 0. && d == 0.)
+    }
+
+    fn supports_image_rect(self) -> bool {
+        let [a, b, c, d, ..] = self.0;
+        a > 0. && d > 0. && b == 0. && c == 0.
+    }
+
     fn multiply(self, other: Self) -> Option<Self> {
         let [a, b, c, d, e, f] = self.0;
         let [g, h, i, j, k, l] = other.0;
@@ -1231,7 +1247,10 @@ impl<'a> SceneBuilder<'a> {
             }
             return Ok(false);
         }
-        if !intersection.rectangular || intersection.bounds != rect {
+        if !intersection.rectangular
+            || intersection.bounds != rect
+            || !paint_bounds.is_some_and(|bounds| self.state.paint_clip.contains(bounds))
+        {
             self.report_partial(provenance.object_ref);
         }
         Ok(true)
@@ -1565,8 +1584,9 @@ impl<'a> SceneBuilder<'a> {
                 };
                 let form_bounds = transformed_rect(form_ctm, bbox)?;
                 let zero = LayoutUnit::from_raw(0);
-                let rectangular = (form_ctm.b == zero && form_ctm.c == zero)
-                    || (form_ctm.a == zero && form_ctm.d == zero);
+                let rectangular = ((form_ctm.b == zero && form_ctm.c == zero)
+                    || (form_ctm.a == zero && form_ctm.d == zero))
+                    && form_paint_ctm.is_some_and(PaintMatrix::is_axis_aligned);
                 let clip = self.state.clip.intersect(form_bounds, rectangular)?;
                 self.push_element(PdfSceneElement::Annotation {
                     value: PdfAnnotationElement {
@@ -1685,7 +1705,15 @@ impl<'a> SceneBuilder<'a> {
         }
         let Matrix { a, b, c, d, .. } = self.state.ctm;
         // @contract: An image rectangle carries only positive axis-aligned placement.
-        if a <= zero || d <= zero || b != zero || c != zero {
+        if a <= zero
+            || d <= zero
+            || b != zero
+            || c != zero
+            || !self
+                .state
+                .paint_ctm
+                .is_some_and(PaintMatrix::supports_image_rect)
+        {
             self.report_partial(provenance.object_ref);
             return Ok(());
         }
