@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use super::super::reader::{PdfObjectRef, PdfValue};
+use super::super::reader::{PdfObjectRef, PdfReadError, PdfValue};
 use super::super::scene::{NativePdfAnnotation, NativePdfNoteScene};
 use super::candidate::{
     Candidate, NativeRedactionCandidateStatus, NativeRedactionStage, evidence_reserve,
@@ -313,12 +313,7 @@ impl NativePdfSession {
             .ok_or(NativeSessionError::TargetUnavailable)?;
         let geometry = redaction::geometry(&self.graph, index)
             .map_err(|_| NativeSessionError::TargetUnavailable)?;
-        let mut remaining = self.remaining_retained;
-        spend(
-            &mut remaining,
-            self.mark_bytes() + self.candidate.as_ref().map_or(0, Candidate::retained),
-        )?;
-        let workspace = Workspace::new(remaining);
+        let workspace = Workspace::new(self.redaction_workspace()?);
         super::verify_raster::accepted_page(self.output_bytes(), index, geometry, &workspace)
             .map_err(|error| match error {
                 NativeVerificationFailure::Budget => NativeSessionError::Budget,
@@ -328,12 +323,15 @@ impl NativePdfSession {
 
     pub fn redaction_admitted(&self) -> bool {
         *self.redaction_admission.get_or_init(|| {
-            let origin_len = Some(self.origin_bytes().len());
-            let limits = accepted_input_limits(self.snapshot.limits, self.snapshot.binding);
-            redaction::check_input_budget(&self.graph, origin_len).is_ok()
-                && NativePdfGraph::open(self.output_bytes(), limits).is_ok_and(|graph| {
-                    redaction::supports_document(&graph, &self.snapshot.page_state.order)
-                })
+            self.redaction_workspace().is_ok_and(|workspace| {
+                redaction::check_document(
+                    &self.graph,
+                    &self.snapshot.page_state.order,
+                    Some(self.origin_bytes().len()),
+                    workspace,
+                )
+                .is_ok()
+            })
         })
     }
 
@@ -411,6 +409,7 @@ impl NativePdfSession {
         self.candidate = None;
         self.redaction_marks.push(mark);
         self.redaction_marks_binding = Some(binding);
+        self.redaction_admission.take();
         Ok(())
     }
 
@@ -430,6 +429,7 @@ impl NativePdfSession {
         if self.redaction_marks.is_empty() {
             self.reset_marks();
         }
+        self.redaction_admission.take();
         Ok(())
     }
 
@@ -440,6 +440,7 @@ impl NativePdfSession {
         self.check_current_binding(binding)?;
         self.candidate = None;
         self.reset_marks();
+        self.redaction_admission.take();
         Ok(())
     }
 
@@ -450,6 +451,15 @@ impl NativePdfSession {
 
     fn mark_bytes(&self) -> usize {
         self.redaction_marks.capacity() * std::mem::size_of::<NativeRedactionMark>()
+    }
+
+    fn redaction_workspace(&self) -> Result<usize, NativeSessionError> {
+        let mut remaining = self.remaining_retained;
+        spend(
+            &mut remaining,
+            self.mark_bytes() + self.candidate.as_ref().map_or(0, Candidate::retained),
+        )?;
+        Ok(remaining)
     }
 
     pub fn redaction_candidate_status(&self) -> Option<NativeRedactionCandidateStatus<'_>> {
@@ -555,7 +565,8 @@ impl NativePdfSession {
         }
         limits.max_output_bytes = output_budget;
         limits.max_retained_bytes = remaining - output_budget;
-        let mut staged = NativePdfGraph::open(self.output_bytes(), limits)?;
+        let mut staged =
+            NativePdfGraph::open(self.output_bytes(), limits).map_err(redaction_graph_error)?;
         redaction::scrub(
             &mut staged,
             &self.snapshot.page_state.order,
@@ -570,7 +581,8 @@ impl NativePdfSession {
         if reopen_limits.max_retained_bytes == 0 || reopen_limits.max_total_decoded_bytes == 0 {
             return Err(NativeSessionError::Budget);
         }
-        let reopened = NativePdfGraph::open(&bytes, reopen_limits)?;
+        let reopened =
+            NativePdfGraph::open(&bytes, reopen_limits).map_err(redaction_graph_error)?;
         let ids = preserve_and_remap(&staged, &reopened, &self.ids)?;
         let candidate = Candidate::new(
             bytes,
@@ -582,6 +594,7 @@ impl NativePdfSession {
         spend(&mut remaining, self.mark_bytes() + candidate.retained())?;
         let result = NativeRedactionStage::Pending(candidate.status().identity);
         self.candidate = Some(candidate);
+        self.redaction_admission.take();
         Ok(result)
     }
 
@@ -591,10 +604,9 @@ impl NativePdfSession {
         request_id: u64,
     ) -> Result<&VersionedNativeRedactionEvidence, NativeSessionError> {
         self.check_candidate(binding, request_id)?;
+        let remaining = self.redaction_workspace()?;
         let accepted = self.graph.original_bytes();
         let origin = self.origin.as_deref().unwrap_or(accepted);
-        let mut remaining = self.remaining_retained;
-        spend(&mut remaining, self.mark_bytes())?;
         let context = NativeRedactionContext {
             binding: self.snapshot.binding,
             request_id,
@@ -605,8 +617,6 @@ impl NativePdfSession {
             .candidate
             .as_mut()
             .ok_or(NativeSessionError::RedactionCandidateUnavailable)?;
-        // @invariant: Candidate retention includes the evidence accumulated across lanes.
-        spend(&mut remaining, candidate.retained())?;
         Ok(candidate.verify(origin, accepted, context, &self.redaction_marks, remaining))
     }
 
@@ -617,6 +627,7 @@ impl NativePdfSession {
     ) -> Result<(), NativeSessionError> {
         self.check_candidate(binding, request_id)?;
         self.candidate = None;
+        self.redaction_admission.take();
         Ok(())
     }
 
@@ -849,34 +860,36 @@ impl NativePdfSession {
         redaction_admitted: bool,
         live: Option<&Self>,
     ) -> Result<bool, NativeSessionError> {
+        // @security: Live projections are authoritative only for the exact accepted bytes and binding.
+        if let Some(session) = live {
+            let snapshot = &session.snapshot;
+            return Ok(binding == snapshot.binding
+                && bytes == session.output_bytes()
+                && claimed_scene == snapshot.scene.scene_hash
+                && *state == snapshot.page_state
+                && claimed_fields == snapshot.fields
+                && projected_notes(&snapshot.scene).eq(claimed_notes.iter().copied())
+                && redaction_admitted == session.redaction_admitted());
+        }
         let hash = *blake3::hash(bytes).as_bytes();
-        if (binding.revision == 0 && binding.origin_hash != hash)
-            || live.is_some_and(|session| {
-                session.snapshot.binding != binding || session.snapshot.output_hash != hash
-            })
-        {
+        if binding.revision == 0 && binding.origin_hash != hash {
             return Ok(false);
         }
-        let graph = NativePdfGraph::open(bytes, accepted_input_limits(limits, binding))?;
-        let initial;
-        let ids = if let Some(session) = live {
-            &session.ids
-        } else {
-            initial = initial_ids(&graph);
-            &initial
-        };
-        let (scene, mut remaining) =
-            accepted_scene(&graph, ids, hash, binding, 0, 0, graph.remaining_retained())?;
-        let mut projected_notes = scene.pages.iter().flat_map(|page| {
-            page.annotations
-                .iter()
-                .filter_map(move |annotation| match annotation {
-                    NativePdfAnnotation::PlainNote(note) => {
-                        Some((page.id.0, note.object, note.id.0))
-                    }
-                    _ => None,
-                })
-        });
+        let graph = NativePdfGraph::open(bytes, accepted_input_limits(limits, binding))
+            .map_err(redaction_graph_error)?;
+        let mut remaining = graph.remaining_retained();
+        spend(&mut remaining, graph.objects.len() * OBJECT_ID_BYTES)?;
+        let ids = initial_ids(&graph);
+        let (scene, mut remaining) = accepted_scene(
+            &graph,
+            &ids,
+            hash,
+            binding,
+            0,
+            0,
+            graph.remaining_retained(),
+        )?;
+        let mut projected_notes = projected_notes(&scene);
         let mut seen = BTreeSet::new();
         let notes_match = claimed_notes
             .iter()
@@ -884,7 +897,7 @@ impl NativePdfSession {
                 let Some((page, object, projected_id)) = projected_notes.next() else {
                     return false;
                 };
-                let valid_id = if live.is_some() || binding.revision == 0 {
+                let valid_id = if binding.revision == 0 {
                     id == projected_id
                 } else {
                     id != 0
@@ -896,6 +909,7 @@ impl NativePdfSession {
                 page == claimed_page && object == claimed_object && valid_id && seen.insert(id)
             })
             && projected_notes.next().is_none();
+        drop(seen);
         if scene.scene_hash != claimed_scene
             || !notes_match
             || !state.valid_for_count(scene.pages.len())
@@ -903,21 +917,12 @@ impl NativePdfSession {
         {
             return Ok(false);
         }
-        let page_state_matches = if let Some(session) = live {
-            *state == session.snapshot.page_state
-        } else {
-            let projected = page_state(&graph, ids, None, &scene, &mut remaining)?;
-            state.restrictions == projected.restrictions
-                && (binding.revision != 0 || *state == projected)
-        };
-        Ok(page_state_matches
-            && live.map_or_else(
-                || {
-                    redaction::check_input_budget(&graph, None).is_ok()
-                        && redaction::supports_document(&graph, &state.order)
-                },
-                Self::redaction_admitted,
-            ) == redaction_admitted)
+        let projected = page_state(&graph, &ids, None, &scene, &mut remaining)?;
+        // @contract: A byte-only verifier cannot reconstruct live workspace reservations.
+        Ok(state.restrictions == projected.restrictions
+            && (binding.revision != 0 || *state == projected)
+            && (!redaction_admitted
+                || redaction::check_document(&graph, &state.order, None, remaining).is_ok()))
     }
 
     pub fn verify_page_projection(
@@ -1439,6 +1444,26 @@ fn accepted_input_limits(mut limits: NativeEditLimits, binding: NativeBinding) -
         limits.max_source_bytes = limits.max_output_bytes;
     }
     limits
+}
+
+fn redaction_graph_error(error: NativeEditError) -> NativeSessionError {
+    match error {
+        NativeEditError::Reader(
+            PdfReadError::InputSizeLimit | PdfReadError::DecodedStreamLimit,
+        ) => NativeSessionError::Budget,
+        error => error.into(),
+    }
+}
+
+fn projected_notes(scene: &NativePdfNoteScene) -> impl Iterator<Item = (u32, PdfObjectRef, u64)> {
+    scene.pages.iter().flat_map(|page| {
+        page.annotations
+            .iter()
+            .filter_map(move |annotation| match annotation {
+                NativePdfAnnotation::PlainNote(note) => Some((page.id.0, note.object, note.id.0)),
+                _ => None,
+            })
+    })
 }
 
 fn accepted_scene(

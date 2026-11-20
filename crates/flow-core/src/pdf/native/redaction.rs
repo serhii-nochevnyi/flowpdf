@@ -211,13 +211,13 @@ struct Inventory<'a> {
 }
 
 impl<'a> Inventory<'a> {
-    fn read(graph: &'a NativePdfGraph) -> Result<Self> {
+    fn read(graph: &'a NativePdfGraph, memory: usize) -> Result<Self> {
         let mut inventory = Self {
             graph,
             roles: BTreeMap::new(),
             pending: Vec::new(),
             work: graph.remaining_work(),
-            memory: graph.remaining_retained() / 4,
+            memory,
         };
         keys(&graph.trailer, &["Root", "Size", "Info", "ID"])?;
         inventory.link(get(&graph.trailer, "Root")?, Role::Catalog)?;
@@ -1329,7 +1329,7 @@ struct Scan<'a> {
 }
 
 impl<'a> Scan<'a> {
-    fn new(inventory: &Inventory<'a>) -> Self {
+    fn new(inventory: &Inventory<'a>, memory: usize) -> Self {
         let graph = inventory.graph;
         Self {
             graph,
@@ -1346,7 +1346,7 @@ impl<'a> Scan<'a> {
             note_uses: BTreeMap::new(),
             active_forms: BTreeSet::new(),
             work: inventory.work,
-            memory: graph.remaining_retained() / 2,
+            memory,
         }
     }
 
@@ -1789,7 +1789,8 @@ pub(super) fn scrub(
     {
         return Err(Unsupported);
     }
-    let (roles, edits, remaining_work) = scan_document(graph, order, marks)?;
+    let (roles, edits, remaining_work) =
+        scan_document(graph, order, marks, graph.remaining_retained())?;
     graph.charge_page_work(graph.remaining_work() - remaining_work)?;
     apply(graph, roles, edits)
 }
@@ -1807,20 +1808,27 @@ pub(super) fn check_input_budget(graph: &NativePdfGraph, origin_len: Option<usiz
     .ok_or(Budget)
 }
 
-pub(super) fn supports_document(graph: &NativePdfGraph, order: &[u64]) -> bool {
-    scan_document(graph, order, &[]).is_ok()
+pub(super) fn check_document(
+    graph: &NativePdfGraph,
+    order: &[u64],
+    origin_len: Option<usize>,
+    workspace: usize,
+) -> Result<()> {
+    check_input_budget(graph, origin_len)?;
+    scan_document(graph, order, &[], workspace).map(|_| ())
 }
 
 fn scan_document(
     graph: &NativePdfGraph,
     order: &[u64],
     marks: &[NativeRedactionMark],
+    workspace: usize,
 ) -> Result<(BTreeMap<Object, Role>, Edits, usize)> {
     if order.len() != graph.pages.len() || order.is_empty() || order.len() > MAX_PAGES {
         return Err(Unsupported);
     }
-    let inventory = Inventory::read(graph)?;
-    let mut scan = Scan::new(&inventory);
+    let inventory = Inventory::read(graph, workspace / 4)?;
+    let mut scan = Scan::new(&inventory, workspace / 2);
     for (&page, &page_id) in graph.pages.iter().zip(order) {
         scan.page(page, page_id, marks)?;
     }
@@ -2103,7 +2111,8 @@ mod tests {
     fn ordinary_admission_and_scrub_inventory_have_distinct_boundaries() {
         let pdf = redaction_fixture("10 10 10 10 re f");
         let mut graph = NativePdfGraph::open(&pdf, NativeEditLimits::default()).unwrap();
-        assert!(Inventory::read(&graph).is_ok());
+        let inventory_budget = graph.remaining_retained() / 4;
+        assert!(Inventory::read(&graph, inventory_budget).is_ok());
         let root = reference(get(&graph.trailer, "Root").unwrap()).unwrap();
         let page = graph.pages[0];
         for (id, fields) in [
@@ -2127,7 +2136,7 @@ mod tests {
                 };
                 dict.insert(field.into(), PdfValue::Null);
                 assert!(
-                    matches!(Inventory::read(&graph), Err(Unsupported)),
+                    matches!(Inventory::read(&graph, inventory_budget), Err(Unsupported)),
                     "{field}"
                 );
                 let Some(PdfValue::Dictionary(dict)) = graph.objects.get_mut(&id) else {
@@ -2139,7 +2148,7 @@ mod tests {
         for field in ["Prev", "Encrypt", "XRefStm"] {
             graph.trailer.insert(field.into(), PdfValue::Null);
             assert!(
-                matches!(Inventory::read(&graph), Err(Unsupported)),
+                matches!(Inventory::read(&graph, inventory_budget), Err(Unsupported)),
                 "{field}"
             );
             graph.trailer.remove(field);
@@ -2158,7 +2167,7 @@ mod tests {
             encoded: vec![127],
             source_offset: 0,
         };
-        let mut inventory = Inventory::read(&graph).unwrap();
+        let mut inventory = Inventory::read(&graph, inventory_budget).unwrap();
         assert!(inventory.inspect_stream(&image, Role::XObject).is_ok());
         for field in [
             "Mask",

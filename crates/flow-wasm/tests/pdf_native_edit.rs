@@ -586,18 +586,15 @@ fn redaction_admission_follows_the_accepted_pdf() {
     assert_eq!(clipped["redactionAdmission"], "unavailable");
     let rehashed = native_pdf_snapshot(bound("snapshot", 2, clipped).to_string());
     assert!(verify_native_pdf_response(rehashed.clone()));
-    let reply: Value = serde_json::from_str(&rehashed).unwrap();
-    let previous_hash = reply["resultHash"].as_str().unwrap();
-    let tampered = rehashed.replace(
+    let tampered = rehash_with_replacement(
+        &rehashed,
         r#""redactionAdmission":"unavailable""#,
         r#""redactionAdmission":"supported""#,
     );
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(b"flowpdf:native-wire:v1");
-    hasher.update(tampered.replace(previous_hash, "").as_bytes());
-    assert!(!verify_native_pdf_response(
-        tampered.replace(previous_hash, hasher.finalize().to_hex().as_str()),
-    ));
+    assert!(!verify_native_pdf_worker_response(tampered.clone()));
+    std::thread::spawn(move || assert!(!verify_native_pdf_response(tampered)))
+        .join()
+        .unwrap();
 
     let mark = |snapshot: &Value| {
         json!({"kind":"addMark","pageId":snapshot["pageState"]["order"][0],
@@ -638,6 +635,114 @@ fn redaction_admission_follows_the_accepted_pdf() {
         call(native_pdf_close, bound("close", 4, after))["status"],
         "closed"
     );
+}
+
+#[test]
+fn marked_snapshot_survives_live_redaction_budget_refusal() {
+    use flow_core::pdf::native::{
+        NATIVE_REQUEST_HISTORY, NativeEditLimits, NativePdfSession, NativeRedactionMark,
+    };
+
+    let fixture = |height: usize| {
+        let paint = b"q 80 0 0 80 10 10 cm /Photo Do Q";
+        let mut content = format!("<< /Length {} >>\nstream\n", paint.len()).into_bytes();
+        content.extend_from_slice(paint);
+        content.extend_from_slice(b"\nendstream");
+        let samples = 1024 * height;
+        let mut image = format!("<< /Type /XObject /Subtype /Image /Width 1024 /Height {height} /ColorSpace /DeviceGray /BitsPerComponent 8 /Length {samples} >>\nstream\n").into_bytes();
+        image
+            .extend((0..samples).map(|sample| ((sample / 1024 + (sample % 1024) / 4) % 256) as u8));
+        image.extend_from_slice(b"\nendstream");
+        fixture_pdf_bytes(&[
+            b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+            b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] /Contents 4 0 R /Resources << /XObject << /Photo 5 0 R >> >> >>".to_vec(),
+            content,
+            image,
+        ])
+    };
+    let limits = NativeEditLimits {
+        max_source_bytes: 8 * 1024 * 1024,
+        max_output_bytes: 8 * 1024 * 1024,
+        max_retained_bytes: 8 * 1024 * 1024
+            - (NATIVE_REQUEST_HISTORY * size_of::<(u64, [u8; 32])>() + 1024),
+        ..NativeEditLimits::default()
+    };
+    let open = |source: &[u8]| NativePdfSession::open_scoped(source, limits, [1; 16]);
+    // @contract: Tune the fixture to the worker allowance before reserving space for marks.
+    let mut low = 400;
+    let mut high = 2100;
+    assert!(open(&fixture(low)).unwrap().redaction_admitted());
+    assert!(!open(&fixture(high)).is_ok_and(|session| session.redaction_admitted()));
+    while low + 1 < high {
+        let mid = (low + high) / 2;
+        if open(&fixture(mid)).is_ok_and(|session| session.redaction_admitted()) {
+            low = mid;
+        } else {
+            high = mid;
+        }
+    }
+    let source = fixture(low);
+    let mut session = open(&source).unwrap();
+    let binding = session.snapshot().binding;
+    let page_id = session.snapshot().page_state.order[0];
+    let geometry = session.redaction_mark_geometry(page_id).unwrap();
+    let rect = |index: i64| [1000 + 2 * index, 1000, 1001 + 2 * index, 1100];
+    let mut marks = 0;
+    while session.redaction_admitted() {
+        assert!(marks < 128);
+        session
+            .add_redaction_mark(
+                binding,
+                NativeRedactionMark {
+                    page_id,
+                    geometry,
+                    rect: rect(marks),
+                },
+            )
+            .unwrap();
+        marks += 1;
+    }
+    drop(session);
+
+    let opened = call(native_pdf_open, open_request(&source));
+    assert_eq!(opened["status"], "opened");
+    let base = &opened["snapshot"];
+    assert_eq!(base["redactionAdmission"], "supported");
+    let unmarked = native_pdf_snapshot(bound("snapshot", 2, base).to_string());
+    assert!(verify_native_pdf_worker_response(unmarked.clone()));
+    std::thread::spawn(move || assert!(verify_native_pdf_response(unmarked)))
+        .join()
+        .unwrap();
+
+    for index in 0..marks {
+        let response = call(
+            native_pdf_redaction,
+            redaction_request(
+                index as u64 + 2,
+                base,
+                json!({
+                    "kind": "addMark", "pageId": base["pageState"]["order"][0], "rect": rect(index),
+                }),
+            ),
+        );
+        assert_eq!(response["status"], "redaction", "code={}", response["code"]);
+    }
+
+    let snapshot = native_pdf_snapshot(bound("snapshot", marks as u64 + 2, base).to_string());
+    assert!(verify_native_pdf_worker_response(snapshot.clone()));
+    let readback: Value = serde_json::from_str(&snapshot).unwrap();
+    assert_eq!(readback["status"], "unseen");
+    assert_eq!(readback["snapshot"]["redactionAdmission"], "unavailable");
+    for field in ["binding", "outputHash", "outputHex"] {
+        assert!(
+            readback["snapshot"][field] == base[field],
+            "{field} changed"
+        );
+    }
+    std::thread::spawn(move || assert!(verify_native_pdf_response(snapshot)))
+        .join()
+        .unwrap();
 }
 
 #[test]
@@ -697,7 +802,7 @@ fn redaction_wire_uses_the_accepted_revision_after_an_ordinary_edit() {
     assert_eq!(native_pdf_redaction(stage.to_string()), staged);
     std::thread::spawn(move || {
         assert!(verify_native_pdf_response(applied));
-        assert!(!verify_native_pdf_response(forged));
+        assert!(verify_native_pdf_response(forged));
         assert!(verify_native_pdf_response(staged));
     })
     .join()
