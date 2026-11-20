@@ -1447,7 +1447,7 @@ impl<'a, 'w> Scan<'a, 'w> {
             .map_err(|_| Budget)?;
         let _parser = reserve_content_tokens(
             self.workspace,
-            source.len(),
+            source,
             16_384,
             8 * size_of::<(ContentToken, usize, &[u8])>(),
         )?;
@@ -1997,6 +1997,101 @@ mod tests {
             }),
         );
         writer::rewrite(&graph).unwrap()
+    }
+
+    #[test]
+    fn nested_vector_chart_redacts_at_the_web_session_budget() {
+        use std::fmt::Write;
+
+        let limits = NativeEditLimits {
+            max_source_bytes: 8 * 1024 * 1024,
+            max_output_bytes: 8 * 1024 * 1024,
+            max_retained_bytes: 8 * 1024 * 1024
+                - (super::super::NATIVE_REQUEST_HISTORY * size_of::<(u64, [u8; 32])>() + 1024),
+            ..NativeEditLimits::default()
+        };
+        let resources = |id| {
+            PdfValue::Dictionary(BTreeMap::from([(
+                "XObject".into(),
+                PdfValue::Dictionary(BTreeMap::from([("Chart".into(), PdfValue::Reference(id))])),
+            )]))
+        };
+        let mut graph = NativePdfGraph::open(&redaction_fixture(""), limits).unwrap();
+        let PdfValue::Dictionary(page) = graph.objects.get_mut(&graph.pages[0]).unwrap() else {
+            unreachable!()
+        };
+        let contents = reference(get(page, "Contents").unwrap()).unwrap();
+        let form = |offset| Object {
+            object_number: contents.object_number + offset,
+            generation: 0,
+        };
+        page.insert("Resources".into(), resources(form(1)));
+
+        for (panel, suffix) in [
+            (0, "q 1 0 0 1 0 25 cm /Chart Do Q\n10 90 5 5 re f"),
+            (1, "q 1 0 0 1 0 25 cm /Chart Do Q"),
+            (2, ""),
+        ] {
+            let mut paint = String::from("% chart [bars]\n");
+            for bar in 0..125 {
+                let x = f64::from(bar) * 0.5;
+                let height = 0.5 + f64::from((bar * (panel + 3)) % 7) * 0.25;
+                writeln!(
+                    paint,
+                    "{x:.24} 2.000000000000000000000000 0.400000000000000000000000 {height:.24} re f"
+                )
+                .unwrap();
+            }
+            paint.push_str(suffix);
+            let mut dict =
+                BTreeMap::from([("Length".into(), PdfValue::Integer(paint.len() as i64))]);
+            if panel != 0 {
+                dict.insert("Type".into(), PdfValue::Name("XObject".into()));
+                dict.insert("Subtype".into(), PdfValue::Name("Form".into()));
+                dict.insert(
+                    "BBox".into(),
+                    PdfValue::Array([0, 0, 100, 75].map(PdfValue::Integer).to_vec()),
+                );
+                dict.insert(
+                    "Resources".into(),
+                    if panel == 1 {
+                        resources(form(2))
+                    } else {
+                        PdfValue::Dictionary(BTreeMap::new())
+                    },
+                );
+            }
+            graph.objects.insert(
+                form(panel as u32),
+                PdfValue::Stream(PdfStream {
+                    dict,
+                    encoded: paint.as_bytes().to_vec(),
+                    data: paint.into_bytes(),
+                    source_offset: 0,
+                }),
+            );
+        }
+
+        let source = writer::rewrite(&graph).unwrap();
+        let mut session = NativePdfSession::open_scoped(&source, limits, [5; 16]).unwrap();
+        let binding = session.snapshot().binding;
+        let page_id = session.snapshot().page_state.order[0];
+        session
+            .add_redaction_mark(
+                binding,
+                NativeRedactionMark {
+                    page_id,
+                    geometry: session.redaction_mark_geometry(page_id).unwrap(),
+                    rect: [11_000, 91_000, 14_000, 94_000],
+                },
+            )
+            .unwrap();
+        session.stage_redaction(binding, 1).unwrap();
+        let evidence = session.verify_redaction(binding, 1).unwrap();
+        assert!(evidence.checks_passed(), "{evidence:?}");
+        let receipt = session.publish_redaction(binding, 1).unwrap();
+        assert_eq!(receipt.binding.revision, 1);
+        assert_eq!(session.origin_bytes(), source);
     }
 
     #[test]

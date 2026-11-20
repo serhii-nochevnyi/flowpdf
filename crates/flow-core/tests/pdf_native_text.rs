@@ -213,7 +213,7 @@ fn core_refuses_replacement_when_recognition_workspace_is_exhausted() {
     }
     let bytes = fixture(&content, false, true, "", false);
     let limits = NativeEditLimits {
-        max_retained_bytes: 7 * 1024 * 1024,
+        max_retained_bytes: 4 * 1024 * 1024,
         ..NativeEditLimits::default()
     };
     let mut session = NativePdfSession::open_scoped(&bytes, limits, [7; 16]).unwrap();

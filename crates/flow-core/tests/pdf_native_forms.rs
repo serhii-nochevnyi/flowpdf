@@ -1,8 +1,8 @@
 use flow_core::pdf::native::{
-    NativeEditLimits, NativeFieldCommand, NativeFieldRefusal, NativePageCommand, NativePdfSession,
-    NativeRequestLookup, NativeSessionError,
+    NATIVE_MAX_FIELD_NAME_BYTES, NativeEditLimits, NativeFieldCommand, NativeFieldRefusal,
+    NativePageCommand, NativePdfSession, NativeRequestLookup, NativeSessionError,
 };
-use flow_core::pdf::{PdfSceneElement, PdfSceneRequest, open_pdf, read_pdf_scene};
+use flow_core::pdf::{PdfReaderLimits, PdfSceneElement, PdfSceneRequest, open_pdf, read_pdf_scene};
 use serde_json::json;
 
 fn build_pdf(objects: &[Vec<u8>]) -> Vec<u8> {
@@ -222,6 +222,34 @@ fn read_only_appearance_retains_verified_name_without_a_setter() {
 }
 
 #[test]
+fn public_widget_metadata_does_not_inherit_labels_from_rejected_split_fields() {
+    let bytes = build_pdf(&[
+        b"<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [5 0 R] >> >>".to_vec(),
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 500] /Annots [4 0 R 6 0 R] >>".to_vec(),
+        b"<< /Subtype /Widget /Parent 5 0 R /Rect [10 10 30 30] >>".to_vec(),
+        b"<< /FT /Tx /T (recipient) /V (saved) /Kids 7 0 R >>".to_vec(),
+        b"<< /Subtype /Widget /Parent 5 0 R /Rect [40 10 60 30] /FT /Btn /V /Yes >>".to_vec(),
+        b"[4 0 R 6 0 R]".to_vec(),
+    ]);
+    let reader = open_pdf(&bytes, Default::default()).unwrap();
+    let scene = read_pdf_scene(&reader, &PdfSceneRequest::default()).unwrap();
+    let [
+        PdfSceneElement::Form { value: first },
+        PdfSceneElement::Form { value: second },
+    ] = scene.pages[0].elements.as_slice()
+    else {
+        panic!("expected two form widgets");
+    };
+    assert_eq!(first.name, None);
+    assert_eq!(first.field_type, None);
+    assert_eq!(first.value, None);
+    assert_eq!(second.name, None);
+    assert_eq!(second.field_type.as_deref(), Some("Btn"));
+    assert_eq!(second.value.as_deref(), Some("Yes"));
+}
+
+#[test]
 fn named_read_only_widgets_keep_their_labels_after_a_page_rewrite() {
     let form = "/Type /XObject /Subtype /Form /BBox [0 0 20 20] /Resources <<>>";
     let max_label = format!("<{}>", "E9".repeat(32));
@@ -247,6 +275,27 @@ fn named_read_only_widgets_keep_their_labels_after_a_page_rewrite() {
             "<FEFF04170433043E04340430>",
             "/T null",
             [Some("Café"), Some("Згода")],
+            NativeFieldRefusal::Profile,
+        ),
+        (
+            "10 0 R",
+            "11 0 R",
+            "/T 12 0 R",
+            [Some("Café"), Some("Згода")],
+            NativeFieldRefusal::Profile,
+        ),
+        (
+            "11 0 R",
+            "(approval)",
+            "/T 10 0 R",
+            [Some("Згода"), Some("Café")],
+            NativeFieldRefusal::Profile,
+        ),
+        (
+            "11 0 R",
+            "(approval)",
+            "/T 14 0 R",
+            [Some("Згода"), None],
             NativeFieldRefusal::Profile,
         ),
         (
@@ -277,10 +326,15 @@ fn named_read_only_widgets_keep_their_labels_after_a_page_rewrite() {
             b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 500] /Annots [5 0 R 7 0 R] >>".to_vec(),
             b"<< /Fields [5 0 R 6 0 R] >>".to_vec(),
             format!("<< /Type /Annot /Subtype /Widget /FT /Btn /T {merged_name} /Ff 1 /V /Off /P 3 0 R /Rect [10 10 30 30] /AP << /N << /Off 8 0 R /Yes 9 0 R >> >> /AS /Off >>").into_bytes(),
-            format!("<< /FT /Btn /T {parent_name} /Ff 1 /V /Off /Kids [7 0 R] >>").into_bytes(),
+            format!("<< /FT /Btn /T {parent_name} /Ff 1 /V /Off /Kids 13 0 R >>").into_bytes(),
             format!("<< /Type /Annot /Subtype /Widget /Parent 6 0 R /P 3 0 R /Rect [40 10 60 30] /AP << /N << /Off 8 0 R /Yes 9 0 R >> >> /AS /Off {widget_label_entry} >>").into_bytes(),
             stream(form, b"q 1 g 0 0 20 20 re f 0 G 1 w 1 1 18 18 re S\nQ\n"),
             stream(form, b"q 1 g 0 0 20 20 re f 0 G 1 w 1 1 18 18 re S\n2 w 2 2 m 18 18 l 2 18 m 18 2 l S\nQ\n"),
+            b"<436166E9>".to_vec(),
+            b"<FEFF04170433043E04340430>".to_vec(),
+            b"null".to_vec(),
+            b"[7 0 R]".to_vec(),
+            b"true".to_vec(),
         ]);
         let mut pdf = session(&bytes);
         let assert_fields = |pdf: &NativePdfSession| {
@@ -293,6 +347,29 @@ fn named_read_only_widgets_keep_their_labels_after_a_page_rewrite() {
                 assert_eq!(field.kind, None);
                 assert_eq!(field.value, None);
                 assert_eq!(field.checked, None);
+            }
+
+            let reader = open_pdf(
+                pdf.output_bytes(),
+                PdfReaderLimits {
+                    max_string_bytes: NATIVE_MAX_FIELD_NAME_BYTES,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let scene = read_pdf_scene(&reader, &PdfSceneRequest::default()).unwrap();
+            let widgets: Vec<_> = scene.pages[0]
+                .elements
+                .iter()
+                .filter_map(|element| match element {
+                    PdfSceneElement::Form { value } => Some(value),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(widgets.len(), fields.len());
+            for (widget, field) in widgets.into_iter().zip(fields) {
+                assert_eq!(widget.provenance.object_ref, field.object);
+                assert_eq!(widget.name, field.name);
             }
         };
         assert_fields(&pdf);

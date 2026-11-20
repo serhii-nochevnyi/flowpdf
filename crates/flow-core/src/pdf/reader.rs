@@ -6,6 +6,7 @@
 //! syntax is classified explicitly and active content is never interpreted.
 
 use std::{
+    borrow::Cow,
     collections::{BTreeMap, BTreeSet},
     io::Cursor as IoCursor,
 };
@@ -331,7 +332,7 @@ pub(crate) enum PdfValue {
     Null,
     Boolean(bool),
     Integer(i64),
-    Real(LayoutUnit),
+    Real((LayoutUnit, f64)),
     // @invariant: The exact decimal token is retained independently of layout rounding.
     ExactReal(String),
     Name(String),
@@ -369,10 +370,20 @@ impl PdfValue {
             Self::Integer(value) => value
                 .checked_mul(LayoutUnit::UNITS_PER_POINT)
                 .map(LayoutUnit::from_raw),
-            Self::Real(value) => Some(*value),
+            Self::Real((value, _)) => Some(*value),
             Self::ExactReal(token) => parse_decimal(token.as_bytes()).ok(),
             _ => None,
         }
+    }
+
+    pub(super) fn as_precise_number(&self) -> Option<f64> {
+        let value = match self {
+            Self::Integer(value) => *value as f64,
+            Self::Real((_, precise)) => *precise,
+            Self::ExactReal(token) => token.parse().ok()?,
+            _ => return None,
+        };
+        value.is_finite().then_some(value)
     }
 
     pub(crate) fn as_reference(&self) -> Option<PdfObjectRef> {
@@ -397,10 +408,122 @@ impl PdfValue {
     }
 }
 
+pub(super) fn decode_pdf_text_string(
+    bytes: &[u8],
+    limit: usize,
+    remaining: &mut usize,
+) -> Result<Option<String>, PdfReadError> {
+    const ACCENTS: [char; 8] = ['˘', 'ˇ', 'ˆ', '˙', '˝', '˛', '˚', '˜'];
+    const SPECIAL: [char; 31] = [
+        '•', '†', '‡', '…', '—', '–', 'ƒ', '⁄', '‹', '›', '−', '‰', '„', '“', '”', '‘', '’', '‚',
+        '™', 'ﬁ', 'ﬂ', 'Ł', 'Œ', 'Š', 'Ÿ', 'Ž', 'ı', 'ł', 'œ', 'š', 'ž',
+    ];
+    let utf16 = bytes.strip_prefix(&[0xfe, 0xff]);
+    let units = if let Some(bytes) = utf16 {
+        if bytes.len() % 2 != 0 {
+            return Ok(None);
+        }
+        bytes.len() / 2
+    } else {
+        bytes.len()
+    };
+    if units > limit || (utf16.is_none() && bytes.iter().any(|&b| matches!(b, 0x7f | 0x9f | 0xad)))
+    {
+        return Ok(None);
+    }
+    let capacity = units.checked_mul(3).ok_or(PdfReadError::StreamLimit)?;
+    let available = remaining
+        .checked_sub(capacity)
+        .ok_or(PdfReadError::StreamLimit)?;
+    let mut text = String::new();
+    text.try_reserve_exact(capacity)
+        .map_err(|_| PdfReadError::StreamLimit)?;
+    if let Some(bytes) = utf16 {
+        let units = bytes
+            .chunks_exact(2)
+            .map(|b| u16::from_be_bytes([b[0], b[1]]));
+        for scalar in char::decode_utf16(units) {
+            let Ok(scalar) = scalar else {
+                return Ok(None);
+            };
+            text.push(scalar);
+        }
+    } else {
+        text.extend(bytes.iter().map(|&b| match b {
+            0x18..=0x1f => ACCENTS[usize::from(b - 0x18)],
+            0x80..=0x9e => SPECIAL[usize::from(b - 0x80)],
+            0xa0 => '€',
+            _ => char::from(b),
+        }));
+    }
+    if text.len() > limit {
+        return Ok(None);
+    }
+    *remaining = available;
+    Ok(Some(text))
+}
+
+pub(super) fn resolve_label_value<'value, 'object: 'value>(
+    value: &'value PdfValue,
+    max_nesting: usize,
+    work: &mut usize,
+    object: &mut impl FnMut(PdfObjectRef) -> Option<Cow<'object, PdfValue>>,
+) -> Option<Cow<'value, PdfValue>> {
+    let mut value = Cow::Borrowed(value);
+    for _ in 0..max_nesting {
+        let Some(reference) = value.as_reference() else {
+            return Some(value);
+        };
+        *work = work.checked_sub(1)?;
+        value = object(reference)?;
+    }
+    value.as_reference().is_none().then_some(value)
+}
+
+pub(super) fn map_widget_label<'a, T>(
+    widget: PdfObjectRef,
+    label: Option<&'a PdfValue>,
+    parent: Option<PdfObjectRef>,
+    max_nesting: usize,
+    work: &mut usize,
+    mut object: impl FnMut(PdfObjectRef) -> Option<Cow<'a, PdfValue>>,
+    read: impl FnOnce(&[u8]) -> T,
+) -> Option<T> {
+    if let Some(label) = label {
+        let label = resolve_label_value(label, max_nesting, work, &mut object)?;
+        if !matches!(*label, PdfValue::Null) {
+            return label.as_bytes().map(read);
+        }
+    }
+    let field = object(parent?)?;
+    let field = field.as_dictionary()?;
+    let children = resolve_label_value(field.get("Kids")?, max_nesting, work, &mut object)?;
+    let children = children.as_array()?;
+    *work = work.checked_sub(children.len())?;
+    if children
+        .iter()
+        .filter(|child| child.as_reference() == Some(widget))
+        .take(2)
+        .count()
+        != 1
+    {
+        return None;
+    }
+    resolve_label_value(field.get("T")?, max_nesting, work, &mut object)?
+        .as_bytes()
+        .map(read)
+}
+
 #[derive(Debug, Clone, Copy)]
 struct PdfXrefEntry {
     offset: usize,
     generation: u16,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PageBox {
+    layout: LayoutRect,
+    edges: [f64; 4],
 }
 
 #[derive(Debug, Clone)]
@@ -408,6 +531,8 @@ pub(crate) struct PdfPageRecord {
     pub object_ref: PdfObjectRef,
     pub media_box: LayoutRect,
     pub crop_box: Option<LayoutRect>,
+    pub(super) media_edges: [f64; 4],
+    pub(super) crop_edges: Option<[f64; 4]>,
     pub resources: Option<PdfValue>,
     pub contents: Vec<PdfObjectRef>,
     pub annotations: Vec<PdfObjectRef>,
@@ -472,6 +597,15 @@ impl PdfReader {
 
     pub(crate) fn object(&self, reference: PdfObjectRef) -> Result<PdfValue, PdfReadError> {
         self.object_with_depth(reference, 0)
+    }
+
+    pub(super) fn label_object(&self, reference: PdfObjectRef) -> Result<PdfValue, PdfReadError> {
+        let (mut cursor, _) = self.object_cursor(reference, 0, None)?;
+        let value = cursor.parse_value(0)?;
+        if !cursor.consume_keyword(b"endobj")? {
+            return Err(PdfReadError::Syntax);
+        }
+        Ok(value)
     }
 
     pub(crate) fn object_offset(&self, reference: PdfObjectRef) -> Option<usize> {
@@ -707,7 +841,7 @@ impl PdfReader {
     fn collect_pages(
         &self,
         reference: PdfObjectRef,
-        inherited_boxes: (Option<LayoutRect>, Option<LayoutRect>),
+        inherited_boxes: (Option<PageBox>, Option<PageBox>),
         inherited_resources: Option<PdfValue>,
         depth: usize,
         active: &mut BTreeSet<PdfObjectRef>,
@@ -812,8 +946,10 @@ impl PdfReader {
                 };
                 pages.push(PdfPageRecord {
                     object_ref: reference,
-                    media_box,
-                    crop_box,
+                    media_box: media_box.layout,
+                    crop_box: crop_box.map(|bounds| bounds.layout),
+                    media_edges: media_box.edges,
+                    crop_edges: crop_box.map(|bounds| bounds.edges),
                     resources,
                     contents,
                     annotations,
@@ -1087,7 +1223,7 @@ fn refs_from_array(value: &PdfValue) -> Result<Vec<PdfObjectRef>, PdfReadError> 
         .collect()
 }
 
-fn parse_page_box(value: &PdfValue) -> Result<LayoutRect, PdfReadError> {
+fn parse_page_box(value: &PdfValue) -> Result<PageBox, PdfReadError> {
     let values = value.as_array().ok_or(PdfReadError::PageTreeInvalid)?;
     if values.len() != 4 {
         return Err(PdfReadError::PageTreeInvalid);
@@ -1103,11 +1239,25 @@ fn parse_page_box(value: &PdfValue) -> Result<LayoutRect, PdfReadError> {
     if width.raw() <= 0 || height.raw() <= 0 {
         return Err(PdfReadError::PageTreeInvalid);
     }
-    Ok(LayoutRect {
-        x: x0,
-        y: y0,
-        width,
-        height,
+    let precise = |index: usize| {
+        values[index]
+            .as_precise_number()
+            .ok_or(PdfReadError::NumericLimit)
+    };
+    let (left, top, right, bottom) = (precise(0)?, precise(1)?, precise(2)?, precise(3)?);
+    Ok(PageBox {
+        layout: LayoutRect {
+            x: x0,
+            y: y0,
+            width,
+            height,
+        },
+        edges: [
+            left.min(right),
+            top.min(bottom),
+            left.max(right),
+            top.max(bottom),
+        ],
     })
 }
 
@@ -1690,7 +1840,12 @@ impl<'a> Cursor<'a> {
                                         .map_err(|_| PdfReadError::Syntax)?,
                                 )
                             } else {
-                                PdfValue::Real(parse_decimal(&token)?)
+                                let rounded = parse_decimal(&token)?;
+                                let precise = std::str::from_utf8(&token)
+                                    .map_err(|_| PdfReadError::Syntax)?
+                                    .parse::<f64>()
+                                    .map_err(|_| PdfReadError::NumericLimit)?;
+                                PdfValue::Real((rounded, precise))
                             }
                         };
                         if let PdfValue::Integer(object_number) = first {

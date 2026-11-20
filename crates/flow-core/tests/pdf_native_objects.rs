@@ -4,8 +4,8 @@ use flow_core::pdf::native::{
     NativeRedactionMark, NativeRequestLookup, NativeSessionError,
 };
 use flow_core::pdf::{
-    PdfPathCommand, PdfReadDiagnosticCode, PdfSceneElement, PdfSceneRequest, open_pdf,
-    read_pdf_scene,
+    PdfPathCommand, PdfReadDiagnosticCode, PdfReaderLimits, PdfSceneElement, PdfSceneRequest,
+    open_pdf, read_pdf_scene,
 };
 use image::ImageDecoder;
 use serde_json::{Value, json};
@@ -461,6 +461,218 @@ fn scene_reports_partial_after_turning_an_asymmetric_form_image() {
         assert_eq!(sibling.rect.width.raw(), 12 * 64);
         assert_eq!(sibling.rect.height.raw(), 8 * 64);
     }
+}
+
+#[test]
+fn saved_native_images_have_representable_placement_or_a_partial_diagnostic() {
+    let source = fixture(b"", false, "", &[]);
+    let mut jpeg = Vec::new();
+    image::codecs::jpeg::JpegEncoder::new(&mut jpeg)
+        .encode(&[30, 100, 200], 1, 1, image::ExtendedColorType::Rgb8)
+        .unwrap();
+    let hex: String = jpeg.iter().map(|byte| format!("{byte:02x}")).collect();
+
+    for (bounds, expected_size) in [
+        ([20_000, 20_000, 20_001, 20_250], None),
+        ([20_000, 20_000, 20_125, 20_250], Some((8, 16))),
+    ] {
+        let mut session = open(&source);
+        apply(
+            &mut session,
+            json!({"kind":"addImage","page":0,"bounds":bounds,"assetHex":hex}),
+        )
+        .unwrap();
+        let reopened = open(session.output_bytes());
+        assert_eq!(objects(&reopened, 0)[0]["bounds"], json!(bounds));
+
+        let reader = open_pdf(session.output_bytes(), Default::default()).unwrap();
+        let scene = read_pdf_scene(&reader, &PdfSceneRequest::default()).unwrap();
+        let page = &scene.pages[0];
+        if let Some(size) = expected_size {
+            let [PdfSceneElement::Image { value }] = page.elements.as_slice() else {
+                panic!("expected a representable image");
+            };
+            assert_eq!((value.width, value.height), (1, 1));
+            assert_eq!(value.data_hex, hex);
+            assert_eq!((value.rect.x.raw(), value.rect.y.raw()), (20 * 64, 20 * 64));
+            assert_eq!((value.rect.width.raw(), value.rect.height.raw()), size);
+            assert!(!page.partial && !scene.report.partial);
+        } else {
+            assert!(page.elements.is_empty());
+            assert!(page.partial && scene.report.partial);
+            assert!(matches!(page.report.diagnostics.as_slice(), [diagnostic]
+                if diagnostic.code == PdfReadDiagnosticCode::PartialPage
+                    && diagnostic.page_index == Some(0)
+                    && diagnostic.object_number.is_some()));
+        }
+    }
+}
+
+#[test]
+fn collapsed_image_diagnostics_account_for_unrounded_clip_visibility() {
+    let image = stream(
+        "/Type /XObject /Subtype /Image /ColorSpace /DeviceGray /Width 1 /Height 1 /BitsPerComponent 8",
+        &[7],
+    );
+    for (contents, partial) in [
+        (&b"q 0 0 40 40 re W n 1 0 0 1 60 60 cm /I Do Q"[..], false),
+        (
+            &b"q 0 0 40 40 re W n 0.001 0 0 1 60 60 cm /I Do Q"[..],
+            false,
+        ),
+        (
+            &b"q 0 0 10 10 re W n 20 20 10 10 re W n 0.001 0 0 1 5 5 cm /I Do Q"[..],
+            false,
+        ),
+        (
+            &b"q 5 5 0.001 1 re W n 0.001 0 0 1 5 5 cm /I Do Q"[..],
+            true,
+        ),
+        (
+            &b"q 0 0 m 10 0 l 10 10 l 0 10 l h W n 20 20 10 10 re W n 0.001 0 0 1 5 5 cm /I Do Q"[..],
+            false,
+        ),
+        (
+            &b"q 20 20 m 22 20 28 20 30 20 c 30 30 l 20 30 l h W n 0 0 10 10 re W n 1 0 0 1 5 5 cm /I Do Q"[..],
+            false,
+        ),
+        (
+            &b"q 0 0 10.004 10 re W n 1 0 0 1 9.997 5 cm /I Do Q"[..],
+            true,
+        ),
+        (
+            &b"q 0 0 10.004 10 re W n 1 0 0 1 10.004 5 cm /I Do Q"[..],
+            false,
+        ),
+    ] {
+        let source = fixture(
+            contents,
+            false,
+            "/Resources << /XObject << /I 6 0 R >> >>",
+            std::slice::from_ref(&image),
+        );
+        let reader = open_pdf(&source, Default::default()).unwrap();
+        let scene = read_pdf_scene(&reader, &PdfSceneRequest::default()).unwrap();
+        let page = &scene.pages[0];
+        assert!(
+            page.elements
+                .iter()
+                .all(|element| matches!(element, PdfSceneElement::Clip { .. }))
+        );
+        assert_eq!(page.partial, partial);
+        assert_eq!(scene.report.partial, partial);
+        if partial {
+            assert!(matches!(page.report.diagnostics.as_slice(), [diagnostic]
+                if diagnostic.code == PdfReadDiagnosticCode::PartialPage));
+        } else {
+            assert!(page.report.diagnostics.is_empty());
+        }
+    }
+}
+
+#[test]
+fn fractional_page_crop_matches_content_clip_for_images() {
+    let image = stream(
+        "/Type /XObject /Subtype /Image /ColorSpace /DeviceGray /Width 1 /Height 1 /BitsPerComponent 8",
+        &[7],
+    );
+    for (start, width, right, left, partial) in [
+        ("0", "10.006", "10.006", "10.003", true),
+        ("0", "9.997", "9.997", "9.998", false),
+        ("0.1", "0.2", "0.3", "0.3", false),
+    ] {
+        let paint = format!("1 0 0 1 {left} 5 cm /I Do");
+        let clip = format!("{start} 0 {width} 10 re W n {paint}");
+        let crop =
+            format!("/CropBox [{start} 0 {right} 10] /Resources << /XObject << /I 6 0 R >> >>");
+        for (content, dictionary) in [
+            (paint.as_bytes(), crop.as_str()),
+            (clip.as_bytes(), "/Resources << /XObject << /I 6 0 R >> >>"),
+        ] {
+            let source = fixture(content, false, dictionary, std::slice::from_ref(&image));
+            let reader = open_pdf(&source, Default::default()).unwrap();
+            let scene = read_pdf_scene(&reader, &PdfSceneRequest::default()).unwrap();
+            let page = &scene.pages[0];
+            assert_eq!(page.partial, partial);
+            assert_eq!(scene.report.partial, partial);
+            assert!(
+                page.elements
+                    .iter()
+                    .all(|element| matches!(element, PdfSceneElement::Clip { .. }))
+            );
+        }
+    }
+}
+
+#[test]
+fn image_diagnostics_account_for_precise_form_clipping() {
+    for (matrix, paint, partial) in [
+        ("", "0.001 0 0 1 60 60 cm /I Do", false),
+        ("/Matrix [1 0 0 1 0 0]", "0.001 0 0 1 60 60 cm /I Do", false),
+        ("/Matrix 8 0 R", "0.001 0 0 1 60 60 cm /I Do", false),
+        ("/Matrix [0.001 0 0 1 5 5]", "", false),
+        ("/Matrix [0.001 0 0 1 5 5]", "1 0 0 1 2 0 cm /I Do", false),
+        ("/Matrix [0.001 0 0 1 5 5]", "/I Do", true),
+        ("/Matrix [0.001 0 0 1 500 5]", "/I Do", false),
+    ] {
+        let form = stream(
+            &format!(
+                "/Type /XObject /Subtype /Form /BBox [0 0 1 40] {matrix} /Resources << /XObject << /I 7 0 R >> >>"
+            ),
+            paint.as_bytes(),
+        );
+        let image = stream(
+            "/Type /XObject /Subtype /Image /ColorSpace /DeviceGray /Width 1 /Height 1 /BitsPerComponent 8",
+            &[7],
+        );
+        let source = fixture(
+            b"/F Do",
+            false,
+            "/Resources << /XObject << /F 6 0 R >> >>",
+            &[form, image, b"[1 0 0 1 0 0]".to_vec()],
+        );
+        let reader = open_pdf(&source, Default::default()).unwrap();
+        let scene = read_pdf_scene(&reader, &PdfSceneRequest::default()).unwrap();
+        let page = &scene.pages[0];
+        assert!(matches!(
+            page.elements.as_slice(),
+            [PdfSceneElement::Annotation { .. }]
+        ));
+        assert_eq!(page.partial, partial, "{matrix} {paint}");
+        assert_eq!(scene.report.partial, partial);
+        if partial {
+            assert!(matches!(page.report.diagnostics.as_slice(), [diagnostic]
+                if diagnostic.code == PdfReadDiagnosticCode::PartialPage));
+        } else {
+            assert!(page.report.diagnostics.is_empty());
+        }
+    }
+}
+
+#[test]
+fn collapsed_form_diagnostics_do_not_enqueue_discarded_children() {
+    let form = stream(
+        "/Type /XObject /Subtype /Form /BBox [0 0 1 1] /Matrix [0.001 0 0 1 20 20] /Resources << /XObject << /Child 7 0 R >> >>",
+        b"/Child Do",
+    );
+    let child = stream("/Type /XObject /Subtype /Form /BBox [0 0 1 1]", b"");
+    let source = fixture(
+        b"/F Do",
+        false,
+        "/Resources << /XObject << /F 6 0 R >> >>",
+        &[form, child],
+    );
+    let limits = PdfReaderLimits {
+        max_scene_elements: 1,
+        ..PdfReaderLimits::default()
+    };
+    let reader = open_pdf(&source, limits).unwrap();
+    let scene = read_pdf_scene(&reader, &PdfSceneRequest::default()).unwrap();
+    assert!(matches!(
+        scene.pages[0].elements.as_slice(),
+        [PdfSceneElement::Annotation { .. }]
+    ));
+    assert!(!scene.pages[0].partial && !scene.report.partial);
 }
 
 #[test]
