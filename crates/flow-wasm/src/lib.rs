@@ -6,12 +6,12 @@ use flow_core::pdf::native::{
     NATIVE_MAX_FIELD_NAME_BYTES, NATIVE_MAX_FIELD_TEXT_BYTES, NATIVE_MAX_GRAPHIC_POINTS,
     NATIVE_MAX_IMAGE_BYTES, NATIVE_MAX_IMAGE_DIMENSION, NATIVE_MAX_IMAGE_PIXELS,
     NATIVE_MAX_STROKE_WIDTH, NATIVE_PREVIEW_MAX_DIMENSION, NATIVE_PREVIEW_MAX_PIXELS,
-    NATIVE_REDACTION_VALIDATOR_PROFILE,
-    NATIVE_REDACTION_VALIDATOR_VERSION, NativeFieldCommand, NativeFieldRefusal, NativeFieldView,
-    NativeObjectCommand, NativeObjectPage, NativeObjectRefusal, NativePageCommand, NativePageState,
-    NativeRedactionCandidateStatus, NativeRedactionMark, NativeRedactionPageEvidence,
-    NativeTextCommand, NativeTextPage, NativeTextRefusal, NativeVerificationLane,
-    NativeVerificationStatus, VersionedNativeRedactionEvidence,
+    NATIVE_REDACTION_VALIDATOR_PROFILE, NATIVE_REDACTION_VALIDATOR_VERSION, NativeFieldCommand,
+    NativeFieldRefusal, NativeFieldView, NativeObjectCommand, NativeObjectKind,
+    NativeObjectOperation, NativeObjectPage, NativeObjectRefusal, NativePageCommand,
+    NativePageState, NativeRedactionCandidateStatus, NativeRedactionMark,
+    NativeRedactionPageEvidence, NativeTextCommand, NativeTextPage, NativeTextRefusal,
+    NativeVerificationLane, NativeVerificationStatus, VersionedNativeRedactionEvidence,
 };
 use flow_core::pdf::{
     NATIVE_MAX_NOTE_BYTES, NATIVE_REQUEST_HISTORY, NativeBinding, NativeEditError,
@@ -2911,6 +2911,24 @@ pub fn native_pdf_preview(request_json: String) -> String {
 
 impl NativeVerifiedScene {
     fn verify(&self) -> Option<()> {
+        use NativeObjectKind::{Graphic, Image};
+        use NativeObjectOperation::{Move, Remove, Replace};
+
+        if self
+            .object_pages
+            .iter()
+            .flat_map(|page| &page.objects)
+            .any(|object| {
+                !matches!(
+                    (object.kind, object.operations.as_slice()),
+                    (_, [Replace, Move, Remove])
+                        | (Graphic, [Move, Remove] | [Remove])
+                        | (Image, [Replace, Remove])
+                )
+            })
+        {
+            return None;
+        }
         let mut writer = NativeHashWriter(blake3::Hasher::new(), 0);
         writer.0.update(b"flowpdf:accepted-note-scene:v2");
         writer.0.update(&self.output_hash);

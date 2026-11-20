@@ -428,6 +428,128 @@ fn object_allowance_insertion_accounts_for_the_enclosing_graphics_save() {
 }
 
 #[test]
+fn object_operations_follow_local_graphics_depth_on_pages_and_in_forms() {
+    let graphic = json!({
+        "shape":"rectangle", "points":[[12000,10000],[22000,20000]],
+        "stroke":null, "fill":[255,0,0], "strokeWidth":0
+    });
+    let asset = concat!(
+        "89504e470d0a1a0a0000000d4948445200000001000000010802000000907753de",
+        "0000000c49444154789c63f8cfc0000003010100c9fe92ef0000000049454e44ae426082"
+    );
+    let full = json!(["replace", "move", "remove"]);
+    let limit = Err(NativeSessionError::Object(NativeObjectRefusal::State));
+    for in_form in [false, true] {
+        for depth in [30, 31, 32] {
+            let paint = format!(
+                "{}10 10 10 10 re f\n10 0 0 10 30 30 cm /I Do\n{}",
+                "q\n".repeat(depth),
+                "Q\n".repeat(depth),
+            );
+            let image = stream(
+                "/Type /XObject /Subtype /Image /ColorSpace /DeviceGray /Width 1 /Height 1 /BitsPerComponent 8",
+                &[7],
+            );
+            let source = if in_form {
+                let form = stream(
+                    "/Type /XObject /Subtype /Form /BBox [0 0 100 100] /Resources << /XObject << /I 6 0 R >> >>",
+                    paint.as_bytes(),
+                );
+                fixture(
+                    b"1 1 2 2 re f\nq /Fm Do Q",
+                    false,
+                    "/Resources << /XObject << /Fm 7 0 R >> >>",
+                    &[image, form],
+                )
+            } else {
+                fixture(
+                    format!("1 1 2 2 re f\n{paint}").as_bytes(),
+                    false,
+                    "/Resources << /XObject << /I 6 0 R >> >>",
+                    &[image],
+                )
+            };
+            let mut session = open(&source);
+            let before = objects(&session, 0);
+            assert_eq!(before[0]["operations"], full);
+            assert_eq!(
+                before[1]["operations"],
+                match depth {
+                    30 => full.clone(),
+                    31 => json!(["move", "remove"]),
+                    _ => json!(["remove"]),
+                }
+            );
+            let image_ops = if depth == 32 {
+                json!(["replace", "remove"])
+            } else {
+                full.clone()
+            };
+            assert_eq!(before[2]["operations"], image_ops);
+            assert!(session.snapshot().scene.object_pages[0].can_add);
+
+            let mut moved = open(&source);
+            let selected = target(&moved, 0, 1);
+            let result = apply(
+                &mut moved,
+                json!({"kind":"moveObject","target":selected,"transform":[1,0,0,1,5,0]}),
+            );
+            if depth == 32 {
+                assert_eq!(result, limit);
+                assert_eq!(moved.output_bytes(), source);
+            } else {
+                result.unwrap();
+                assert_eq!(
+                    objects(&moved, 0)[1]["bounds"],
+                    json!([15000, 10000, 25000, 20000])
+                );
+            }
+
+            let binding = session.snapshot().binding;
+            let selected = target(&session, 0, 1);
+            let result = apply(
+                &mut session,
+                json!({"kind":"replaceGraphic","target":selected,"graphic":graphic}),
+            );
+            if depth == 30 {
+                result.unwrap();
+                assert_eq!(objects(&session, 0)[1]["operations"], json!(["remove"]));
+            } else {
+                assert_eq!(result, limit);
+                assert_eq!(session.snapshot().binding, binding);
+                assert_eq!(session.lookup(binding, 1), Ok(NativeRequestLookup::Unseen));
+                assert_eq!(session.output_bytes(), source);
+            }
+
+            let selected = target(&session, 0, 2);
+            apply(
+                &mut session,
+                json!({"kind":"replaceImage","target":selected,"assetHex":asset}),
+            )
+            .unwrap();
+            let after = objects(&session, 0);
+            assert_eq!(after[2]["profile"], "rasterRgb8");
+            assert_eq!(after[2]["bounds"], before[2]["bounds"]);
+            assert_eq!(after[2]["operations"], image_ops);
+
+            let selected = target(&session, 0, 1);
+            apply(
+                &mut session,
+                json!({"kind":"removeObject","target":selected}),
+            )
+            .unwrap();
+            let after = objects(&open(session.output_bytes()), 0);
+            assert_eq!(after.as_array().unwrap().len(), 2);
+            assert_eq!(after[0]["operations"], full);
+            assert_eq!(after[0]["bounds"], before[0]["bounds"]);
+            assert_eq!(after[1]["operations"], image_ops);
+            assert_eq!(after[1]["bounds"], before[2]["bounds"]);
+            assert_eq!(session.origin_bytes(), source);
+        }
+    }
+}
+
+#[test]
 fn object_scan_workspace_refusal_keeps_vector_page_open_for_notes() {
     use std::io::Write;
 

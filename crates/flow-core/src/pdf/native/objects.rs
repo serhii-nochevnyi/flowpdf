@@ -101,6 +101,16 @@ pub enum NativeObjectOperation {
     Remove,
 }
 
+impl NativeObjectOperation {
+    fn graphics_saves(self, kind: NativeObjectKind) -> usize {
+        match (self, kind) {
+            (Self::Replace, NativeObjectKind::Graphic) => 2,
+            (Self::Move, _) => 1,
+            (Self::Replace | Self::Remove, _) => 0,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct NativeObjectView {
@@ -108,7 +118,7 @@ pub struct NativeObjectView {
     pub kind: NativeObjectKind,
     pub profile: NativeObjectProfile,
     pub bounds: Bounds,
-    pub operations: [NativeObjectOperation; 3],
+    pub operations: Vec<NativeObjectOperation>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -182,12 +192,15 @@ pub enum NativeObjectCommand {
 }
 
 impl NativeObjectCommand {
-    fn target(&self) -> Option<NativeObjectTarget> {
+    fn target(&self) -> Option<(NativeObjectTarget, NativeObjectOperation)> {
+        use NativeObjectOperation::{Move, Remove, Replace};
+
         match self {
-            Self::ReplaceGraphic { target, .. }
-            | Self::ReplaceImage { target, .. }
-            | Self::MoveObject { target, .. }
-            | Self::RemoveObject { target } => Some(*target),
+            Self::ReplaceGraphic { target, .. } | Self::ReplaceImage { target, .. } => {
+                Some((*target, Replace))
+            }
+            Self::MoveObject { target, .. } => Some((*target, Move)),
+            Self::RemoveObject { target } => Some((*target, Remove)),
             _ => None,
         }
     }
@@ -487,6 +500,10 @@ struct GraphicsState {
     stroke_width: f64,
 }
 
+fn graphics_saves_fit(depth: usize, saves: usize) -> bool {
+    depth + saves <= MAX_GRAPHICS_DEPTH
+}
+
 struct GraphicsStack<'w> {
     saved: Vec<GraphicsState>,
     memory: Reservation<'w>,
@@ -503,7 +520,7 @@ impl<'w> GraphicsStack<'w> {
     }
 
     fn save(&mut self, state: GraphicsState) -> Result<()> {
-        if self.saved.len() == MAX_GRAPHICS_DEPTH {
+        if !graphics_saves_fit(self.saved.len(), 1) {
             return Err(State.into());
         }
         self.memory
@@ -572,6 +589,7 @@ impl Path {
 struct Frame {
     stream: PdfObjectRef,
     span: Range<usize>,
+    graphics_depth: usize,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -592,7 +610,7 @@ struct Found {
 }
 
 impl Found {
-    fn view(&self, page: NativePageId, binding: NativeBinding, hash: [u8; 32]) -> NativeObjectView {
+    fn id(&self, page: NativePageId, binding: NativeBinding, hash: [u8; 32]) -> [u8; 32] {
         let mut id = blake3::Hasher::new();
         id.update(b"flowpdf:native-object:v1");
         id.update(&binding.epoch);
@@ -608,9 +626,20 @@ impl Found {
             id.update(&(frame.span.start as u64).to_be_bytes());
             id.update(&(frame.span.end as u64).to_be_bytes());
         }
+        *id.finalize().as_bytes()
+    }
+
+    fn supports(&self, operation: NativeObjectOperation) -> bool {
+        graphics_saves_fit(
+            self.leaf.graphics_depth,
+            operation.graphics_saves(self.signature.profile.kind()),
+        )
+    }
+
+    fn view(&self, page: NativePageId, binding: NativeBinding, hash: [u8; 32]) -> NativeObjectView {
         let profile = self.signature.profile;
         NativeObjectView {
-            id: *id.finalize().as_bytes(),
+            id: self.id(page, binding, hash),
             kind: profile.kind(),
             profile,
             bounds: self.signature.bounds,
@@ -618,7 +647,10 @@ impl Found {
                 NativeObjectOperation::Replace,
                 NativeObjectOperation::Move,
                 NativeObjectOperation::Remove,
-            ],
+            ]
+            .into_iter()
+            .filter(|&operation| self.supports(operation))
+            .collect(),
         }
     }
 }
@@ -659,7 +691,7 @@ impl ScannedPage<'_> {
         let enclosing_save = usize::from(restore_page);
         if self.found.len() >= MAX_OBJECTS_PER_PAGE
             || self.slots + 1 + enclosing_save > MAX_OBJECTS_PER_PAGE
-            || self.graphics_peak + enclosing_save > MAX_GRAPHICS_DEPTH
+            || !graphics_saves_fit(self.graphics_peak, enclosing_save)
         {
             return Err(Budget);
         }
@@ -851,6 +883,7 @@ impl<'a, 'w> Scan<'a, 'w> {
                         Frame {
                             stream: reference,
                             span,
+                            graphics_depth: stack.saved.len(),
                         },
                         state.matrix,
                         clip,
@@ -898,6 +931,7 @@ impl<'a, 'w> Scan<'a, 'w> {
                         Frame {
                             stream: reference,
                             span: start..end,
+                            graphics_depth: stack.saved.len(),
                         },
                         state,
                         clip,
@@ -1542,13 +1576,24 @@ pub(super) fn stage(
     let found = &before.found;
     let index = command
         .target()
-        .map(|target| -> Result<usize> {
+        .map(|(target, operation)| -> Result<usize> {
             let index = found
                 .iter()
-                .position(|item| item.view(page.id, binding, output).id == target.id)
+                .position(|item| item.id(page.id, binding, output) == target.id)
                 .ok_or(TargetUnavailable)?;
-            if found[index].signature.profile != target.profile {
+            let item = &found[index];
+            let kind = item.signature.profile.kind();
+            if item.signature.profile != target.profile
+                || match command {
+                    ReplaceGraphic { .. } => kind != NativeObjectKind::Graphic,
+                    ReplaceImage { .. } => kind != NativeObjectKind::Image,
+                    _ => false,
+                }
+            {
                 return Err(Profile.into());
+            }
+            if !item.supports(operation) {
+                return Err(State.into());
             }
             Ok(index)
         })
@@ -1568,9 +1613,6 @@ pub(super) fn stage(
     let mut resource = None;
     let (mut replacement, expected) = match command {
         AddGraphic { graphic, .. } | ReplaceGraphic { graphic, .. } => {
-            if item.is_some_and(|item| item.signature.profile.kind() != NativeObjectKind::Graphic) {
-                return Err(Profile.into());
-            }
             let (source, profile, rect) = graphic_source(graphic)?;
             let source = if item.is_some() {
                 format!("q\n{}\n{source}\nQ", matrix.inverse()?.operator())
@@ -1580,9 +1622,6 @@ pub(super) fn stage(
             (source.into_bytes(), Some((profile, rect)))
         }
         AddImage { asset_hex, .. } | ReplaceImage { asset_hex, .. } => {
-            if item.is_some_and(|item| item.signature.profile.kind() != NativeObjectKind::Image) {
-                return Err(Profile.into());
-            }
             let rect = match command {
                 AddImage { bounds, .. } => page_space(*bounds),
                 _ => matrix.rect([0., 0., 1., 1.]),
