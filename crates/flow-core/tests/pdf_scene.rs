@@ -387,12 +387,14 @@ fn text_near_upper_edge_is_retained_as_partial_under_equivalent_crops() {
 
 #[test]
 fn widget_readback_requires_a_registered_split_field_with_a_single_matching_child() {
-    for (fields, children, expected) in [
-        ("[5 0 R]", "[4 0 R]", Some("Ї")),
-        ("[5 0 R]", "[4 0 R 4 0 R]", None),
-        ("[5 0 R]", "[]", None),
-        ("[]", "[4 0 R]", None),
-        ("[5 0 R 5 0 R]", "[4 0 R]", None),
+    for (fields, children, widget_entries, field_entries, expected) in [
+        ("[5 0 R]", "[4 0 R]", "", "", Some("Ї")),
+        ("[5 0 R]", "[4 0 R]", "/Kids []", "", None),
+        ("[5 0 R]", "[4 0 R]", "", "/Parent 7 0 R", None),
+        ("[5 0 R]", "[4 0 R 4 0 R]", "", "", None),
+        ("[5 0 R]", "[]", "", "", None),
+        ("[]", "[4 0 R]", "", "", None),
+        ("[5 0 R 5 0 R]", "[4 0 R]", "", "", None),
     ] {
         let bytes = pdf(vec![
             (
@@ -406,11 +408,15 @@ fn widget_readback_requires_a_registered_split_field_with_a_single_matching_chil
             ),
             (
                 4,
-                b"<< /Subtype /Widget /Parent 5 0 R /Rect [10 10 40 30] >>".to_vec(),
+                format!(
+                    "<< /Subtype /Widget /Parent 5 0 R /Rect [10 10 40 30] {widget_entries} >>"
+                )
+                .into_bytes(),
             ),
             (
                 5,
-                b"<< /FT /Tx /T (recipient) /V <FEFF0407> /Kids 6 0 R >>".to_vec(),
+                format!("<< /FT /Tx /T (recipient) /V <FEFF0407> /Kids 6 0 R {field_entries} >>")
+                    .into_bytes(),
             ),
             (6, children.as_bytes().to_vec()),
             (7, b"<< /Fields 8 0 R >>".to_vec()),
@@ -421,6 +427,7 @@ fn widget_readback_requires_a_registered_split_field_with_a_single_matching_chil
         let [PdfSceneElement::Form { value }] = scene.pages[0].elements.as_slice() else {
             panic!("expected a widget");
         };
+        assert_eq!(value.field_type.as_deref(), expected.map(|_| "Tx"));
         assert_eq!(value.value.as_deref(), expected);
         assert_eq!(value.name.as_deref(), expected.map(|_| "recipient"));
         assert_eq!(value.provenance.object_ref.object_number, 4);
@@ -491,4 +498,63 @@ fn indirect_page_crop_obeys_the_reader_nesting_limit() {
     )
     .unwrap();
     assert_eq!(reader.summary(), Err(PdfReadError::NestingLimit));
+}
+
+#[test]
+fn link_resolution_does_not_consume_widget_readback_budget() {
+    for widget_first in [true, false] {
+        let mut annotations = (9..=20).collect::<Vec<_>>();
+        annotations.insert(if widget_first { 0 } else { annotations.len() }, 4);
+        let references = annotations
+            .into_iter()
+            .map(|id| format!("{id} 0 R"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let mut objects = vec![
+            (
+                1,
+                b"<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [5 0 R] >> >>".to_vec(),
+            ),
+            (2, b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec()),
+            (
+                3,
+                format!(
+                    "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Annots [{references}] >>"
+                )
+                .into_bytes(),
+            ),
+            (
+                4,
+                b"<< /Subtype /Widget /Parent 5 0 R /Rect [10 10 40 30] >>".to_vec(),
+            ),
+            (
+                5,
+                b"<< /FT /Tx /T (recipient) /V (saved) /Kids 6 0 R >>".to_vec(),
+            ),
+            (6, b"[4 0 R]".to_vec()),
+        ];
+        objects.extend((9..=20).map(|id| {
+            (
+                id,
+                b"<< /Subtype /Link /Rect [50 10 70 30] /Dest 21 0 R >>".to_vec(),
+            )
+        }));
+        objects.extend((21..=35).map(|id| (id, format!("{} 0 R", id + 1).into_bytes())));
+        objects.push((36, b"[3 0 R /Fit]".to_vec()));
+        let reader = open_pdf(
+            &pdf(objects),
+            PdfReaderLimits {
+                max_content_tokens: 192,
+                ..PdfReaderLimits::default()
+            },
+        )
+        .unwrap();
+        let scene = read_pdf_scene(&reader, &PdfSceneRequest::default()).unwrap();
+        assert!(scene.pages[0].elements.iter().any(|element| {
+            matches!(element, PdfSceneElement::Form { value }
+                if value.field_type.as_deref() == Some("Tx")
+                && value.name.as_deref() == Some("recipient")
+                && value.value.as_deref() == Some("saved"))
+        }));
+    }
 }

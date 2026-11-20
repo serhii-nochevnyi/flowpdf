@@ -499,6 +499,9 @@ pub(super) fn map_widget_label<'a, T>(
     *work = work.checked_sub(1)?;
     let field = object(parent)?;
     let field = field.as_dictionary()?;
+    if field.contains_key("Parent") {
+        return None;
+    }
     let children = resolve_annotation_value(field.get("Kids")?, max_nesting, work, &mut object)?;
     let children = children.as_array()?;
     *work = work.checked_sub(children.len())?;

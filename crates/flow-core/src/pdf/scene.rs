@@ -687,7 +687,8 @@ struct SceneBuilder<'a> {
     page_index: u32,
     page: &'a PdfPageRecord,
     field_counts: &'a BTreeMap<PdfObjectRef, usize>,
-    annotation_work: usize,
+    link_work: usize,
+    widget_work: usize,
     elements: Vec<PdfSceneElement>,
     emit_elements: bool,
     report: PdfReadReport,
@@ -712,7 +713,8 @@ impl<'a> SceneBuilder<'a> {
             page_index,
             page,
             field_counts,
-            annotation_work: reader.limits().max_content_tokens,
+            link_work: reader.limits().max_content_tokens,
+            widget_work: reader.limits().max_content_tokens,
             elements: Vec::new(),
             emit_elements: true,
             report: PdfReadReport::default(),
@@ -1752,7 +1754,7 @@ impl<'a> SceneBuilder<'a> {
                         resolve_annotation_value(
                             destination,
                             self.limits.max_nesting,
-                            &mut self.annotation_work,
+                            &mut self.link_work,
                             &mut |reference| {
                                 self.reader
                                     .non_stream_object(reference)
@@ -1788,7 +1790,7 @@ impl<'a> SceneBuilder<'a> {
                     dictionary.get("T"),
                     parent,
                     self.limits.max_nesting,
-                    &mut self.annotation_work,
+                    &mut self.widget_work,
                     |reference| {
                         if reference == *annotation_ref {
                             Some(Cow::Borrowed(&value))
@@ -1864,7 +1866,9 @@ impl<'a> SceneBuilder<'a> {
         let parent_ref = parent.as_reference()?;
         if parent_ref == widget
             || self.field_counts.get(&parent_ref) != Some(&1)
-            || ["FT", "V"].iter().any(|key| dictionary.contains_key(*key))
+            || ["FT", "V", "Kids"]
+                .iter()
+                .any(|key| dictionary.contains_key(*key))
         {
             return None;
         }
@@ -1872,7 +1876,7 @@ impl<'a> SceneBuilder<'a> {
             let label = resolve_annotation_value(
                 label,
                 self.limits.max_nesting,
-                &mut self.annotation_work,
+                &mut self.widget_work,
                 &mut |reference| {
                     self.reader
                         .non_stream_object(reference)
@@ -1898,7 +1902,7 @@ impl<'a> SceneBuilder<'a> {
         let children = resolve_annotation_value(
             field.get("Kids")?,
             self.limits.max_nesting,
-            &mut self.annotation_work,
+            &mut self.widget_work,
             &mut |reference| {
                 self.reader
                     .non_stream_object(reference)
