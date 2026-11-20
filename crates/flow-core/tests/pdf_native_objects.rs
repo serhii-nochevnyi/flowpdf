@@ -528,6 +528,18 @@ fn collapsed_image_diagnostics_account_for_unrounded_clip_visibility() {
             &b"q 5 5 0.001 1 re W n 0.001 0 0 1 5 5 cm /I Do Q"[..],
             true,
         ),
+        (
+            &b"q 0 0 m 10 0 l 10 10 l 0 10 l h W n 20 20 10 10 re W n 0.001 0 0 1 5 5 cm /I Do Q"[..],
+            false,
+        ),
+        (
+            &b"q 0 0 10.004 10 re W n 1 0 0 1 9.997 5 cm /I Do Q"[..],
+            true,
+        ),
+        (
+            &b"q 0 0 10.004 10 re W n 1 0 0 1 10.004 5 cm /I Do Q"[..],
+            false,
+        ),
     ] {
         let source = fixture(
             contents,
@@ -544,6 +556,49 @@ fn collapsed_image_diagnostics_account_for_unrounded_clip_visibility() {
                 .all(|element| matches!(element, PdfSceneElement::Clip { .. }))
         );
         assert_eq!(page.partial, partial);
+        assert_eq!(scene.report.partial, partial);
+        if partial {
+            assert!(matches!(page.report.diagnostics.as_slice(), [diagnostic]
+                if diagnostic.code == PdfReadDiagnosticCode::PartialPage));
+        } else {
+            assert!(page.report.diagnostics.is_empty());
+        }
+    }
+}
+
+#[test]
+fn image_diagnostics_account_for_precise_form_clipping() {
+    for (matrix, paint, partial) in [
+        ("", "0.001 0 0 1 60 60 cm /I Do", false),
+        ("/Matrix [1 0 0 1 0 0]", "0.001 0 0 1 60 60 cm /I Do", false),
+        ("/Matrix 8 0 R", "0.001 0 0 1 60 60 cm /I Do", false),
+        ("/Matrix [0.001 0 0 1 5 5]", "/I Do", true),
+        ("/Matrix [0.001 0 0 1 500 5]", "/I Do", false),
+    ] {
+        let form = stream(
+            &format!(
+                "/Type /XObject /Subtype /Form /BBox [0 0 1 40] {matrix} /Resources << /XObject << /I 7 0 R >> >>"
+            ),
+            paint.as_bytes(),
+        );
+        let image = stream(
+            "/Type /XObject /Subtype /Image /ColorSpace /DeviceGray /Width 1 /Height 1 /BitsPerComponent 8",
+            &[7],
+        );
+        let source = fixture(
+            b"/F Do",
+            false,
+            "/Resources << /XObject << /F 6 0 R >> >>",
+            &[form, image, b"[1 0 0 1 0 0]".to_vec()],
+        );
+        let reader = open_pdf(&source, Default::default()).unwrap();
+        let scene = read_pdf_scene(&reader, &PdfSceneRequest::default()).unwrap();
+        let page = &scene.pages[0];
+        assert!(matches!(
+            page.elements.as_slice(),
+            [PdfSceneElement::Annotation { .. }]
+        ));
+        assert_eq!(page.partial, partial, "{matrix} {paint}");
         assert_eq!(scene.report.partial, partial);
         if partial {
             assert!(matches!(page.report.diagnostics.as_slice(), [diagnostic]

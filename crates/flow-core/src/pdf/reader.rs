@@ -332,7 +332,7 @@ pub(crate) enum PdfValue {
     Null,
     Boolean(bool),
     Integer(i64),
-    Real(LayoutUnit),
+    Real((LayoutUnit, f64)),
     // @invariant: The exact decimal token is retained independently of layout rounding.
     ExactReal(String),
     Name(String),
@@ -370,7 +370,7 @@ impl PdfValue {
             Self::Integer(value) => value
                 .checked_mul(LayoutUnit::UNITS_PER_POINT)
                 .map(LayoutUnit::from_raw),
-            Self::Real(value) => Some(*value),
+            Self::Real((value, _)) => Some(*value),
             Self::ExactReal(token) => parse_decimal(token.as_bytes()).ok(),
             _ => None,
         }
@@ -1806,7 +1806,12 @@ impl<'a> Cursor<'a> {
                                         .map_err(|_| PdfReadError::Syntax)?,
                                 )
                             } else {
-                                PdfValue::Real(parse_decimal(&token)?)
+                                let rounded = parse_decimal(&token)?;
+                                let precise = std::str::from_utf8(&token)
+                                    .map_err(|_| PdfReadError::Syntax)?
+                                    .parse::<f64>()
+                                    .map_err(|_| PdfReadError::NumericLimit)?;
+                                PdfValue::Real((rounded, precise))
                             }
                         };
                         if let PdfValue::Integer(object_number) = first {

@@ -470,6 +470,12 @@ impl PaintBounds {
         Self([x, y, x + points(rect.width), y + points(rect.height)])
     }
 
+    fn union(self, other: Self) -> Self {
+        let [left, bottom, right, top] = self.0;
+        let [x0, y0, x1, y1] = other.0;
+        Self([left.min(x0), bottom.min(y0), right.max(x1), top.max(y1)])
+    }
+
     fn intersect(self, other: Self) -> Self {
         let [left, bottom, right, top] = self.0;
         let [x0, y0, x1, y1] = other.0;
@@ -503,6 +509,23 @@ impl PaintMatrix {
             .then_some(Self(values))
     }
 
+    fn pdf_numbers<const N: usize>(value: &PdfValue) -> Option<[f64; N]> {
+        let values: &[PdfValue; N] = value.as_array()?.try_into().ok()?;
+        let mut numbers = [0.; N];
+        for (number, value) in numbers.iter_mut().zip(values) {
+            *number = match value {
+                PdfValue::Integer(value) => *value as f64,
+                PdfValue::Real((_, precise)) => *precise,
+                PdfValue::ExactReal(value) => value.parse().ok()?,
+                _ => return None,
+            };
+            if !number.is_finite() {
+                return None;
+            }
+        }
+        Some(numbers)
+    }
+
     fn bounds(self, [x, y, width, height]: [f64; 4]) -> Option<PaintBounds> {
         let [a, b, c, d, e, f] = self.0;
         let point = |x, y| [a * x + c * y + e, b * x + d * y + f];
@@ -530,7 +553,7 @@ struct GraphicsState {
     ctm: Matrix,
     paint_ctm: Option<PaintMatrix>,
     paint_clip: PaintBounds,
-    path_rectangle: Option<PaintBounds>,
+    path_paint_bounds: Option<PaintBounds>,
     text_matrix: Matrix,
     line_matrix: Matrix,
     font: Option<FontMap>,
@@ -562,7 +585,7 @@ impl GraphicsState {
             ctm: Matrix::IDENTITY,
             paint_ctm: Some(PaintMatrix([1., 0., 0., 1., 0., 0.])),
             paint_clip: PaintBounds::from_layout(bounds),
-            path_rectangle: None,
+            path_paint_bounds: None,
             text_matrix: Matrix::IDENTITY,
             line_matrix: Matrix::IDENTITY,
             font: None,
@@ -585,6 +608,17 @@ impl GraphicsState {
             path_ctm_changed: false,
             pending_clip: None,
         }
+    }
+
+    fn extend_path_paint_bounds(&mut self, rect: [f64; 4]) {
+        let bounds = self.paint_ctm.and_then(|matrix| matrix.bounds(rect));
+        self.path_paint_bounds = if self.path.is_empty() {
+            bounds
+        } else {
+            self.path_paint_bounds
+                .zip(bounds)
+                .map(|(path, next)| path.union(next))
+        };
     }
 }
 
@@ -802,19 +836,23 @@ impl<'a> SceneBuilder<'a> {
                 }
             }
             "m" => {
-                self.state.path_rectangle = None;
                 let (x, y) = two_numbers(operands)?;
+                let [px, py] =
+                    std::array::from_fn(|i| operands[operands.len() - 2 + i].precise_number());
+                self.state.extend_path_paint_bounds([px, py, 0., 0.]);
                 self.state.path.push(RawPathCommand::MoveTo(x, y));
                 self.state.current_point = Some((x, y));
             }
             "l" => {
-                self.state.path_rectangle = None;
                 let (x, y) = two_numbers(operands)?;
+                let [px, py] =
+                    std::array::from_fn(|i| operands[operands.len() - 2 + i].precise_number());
+                self.state.extend_path_paint_bounds([px, py, 0., 0.]);
                 self.state.path.push(RawPathCommand::LineTo(x, y));
                 self.state.current_point = Some((x, y));
             }
             "c" => {
-                self.state.path_rectangle = None;
+                self.state.path_paint_bounds = None;
                 let values = six_number_values(operands)?;
                 self.state.path.push(RawPathCommand::CurveTo(
                     values[0], values[1], values[2], values[3], values[4], values[5],
@@ -822,7 +860,7 @@ impl<'a> SceneBuilder<'a> {
                 self.state.current_point = Some((values[4], values[5]));
             }
             "v" => {
-                self.state.path_rectangle = None;
+                self.state.path_paint_bounds = None;
                 let values = four_number_values(operands)?;
                 let (x0, y0) = self.state.current_point.ok_or(PdfReadError::Syntax)?;
                 self.state.path.push(RawPathCommand::CurveTo(
@@ -831,7 +869,7 @@ impl<'a> SceneBuilder<'a> {
                 self.state.current_point = Some((values[2], values[3]));
             }
             "y" => {
-                self.state.path_rectangle = None;
+                self.state.path_paint_bounds = None;
                 let values = four_number_values(operands)?;
                 self.state.path.push(RawPathCommand::CurveTo(
                     values[0], values[1], values[2], values[3], values[2], values[3],
@@ -840,15 +878,10 @@ impl<'a> SceneBuilder<'a> {
             }
             "re" => {
                 let values = four_number_values(operands)?;
-                self.state.path_rectangle = self
-                    .state
-                    .paint_ctm
-                    .filter(|_| self.state.path.is_empty())
-                    .and_then(|matrix| {
-                        matrix.bounds(std::array::from_fn(|i| {
-                            operands[operands.len() - 4 + i].precise_number()
-                        }))
-                    });
+                self.state
+                    .extend_path_paint_bounds(std::array::from_fn(|i| {
+                        operands[operands.len() - 4 + i].precise_number()
+                    }));
                 let (x, y, width, height) = (values[0], values[1], values[2], values[3]);
                 self.state.path.push(RawPathCommand::MoveTo(x, y));
                 self.state
@@ -871,7 +904,7 @@ impl<'a> SceneBuilder<'a> {
                         self.state.path.clone(),
                         operator == "W*",
                         provenance,
-                        self.state.path_rectangle,
+                        self.state.path_paint_bounds,
                     ));
                 }
             }
@@ -996,7 +1029,7 @@ impl<'a> SceneBuilder<'a> {
         provenance: PdfSourceProvenance,
     ) -> Result<(), PdfReadError> {
         let pending_clip = self.state.pending_clip.take();
-        self.state.path_rectangle = None;
+        self.state.path_paint_bounds = None;
         let path_ctm_changed = std::mem::take(&mut self.state.path_ctm_changed);
         self.state.current_point = None;
 
@@ -1426,6 +1459,7 @@ impl<'a> SceneBuilder<'a> {
                     None | Some(PdfValue::Null) => resources,
                     Some(value) => Some(value),
                 };
+                let mut form_paint_ctm = self.state.paint_ctm;
                 let form_ctm = match dictionary.get("Matrix") {
                     None | Some(PdfValue::Null) => self.state.ctm,
                     Some(value) => {
@@ -1443,6 +1477,9 @@ impl<'a> SceneBuilder<'a> {
                                     self.report_partial(xobject_ref);
                                     return Ok(());
                                 };
+                                form_paint_ctm = form_paint_ctm.and_then(|outer| {
+                                    outer.multiply(PaintMatrix(PaintMatrix::pdf_numbers(value)?))
+                                });
                                 self.state.ctm.multiply(matrix)?
                             }
                         }
@@ -1452,6 +1489,14 @@ impl<'a> SceneBuilder<'a> {
                     .get("BBox")
                     .map(|value| self.reader.resolve(value, depth))
                     .transpose()?;
+                let form_paint_clip = form_paint_ctm
+                    .and_then(|matrix| {
+                        let [x, y, right, top] = PaintMatrix::pdf_numbers(local_bbox.as_ref()?)?;
+                        matrix.bounds([x, y, (right - x).max(0.), (top - y).max(0.)])
+                    })
+                    .map_or(self.state.paint_clip, |bounds| {
+                        self.state.paint_clip.intersect(bounds)
+                    });
                 let Some(bbox) = local_bbox
                     .as_ref()
                     .and_then(|value| parse_bbox(value).ok())
@@ -1477,15 +1522,17 @@ impl<'a> SceneBuilder<'a> {
                     },
                 })?;
                 if clip.is_empty() {
+                    if !form_paint_clip.is_empty() {
+                        self.report_partial(xobject_ref);
+                    }
                     return Ok(());
                 }
                 let caller_state = self.state.clone();
                 let caller_stack = std::mem::take(&mut self.state_stack);
                 self.state.ctm = form_ctm;
-                if !matches!(dictionary.get("Matrix"), None | Some(PdfValue::Null)) {
-                    self.state.paint_ctm = None;
-                }
-                self.state.path_rectangle = None;
+                self.state.paint_ctm = form_paint_ctm;
+                self.state.paint_clip = form_paint_clip;
+                self.state.path_paint_bounds = None;
                 self.state.clip = clip;
                 self.state.path.clear();
                 self.state.current_point = None;
@@ -1571,7 +1618,7 @@ impl<'a> SceneBuilder<'a> {
                 height: one,
             },
         )?;
-        if rect.width <= zero || rect.height <= zero || self.state.clip.is_empty() {
+        if self.state.clip.intersect(rect, true)?.is_empty() {
             let clip = self.state.paint_clip;
             if !clip.is_empty()
                 && self
@@ -1923,7 +1970,7 @@ impl ContentToken {
 fn font_width(value: &PdfValue) -> Option<LayoutUnit> {
     match value {
         PdfValue::Integer(value) => Some(LayoutUnit::from_raw(*value)),
-        PdfValue::Real(value) => Some(*value),
+        PdfValue::Real((value, _)) => Some(*value),
         _ => None,
     }
 }
