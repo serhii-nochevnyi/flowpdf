@@ -802,20 +802,37 @@ describe('native PDF edit coordinator', () => {
     lane.coordinator.dispose()
   })
 
-  it('drops queued commands when the worker dies during a mutation', async () => {
+  it.each(['worker loss', 'disposal'] as const)('settles pending and queued commands after %s when termination throws', async (mode) => {
+    vi.useFakeTimers()
     const lane = fakePort()
     const initial = await opened(lane)
+    const cleanupFailure = new Error('Worker termination unavailable')
+    vi.mocked(lane.worker.terminate).mockImplementation(() => { throw cleanupFailure })
     const first = expect(lane.coordinator.command(note('in flight'))).rejects
       .toMatchObject({ code: 'FLOW_PDF_NATIVE_WORKER_FAILED' })
     const queued = expect(lane.coordinator.command(note('queued'))).rejects
       .toMatchObject({ code: 'FLOW_PDF_NATIVE_WORKER_FAILED' })
     const dispatched = await lane.take()
     const handler = lane.worker.onmessage
-    lane.worker.onmessageerror?.(new MessageEvent('messageerror'))
+    const listener = vi.fn()
+    lane.coordinator.subscribe(listener)
+    if (mode === 'worker loss') {
+      expect(() => lane.worker.onmessageerror?.(new MessageEvent('messageerror'))).not.toThrow()
+    } else {
+      expect(() => lane.coordinator.dispose()).toThrow(cleanupFailure)
+    }
+    expect(vi.getTimerCount()).toBe(0)
     await Promise.all([first, queued])
     handler?.(new MessageEvent('message', { data: { dispatchId: dispatched.dispatchId, type: 'response', json: JSON.stringify(addReply(dispatched.request, initial)) } }))
     expect(lane.sent).toHaveLength(0)
-    expect(lane.coordinator.snapshot()).toMatchObject({ phase: 'invalidated', accepted: initial })
+    expect(lane.coordinator.snapshot()).toMatchObject({ phase: 'invalidated', accepted: initial, reopenOriginal: true })
+    expect(lane.coordinator.originalForReopen()).toEqual(original())
+    expect(listener).toHaveBeenCalledOnce()
+    expect(lane.worker.onmessage).toBeNull()
+    expect(lane.worker.onerror).toBeNull()
+    expect(lane.worker.onmessageerror).toBeNull()
+    expect(() => lane.coordinator.dispose()).not.toThrow()
+    expect(lane.worker.terminate).toHaveBeenCalledOnce()
   })
 
   it('refuses a forged cross-source reply and preserves the verified output on worker loss', async () => {
