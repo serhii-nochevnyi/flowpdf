@@ -305,6 +305,46 @@ fn nested_form_paint_respects_direct_and_inherited_page_crop() {
 }
 
 #[test]
+fn form_path_readback_accounts_for_fractional_clip_edges_and_transform() {
+    for (right, skew, adjustment, partial) in [
+        ("10.121", "0", "0", true),
+        ("10.125", "0.004", "-0.004", true),
+        ("10.125", "0", "0", false),
+    ] {
+        let paint = format!("1 {adjustment} 0 1 0 0 cm 5 0 5.125 5 re f");
+        let bytes = pdf(vec![
+            (1, b"<< /Type /Catalog /Pages 2 0 R >>".to_vec()),
+            (2, b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec()),
+            (3, b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Resources << /XObject << /F 5 0 R >> >> /Contents 4 0 R >>".to_vec()),
+            stream(4, "", b"/F Do"),
+            stream(5, &format!("/Type /XObject /Subtype /Form /BBox [0 0 {right} 20] /Matrix [1 {skew} 0 1 20.125 20]"), paint.as_bytes()),
+        ]);
+        let reader = open_pdf(&bytes, Default::default()).unwrap();
+        let scene = read_pdf_scene(&reader, &PdfSceneRequest::default()).unwrap();
+        let page = &scene.pages[0];
+        let [
+            PdfSceneElement::Annotation { .. },
+            PdfSceneElement::Path { value },
+        ] = page.elements.as_slice()
+        else {
+            panic!("expected a Form with a filled path");
+        };
+        assert!(value.fill);
+        assert_eq!(value.rect.x.raw(), 25 * 64 + 8);
+        assert_eq!(value.rect.width.raw(), 5 * 64 + 8);
+        assert_eq!(page.partial, partial, "{right} {skew}");
+        assert_eq!(scene.report.partial, partial);
+        if partial {
+            assert!(matches!(page.report.diagnostics.as_slice(), [diagnostic]
+                if diagnostic.code == PdfReadDiagnosticCode::PartialPage
+                    && diagnostic.object_number == Some(5)));
+        } else {
+            assert!(page.report.diagnostics.is_empty());
+        }
+    }
+}
+
+#[test]
 fn equivalent_default_crop_keeps_content_clip_visibility_and_diagnostics() {
     for crop in ["", "/CropBox [0 0 200 200]", "/CropBox [-10 -10 210 210]"] {
         let bytes = pdf(vec![
