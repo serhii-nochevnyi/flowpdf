@@ -477,6 +477,8 @@ struct GraphicsState {
     path: Vec<RawPathCommand>,
     current_point: Option<(LayoutUnit, LayoutUnit)>,
     clip: SceneClip,
+    line_width: Option<LayoutUnit>,
+    miter_limit: Option<LayoutUnit>,
     path_ctm_changed: bool,
     pending_clip: Option<(Vec<RawPathCommand>, bool, PdfSourceProvenance)>,
 }
@@ -502,6 +504,8 @@ impl GraphicsState {
                 bounds,
                 rectangular: true,
             },
+            line_width: Some(Matrix::IDENTITY.a),
+            miter_limit: Some(LayoutUnit::from_raw(10 * LayoutUnit::UNITS_PER_POINT)),
             path_ctm_changed: false,
             pending_clip: None,
         }
@@ -548,6 +552,7 @@ struct SceneBuilder<'a> {
     limits: &'a PdfReaderLimits,
     page_index: u32,
     page: &'a PdfPageRecord,
+    field_counts: &'a BTreeMap<PdfObjectRef, usize>,
     elements: Vec<PdfSceneElement>,
     report: PdfReadReport,
     fonts: BTreeMap<(PdfObjectRef, String), FontMap>,
@@ -563,12 +568,14 @@ impl<'a> SceneBuilder<'a> {
         pages: &'a [PdfPageRecord],
         page_index: u32,
         page: &'a PdfPageRecord,
+        field_counts: &'a BTreeMap<PdfObjectRef, usize>,
     ) -> Self {
         Self {
             reader,
             limits: reader.limits(),
             page_index,
             page,
+            field_counts,
             elements: Vec::new(),
             report: PdfReadReport::default(),
             fonts: BTreeMap::new(),
@@ -830,6 +837,12 @@ impl<'a> SceneBuilder<'a> {
                     }
                 }
             }
+            "w" => self.state.line_width = one_number(operands).ok(),
+            "M" => self.state.miter_limit = one_number(operands).ok(),
+            "gs" => {
+                self.state.line_width = None;
+                self.state.miter_limit = None;
+            }
             "Do" => self.paint_xobject(operands, object_ref, provenance, depth, resources)?,
             "BI" | "ID" | "EI" => self.report.push(
                 PdfReadDiagnostic::blocked(
@@ -901,11 +914,10 @@ impl<'a> SceneBuilder<'a> {
             }
             let rect = path_bounds(&commands)?;
             let stroke = matches!(operator, "S" | "s" | "B" | "B*" | "b" | "b*");
-            let clip = self.state.clip;
-            let visible = if clip.rectangular && clip.bounds == self.page.media_box {
-                self.paint_visible(rect, !stroke, &provenance)?
+            let visible = if stroke {
+                self.stroke_visible(rect, &provenance)?
             } else {
-                self.paint_visible_in_clip(rect, !stroke, &provenance)?
+                self.paint_visible(rect, true, &provenance)?
             };
             if visible {
                 // @contract: Only provenance records the fill rule for painted paths.
@@ -952,19 +964,54 @@ impl<'a> SceneBuilder<'a> {
         ));
     }
 
-    fn paint_visible(
+    fn stroke_visible(
         &mut self,
         rect: LayoutRect,
-        bounded: bool,
         provenance: &PdfSourceProvenance,
     ) -> Result<bool, PdfReadError> {
-        if self.invocation_path.len() <= 1 && self.page.crop_box.is_none() {
-            return Ok(true);
+        if self.state.clip.is_empty() {
+            return Ok(false);
         }
-        self.paint_visible_in_clip(rect, bounded, provenance)
+        if let Some(bounds) = self.stroke_bounds(rect) {
+            return self.paint_visible(bounds, false, provenance);
+        }
+        self.report_partial(provenance.object_ref);
+        Ok(true)
     }
 
-    fn paint_visible_in_clip(
+    fn stroke_bounds(&self, rect: LayoutRect) -> Option<LayoutRect> {
+        let width = i128::from(self.state.line_width?.raw());
+        let miter = i128::from(self.state.miter_limit?.raw());
+        let unit = i128::from(LayoutUnit::UNITS_PER_POINT);
+        if width <= 0 || miter < unit {
+            return None;
+        }
+        let Matrix { a, b, c, d, .. } = self.state.ctm;
+        let scale = (i128::from(a.raw()).abs() + i128::from(c.raw()).abs())
+            .max(i128::from(b.raw()).abs() + i128::from(d.raw()).abs());
+        // @invariant: The margin covers miter joins and projecting square caps.
+        let divisor = 2 * unit * unit;
+        let numerator = width.checked_mul(miter.max(2 * unit))?.checked_mul(scale)?;
+        let margin = LayoutUnit::from_raw(i64::try_from(numerator / divisor + 1).ok()?);
+        Some(LayoutRect {
+            x: rect.x.checked_sub(margin).ok()?,
+            y: rect.y.checked_sub(margin).ok()?,
+            width: rect
+                .width
+                .checked_add(margin)
+                .ok()?
+                .checked_add(margin)
+                .ok()?,
+            height: rect
+                .height
+                .checked_add(margin)
+                .ok()?
+                .checked_add(margin)
+                .ok()?,
+        })
+    }
+
+    fn paint_visible(
         &mut self,
         rect: LayoutRect,
         bounded: bool,
@@ -982,7 +1029,16 @@ impl<'a> SceneBuilder<'a> {
             if intersection.rectangular && intersection.bounds == rect {
                 return Ok(true);
             }
+        } else if clip.rectangular
+            && clip.bounds == self.page.media_box
+            && rect.x > clip.bounds.x
+            && rect.y > clip.bounds.y
+            && rect.x.checked_add(rect.width)? < clip.bounds.x.checked_add(clip.bounds.width)?
+            && rect.y.checked_add(rect.height)? < clip.bounds.y.checked_add(clip.bounds.height)?
+        {
+            return Ok(true);
         }
+        // @contract: Stroke geometry can extend beyond the scene rectangle.
         self.report_partial(provenance.object_ref);
         Ok(true)
     }
@@ -1190,10 +1246,12 @@ impl<'a> SceneBuilder<'a> {
             }
         }
         if !glyphs.is_empty() {
-            let rect = union_rect(glyphs.iter().map(|glyph| glyph.rect))?;
-            if !self.paint_visible(rect, false, &provenance)? {
+            if self.state.clip.is_empty() {
                 return Ok(());
             }
+            let rect = union_rect(glyphs.iter().map(|glyph| glyph.rect))?;
+            // @contract: Advance rectangles do not bound painted glyphs.
+            self.report_partial(provenance.object_ref);
             self.push_element(PdfSceneElement::Text {
                 value: PdfTextElement {
                     text,
@@ -1488,15 +1546,23 @@ impl<'a> SceneBuilder<'a> {
                     },
                 })?;
             } else if subtype.as_deref() == Some("Widget") {
-                let field_type = dictionary
-                    .get("FT")
-                    .and_then(PdfValue::as_name)
-                    .map(str::to_owned);
-                let name = string_value(dictionary.get("T"));
-                let value = string_value(dictionary.get("V"));
+                let owner = self.widget_field_owner(*annotation_ref, dictionary);
+                let field = owner.as_ref().unwrap_or(dictionary);
+                let field_type = field.get("FT").and_then(PdfValue::as_name);
+                let name = string_value(field.get("T"), self.limits.max_string_bytes);
+                let saved = field.get("V");
+                let value = if field_type == Some("Btn")
+                    && field
+                        .get("Ff")
+                        .is_none_or(|flags| matches!(flags.as_integer(), Some(0..=7)))
+                {
+                    saved.and_then(PdfValue::as_name).map(str::to_owned)
+                } else {
+                    string_value(saved, self.limits.max_string_bytes)
+                };
                 self.push_element(PdfSceneElement::Form {
                     value: PdfFormElement {
-                        field_type,
+                        field_type: field_type.map(str::to_owned),
                         name,
                         value,
                         rect,
@@ -1535,6 +1601,37 @@ impl<'a> SceneBuilder<'a> {
         Ok(())
     }
 
+    fn widget_field_owner(
+        &self,
+        widget: PdfObjectRef,
+        dictionary: &BTreeMap<String, PdfValue>,
+    ) -> Option<BTreeMap<String, PdfValue>> {
+        let parent = dictionary.get("Parent")?;
+        let parent_ref = parent.as_reference()?;
+        if parent_ref == widget
+            || self.field_counts.get(&parent_ref) != Some(&1)
+            || ["FT", "T", "V"]
+                .iter()
+                .any(|key| dictionary.contains_key(*key))
+        {
+            return None;
+        }
+        let PdfValue::Dictionary(field) = self.reader.resolve(parent, 0).ok()? else {
+            return None;
+        };
+        if field.contains_key("Parent")
+            || !matches!(
+                field.get("FT").and_then(PdfValue::as_name),
+                Some("Tx" | "Btn")
+            )
+        {
+            return None;
+        }
+        let children = self.reader.resolve(field.get("Kids")?, 1).ok()?;
+        matches!(children.as_array(), Some([PdfValue::Reference(child)]) if *child == widget)
+            .then_some(field)
+    }
+
     fn push_element(&mut self, element: PdfSceneElement) -> Result<(), PdfReadError> {
         if self.elements.len() >= self.limits.max_scene_elements {
             self.report.push(PdfReadDiagnostic::blocked(
@@ -1566,6 +1663,7 @@ pub fn read_pdf_scene(
         .ok_or(PdfReadError::PageCountLimit)?
         .min(pages.len());
     let mut report = reader.preflight_report();
+    let mut field_counts = BTreeMap::new();
     if let Ok(catalog) = reader.object(reader.root_for_scene())
         && let Some(dictionary) = catalog.as_dictionary()
     {
@@ -1575,11 +1673,20 @@ pub fn read_pdf_scene(
             Some(reader.root_for_scene().object_number),
             &mut report,
         );
+        if let Some(form) = dictionary.get("AcroForm")
+            && let Ok(PdfValue::Dictionary(form)) = reader.resolve(form, 1)
+            && let Some(fields) = form.get("Fields")
+            && let Ok(PdfValue::Array(fields)) = reader.resolve(fields, 2)
+        {
+            for field in fields.iter().filter_map(PdfValue::as_reference) {
+                *field_counts.entry(field).or_insert(0) += 1;
+            }
+        }
     }
     let mut scene_pages = Vec::with_capacity(end.saturating_sub(first));
     for (index, page) in pages.iter().enumerate().take(end).skip(first) {
         let page_index = u32::try_from(index).map_err(|_| PdfReadError::PageCountLimit)?;
-        match SceneBuilder::new(reader, &pages, page_index, page).run() {
+        match SceneBuilder::new(reader, &pages, page_index, page, &field_counts).run() {
             Ok(page) => {
                 report.extend(&page.report);
                 scene_pages.push(page);
@@ -1611,13 +1718,10 @@ pub fn read_pdf_scene(
 fn is_known_noop(operator: &str) -> bool {
     matches!(
         operator,
-        "w" | "J"
-            | "j"
-            | "M"
+        "J" | "j"
             | "d"
             | "ri"
             | "i"
-            | "gs"
             | "CS"
             | "cs"
             | "SC"
@@ -1887,10 +1991,15 @@ fn parse_bbox(value: &PdfValue) -> Result<LayoutRect, PdfReadError> {
     })
 }
 
-fn string_value(value: Option<&PdfValue>) -> Option<String> {
-    value
-        .and_then(PdfValue::as_bytes)
-        .and_then(|value| String::from_utf8(value.to_vec()).ok())
+fn string_value(value: Option<&PdfValue>, limit: usize) -> Option<String> {
+    let bytes = value?.as_bytes()?;
+    let text = if let Some(utf16) = bytes.strip_prefix(&[0xfe, 0xff]) {
+        decode_utf16_be(utf16).ok()?
+    } else {
+        let utf8 = bytes.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(bytes);
+        std::str::from_utf8(utf8).ok()?.to_owned()
+    };
+    (text.len() <= limit).then_some(text)
 }
 
 fn next_code(bytes: &[u8], index: usize, mapping: &BTreeMap<Vec<u8>, String>) -> (Vec<u8>, u8) {
@@ -1993,7 +2102,10 @@ fn parse_hex_token(token: &str) -> Result<Vec<u8>, PdfReadError> {
 }
 
 fn parse_utf16_hex(token: &str) -> Result<String, PdfReadError> {
-    let bytes = parse_hex_token(token)?;
+    decode_utf16_be(&parse_hex_token(token)?)
+}
+
+fn decode_utf16_be(bytes: &[u8]) -> Result<String, PdfReadError> {
     if bytes.len() % 2 != 0 {
         return Err(PdfReadError::Syntax);
     }

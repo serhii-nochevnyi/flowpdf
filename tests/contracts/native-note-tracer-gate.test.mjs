@@ -130,6 +130,7 @@ for (const [profile, revision, expanded] of [
   ['reviewed baseline (5683541)', baselineRevision, true],
   ['reviewed recovery note', recoveryNoteRevision, true],
   ['reviewed accessible page text', accessibleTextRevision, true],
+  ['reviewed worker quarantine and accessible text', 'fb250eb5e22f5c2220eb79c94a08e08a006faaed', true],
 ]) {
   test(`accepts the exact ${profile} harness`, (t) => {
     const paths = ['.github/workflows/pdf-native-note-tracer.yml', 'package.json',

@@ -1,6 +1,8 @@
 use flow_core::pdf::native::{
-    NativeEditLimits, NativePageCommand, NativePdfSession, NativeRequestLookup, NativeSessionError,
+    NativeEditLimits, NativePageCommand, NativePageTarget, NativePdfSession, NativeRequestLookup,
+    NativeSessionError,
 };
+use flow_core::pdf::{PdfSceneElement, PdfSceneRequest, open_pdf, read_pdf_scene};
 
 fn fixture() -> Vec<u8> {
     build_pdf(&[
@@ -202,6 +204,82 @@ fn independent_note_and_checkbox_clone_survive_cross_parent_reorder_and_navigati
     assert_eq!(output.matches("/ProcSet [/PDF ]").count(), 1);
     assert_eq!(output.matches("/Length 4").count(), 1);
     assert!(!output.contains("/Title"));
+}
+
+#[test]
+fn cross_parent_reorder_preserves_public_text_and_field_readback() {
+    let paint = "BT /F1 10 Tf 20 40 Td (Page text) Tj ET\n20 50 m 40 50 l S\n";
+    let source = build_pdf(&[
+        (
+            0,
+            "<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [7 0 R] >> >>",
+        ),
+        (
+            0,
+            "<< /Type /Pages /Kids [3 0 R 5 0 R] /Count 2 /MediaBox [0 0 200 200] >>",
+        ),
+        (0, "<< /Type /Pages /Parent 2 0 R /Kids [4 0 R] /Count 1 >>"),
+        (
+            0,
+            "<< /Type /Page /Parent 3 0 R /Contents 9 0 R /Annots [8 0 R] /Resources << /Font << /F1 10 0 R >> >> >>",
+        ),
+        (
+            0,
+            "<< /Type /Pages /Parent 2 0 R /Kids [6 0 R] /Count 1 /CropBox [0 0 100 100] >>",
+        ),
+        (0, "<< /Type /Page /Parent 5 0 R >>"),
+        (
+            0,
+            "<< /FT /Tx /T (customer) /V (saved data) /Kids [8 0 R] >>",
+        ),
+        (
+            0,
+            "<< /Type /Annot /Subtype /Widget /P 4 0 R /Parent 7 0 R /Rect [20 70 100 90] >>",
+        ),
+        (
+            0,
+            &format!("<< /Length {} >>\nstream\n{paint}\nendstream", paint.len()),
+        ),
+        (
+            0,
+            "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /MissingWidth 500 >>",
+        ),
+    ]);
+    let mut session =
+        NativePdfSession::open_scoped(&source, NativeEditLimits::default(), [6; 16]).unwrap();
+    let reorder = NativePageCommand::ReorderPage {
+        target: NativePageTarget {
+            page: 0,
+            stable_id: session.snapshot().page_state.order[0],
+        },
+        position: 1,
+    };
+    session
+        .apply_page(session.snapshot().binding, 1, &reorder)
+        .unwrap();
+    assert!(String::from_utf8_lossy(session.output_bytes()).contains("/CropBox [0 0 200 200"));
+
+    for (bytes, first_page) in [(source.as_slice(), 0), (session.output_bytes(), 1)] {
+        let reader = open_pdf(bytes, Default::default()).unwrap();
+        let scene = read_pdf_scene(
+            &reader,
+            &PdfSceneRequest {
+                first_page,
+                page_count: 1,
+            },
+        )
+        .unwrap();
+        let page = &scene.pages[0];
+        assert!(page.partial && scene.report.partial);
+        assert!(matches!(
+            page.elements.as_slice(),
+            [PdfSceneElement::Form { value: field }, PdfSceneElement::Text { value: text }, PdfSceneElement::Path { value: path }]
+                if field.field_type.as_deref() == Some("Tx")
+                    && field.name.as_deref() == Some("customer")
+                    && field.value.as_deref() == Some("saved data")
+                    && text.text == "Page text" && path.stroke
+        ));
+    }
 }
 
 #[test]
