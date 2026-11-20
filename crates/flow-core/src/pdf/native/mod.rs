@@ -61,12 +61,17 @@ mod text {
     }
 
     impl FieldFont {
-        pub(super) fn admit(graph: &NativePdfGraph, dict: &Dict) -> Option<Self> {
-            let workspace = Workspace::new(graph.remaining_retained());
+        pub(super) fn admit(
+            graph: &NativePdfGraph,
+            dict: &Dict,
+            remaining: &mut usize,
+        ) -> RecognitionResult<Self> {
+            let workspace = Workspace::new(*remaining);
             let mut memory = workspace.scope();
-            font_profile(graph, dict, &workspace, &mut memory)
-                .ok()
-                .map(Self)
+            let font = font_profile(graph, dict, &workspace, &mut memory)?;
+            memory.grow(size_of::<Self>()).map_err(|_| Budget)?;
+            *remaining = workspace.remaining();
+            Ok(Self(font))
         }
 
         pub(super) fn operand(

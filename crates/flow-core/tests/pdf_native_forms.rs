@@ -569,8 +569,7 @@ fn read_only_label_does_not_shadow_an_editable_field_name() {
     assert_eq!(fields[0].refusal, Some(NativeFieldRefusal::Profile));
 }
 
-#[test]
-fn embedded_appearance_round_trips_ukrainian_and_refuses_unmapped_glyphs() {
+fn embedded_appearance(field_widths: &str) -> Vec<u8> {
     let font = include_bytes!("../data/NotoSans-Regular.ttf");
     let face = ttf_parser::Face::parse(font, 0).unwrap();
     let gid = face.glyph_index('Ї').unwrap().0.to_be_bytes();
@@ -581,7 +580,7 @@ fn embedded_appearance_round_trips_ukrainian_and_refuses_unmapped_glyphs() {
         b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 500] /Annots [11 0 R] >>".to_vec(),
         b"<< /Fields [11 0 R] /DR << /Font << /FlowField 5 0 R >> >> >>".to_vec(),
         b"<< /Type /Font /Subtype /Type0 /BaseFont /NotoSans-Regular /Encoding /Identity-H /DescendantFonts [6 0 R] /ToUnicode 7 0 R >>".to_vec(),
-        b"<< /Type /Font /Subtype /CIDFontType2 /BaseFont /NotoSans-Regular /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> /W [1 [339]] /FontDescriptor 8 0 R /CIDToGIDMap 10 0 R >>".to_vec(),
+        format!("<< /Type /Font /Subtype /CIDFontType2 /BaseFont /NotoSans-Regular /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> /W {field_widths} /FontDescriptor 8 0 R /CIDToGIDMap 10 0 R >>").into_bytes(),
         stream("", cmap),
         b"<< /Type /FontDescriptor /FontName /NotoSans-Regular /Flags 32 /FontFile2 9 0 R >>".to_vec(),
         stream(&format!("/Length1 {}", font.len()), font),
@@ -590,7 +589,12 @@ fn embedded_appearance_round_trips_ukrainian_and_refuses_unmapped_glyphs() {
         stream("/Type /XObject /Subtype /Form /BBox [0 0 140 30] /Resources << /Font << /FlowField 5 0 R >> >>",
             b"q 1 g 0 0 140 30 re f 0 G 1 w 1 1 138 28 re S\nBT /FlowField 10 Tf 0 g 2 4 Td <> Tj ET\nQ\n"),
     ];
-    let bytes = build_pdf(&objects);
+    build_pdf(&objects)
+}
+
+#[test]
+fn embedded_appearance_round_trips_ukrainian_and_refuses_unmapped_glyphs() {
+    let bytes = embedded_appearance("[1 [339]]");
     let mut pdf = session(&bytes);
     assert_eq!(pdf.snapshot().fields[0].value.as_deref(), Some(""));
     let id = pdf.snapshot().fields[0].id;
@@ -617,6 +621,74 @@ fn embedded_appearance_round_trips_ukrainian_and_refuses_unmapped_glyphs() {
     );
     assert_eq!(pdf.output_bytes(), accepted);
     assert_eq!(pdf.snapshot().binding.revision, 1);
+}
+
+#[test]
+fn embedded_font_uses_the_live_projection_and_command_budgets() {
+    let bytes = embedded_appearance("[1 [339] 2 4096 339]");
+    let open = |max_retained_bytes| {
+        NativePdfSession::open_scoped(
+            &bytes,
+            NativeEditLimits {
+                max_retained_bytes,
+                ..NativeEditLimits::default()
+            },
+            [7; 16],
+        )
+    };
+    let set_text = |pdf: &NativePdfSession| NativeFieldCommand::SetFieldText {
+        field: pdf.snapshot().fields[0].id,
+        value: "Ї".into(),
+    };
+    let mut roomy = open(7 * 1024 * 1024).unwrap();
+    let command = set_text(&roomy);
+    roomy
+        .apply_field(roomy.snapshot().binding, 1, &command)
+        .unwrap();
+    assert_saved_value(roomy.output_bytes(), "recipient", "Tx", "Ї");
+    let reopened = session(roomy.output_bytes());
+    assert!(reopened.snapshot().fields[0].can_edit_appearance);
+    assert_eq!(reopened.snapshot().fields[0].value.as_deref(), Some("Ї"));
+
+    assert!(matches!(
+        open(2 * 1024 * 1024),
+        Err(NativeSessionError::Budget)
+    ));
+    let mut pdf = open(5 * 1024 * 1024).unwrap();
+    let accepted = pdf.snapshot().clone();
+    assert!(accepted.fields[0].can_edit_appearance);
+    let command = set_text(&pdf);
+    assert_eq!(
+        pdf.apply_field(accepted.binding, 1, &command),
+        Err(NativeSessionError::Budget)
+    );
+    assert_eq!(pdf.snapshot().binding, accepted.binding);
+    assert_eq!(pdf.snapshot().output_hash, accepted.output_hash);
+    assert_eq!(pdf.snapshot().consumed_request, accepted.consumed_request);
+    assert_eq!(pdf.snapshot().fields, accepted.fields);
+    assert_eq!(
+        pdf.lookup(accepted.binding, 1),
+        Ok(NativeRequestLookup::Unseen)
+    );
+    assert_eq!(pdf.output_bytes(), bytes);
+}
+
+#[test]
+fn unsupported_embedded_font_keeps_the_appearance_refusal() {
+    let bytes = embedded_appearance("[1 [0]]");
+    let mut pdf = session(&bytes);
+    let field = &pdf.snapshot().fields[0];
+    assert!(!field.can_edit_appearance);
+    assert_eq!(field.refusal, Some(NativeFieldRefusal::Appearance));
+    let command = NativeFieldCommand::SetFieldText {
+        field: field.id,
+        value: "Ї".into(),
+    };
+    assert_eq!(
+        pdf.apply_field(pdf.snapshot().binding, 1, &command),
+        Err(NativeSessionError::Field(NativeFieldRefusal::Appearance))
+    );
+    assert_eq!(pdf.output_bytes(), bytes);
 }
 
 #[test]

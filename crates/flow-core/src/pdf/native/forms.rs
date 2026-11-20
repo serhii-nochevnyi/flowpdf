@@ -393,7 +393,22 @@ fn load_form(
             _ => return Err(Profile.into()),
         }
     }
-    let font = (|| {
+    for &field in &fields {
+        let values = dict(graph, field).map_err(|_| Reference)?;
+        if values.get("FT").is_some_and(|value| {
+            graph
+                .resolve_metered(value, &mut graph.remaining_work())
+                .is_ok_and(|value| value.as_name() == Some("Sig"))
+        }) {
+            return Err(Profile.into());
+        }
+    }
+    let names =
+        field_name_inventory(graph, &fields, work, remaining).map_err(|error| match error {
+            NativeEditError::Budget => NativeSessionError::Budget,
+            _ => Reference.into(),
+        })?;
+    let font = match (|| -> Result<Font, NativeSessionError> {
         let Some(resources) = values.get("DR") else {
             return Ok(Font::Simple);
         };
@@ -412,24 +427,14 @@ fn load_form(
         let font = dict(graph, reference).map_err(|_| Appearance)?;
         Ok(Font::Embedded(
             reference,
-            Box::new(FieldFont::admit(graph, font).ok_or(Appearance)?),
+            Box::new(FieldFont::admit(graph, font, remaining)?),
         ))
-    })();
-    for &field in &fields {
-        let values = dict(graph, field).map_err(|_| Reference)?;
-        if values.get("FT").is_some_and(|value| {
-            graph
-                .resolve_metered(value, &mut graph.remaining_work())
-                .is_ok_and(|value| value.as_name() == Some("Sig"))
-        }) {
-            return Err(Profile.into());
-        }
-    }
-    let names =
-        field_name_inventory(graph, &fields, work, remaining).map_err(|error| match error {
-            NativeEditError::Budget => NativeSessionError::Budget,
-            _ => Reference.into(),
-        })?;
+    })() {
+        Ok(font) => Ok(font),
+        Err(NativeSessionError::Field(reason)) => Err(reason),
+        Err(NativeSessionError::Text(_)) => Err(Appearance),
+        Err(error) => return Err(error),
+    };
     Ok(Form {
         owner: Some(owner),
         fields,
@@ -1120,13 +1125,28 @@ pub(super) fn stage(
     current: &[NativeFieldView],
     command: &NativeFieldCommand,
 ) -> Result<ExpectedField, NativeSessionError> {
-    use NativeFieldCommand::*;
     command.validate()?;
     let budget = graph.remaining_work();
     let mut work = budget;
-    let mut remaining = graph.remaining_retained();
-    let mut form = load_form(graph, &mut work, &mut remaining)?;
+    let available = graph.remaining_retained();
+    let mut remaining = available;
+    let form = load_form(graph, &mut work, &mut remaining)?;
     graph.charge_page_work(budget - work)?;
+    let form_bytes = available - remaining;
+    graph.charge_page_retained(form_bytes)?;
+    let result = stage_form(graph, pages, current, command, form);
+    graph.release_page_retained(form_bytes);
+    result
+}
+
+fn stage_form(
+    graph: &mut NativePdfGraph,
+    pages: &[NativePdfNotePage],
+    current: &[NativeFieldView],
+    command: &NativeFieldCommand,
+    mut form: Form,
+) -> Result<ExpectedField, NativeSessionError> {
+    use NativeFieldCommand::*;
     let page_at = |page: u32| pages.get(page as usize).ok_or(Geometry);
     let target = command
         .target()
@@ -1147,8 +1167,14 @@ pub(super) fn stage(
         graph.charge_page_work(old_page.annotations.len() + form.fields.len())?;
         let mut work = graph.remaining_work();
         let budget = work;
-        let identity =
-            recognize_identity(graph, &form, old_page, view.object, &mut work, remaining)?;
+        let identity = recognize_identity(
+            graph,
+            &form,
+            old_page,
+            view.object,
+            &mut work,
+            graph.remaining_retained(),
+        )?;
         form.names.clear();
         let admitted = recognize_appearance(graph, &form, old_page, view.object, identity)?;
         graph.charge_page_work(budget - work)?;
