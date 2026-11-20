@@ -24,6 +24,8 @@ import {
   type NativePdfWorkerPort,
   type NativePdfWorkerScope,
 } from '../src/pdf/pdf-native-edit-worker.js'
+import type { PdfReaderWorkerInboundMessage } from '../src/pdf/pdf-protocol.js'
+import type { PdfReaderWorkerPort, PdfReaderWorkerScope } from '../src/pdf/pdf-reader-worker.js'
 
 const hash = (byte: number) => Array<number>(32).fill(byte)
 const storeHash = '039058c6f2c0cb492c533b0a4d14ef77cc0f78abccced5287d84a1a2011cfb81'
@@ -1639,6 +1641,79 @@ describe('native redaction quarantine', () => {
 })
 
 describe('native PDF runtime composition', () => {
+  it.each(['setup', 'disposal'] as const)('terminates a page reader after scheduler %s fails and extracts on a fresh worker', async (stage) => {
+    await initializeWasm()
+    const { createNativePdfRuntime } = await import('../src/layout/layout-runtime.js')
+    const { createWasmPdfReaderEngine, installPdfReaderWorker, RevisionAwarePdfReaderScheduler } =
+      await import('../src/pdf/pdf-reader-worker.js')
+    const content = 'BT /F1 12 Tf 20 80 Td (Page text) Tj ET\n'
+    const bytes = new TextEncoder().encode(fixturePdf([
+      '<< /Type /Catalog /Pages 2 0 R >>',
+      '<< /Type /Pages /Kids [3 0 R] /Count 1 >>',
+      '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>',
+      '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>',
+      `<< /Length ${content.length} >>\nstream\n${content}endstream`,
+    ]))
+    const originStoreHash = nativeBytesHex(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes)))
+    const identity = { protocolVersion: 1, originStoreHash }
+    const opened = readNativeResponse(wasm.native_pdf_open(JSON.stringify({
+      ...identity, operation: 'open', requestId: 1,
+      epoch: Array.from(crypto.getRandomValues(new Uint8Array(16))), bytesHex: nativeBytesHex(bytes),
+    })))
+    if (opened?.status !== 'opened') throw new Error('expected a verified PDF snapshot')
+    const { snapshot } = opened
+    const closed = readNativeResponse(wasm.native_pdf_close(JSON.stringify({
+      ...identity, operation: 'close', requestId: 2, binding: snapshot.binding,
+    })))
+    expect(closed?.status).toBe('closed')
+    const pageId = snapshot.scene.pages[0]!.id
+    const outputHash = nativeBytesHex(Uint8Array.from(snapshot.outputHash))
+    const failure = new Error(`reader scheduler ${stage} failed`)
+    const reader = createWasmPdfReaderEngine(wasm)
+    const workers: PageReaderWorker[] = []
+    class PageReaderWorker implements PdfReaderWorkerPort {
+      onmessage: PdfReaderWorkerPort['onmessage'] = null
+      onerror = null
+      onmessageerror = null
+      terminate = vi.fn()
+      private readonly scope: PdfReaderWorkerScope = {
+        onmessage: null,
+        postMessage: (data) => this.onmessage?.({ data }),
+      }
+      postMessage(message: PdfReaderWorkerInboundMessage) {
+        this.scope.onmessage?.({ data: message })
+      }
+
+      constructor(url: URL) {
+        if (!url.pathname.endsWith('/pdf-reader-worker-entry.ts')) return
+        workers.push(this)
+        installPdfReaderWorker(this.scope, reader.run, reader.verifyResultHash)
+        if (stage === 'setup' && workers.length === 1) {
+          Object.defineProperty(this, 'onerror', { set() { throw failure } })
+        }
+      }
+    }
+    const dispose = vi.spyOn(RevisionAwarePdfReaderScheduler.prototype, 'dispose')
+    if (stage === 'disposal') dispose.mockImplementationOnce(() => { throw failure })
+    const runtime = createNativePdfRuntime(PageReaderWorker as unknown as typeof Worker)
+    try {
+      const failedRead = new AbortController()
+      await expect(runtime.extractPageText!(snapshot, pageId, failedRead.signal)).rejects.toBe(failure)
+      expect(workers).toHaveLength(1)
+      expect(workers[0]?.terminate).toHaveBeenCalledOnce()
+      failedRead.abort()
+
+      await expect(runtime.extractPageText!(snapshot, pageId, new AbortController().signal)).resolves.toMatchObject({
+        outputHash, pageId, text: [{ value: 'Page text' }],
+      })
+      expect(workers).toHaveLength(2)
+      for (const worker of workers) expect(worker.terminate).toHaveBeenCalledOnce()
+    } finally {
+      dispose.mockRestore()
+      runtime.dispose()
+    }
+  })
+
   it('releases workers, schedulers, and the native coordinator before retrying a late startup failure', async () => {
     const { createDefaultWorkerRuntime } = await import('../src/layout/layout-runtime.js')
     const { RevisionAwareLayoutScheduler } = await import('../src/layout/layout-worker.js')

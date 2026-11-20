@@ -105,16 +105,20 @@ export function createNativePdfRuntime(
           ? new Worker(new URL('../pdf/pdf-reader-worker-entry.ts', import.meta.url), { type: 'module' })
           : new workerConstructor(new URL('../pdf/pdf-reader-worker-entry.ts', import.meta.url), { type: 'module' })
       ) as unknown as PdfReaderWorkerPort
-      const scheduler = createWorkerPdfReaderScheduler(worker)
+      let scheduler: RevisionAwarePdfReaderScheduler | undefined
       const stop = () => {
         if (!pageReads.delete(stop)) return
-        signal.removeEventListener('abort', stop)
-        scheduler.dispose()
-        worker.terminate()
+        try {
+          signal.removeEventListener('abort', stop)
+          scheduler?.dispose()
+        } finally {
+          worker.terminate()
+        }
       }
       pageReads.add(stop)
-      signal.addEventListener('abort', stop, { once: true })
       try {
+        scheduler = createWorkerPdfReaderScheduler(worker)
+        signal.addEventListener('abort', stop, { once: true })
         const outcome = await scheduler.request({
           protocolVersion: PDF_READER_PROTOCOL_VERSION,
           requestId: `native-page-text-${++pageReadNumber}`,
