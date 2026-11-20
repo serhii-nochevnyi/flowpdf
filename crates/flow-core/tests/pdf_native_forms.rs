@@ -608,16 +608,38 @@ fn checkbox_edit_skips_unused_embedded_default_font() {
         appearance,
         b"q 1 g 0 0 20 20 re f 0 G 1 w 1 1 18 18 re S\n2 w 2 2 m 18 18 l 2 18 m 18 2 l S\nQ\n",
     ));
-    for centered in [false, true] {
+    let valid_text_appearance =
+        &b"q 1 g 0 0 140 30 re f 0 G 1 w 1 1 138 28 re S\nBT /FlowField 10 Tf 0 g 2 4 Td <> Tj ET\nQ\n"[..];
+    for read_only in [
+        None,
+        Some((
+            "/Q 1",
+            "",
+            valid_text_appearance,
+            NativeFieldRefusal::Profile,
+        )),
+        Some((
+            "",
+            "/Matrix [1 0 0 1 0 0]",
+            valid_text_appearance,
+            NativeFieldRefusal::Appearance,
+        )),
+        Some((
+            "",
+            "",
+            &b"q 0 g 0 0 140 30 re f Q\n"[..],
+            NativeFieldRefusal::Appearance,
+        )),
+    ] {
         let mut objects = objects.clone();
-        if centered {
+        if let Some((field_options, stream_options, data, _)) = read_only {
             objects[2] =
                 b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 500] /Annots [11 0 R 14 0 R] >>"
                     .to_vec();
             objects[3] =
                 b"<< /Fields [11 0 R 14 0 R] /DR << /Font << /FlowField 5 0 R >> >> >>".to_vec();
-            objects.push(b"<< /Type /Annot /Subtype /Widget /FT /Tx /Q 1 /T (recipient) /V () /DV () /P 3 0 R /Rect [50 50 190 80] /AP << /N 15 0 R >> >>".to_vec());
-            objects.push(embedded_form_objects("[1 [339]]").pop().unwrap());
+            objects.push(format!("<< /Type /Annot /Subtype /Widget /FT /Tx /T (recipient) /V () /DV () /P 3 0 R /Rect [50 50 190 80] /AP << /N 15 0 R >> {field_options} >>").into_bytes());
+            objects.push(stream(&format!("/Type /XObject /Subtype /Form /BBox [0 0 140 30] /Resources << /Font << /FlowField 5 0 R >> >> {stream_options}"), data));
         }
         let bytes = build_pdf(&objects);
         let limits = NativeEditLimits {
@@ -639,10 +661,10 @@ fn checkbox_edit_skips_unused_embedded_default_font() {
         let reopened = NativePdfSession::open_scoped(pdf.output_bytes(), limits, [8; 16]).unwrap();
         assert!(reopened.snapshot().fields[0].can_edit_appearance);
         assert_eq!(reopened.snapshot().fields[0].checked, Some(true));
-        if centered {
+        if let Some((_, _, _, refusal)) = read_only {
             let other = &reopened.snapshot().fields[1];
             assert_eq!(other.name.as_deref(), Some("recipient"));
-            assert_eq!(other.refusal, Some(NativeFieldRefusal::Profile));
+            assert_eq!(other.refusal, Some(refusal));
         }
     }
 }

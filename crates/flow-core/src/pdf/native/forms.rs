@@ -263,17 +263,24 @@ enum Font {
     Embedded(Ref, Box<FieldFont>),
 }
 
+fn font_resource(reference: Option<Ref>) -> Value {
+    match reference {
+        Some(reference) => Value::Reference(reference),
+        None => Value::Dictionary(dictionary([
+            ("Type", name("Font")),
+            ("Subtype", name("Type1")),
+            ("BaseFont", name("Helvetica")),
+            ("Encoding", name("WinAnsiEncoding")),
+        ])),
+    }
+}
+
 impl Font {
     fn resource(&self) -> Value {
-        match self {
-            Self::Simple => Value::Dictionary(dictionary([
-                ("Type", name("Font")),
-                ("Subtype", name("Type1")),
-                ("BaseFont", name("Helvetica")),
-                ("Encoding", name("WinAnsiEncoding")),
-            ])),
-            Self::Embedded(reference, _) => Value::Reference(*reference),
-        }
+        font_resource(match self {
+            Self::Simple => None,
+            Self::Embedded(reference, _) => Some(*reference),
+        })
     }
 
     fn operand(&self, value: &str, [width, height]: [i64; 2]) -> FieldResult<String> {
@@ -417,34 +424,41 @@ fn load_form(
     })
 }
 
+fn form_font_reference(graph: &NativePdfGraph, form: &Form) -> FieldResult<Option<Ref>> {
+    let Some(owner) = form.owner else {
+        return Ok(None);
+    };
+    let values = pages::form_dict(graph, owner).map_err(|_| Reference)?;
+    let Some(resources) = values.get("DR") else {
+        return Ok(None);
+    };
+    let resources = resource_value(graph, resources)?;
+    let Some(fonts) = resources.get("Font") else {
+        return Ok(None);
+    };
+    let fonts = resource_value(graph, fonts)?;
+    let Some(font) = fonts.get(FONT) else {
+        return Ok(None);
+    };
+    if simple_font(font) {
+        return Ok(None);
+    }
+    font.as_reference().map(Some).ok_or(Appearance)
+}
+
 fn admit_form_font(
     graph: &NativePdfGraph,
     form: &mut Form,
+    reference: Option<Ref>,
     remaining: &mut usize,
 ) -> Result<(), NativeSessionError> {
     if form.font.is_some() {
         return Ok(());
     }
     let font = match (|| -> Result<Font, NativeSessionError> {
-        let Some(owner) = form.owner else {
+        let Some(reference) = reference else {
             return Ok(Font::Simple);
         };
-        let values = pages::form_dict(graph, owner).map_err(|_| Reference)?;
-        let Some(resources) = values.get("DR") else {
-            return Ok(Font::Simple);
-        };
-        let resources = resource_value(graph, resources)?;
-        let Some(fonts) = resources.get("Font") else {
-            return Ok(Font::Simple);
-        };
-        let fonts = resource_value(graph, fonts)?;
-        let Some(font) = fonts.get(FONT) else {
-            return Ok(Font::Simple);
-        };
-        if simple_font(font) {
-            return Ok(Font::Simple);
-        }
-        let reference = font.as_reference().ok_or(Appearance)?;
         let font = dict(graph, reference).map_err(|_| Appearance)?;
         Ok(Font::Embedded(
             reference,
@@ -509,26 +523,41 @@ impl FieldValue {
     }
 }
 
-fn appearance_stream(dimensions: [i64; 2], data: Vec<u8>, font: Option<&Font>) -> PdfStream {
-    let [width, height] = dimensions;
+fn appearance_dictionary([width, height]: [i64; 2], length: usize, font: Option<Value>) -> Dict {
     let resources = font.map_or_else(Dict::new, |font| {
-        dictionary([(
-            "Font",
-            Value::Dictionary(dictionary([(FONT, font.resource())])),
-        )])
+        dictionary([("Font", Value::Dictionary(dictionary([(FONT, font)])))])
     });
+    dictionary([
+        ("Type", name("XObject")),
+        ("Subtype", name("Form")),
+        ("BBox", numbers([0, 0, width, height])),
+        ("Resources", Value::Dictionary(resources)),
+        ("Length", Value::Integer(length as i64)),
+    ])
+}
+
+fn appearance_stream(dimensions: [i64; 2], data: Vec<u8>, font: Option<&Font>) -> PdfStream {
     PdfStream {
-        dict: dictionary([
-            ("Type", name("XObject")),
-            ("Subtype", name("Form")),
-            ("BBox", numbers([0, 0, width, height])),
-            ("Resources", Value::Dictionary(resources)),
-            ("Length", Value::Integer(data.len() as i64)),
-        ]),
+        dict: appearance_dictionary(dimensions, data.len(), font.map(Font::resource)),
         encoded: data.clone(),
         data,
         source_offset: 0,
     }
+}
+
+const TEXT_APPEARANCE_SUFFIX: &str = "> Tj ET\nQ\n";
+
+fn appearance_background([w, h]: [i64; 2]) -> String {
+    format!(
+        "q 1 g 0 0 {w} {h} re f 0 G 1 w 1 1 {} {} re S\n",
+        w - 2,
+        h - 2
+    )
+}
+
+fn text_appearance_prefix(size: [i64; 2]) -> String {
+    let background = appearance_background(size);
+    format!("{background}BT /{FONT} 10 Tf 0 g 2 4 Td <")
 }
 
 fn appearances(
@@ -536,21 +565,17 @@ fn appearances(
     size: [i64; 2],
     value: &FieldValue,
 ) -> FieldResult<Vec<(Option<&'static str>, PdfStream)>> {
-    let [w, h] = size;
-    let background = format!(
-        "q 1 g 0 0 {w} {h} re f 0 G 1 w 1 1 {} {} re S\n",
-        w - 2,
-        h - 2
-    );
     match value {
         FieldValue::Text(text) => {
             let font = form.text_font()?;
             let hex = font.operand(text, size)?;
-            let data =
-                format!("{background}BT /{FONT} 10 Tf 0 g 2 4 Td <{hex}> Tj ET\nQ\n").into_bytes();
+            let prefix = text_appearance_prefix(size);
+            let data = format!("{prefix}{hex}{TEXT_APPEARANCE_SUFFIX}").into_bytes();
             Ok(vec![(None, appearance_stream(size, data, Some(font)))])
         }
         FieldValue::Checkbox { .. } => {
+            let [w, h] = size;
+            let background = appearance_background(size);
             let mark = format!(
                 "{background}2 w 2 2 m {} {} l 2 {} m {} 2 l S\nQ\n",
                 w - 2,
@@ -569,7 +594,7 @@ fn appearances(
     }
 }
 
-fn stream_matches(graph: &NativePdfGraph, actual: &Value, expected: &PdfStream) -> bool {
+fn same_appearance_dictionary(a: &Dict, b: &Dict) -> bool {
     fn same(left: &Value, right: &Value) -> bool {
         match (left, right) {
             (Value::Name(a), Value::Name(b)) => a == b,
@@ -578,17 +603,18 @@ fn stream_matches(graph: &NativePdfGraph, actual: &Value, expected: &PdfStream) 
             (Value::Array(a), Value::Array(b)) => {
                 a.len() == b.len() && a.iter().zip(b).all(|(a, b)| same(a, b))
             }
-            (Value::Dictionary(a), Value::Dictionary(b)) => same_dict(a, b),
+            (Value::Dictionary(a), Value::Dictionary(b)) => same_appearance_dictionary(a, b),
             _ => false,
         }
     }
-    fn same_dict(a: &Dict, b: &Dict) -> bool {
-        a.len() == b.len()
-            && b.iter()
-                .all(|(key, value)| a.get(key).is_some_and(|entry| same(entry, value)))
-    }
+    a.len() == b.len()
+        && b.iter()
+            .all(|(key, value)| a.get(key).is_some_and(|entry| same(entry, value)))
+}
+
+fn stream_matches(graph: &NativePdfGraph, actual: &Value, expected: &PdfStream) -> bool {
     matches!(actual.as_reference().and_then(|reference| graph.objects.get(&reference)),
-        Some(Value::Stream(actual)) if actual.data == expected.data && same_dict(&actual.dict, &expected.dict))
+        Some(Value::Stream(actual)) if actual.data == expected.data && same_appearance_dictionary(&actual.dict, &expected.dict))
 }
 
 struct Admitted {
@@ -718,14 +744,34 @@ fn recognize_appearance(
             {
                 return Err(Appearance.into());
             }
-            if !matches!(
-                ap.as_reference()
-                    .and_then(|reference| graph.objects.get(&reference)),
-                Some(Value::Stream(_))
-            ) {
+            let Some(Value::Stream(stream)) = ap
+                .as_reference()
+                .and_then(|reference| graph.objects.get(&reference))
+            else {
+                return Err(Appearance.into());
+            };
+            let text = get_text("V")?;
+            let reference = form_font_reference(graph, form)?;
+            let prefix = text_appearance_prefix(size);
+            let expected =
+                appearance_dictionary(size, stream.data.len(), Some(font_resource(reference)));
+            let hex = stream
+                .data
+                .strip_prefix(prefix.as_bytes())
+                .and_then(|data| data.strip_suffix(TEXT_APPEARANCE_SUFFIX.as_bytes()));
+            let width = if reference.is_some() { 4 } else { 2 };
+            if !same_appearance_dictionary(&stream.dict, &expected)
+                || !hex.is_some_and(|hex| {
+                    hex.len() == text.chars().count() * width
+                        && hex
+                            .iter()
+                            .all(|byte| matches!(byte, b'0'..=b'9' | b'A'..=b'F'))
+                })
+            {
                 return Err(Appearance.into());
             }
-            let text = get_text("V")?;
+            drop(expected);
+            drop(prefix);
             let default = fields
                 .contains_key("DV")
                 .then(|| get_text("DV"))
@@ -739,7 +785,7 @@ fn recognize_appearance(
                         + default.as_ref().map_or(0, String::capacity),
                 )?;
                 let before = available;
-                admit_form_font(graph, form, &mut available)?;
+                admit_form_font(graph, form, reference, &mut available)?;
                 spend(remaining, before - available)?;
             }
             if let Some(default) = default {
@@ -1340,7 +1386,8 @@ fn stage_form(
             let mut remaining = graph.remaining_retained();
             spend(&mut remaining, text.capacity())?;
             let available = remaining;
-            admit_form_font(graph, &mut form, &mut remaining)?;
+            let reference = form_font_reference(graph, &form)?;
+            admit_form_font(graph, &mut form, reference, &mut remaining)?;
             let bytes = available - remaining;
             graph.charge_page_retained(bytes)?;
             *form_bytes += bytes;
