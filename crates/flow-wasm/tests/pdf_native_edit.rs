@@ -370,7 +370,11 @@ fn page_preview_binds_the_rotated_crop_and_current_accepted_revision() {
     assert_eq!(updated_pixel(4, 12), "5e552e");
     assert_eq!(updated_pixel(5, 13), "ffdc40");
     assert_eq!(updated_pixel(4, 11), pixel(4, 11));
+    let mut different_rgb = updated_rgb.to_owned();
+    let offset = (12 * 16 + 4) * 6;
+    different_rgb.replace_range(offset..offset + 6, "000000");
     for (field, accepted, other) in [
+        ("requestId", json!(6), json!(7)),
         ("pageId", first.clone(), json!(1)),
         (
             "cropBox",
@@ -384,6 +388,7 @@ fn page_preview_binds_the_rotated_crop_and_current_accepted_revision() {
             current["originStoreHash"].clone(),
             json!("00".repeat(32)),
         ),
+        ("rgbHex", json!(updated_rgb), json!(different_rgb)),
     ] {
         let different = rehash_with_replacement(
             &updated_reply,
@@ -393,15 +398,22 @@ fn page_preview_binds_the_rotated_crop_and_current_accepted_revision() {
         assert!(verify_native_pdf_response(different.clone()), "{field}");
         assert!(!verify_native_pdf_worker_response(different), "{field}");
     }
+    let refreshed_reply =
+        native_pdf_preview(preview_request(7, current, first.clone()).to_string());
+    assert!(verify_native_pdf_worker_response(refreshed_reply.clone()));
+    assert!(!verify_native_pdf_worker_response(updated_reply));
     assert_eq!(
-        call(native_pdf_close, bound("close", 7, current))["status"],
+        call(native_pdf_close, bound("close", 8, current))["status"],
         "closed"
     );
     assert!(!verify_native_pdf_worker_response(original_reply.clone()));
-    assert!(!verify_native_pdf_worker_response(updated_reply));
-    std::thread::spawn(move || assert!(verify_native_pdf_response(original_reply)))
-        .join()
-        .unwrap();
+    assert!(!verify_native_pdf_worker_response(refreshed_reply.clone()));
+    std::thread::spawn(move || {
+        assert!(verify_native_pdf_response(original_reply));
+        assert!(verify_native_pdf_response(refreshed_reply));
+    })
+    .join()
+    .unwrap();
 }
 
 #[test]
@@ -715,26 +727,48 @@ fn marked_snapshot_survives_live_redaction_budget_refusal() {
         .join()
         .unwrap();
 
+    let mark_request = |kind, request_id, index| {
+        redaction_request(
+            request_id,
+            base,
+            json!({
+                "kind": kind, "pageId": base["pageState"]["order"][0], "rect": rect(index),
+            }),
+        )
+    };
     for index in 0..marks {
         let response = call(
             native_pdf_redaction,
-            redaction_request(
-                index as u64 + 2,
-                base,
-                json!({
-                    "kind": "addMark", "pageId": base["pageState"]["order"][0], "rect": rect(index),
-                }),
-            ),
+            mark_request("addMark", index as u64 + 2, index),
         );
         assert_eq!(response["status"], "redaction", "code={}", response["code"]);
+        assert_eq!(response["redaction"]["markCount"], index + 1);
     }
 
-    let snapshot = native_pdf_snapshot(bound("snapshot", marks as u64 + 2, base).to_string());
+    let request_id = marks as u64 + 2;
+    let refused = call(
+        native_pdf_redaction,
+        mark_request("addMark", request_id, marks),
+    );
+    assert_eq!(refused["status"], "failed");
+    assert_eq!(refused["code"], "FLOW_PDF_NATIVE_BUDGET_EXHAUSTED");
+    assert!(refused.get("redaction").is_none());
+    assert!(refused.get("preview").is_none());
+    status_only(&refused);
+
+    let status = call(
+        native_pdf_redaction,
+        redaction_request(request_id, base, json!({"kind":"status","candidate":null})),
+    );
+    assert_eq!(status["status"], "redaction");
+    assert_eq!(status["redaction"]["markCount"], marks);
+
+    let snapshot = native_pdf_snapshot(bound("snapshot", request_id, base).to_string());
     assert!(verify_native_pdf_worker_response(snapshot.clone()));
     let readback: Value = serde_json::from_str(&snapshot).unwrap();
     assert_eq!(readback["status"], "unseen");
     assert_eq!(readback["snapshot"]["redactionAdmission"], "unavailable");
-    for field in ["binding", "outputHash", "outputHex"] {
+    for field in ["binding", "outputHash", "outputHex", "consumedRequest"] {
         assert!(
             readback["snapshot"][field] == base[field],
             "{field} changed"
@@ -743,6 +777,15 @@ fn marked_snapshot_survives_live_redaction_budget_refusal() {
     std::thread::spawn(move || assert!(verify_native_pdf_response(snapshot)))
         .join()
         .unwrap();
+
+    for index in 0..marks {
+        let removed = call(
+            native_pdf_redaction,
+            mark_request("removeMark", request_id + 1 + index as u64, index),
+        );
+        assert_eq!(removed["status"], "redaction");
+        assert_eq!(removed["redaction"]["markCount"], marks - index - 1);
+    }
 }
 
 #[test]
@@ -1107,7 +1150,7 @@ fn redaction_wire_refuses_marks_on_oversized_pages() {
         ),
     );
     assert_eq!(refused["status"], "failed", "{refused}");
-    assert_eq!(refused["code"], "FLOW_PDF_NATIVE_UNSUPPORTED");
+    assert_eq!(refused["code"], "FLOW_PDF_NATIVE_BUDGET_EXHAUSTED");
     assert!(refused["redaction"].is_null());
     status_only(&refused);
 

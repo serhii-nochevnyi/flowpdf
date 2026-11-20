@@ -205,7 +205,7 @@ pub struct NativePdfSession {
     records: VecDeque<RequestRecord>,
     remaining_retained: usize,
     next_page_object_id: u64,
-    redaction_admission: OnceLock<bool>,
+    redaction_admission: OnceLock<Result<(), NativeSessionError>>,
     redaction_marks: Vec<NativeRedactionMark>,
     redaction_marks_binding: Option<NativeBinding>,
     last_redaction_request: u64,
@@ -322,17 +322,21 @@ impl NativePdfSession {
     }
 
     pub fn redaction_admitted(&self) -> bool {
-        *self.redaction_admission.get_or_init(|| {
-            self.redaction_workspace().is_ok_and(|workspace| {
+        self.check_redaction_admission().is_ok()
+    }
+
+    pub fn check_redaction_admission(&self) -> Result<(), NativeSessionError> {
+        self.redaction_admission
+            .get_or_init(|| {
                 redaction::check_document(
                     &self.graph,
                     &self.snapshot.page_state.order,
                     Some(self.origin_bytes().len()),
-                    workspace,
+                    self.redaction_workspace()?,
                 )
-                .is_ok()
+                .map_err(redaction_graph_error)
             })
-        })
+            .clone()
     }
 
     pub fn redaction_mark_geometry(
