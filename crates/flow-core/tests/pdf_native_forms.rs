@@ -222,31 +222,66 @@ fn read_only_appearance_retains_verified_name_without_a_setter() {
 }
 
 #[test]
-fn public_widget_metadata_does_not_inherit_labels_from_rejected_split_fields() {
+fn native_and_public_widget_labels_require_consistent_split_field_children() {
+    for (second_entries, expected_label, second_type, second_value) in [
+        ("", Some("recipient"), None, None),
+        ("/FT /Btn /V /Yes", None, Some("Btn"), Some("Yes")),
+    ] {
+        let bytes = build_pdf(&[
+            b"<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [5 0 R] >> >>".to_vec(),
+            b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 500] /Annots [4 0 R 6 0 R] >>".to_vec(),
+            b"<< /Type /Annot /Subtype /Widget /P 3 0 R /Parent 5 0 R /Rect [10 10 30 30] >>".to_vec(),
+            b"<< /FT /Tx /T 8 0 R /V (saved) /Kids 7 0 R >>".to_vec(),
+            format!("<< /Type /Annot /Subtype /Widget /P 3 0 R /Parent 5 0 R /Rect [40 10 60 30] {second_entries} >>").into_bytes(),
+            b"[4 0 R 6 0 R]".to_vec(),
+            b"(recipient)".to_vec(),
+        ]);
+        let native = session(&bytes);
+        let reader = open_pdf(&bytes, Default::default()).unwrap();
+        let scene = read_pdf_scene(&reader, &PdfSceneRequest::default()).unwrap();
+        let [
+            PdfSceneElement::Form { value: first },
+            PdfSceneElement::Form { value: second },
+        ] = scene.pages[0].elements.as_slice()
+        else {
+            panic!("expected two form widgets");
+        };
+        let fields = &native.snapshot().fields;
+        assert_eq!(fields.len(), 2);
+        for (field, widget) in fields.iter().zip([first, second]) {
+            assert_eq!(field.object, widget.provenance.object_ref);
+            assert_eq!(field.name, widget.name);
+            assert_eq!(widget.name.as_deref(), expected_label);
+            assert!(!field.can_edit_appearance);
+            assert_eq!(field.value, None);
+        }
+        assert_eq!(first.field_type, None);
+        assert_eq!(first.value, None);
+        assert_eq!(second.field_type.as_deref(), second_type);
+        assert_eq!(second.value.as_deref(), second_value);
+    }
+}
+
+#[test]
+fn read_only_nested_widget_keeps_its_native_display_label() {
     let bytes = build_pdf(&[
         b"<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [5 0 R] >> >>".to_vec(),
         b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
-        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 500] /Annots [4 0 R 6 0 R] >>".to_vec(),
-        b"<< /Subtype /Widget /Parent 5 0 R /Rect [10 10 30 30] >>".to_vec(),
-        b"<< /FT /Tx /T (recipient) /V (saved) /Kids 7 0 R >>".to_vec(),
-        b"<< /Subtype /Widget /Parent 5 0 R /Rect [40 10 60 30] /FT /Btn /V /Yes >>".to_vec(),
-        b"[4 0 R 6 0 R]".to_vec(),
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 500] /Annots [4 0 R] >>".to_vec(),
+        b"<< /Type /Annot /Subtype /Widget /P 3 0 R /Parent 6 0 R /Rect [10 10 30 30] >>".to_vec(),
+        b"<< /T (section) /Kids [6 0 R] >>".to_vec(),
+        b"<< /Parent 5 0 R /FT /Tx /T 7 0 R /V (saved) /Kids [4 0 R] >>".to_vec(),
+        b"(recipient)".to_vec(),
     ]);
-    let reader = open_pdf(&bytes, Default::default()).unwrap();
-    let scene = read_pdf_scene(&reader, &PdfSceneRequest::default()).unwrap();
-    let [
-        PdfSceneElement::Form { value: first },
-        PdfSceneElement::Form { value: second },
-    ] = scene.pages[0].elements.as_slice()
-    else {
-        panic!("expected two form widgets");
+    let native = session(&bytes);
+    let [widget] = native.snapshot().fields.as_slice() else {
+        panic!("expected a read-only widget");
     };
-    assert_eq!(first.name, None);
-    assert_eq!(first.field_type, None);
-    assert_eq!(first.value, None);
-    assert_eq!(second.name, None);
-    assert_eq!(second.field_type.as_deref(), Some("Btn"));
-    assert_eq!(second.value.as_deref(), Some("Yes"));
+    assert_eq!(widget.name.as_deref(), Some("recipient"));
+    assert!(!widget.can_edit_appearance);
+    assert_eq!(widget.value, None);
+    assert_eq!(native.output_bytes(), bytes);
 }
 
 #[test]

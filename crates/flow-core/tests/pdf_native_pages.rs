@@ -207,6 +207,57 @@ fn independent_note_and_checkbox_clone_survive_cross_parent_reorder_and_navigati
 }
 
 #[test]
+fn indirect_link_destination_tracks_the_same_page_after_reorder() {
+    let source = build_pdf(&[
+        (0, "<< /Type /Catalog /Pages 2 0 R >>"),
+        (
+            0,
+            "<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 /MediaBox [0 0 200 200] >>",
+        ),
+        (0, "<< /Type /Page /Parent 2 0 R /Annots [5 0 R] >>"),
+        (0, "<< /Type /Page /Parent 2 0 R >>"),
+        (
+            0,
+            "<< /Type /Annot /Subtype /Link /P 3 0 R /Rect [10 10 30 30] /Dest 6 0 R >>",
+        ),
+        (0, "[4 0 R /Fit]"),
+    ]);
+    let mut session =
+        NativePdfSession::open_scoped(&source, NativeEditLimits::default(), [6; 16]).unwrap();
+    let reorder = NativePageCommand::ReorderPage {
+        target: NativePageTarget {
+            page: 1,
+            stable_id: session.snapshot().page_state.order[1],
+        },
+        position: 0,
+    };
+    session
+        .apply_page(session.snapshot().binding, 1, &reorder)
+        .unwrap();
+
+    for (bytes, link_page, target_page) in
+        [(source.as_slice(), 0, 1), (session.output_bytes(), 1, 0)]
+    {
+        let reader = open_pdf(bytes, Default::default()).unwrap();
+        let scene = read_pdf_scene(
+            &reader,
+            &PdfSceneRequest {
+                first_page: 0,
+                page_count: 2,
+            },
+        )
+        .unwrap();
+        let [PdfSceneElement::Link { value }] = scene.pages[link_page].elements.as_slice() else {
+            panic!("expected a retained link");
+        };
+        assert_eq!(value.provenance.object_ref.object_number, 5);
+        assert!(value.internal);
+        assert_eq!(value.destination_page, Some(target_page as u32));
+        assert_eq!(scene.pages[target_page].source_object.object_number, 4);
+    }
+}
+
+#[test]
 fn cross_parent_reorder_preserves_public_text_and_field_readback() {
     let paint = "BT /F1 10 Tf 20 40 Td (Page text) Tj ET\n20 50 m 40 50 l S\n";
     let source = build_pdf(&[

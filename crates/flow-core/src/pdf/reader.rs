@@ -463,7 +463,7 @@ pub(super) fn decode_pdf_text_string(
     Ok(Some(text))
 }
 
-pub(super) fn resolve_label_value<'value, 'object: 'value>(
+pub(super) fn resolve_annotation_value<'value, 'object: 'value>(
     value: &'value PdfValue,
     max_nesting: usize,
     work: &mut usize,
@@ -490,26 +490,48 @@ pub(super) fn map_widget_label<'a, T>(
     read: impl FnOnce(&[u8]) -> T,
 ) -> Option<T> {
     if let Some(label) = label {
-        let label = resolve_label_value(label, max_nesting, work, &mut object)?;
+        let label = resolve_annotation_value(label, max_nesting, work, &mut object)?;
         if !matches!(*label, PdfValue::Null) {
             return label.as_bytes().map(read);
         }
     }
-    let field = object(parent?)?;
+    let parent = parent.filter(|&parent| parent != widget)?;
+    *work = work.checked_sub(1)?;
+    let field = object(parent)?;
     let field = field.as_dictionary()?;
-    let children = resolve_label_value(field.get("Kids")?, max_nesting, work, &mut object)?;
+    let children = resolve_annotation_value(field.get("Kids")?, max_nesting, work, &mut object)?;
     let children = children.as_array()?;
     *work = work.checked_sub(children.len())?;
-    if children
-        .iter()
-        .filter(|child| child.as_reference() == Some(widget))
-        .take(2)
-        .count()
-        != 1
-    {
+    let mut seen = BTreeSet::new();
+    for child in children {
+        let child = child.as_reference()?;
+        if child == parent || !seen.insert(child) {
+            return None;
+        }
+        let entry = object(child)?;
+        let entry = entry.as_dictionary()?;
+        if entry.get("Subtype").and_then(PdfValue::as_name) != Some("Widget")
+            || entry.get("Parent").and_then(PdfValue::as_reference) != Some(parent)
+            || ["FT", "V", "Kids"]
+                .iter()
+                .any(|key| entry.contains_key(*key))
+        {
+            return None;
+        }
+        if child != widget
+            && let Some(label) = entry.get("T")
+            && !matches!(
+                resolve_annotation_value(label, max_nesting, work, &mut object).as_deref(),
+                Some(PdfValue::Null)
+            )
+        {
+            return None;
+        }
+    }
+    if !seen.contains(&widget) {
         return None;
     }
-    resolve_label_value(field.get("T")?, max_nesting, work, &mut object)?
+    resolve_annotation_value(field.get("T")?, max_nesting, work, &mut object)?
         .as_bytes()
         .map(read)
 }
@@ -599,7 +621,10 @@ impl PdfReader {
         self.object_with_depth(reference, 0)
     }
 
-    pub(super) fn label_object(&self, reference: PdfObjectRef) -> Result<PdfValue, PdfReadError> {
+    pub(super) fn non_stream_object(
+        &self,
+        reference: PdfObjectRef,
+    ) -> Result<PdfValue, PdfReadError> {
         let (mut cursor, _) = self.object_cursor(reference, 0, None)?;
         let value = cursor.parse_value(0)?;
         if !cursor.consume_keyword(b"endobj")? {
