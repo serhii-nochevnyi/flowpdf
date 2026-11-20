@@ -12,8 +12,8 @@ use crate::layout::{LayoutRect, LayoutUnit};
 
 use super::reader::{
     PdfObjectRef, PdfPageRecord, PdfReadDiagnostic, PdfReadDiagnosticCode, PdfReadError,
-    PdfReadReport, PdfReader, PdfReaderLimits, PdfStream, PdfValue, read_scene_name,
-    report_active_content, single_filter,
+    PdfReadReport, PdfReader, PdfReaderLimits, PdfStream, PdfValue, decode_pdf_text_string,
+    map_widget_label, read_scene_name, report_active_content, single_filter,
 };
 
 use super::native::{NativeNoteId, NativePageGeometry, NativePageId, NativeTextPage};
@@ -553,6 +553,7 @@ struct SceneBuilder<'a> {
     page_index: u32,
     page: &'a PdfPageRecord,
     field_counts: &'a BTreeMap<PdfObjectRef, usize>,
+    widget_label_work: usize,
     elements: Vec<PdfSceneElement>,
     report: PdfReadReport,
     fonts: BTreeMap<(PdfObjectRef, String), FontMap>,
@@ -576,6 +577,7 @@ impl<'a> SceneBuilder<'a> {
             page_index,
             page,
             field_counts,
+            widget_label_work: reader.limits().max_content_tokens,
             elements: Vec::new(),
             report: PdfReadReport::default(),
             fonts: BTreeMap::new(),
@@ -1458,6 +1460,12 @@ impl<'a> SceneBuilder<'a> {
                 height: one,
             },
         )?;
+        if rect.width <= zero || rect.height <= zero {
+            if !self.state.clip.is_empty() {
+                self.report_partial(provenance.object_ref);
+            }
+            return Ok(());
+        }
         if !self.paint_visible(rect, true, &provenance)? {
             return Ok(());
         }
@@ -1549,7 +1557,26 @@ impl<'a> SceneBuilder<'a> {
                 let owner = self.widget_field_owner(*annotation_ref, dictionary);
                 let field = owner.as_ref().unwrap_or(dictionary);
                 let field_type = field.get("FT").and_then(PdfValue::as_name);
-                let name = string_value(field.get("T"), self.limits.max_string_bytes);
+                let parent = dictionary
+                    .get("Parent")
+                    .and_then(PdfValue::as_reference)
+                    .filter(|parent| {
+                        parent != annotation_ref && self.field_counts.get(parent) == Some(&1)
+                    });
+                let limit = self.limits.max_string_bytes;
+                let mut available = limit.saturating_mul(3);
+                let name = map_widget_label(
+                    *annotation_ref,
+                    dictionary.get("T"),
+                    parent,
+                    self.limits.max_nesting,
+                    &mut self.widget_label_work,
+                    |reference| self.reader.label_object(reference).ok().map(Cow::Owned),
+                    |bytes| decode_pdf_text_string(bytes, limit, &mut available),
+                )
+                .transpose()?
+                .flatten()
+                .filter(|name| !name.is_empty() && !name.chars().any(char::is_control));
                 let saved = field.get("V");
                 let value = if field_type == Some("Btn")
                     && field

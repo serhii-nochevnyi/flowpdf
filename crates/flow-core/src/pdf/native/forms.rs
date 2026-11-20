@@ -1,15 +1,20 @@
-use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write;
+use std::{
+    borrow::Cow,
+    collections::{BTreeMap, BTreeSet},
+};
 
 use serde::{Deserialize, Deserializer, Serialize};
 
 use super::super::{
-    reader::{PdfObjectRef as Ref, PdfStream, PdfValue as Value},
+    reader::{
+        PdfObjectRef as Ref, PdfStream, PdfValue as Value, decode_pdf_text_string, map_widget_label,
+    },
     scene::{NativePdfAnnotation, NativePdfNotePage, NativeReadOnlyAnnotation},
 };
 use super::{
     NativeBinding, NativeEditError, NativeSessionError,
-    graph::{NativePdfGraph, collect_refs, decode_pdf_doc_encoding, spend},
+    graph::{NativePdfGraph, collect_refs, spend},
     pages::{self, dict, dict_mut, refs},
     text::FieldFont,
 };
@@ -747,42 +752,6 @@ fn id(binding: NativeBinding, widget: Ref) -> [u8; 32] {
     *hash.finalize().as_bytes()
 }
 
-fn display_name_bytes<'a>(
-    graph: &'a NativePdfGraph,
-    widget: Ref,
-    data: &'a Dict,
-    work: &mut usize,
-) -> Option<&'a [u8]> {
-    let widget_label = data
-        .get("T")
-        .map(|label| graph.resolve_metered(label, work))
-        .transpose()
-        .ok()?
-        .filter(|label| !matches!(label, Value::Null));
-    let label = if let Some(label) = widget_label {
-        label
-    } else {
-        let parent = data.get("Parent")?.as_reference()?;
-        let field = dict(graph, parent).ok()?;
-        let children = graph
-            .resolve_metered(field.get("Kids")?, work)
-            .ok()?
-            .as_array()?;
-        spend(work, children.len()).ok()?;
-        if children
-            .iter()
-            .filter(|child| child.as_reference() == Some(widget))
-            .take(2)
-            .count()
-            != 1
-        {
-            return None;
-        }
-        graph.resolve_metered(field.get("T")?, work).ok()?
-    };
-    label.as_bytes()
-}
-
 pub(super) fn field_name_inventory(
     graph: &NativePdfGraph,
     fields: &[Ref],
@@ -808,54 +777,14 @@ pub(super) fn field_name_inventory(
         let bytes = label.as_bytes().ok_or(Unsupported)?;
         // @security: Meter the full encoded name before decoding it for collision checks.
         spend(work, bytes.len())?;
-        let name = decode_field_name(bytes, usize::MAX, remaining)?.ok_or(Unsupported)?;
+        let name = decode_pdf_text_string(bytes, usize::MAX, remaining)
+            .map_err(|_| Budget)?
+            .ok_or(Unsupported)?;
         if names.insert(name, field).is_some() {
             return Err(Unsupported);
         }
     }
     Ok(names)
-}
-
-// @contract: Match PDF 1.7 note text: UTF-16BE with a BOM, otherwise validated PDFDocEncoding.
-fn decode_field_name(
-    bytes: &[u8],
-    limit: usize,
-    remaining: &mut usize,
-) -> Result<Option<String>, NativeEditError> {
-    use NativeEditError::Budget;
-
-    let mut available = *remaining;
-    let name = if let Some(utf16) = bytes.strip_prefix(&[0xfe, 0xff]) {
-        if utf16.len() % 2 != 0 || utf16.len() / 2 > limit {
-            return Ok(None);
-        }
-        // @security: Decode code units directly into reserved UTF-8 storage.
-        let capacity = (utf16.len() / 2).checked_mul(3).ok_or(Budget)?;
-        spend(&mut available, capacity)?;
-        let mut name = String::new();
-        name.try_reserve_exact(capacity).map_err(|_| Budget)?;
-        let units = utf16
-            .chunks_exact(2)
-            .map(|unit| u16::from_be_bytes([unit[0], unit[1]]));
-        for scalar in char::decode_utf16(units) {
-            let Ok(scalar) = scalar else {
-                return Ok(None);
-            };
-            name.push(scalar);
-        }
-        name
-    } else {
-        if bytes.len() > limit || bytes.iter().any(|&byte| matches!(byte, 0x7f | 0x9f | 0xad)) {
-            return Ok(None);
-        }
-        spend(&mut available, bytes.len().checked_mul(3).ok_or(Budget)?)?;
-        decode_pdf_doc_encoding(bytes)?
-    };
-    if name.len() > limit {
-        return Ok(None);
-    }
-    *remaining = available;
-    Ok(Some(name))
 }
 
 pub(super) fn project(
@@ -943,10 +872,21 @@ pub(super) fn project(
                 FieldValue::Text(value) => view.value = Some(value),
                 FieldValue::Checkbox { checked, .. } => view.checked = Some(checked),
             }
-        } else if let Some(bytes) = display_name_bytes(graph, object, data, &mut work) {
+        } else {
             let mut available = *remaining;
-            view.name = decode_field_name(bytes, MAX_NAME, &mut available)?
-                .filter(|name| !name.is_empty() && !name.chars().any(char::is_control));
+            view.name = map_widget_label(
+                object,
+                data.get("T"),
+                data.get("Parent").and_then(Value::as_reference),
+                graph.limits.max_nesting,
+                &mut work,
+                |reference| graph.objects.get(&reference).map(Cow::Borrowed),
+                |bytes| decode_pdf_text_string(bytes, MAX_NAME, &mut available),
+            )
+            .transpose()
+            .map_err(|_| NativeEditError::Budget)?
+            .flatten()
+            .filter(|name| !name.is_empty() && !name.chars().any(char::is_control));
             if view.name.is_some() {
                 *remaining = available;
             }

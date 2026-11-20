@@ -464,6 +464,80 @@ fn scene_reports_partial_after_turning_an_asymmetric_form_image() {
 }
 
 #[test]
+fn saved_native_images_have_representable_placement_or_a_partial_diagnostic() {
+    let source = fixture(b"", false, "", &[]);
+    let mut jpeg = Vec::new();
+    image::codecs::jpeg::JpegEncoder::new(&mut jpeg)
+        .encode(&[30, 100, 200], 1, 1, image::ExtendedColorType::Rgb8)
+        .unwrap();
+    let hex: String = jpeg.iter().map(|byte| format!("{byte:02x}")).collect();
+
+    for (bounds, expected_size) in [
+        ([20_000, 20_000, 20_001, 20_250], None),
+        ([20_000, 20_000, 20_125, 20_250], Some((8, 16))),
+    ] {
+        let mut session = open(&source);
+        apply(
+            &mut session,
+            json!({"kind":"addImage","page":0,"bounds":bounds,"assetHex":hex}),
+        )
+        .unwrap();
+        let reopened = open(session.output_bytes());
+        assert_eq!(objects(&reopened, 0)[0]["bounds"], json!(bounds));
+
+        let reader = open_pdf(session.output_bytes(), Default::default()).unwrap();
+        let scene = read_pdf_scene(&reader, &PdfSceneRequest::default()).unwrap();
+        let page = &scene.pages[0];
+        if let Some(size) = expected_size {
+            let [PdfSceneElement::Image { value }] = page.elements.as_slice() else {
+                panic!("expected a representable image");
+            };
+            assert_eq!((value.width, value.height), (1, 1));
+            assert_eq!(value.data_hex, hex);
+            assert_eq!((value.rect.x.raw(), value.rect.y.raw()), (20 * 64, 20 * 64));
+            assert_eq!((value.rect.width.raw(), value.rect.height.raw()), size);
+            assert!(!page.partial && !scene.report.partial);
+        } else {
+            assert!(page.elements.is_empty());
+            assert!(page.partial && scene.report.partial);
+            assert!(matches!(page.report.diagnostics.as_slice(), [diagnostic]
+                if diagnostic.code == PdfReadDiagnosticCode::PartialPage
+                    && diagnostic.page_index == Some(0)
+                    && diagnostic.object_number.is_some()));
+        }
+    }
+}
+
+#[test]
+fn images_proven_outside_the_effective_clip_do_not_make_the_scene_partial() {
+    let image = stream(
+        "/Type /XObject /Subtype /Image /ColorSpace /DeviceGray /Width 1 /Height 1 /BitsPerComponent 8",
+        &[7],
+    );
+    for contents in [
+        &b"q 0 0 40 40 re W n 1 0 0 1 60 60 cm /I Do Q"[..],
+        &b"q 0 0 10 10 re W n 20 20 10 10 re W n 0.001 0 0 1 5 5 cm /I Do Q"[..],
+    ] {
+        let source = fixture(
+            contents,
+            false,
+            "/Resources << /XObject << /I 6 0 R >> >>",
+            std::slice::from_ref(&image),
+        );
+        let reader = open_pdf(&source, Default::default()).unwrap();
+        let scene = read_pdf_scene(&reader, &PdfSceneRequest::default()).unwrap();
+        let page = &scene.pages[0];
+        assert!(
+            page.elements
+                .iter()
+                .all(|element| matches!(element, PdfSceneElement::Clip { .. }))
+        );
+        assert!(!page.partial && !scene.report.partial);
+        assert!(page.report.diagnostics.is_empty());
+    }
+}
+
+#[test]
 fn scene_reads_nested_image_replacement_and_unchanged_sibling() {
     let outer = stream(
         "/Type /XObject /Subtype /Form /BBox [0 0 40 40] /Matrix [2 0 0 1 0 0] /Resources 9 0 R",
