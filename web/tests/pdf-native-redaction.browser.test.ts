@@ -671,35 +671,53 @@ for (const locale of ['en', 'uk'] as const) {
       expect(newOutput()).toBeNull()
       await expect.element(button('note.add')).toBeEnabled()
 
-      lane = controlledWorker()
-      await putOriginal(source)
-      await fillMark(20, 20, 59, 80)
-      await addMark(1)
-      const refused = checkpoint()
-      const sourceWrites = put.mock.calls.length
-      lane.control.hold = 'stage'
-      lane.control.resume = undefined
-      await activate((await openConfirmation('apply', '1', 1)).element())
-      await expect.poll(() => lane.control.resume).toBeTypeOf('function')
-      for (const key of ['internal', 'structure', 'text', 'raster'] as const) await assertCheck(key, 'evidence.pending')
-      lane.control.die()
-      await expect.element(button('session.reopen')).toBeVisible()
-      await expect.element(alert).toHaveTextContent(t('redaction.unavailable'))
-      await expect.element(redaction.getByText(t('redaction.marked'), { exact: true })).toBeVisible()
-      expect(visibleRaster()).not.toBeNull()
-      expect(redactionButton('redaction.apply').query()).toBeNull()
-      expect(newOutput()).toBeNull()
-      expect(marksOnPage()).toHaveLength(1)
-      expect(acceptedScope()?.binding.revision).toBe(0)
-      expect(downloads).toHaveLength(refused.downloads)
-      expect(urls).toHaveBeenCalledTimes(refused.urls)
-      expect(put).toHaveBeenCalledTimes(sourceWrites)
-      assertUnpublishedReplies(rawRedactionReplies(lane.control))
+      for (const held of ['stage', 'verify'] as const) {
+        lane = controlledWorker()
+        await putOriginal(source)
+        await fillMark(20, 20, 59, 80)
+        await addMark(1)
+        const refused = checkpoint()
+        const sourceWrites = put.mock.calls.length
+        const beforeLoss = acceptedScope()
+        lane.control.hold = held
+        await activate((await openConfirmation('apply', '1', 1)).element())
+        await expect.poll(() => lane.control.resume).toBeTypeOf('function')
+        await expect.element(status).toHaveTextContent(t(held === 'stage' ? 'redaction.staging' : 'redaction.pending'))
+        if (held === 'stage') {
+          expect(panel.element().querySelector('[data-redaction-check]')).toBeNull()
+        } else {
+          await assertCheck('internal', 'evidence.passed')
+          for (const key of ['structure', 'text', 'raster'] as const) await assertCheck(key, 'evidence.pending')
+        }
+        lane.control.die()
+        await expect.element(button('session.reopen')).toBeVisible()
+        await expect.element(alert).toHaveTextContent(t('redaction.noOutput', {
+          reason: t(held === 'stage' ? 'redaction.stageUnavailable' : 'redaction.inconclusive'),
+        }))
+        if (held === 'stage') {
+          expect(panel.element().querySelector('[data-redaction-check]')).toBeNull()
+        } else {
+          await assertCheck('internal', 'evidence.passed')
+          for (const key of ['structure', 'text', 'raster'] as const) await assertCheck(key, 'evidence.inconclusive')
+        }
+        await expect.element(redaction.getByText(t('redaction.marked'), { exact: true })).toBeVisible()
+        expect(visibleRaster()).not.toBeNull()
+        expect(redactionButton('redaction.apply').query()).toBeNull()
+        expect(newOutput()).toBeNull()
+        expect(marksOnPage()).toHaveLength(1)
+        expect(acceptedScope()).toBe(beforeLoss)
+        expect(downloads).toHaveLength(refused.downloads)
+        expect(urls).toHaveBeenCalledTimes(refused.urls)
+        expect(put).toHaveBeenCalledTimes(sourceWrites)
+        expect(lane.control.requests).not.toContain('publish')
+        assertUnpublishedReplies(rawRedactionReplies(lane.control))
+      }
 
       lane = controlledWorker()
       await putOriginal(source)
       await fillMark(20, 20, 59, 80)
       await addMark(1)
+      expect(panel.element().querySelector('[data-redaction-check]')).toBeNull()
       const pendingConfirmation = await openConfirmation(locale === 'en' ? 'clear' : 'apply', '1', 1)
       await expect.element(pendingConfirmation).toBeEnabled()
       lane.control.die()

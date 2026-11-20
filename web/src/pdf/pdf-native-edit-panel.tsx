@@ -43,11 +43,13 @@ type RedactionAttempt = {
   readonly pages: readonly number[]
   readonly priorResult: NativePdfRedactionResult | null
   readonly controller: AbortController
+  observed: NativePdfRedactionResult | null
 }
 type RedactionChecks = Readonly<Record<'internal' | 'structure' | 'text' | 'raster', CheckStatus>>
 type RedactedOutput = {
   readonly snapshot: NativePdfSnapshot
   readonly candidate: NativePdfRedactionCandidate
+  readonly checks: RedactionChecks | null
 }
 const redactionLanes = ['structure', 'text', 'raster'] as const
 
@@ -85,16 +87,50 @@ export function redactedDownloadFor(output: RedactedOutput | null, snapshot: Nat
   return output && snapshot && sameNativeAcceptedOutput(output.snapshot, snapshot) ? output : null
 }
 
-function redactionChecks(verification: NativePdfRedactionVerification | null, fallback: CheckStatus): RedactionChecks {
+function redactionRefusalReason(result: NativePdfRedactionResult | null, cause: unknown): NativePdfMessage {
+  const code = cause instanceof NativePdfWorkerError ? cause.code : null
+  const status = result?.verification?.status
+  if (code === 'FLOW_PDF_NATIVE_REDACTION_CANCELLED') return 'redaction.cancelled'
+  if (status === 'failed') return 'redaction.failed'
+  switch (code) {
+    case 'FLOW_PDF_NATIVE_UNSUPPORTED':
+    case 'FLOW_PDF_NATIVE_REDACTION_MARK_INVALID': return 'redaction.unsupported'
+    case 'FLOW_PDF_NATIVE_BUDGET_EXHAUSTED': return 'error.budget'
+  }
+  if (status === 'unavailable') return 'redaction.unavailable'
+  if (status === 'passed') return 'redaction.unpublished'
+  if (result?.candidate) return 'redaction.inconclusive'
+  if (code === 'FLOW_PDF_NATIVE_WORKER_FAILED') return 'redaction.stageUnavailable'
+  if (code === 'FLOW_PDF_NATIVE_POSTCONDITION_FAILED') return 'redaction.stageRefused'
+  return 'redaction.stageUnconfirmed'
+}
+
+export function redactionAttemptFeedback(result: NativePdfRedactionResult | null, pending: boolean, cause?: unknown): {
+  readonly checks: RedactionChecks | null
+  readonly reason: NativePdfMessage
+} {
+  if (!result?.candidate) return { checks: null, reason: redactionRefusalReason(null, cause) }
+  const verification = result.verification
+  const unverified = pending ? 'pending' : 'inconclusive'
   const laneStatus = (lane: typeof redactionLanes[number]) => {
     const status = verification?.[lane].status
-    return status === undefined || status === 'pending' ? fallback : status
+    return status === undefined || status === 'pending' ? unverified : status
   }
+  // @invariant: Staging reopens the rewrite. A failed verdict with no failed lane signals an identity failure.
   return {
-    internal: verification?.status === 'failed' && !redactionLanes.some((lane) => verification[lane].status === 'failed')
-      ? 'failed' : verification ? 'passed' : fallback,
-    structure: laneStatus('structure'), text: laneStatus('text'), raster: laneStatus('raster'),
+    checks: {
+      internal: verification?.status === 'failed' && !redactionLanes.some((lane) => verification[lane].status === 'failed')
+        ? 'failed' : 'passed',
+      structure: laneStatus('structure'), text: laneStatus('text'), raster: laneStatus('raster'),
+    },
+    reason: redactionRefusalReason(result, cause),
   }
+}
+
+function redactionResultFor(attempt: RedactionAttempt, result: NativePdfRedactionResult | null): NativePdfRedactionResult | null {
+  return result !== attempt.priorResult && result?.candidate
+    && sameNativeBytes(result.acceptedHash, attempt.before.outputHash)
+    && sameNativeBytes(result.candidate.affectedPages, attempt.pages) ? result : null
 }
 
 export interface NativePdfAcceptedDocument {
@@ -839,7 +875,7 @@ export function PdfNativeEditPanel({
   const [redactionCoordinates, setRedactionCoordinates] = useState<ObjectCoordinates>(['', '', '', ''])
   const [marks, setMarks] = useState<readonly RedactionMark[]>([])
   const [redactionRefusal, setRedactionRefusal] = useState<{
-    readonly before: NativePdfSnapshot; readonly reason: NativePdfMessage; readonly checks: RedactionChecks
+    readonly before: NativePdfSnapshot; readonly reason: NativePdfMessage; readonly checks: RedactionChecks | null
     readonly requiresReopen: boolean
   } | null>(null)
   const [redactedOutput, setRedactedOutput] = useState<RedactedOutput | null>(null)
@@ -866,6 +902,7 @@ export function PdfNativeEditPanel({
     return () => {
       mounted.current = false
       navigationRequest.current?.abort()
+      pendingRedaction.current = null
       candidateRef.current?.dispose()
       coordinatorRef.current?.dispose()
       candidateRef.current = null
@@ -980,13 +1017,13 @@ export function PdfNativeEditPanel({
   const markError = markCrop !== null && markRect === null && redactionCoordinates.some(Boolean) ? 'redaction.geometry.invalid'
     : duplicateMark ? 'redaction.geometry.duplicate' : null
   const attempt = pendingRedaction.current
-  const activeRedaction = attempt?.action.kind === 'stage' ? attempt : null
-  const liveVerification = activeRedaction && service?.redaction !== activeRedaction.priorResult
-    ? service?.redaction?.verification ?? null : null
+  const activeRedaction = attempt?.action.kind === 'stage' && attempt.before === snapshot ? attempt : null
+  const liveRedaction = activeRedaction
+    ? redactionResultFor(activeRedaction, service?.redaction ?? null) ?? activeRedaction.observed : null
   const preRedactionOutput = marks.length > 0 || activeRedaction !== null || currentRefusal !== null
   const currentRedacted = preRedactionOutput ? null : redactedDownloadFor(redactedOutput, snapshot)
-  const checks = activeRedaction ? redactionChecks(liveVerification, needsReconcile ? 'inconclusive' : 'pending')
-    : currentRefusal?.checks ?? (currentRedacted ? redactionChecks(null, 'passed') : null)
+  const checks = activeRedaction ? redactionAttemptFeedback(liveRedaction, busy === 'redacting' && !needsReconcile && !invalidated).checks
+    : currentRefusal?.checks ?? currentRedacted?.checks ?? null
   const textSnapshot = sessionReady && !navigationBlocked && page && extractPageText ? snapshot : undefined
   const currentTextRead = textSnapshot && textRead?.snapshot === textSnapshot && textRead.pageId === pageId ? textRead : null
   const extracted = extractPageText ? currentTextRead?.result
@@ -1124,23 +1161,11 @@ export function PdfNativeEditPanel({
   }
 
   function refuseRedaction(attempt: RedactionAttempt, result: NativePdfRedactionResult | null, cause?: unknown, requiresReopen = false) {
-    const code = cause instanceof NativePdfWorkerError ? cause.code : null
-    const unsupported = code === 'FLOW_PDF_NATIVE_UNSUPPORTED' || code === 'FLOW_PDF_NATIVE_REDACTION_MARK_INVALID'
-    const budgetExceeded = code === 'FLOW_PDF_NATIVE_BUDGET_EXHAUSTED'
-    const verification = result === attempt.priorResult ? null : result?.verification ?? null
-    const fallback = unsupported || code === 'FLOW_PDF_NATIVE_WORKER_FAILED'
-      || verification?.status === 'unavailable' ? 'unavailable' : 'inconclusive'
-    const checks = redactionChecks(verification, fallback)
-    const reason = code === 'FLOW_PDF_NATIVE_REDACTION_CANCELLED' ? 'redaction.cancelled'
-      : unsupported ? 'redaction.unsupported'
-        : budgetExceeded ? 'error.budget'
-          : verification?.status === 'failed' ? 'redaction.failed'
-            : fallback === 'unavailable' ? 'redaction.unavailable'
-              : verification?.status === 'passed' ? 'redaction.unpublished' : 'redaction.inconclusive'
-    setRedactionRefusal({ before: attempt.before, reason, requiresReopen, checks: {
-      ...checks, internal: !verification && (unsupported || budgetExceeded
-        || code === 'FLOW_PDF_NATIVE_POSTCONDITION_FAILED') ? 'failed' : checks.internal,
-    } })
+    const current = redactionResultFor(attempt, result)
+    const evidence = requiresReopen ? null : current?.verification ? current : attempt.observed ?? current
+    const feedback = redactionAttemptFeedback(evidence, false, cause)
+    setRedactionRefusal({ ...feedback, before: attempt.before, requiresReopen,
+      reason: attempt.action.kind === 'stage' ? feedback.reason : 'redaction.inconclusive' })
   }
 
   function finishRedaction(
@@ -1168,7 +1193,7 @@ export function PdfNativeEditPanel({
       return requiresReopen
     }
     setAccepted((document) => document && { ...document, snapshot: current })
-    setRedactedOutput({ snapshot: current, candidate })
+    setRedactedOutput({ snapshot: current, candidate, checks: redactionAttemptFeedback(result, false).checks })
     setMarks([])
     setRedactionCoordinates(['', '', '', ''])
     setStatus(['redaction.success'])
@@ -1197,7 +1222,7 @@ export function PdfNativeEditPanel({
     const markedPages = new Set(marks.map((mark) => mark.pageId))
     const attempt: RedactionAttempt = {
       before: snapshot, action, nextMarks, pages: live.accepted.pageState.order.filter((id) => markedPages.has(id)),
-      priorResult: live.redaction, controller: new AbortController(),
+      priorResult: live.redaction, controller: new AbortController(), observed: null,
     }
     const applying = action.kind === 'stage'
     pendingRedaction.current = attempt
@@ -1210,7 +1235,25 @@ export function PdfNativeEditPanel({
     }
     setBusy(applying ? 'redacting' : 'marking')
     let requiresReopen = false
+    let unsubscribe: (() => void) | undefined
     try {
+      if (applying) {
+        let stagedRequest: number | null = null
+        unsubscribe = coordinator.subscribe(() => {
+          const current = coordinator.snapshot()
+          if (pendingRedaction.current !== attempt || current.phase !== 'validating'
+            || current.accepted !== attempt.before || current.pendingRequestId === null) return
+          const result = redactionResultFor(attempt, current.redaction)
+          const candidate = result?.candidate
+          if (!candidate || candidate.validatorVersion !== 1 || candidate.validatorProfile !== 'classic-xref-owned-144dpi-v1'
+            || result.published || result.markCount !== attempt.nextMarks.length || !result.verification) return
+          if (result.action === 'stage' && result.verification.status === 'pending' && stagedRequest === null) {
+            stagedRequest = current.pendingRequestId
+          } else if (result.action !== 'verify' || current.pendingRequestId !== stagedRequest
+            || !attempt.observed?.candidate || !sameNativeBytes(attempt.observed.candidate.hash, candidate.hash)) return
+          attempt.observed = result
+        })
+      }
       const result = applying ? await coordinator.applyRedaction(attempt.pages, attempt.controller.signal)
         : await coordinator.markRedaction(action, attempt.nextMarks.length)
       if (mounted.current) requiresReopen = finishRedaction(attempt, result, coordinator.snapshot().accepted)
@@ -1222,6 +1265,7 @@ export function PdfNativeEditPanel({
         || cause.code === 'FLOW_PDF_NATIVE_REDACTION_MARK_INVALID')) setError(['redaction.unsupported'])
       else setFailure(cause, false)
     } finally {
+      unsubscribe?.()
       const current = coordinator.snapshot()
       const reconcile = current.phase === 'reconciliationRequired'
       if (!reconcile) pendingRedaction.current = null
@@ -1968,7 +2012,8 @@ export function PdfNativeEditPanel({
   }
   const announcement = busy === 'opening' ? t('status.opening')
     : busy === 'mutating' ? t('status.pending')
-      : busy === 'redacting' ? t(activeRedaction?.controller.signal.aborted ? 'redaction.cancelling' : 'redaction.pending')
+      : busy === 'redacting' ? t(activeRedaction?.controller.signal.aborted ? 'redaction.cancelling'
+        : liveRedaction ? 'redaction.pending' : 'redaction.staging')
         : busy === 'reconciling' ? t('status.reconciling')
           : navigation ? t(navigation.failed ? 'navigation.error' : 'navigation.pending', { page: navigation.position })
             : status === null ? '' : t(...status)
@@ -2225,10 +2270,10 @@ export function PdfNativeEditPanel({
             </>}
             {activeRedaction && busy === 'redacting' && <div className="native-actions">
               <button type="button" id={`${id}-redaction-cancel`}
-                disabled={activeRedaction.controller.signal.aborted || liveVerification?.status === 'passed'}
+                disabled={activeRedaction.controller.signal.aborted || liveRedaction?.verification?.status === 'passed'}
                 onClick={() => {
-                  const result = coordinator?.snapshot().redaction
-                  if (result !== activeRedaction.priorResult && result?.verification?.status === 'passed') return
+                  const result = redactionResultFor(activeRedaction, coordinator?.snapshot().redaction ?? null)
+                  if (result?.verification?.status === 'passed') return
                   activeRedaction.controller.abort()
                   setStatus(['redaction.cancelling'])
                 }}>{t('redaction.cancel')}</button>
