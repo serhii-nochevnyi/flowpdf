@@ -1,7 +1,7 @@
 use flow_core::layout::LayoutUnit;
 use flow_core::pdf::native::{
-    NativeEditLimits, NativeObjectCommand, NativeObjectRefusal, NativePdfSession,
-    NativeRedactionMark, NativeRequestLookup, NativeSessionError,
+    NativeEditLimits, NativeNoteCommand, NativeObjectCommand, NativeObjectRefusal,
+    NativePdfSession, NativeRedactionMark, NativeRequestLookup, NativeSessionError,
 };
 use flow_core::pdf::{
     PdfPathCommand, PdfReadDiagnosticCode, PdfReaderLimits, PdfSceneElement, PdfSceneRequest,
@@ -370,6 +370,173 @@ fn added_graphic_paints_after_shared_streams_in_initial_graphics_state() {
             1
         );
     }
+}
+
+#[test]
+fn object_allowance_insertion_accounts_for_the_enclosing_graphics_save() {
+    let graphic = json!({
+        "shape":"rectangle", "points":[[25000,5000],[35000,15000]],
+        "stroke":null, "fill":[255,0,0], "strokeWidth":0
+    });
+    for (depth, translated, can_add) in [(31, true, true), (32, false, true), (32, true, false)] {
+        let mut first = b"q\n".repeat(depth);
+        first.extend_from_slice(b"0 1 0 rg 24 5 10 10 re f\n");
+        let mut second = b"Q\n".repeat(depth);
+        if translated {
+            second.extend_from_slice(b"1 0 0 1 20 0 cm\n");
+        }
+        second.extend_from_slice(b"0 0 1 rg 3 5 10 10 re f");
+        let source = fixture_with_slots(&first, false, "", &[stream("", &second)], "[5 0 R 6 0 R]");
+        let mut session = open(&source);
+        let before = session.snapshot().binding;
+        let original = objects(&session, 0);
+        let page = &session.snapshot().scene.object_pages[0];
+        assert_eq!(page.refusal, None);
+        assert_eq!(
+            page.can_add, can_add,
+            "depth {depth}, translated {translated}"
+        );
+        assert_eq!(original.as_array().unwrap().len(), 2);
+
+        let result = apply(
+            &mut session,
+            json!({"kind":"addGraphic","page":0,"graphic":graphic}),
+        );
+        if can_add {
+            result.unwrap();
+            let edited = objects(&open(session.output_bytes()), 0);
+            assert_eq!(edited.as_array().unwrap().len(), 3);
+            assert_eq!(edited[0]["bounds"], original[0]["bounds"]);
+            assert_eq!(edited[1]["bounds"], original[1]["bounds"]);
+            assert_eq!(edited[2]["bounds"], json!([25000, 5000, 35000, 15000]));
+            for original in [&first, &second] {
+                let body = [b"stream\n".as_slice(), original, b"\nendstream"].concat();
+                assert!(
+                    session
+                        .output_bytes()
+                        .windows(body.len())
+                        .any(|bytes| bytes == body)
+                );
+            }
+        } else {
+            assert_eq!(result, Err(NativeSessionError::Budget));
+            assert_eq!(session.snapshot().binding, before);
+            assert_eq!(session.lookup(before, 1), Ok(NativeRequestLookup::Unseen));
+            assert_eq!(session.output_bytes(), source);
+        }
+    }
+}
+
+#[test]
+fn object_scan_workspace_refusal_keeps_vector_page_open_for_notes() {
+    use std::io::Write;
+
+    let mut content = b"10 10 m 20 40 30 40 40 10 c S\n".to_vec();
+    for row in 0..24 {
+        for column in 0..24 {
+            let tint = (row + column) % 9;
+            let x = 10 + 7 * column;
+            let y = 20 + 7 * row;
+            writeln!(
+                &mut content,
+                "[3 2] 0 d 0.25 0.{tint} 0.75 rg {x} {y} 6 6 re B"
+            )
+            .unwrap();
+        }
+    }
+    let source = fixture(&content, false, "", &[]);
+    let limits = NativeEditLimits {
+        max_retained_bytes: 384 * 1024,
+        ..NativeEditLimits::default()
+    };
+    let mut session = NativePdfSession::open_scoped(&source, limits, [7; 16]).unwrap();
+    let binding = session.snapshot().binding;
+    let view = &session.snapshot().scene.object_pages[0];
+    assert!(!view.can_add);
+    assert!(view.objects.is_empty());
+    assert_eq!(view.refusal, None);
+    assert_eq!(
+        apply(
+            &mut session,
+            json!({
+                "kind":"addGraphic", "page":0,
+                "graphic":{
+                    "shape":"rectangle", "points":[[5000,5000],[15000,15000]],
+                    "stroke":null, "fill":[255,0,0], "strokeWidth":0
+                }
+            }),
+        ),
+        Err(NativeSessionError::Budget)
+    );
+    assert_eq!(session.output_bytes(), source);
+    assert_eq!(session.snapshot().binding, binding);
+    assert_eq!(session.lookup(binding, 1), Ok(NativeRequestLookup::Unseen));
+    let page = session.snapshot().scene.pages[0].id;
+    let receipt = session
+        .apply(
+            binding,
+            1,
+            &NativeNoteCommand::Add {
+                page,
+                rect: [60, 60, 80, 80],
+                contents: "Chart note".into(),
+            },
+        )
+        .unwrap();
+    assert_eq!(receipt.binding.revision, 1);
+    assert_eq!(session.snapshot().scene.pages[0].annotations.len(), 1);
+    assert!(!session.snapshot().scene.object_pages[0].can_add);
+    assert_eq!(session.origin_bytes(), source);
+}
+
+#[test]
+fn object_allowance_refusal_preserves_accepted_graphic_edit_state() {
+    let mut content = Vec::new();
+    for x in 0..96 {
+        use std::io::Write;
+        writeln!(&mut content, "0 1 0 rg {x} 20 4 4 re f").unwrap();
+    }
+    let source = fixture(&content, false, "", &[]);
+    let command = |session: &NativePdfSession| {
+        json!({
+            "kind":"moveObject", "target":target(session, 0, 0),
+            "transform":[1,0,0,1,0,10]
+        })
+    };
+    let mut roomy = open(&source);
+    let move_graphic = command(&roomy);
+    apply(&mut roomy, move_graphic).unwrap();
+    assert_eq!(
+        objects(&roomy, 0)[0]["bounds"],
+        json!([0, 30000, 4000, 34000])
+    );
+
+    let limits = NativeEditLimits {
+        max_retained_bytes: 128 * 1024,
+        ..NativeEditLimits::default()
+    };
+    let mut constrained = NativePdfSession::open_scoped(&source, limits, [7; 16]).unwrap();
+    let before = constrained.snapshot().clone();
+    assert_eq!(before.scene.object_pages[0].objects.len(), 96);
+    let move_graphic = command(&constrained);
+    assert_eq!(
+        apply(&mut constrained, move_graphic),
+        Err(NativeSessionError::Budget)
+    );
+    assert_eq!(constrained.output_bytes(), source);
+    assert_eq!(constrained.snapshot().binding, before.binding);
+    assert_eq!(
+        constrained.snapshot().consumed_request,
+        before.consumed_request
+    );
+    assert_eq!(
+        constrained.snapshot().scene.object_pages,
+        before.scene.object_pages
+    );
+    assert_eq!(
+        constrained.lookup(before.binding, 1),
+        Ok(NativeRequestLookup::Unseen)
+    );
 }
 
 #[test]
