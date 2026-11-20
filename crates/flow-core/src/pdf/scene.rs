@@ -13,7 +13,7 @@ use crate::layout::{LayoutRect, LayoutUnit};
 use super::reader::{
     PdfObjectRef, PdfPageRecord, PdfReadDiagnostic, PdfReadDiagnosticCode, PdfReadError,
     PdfReadReport, PdfReader, PdfReaderLimits, PdfStream, PdfValue, decode_pdf_text_string,
-    map_widget_label, read_scene_name, report_active_content, single_filter,
+    read_scene_name, report_active_content, resolve_label_value, single_filter,
 };
 
 use super::native::{NativeNoteId, NativePageGeometry, NativePageId, NativeTextPage};
@@ -460,9 +460,77 @@ impl SceneClip {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+struct PaintBounds([f64; 4]);
+
+impl PaintBounds {
+    fn from_layout(rect: LayoutRect) -> Self {
+        let points = |unit: LayoutUnit| unit.raw() as f64 / LayoutUnit::UNITS_PER_POINT as f64;
+        let (x, y) = (points(rect.x), points(rect.y));
+        Self([x, y, x + points(rect.width), y + points(rect.height)])
+    }
+
+    fn intersect(self, other: Self) -> Self {
+        let [left, bottom, right, top] = self.0;
+        let [x0, y0, x1, y1] = other.0;
+        Self([left.max(x0), bottom.max(y0), right.min(x1), top.min(y1)])
+    }
+
+    fn is_empty(self) -> bool {
+        let [left, bottom, right, top] = self.0;
+        left >= right || bottom >= top
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PaintMatrix([f64; 6]);
+
+impl PaintMatrix {
+    fn multiply(self, other: Self) -> Option<Self> {
+        let [a, b, c, d, e, f] = self.0;
+        let [g, h, i, j, k, l] = other.0;
+        let values = [
+            a * g + c * h,
+            b * g + d * h,
+            a * i + c * j,
+            b * i + d * j,
+            a * k + c * l + e,
+            b * k + d * l + f,
+        ];
+        values
+            .iter()
+            .all(|value| value.is_finite())
+            .then_some(Self(values))
+    }
+
+    fn bounds(self, [x, y, width, height]: [f64; 4]) -> Option<PaintBounds> {
+        let [a, b, c, d, e, f] = self.0;
+        let point = |x, y| [a * x + c * y + e, b * x + d * y + f];
+        let corners = [
+            point(x, y),
+            point(x + width, y),
+            point(x, y + height),
+            point(x + width, y + height),
+        ];
+        if !corners.iter().flatten().all(|value| value.is_finite()) {
+            return None;
+        }
+        let [[x0, y0], [x1, y1], [x2, y2], [x3, y3]] = corners;
+        Some(PaintBounds([
+            x0.min(x1).min(x2).min(x3),
+            y0.min(y1).min(y2).min(y3),
+            x0.max(x1).max(x2).max(x3),
+            y0.max(y1).max(y2).max(y3),
+        ]))
+    }
+}
+
 #[derive(Debug, Clone)]
 struct GraphicsState {
     ctm: Matrix,
+    paint_ctm: Option<PaintMatrix>,
+    paint_clip: PaintBounds,
+    path_rectangle: Option<PaintBounds>,
     text_matrix: Matrix,
     line_matrix: Matrix,
     font: Option<FontMap>,
@@ -480,13 +548,21 @@ struct GraphicsState {
     line_width: Option<LayoutUnit>,
     miter_limit: Option<LayoutUnit>,
     path_ctm_changed: bool,
-    pending_clip: Option<(Vec<RawPathCommand>, bool, PdfSourceProvenance)>,
+    pending_clip: Option<(
+        Vec<RawPathCommand>,
+        bool,
+        PdfSourceProvenance,
+        Option<PaintBounds>,
+    )>,
 }
 
 impl GraphicsState {
     fn new(bounds: LayoutRect) -> Self {
         Self {
             ctm: Matrix::IDENTITY,
+            paint_ctm: Some(PaintMatrix([1., 0., 0., 1., 0., 0.])),
+            paint_clip: PaintBounds::from_layout(bounds),
+            path_rectangle: None,
             text_matrix: Matrix::IDENTITY,
             line_matrix: Matrix::IDENTITY,
             font: None,
@@ -538,7 +614,7 @@ struct FontMap {
 
 #[derive(Debug, Clone)]
 pub(super) enum ContentToken {
-    Number(LayoutUnit),
+    Number((LayoutUnit, f64)),
     Integer(i64),
     Name(String),
     String(Vec<u8>),
@@ -599,6 +675,10 @@ impl<'a> SceneBuilder<'a> {
     fn run(mut self) -> Result<PdfScenePage, PdfReadError> {
         if let Some(crop_box) = self.page.crop_box {
             self.state.clip = self.state.clip.intersect(crop_box, true)?;
+            self.state.paint_clip = self
+                .state
+                .paint_clip
+                .intersect(PaintBounds::from_layout(crop_box));
         }
         self.inspect_annotations()?;
         for (index, content_ref) in self.page.contents.iter().enumerate() {
@@ -712,21 +792,29 @@ impl<'a> SceneBuilder<'a> {
                     self.state.path_ctm_changed |=
                         !self.state.path.is_empty() && self.state.ctm != ctm;
                     self.state.ctm = ctm;
+                    self.state.paint_ctm = self.state.paint_ctm.and_then(|outer| {
+                        outer.multiply(PaintMatrix(std::array::from_fn(|i| {
+                            operands[operands.len() - 6 + i].precise_number()
+                        })))
+                    });
                 } else {
                     return Err(PdfReadError::Syntax);
                 }
             }
             "m" => {
+                self.state.path_rectangle = None;
                 let (x, y) = two_numbers(operands)?;
                 self.state.path.push(RawPathCommand::MoveTo(x, y));
                 self.state.current_point = Some((x, y));
             }
             "l" => {
+                self.state.path_rectangle = None;
                 let (x, y) = two_numbers(operands)?;
                 self.state.path.push(RawPathCommand::LineTo(x, y));
                 self.state.current_point = Some((x, y));
             }
             "c" => {
+                self.state.path_rectangle = None;
                 let values = six_number_values(operands)?;
                 self.state.path.push(RawPathCommand::CurveTo(
                     values[0], values[1], values[2], values[3], values[4], values[5],
@@ -734,6 +822,7 @@ impl<'a> SceneBuilder<'a> {
                 self.state.current_point = Some((values[4], values[5]));
             }
             "v" => {
+                self.state.path_rectangle = None;
                 let values = four_number_values(operands)?;
                 let (x0, y0) = self.state.current_point.ok_or(PdfReadError::Syntax)?;
                 self.state.path.push(RawPathCommand::CurveTo(
@@ -742,6 +831,7 @@ impl<'a> SceneBuilder<'a> {
                 self.state.current_point = Some((values[2], values[3]));
             }
             "y" => {
+                self.state.path_rectangle = None;
                 let values = four_number_values(operands)?;
                 self.state.path.push(RawPathCommand::CurveTo(
                     values[0], values[1], values[2], values[3], values[2], values[3],
@@ -750,6 +840,15 @@ impl<'a> SceneBuilder<'a> {
             }
             "re" => {
                 let values = four_number_values(operands)?;
+                self.state.path_rectangle = self
+                    .state
+                    .paint_ctm
+                    .filter(|_| self.state.path.is_empty())
+                    .and_then(|matrix| {
+                        matrix.bounds(std::array::from_fn(|i| {
+                            operands[operands.len() - 4 + i].precise_number()
+                        }))
+                    });
                 let (x, y, width, height) = (values[0], values[1], values[2], values[3]);
                 self.state.path.push(RawPathCommand::MoveTo(x, y));
                 self.state
@@ -768,8 +867,12 @@ impl<'a> SceneBuilder<'a> {
             "h" => self.state.path.push(RawPathCommand::Close),
             "W" | "W*" => {
                 if !self.state.path.is_empty() {
-                    self.state.pending_clip =
-                        Some((self.state.path.clone(), operator == "W*", provenance));
+                    self.state.pending_clip = Some((
+                        self.state.path.clone(),
+                        operator == "W*",
+                        provenance,
+                        self.state.path_rectangle,
+                    ));
                 }
             }
             "S" | "s" | "f" | "F" | "f*" | "B" | "B*" | "b" | "b*" | "n" => {
@@ -893,6 +996,7 @@ impl<'a> SceneBuilder<'a> {
         provenance: PdfSourceProvenance,
     ) -> Result<(), PdfReadError> {
         let pending_clip = self.state.pending_clip.take();
+        self.state.path_rectangle = None;
         let path_ctm_changed = std::mem::take(&mut self.state.path_ctm_changed);
         self.state.current_point = None;
 
@@ -938,7 +1042,10 @@ impl<'a> SceneBuilder<'a> {
             }
         }
         self.state.path.clear();
-        if let Some((commands, even_odd, clip_provenance)) = pending_clip {
+        if let Some((commands, even_odd, clip_provenance, paint_bounds)) = pending_clip {
+            if let Some(bounds) = paint_bounds {
+                self.state.paint_clip = self.state.paint_clip.intersect(bounds);
+            }
             let commands = transform_path(&commands, self.state.ctm)?;
             let rect = path_bounds(&commands)?;
             self.state.clip = self
@@ -1375,6 +1482,10 @@ impl<'a> SceneBuilder<'a> {
                 let caller_state = self.state.clone();
                 let caller_stack = std::mem::take(&mut self.state_stack);
                 self.state.ctm = form_ctm;
+                if !matches!(dictionary.get("Matrix"), None | Some(PdfValue::Null)) {
+                    self.state.paint_ctm = None;
+                }
+                self.state.path_rectangle = None;
                 self.state.clip = clip;
                 self.state.path.clear();
                 self.state.current_point = None;
@@ -1460,8 +1571,15 @@ impl<'a> SceneBuilder<'a> {
                 height: one,
             },
         )?;
-        if rect.width <= zero || rect.height <= zero {
-            if !self.state.clip.is_empty() {
+        if rect.width <= zero || rect.height <= zero || self.state.clip.is_empty() {
+            let clip = self.state.paint_clip;
+            if !clip.is_empty()
+                && self
+                    .state
+                    .paint_ctm
+                    .and_then(|matrix| matrix.bounds([0., 0., 1., 1.]))
+                    .is_none_or(|bounds| !clip.intersect(bounds).is_empty())
+            {
                 self.report_partial(provenance.object_ref);
             }
             return Ok(());
@@ -1557,26 +1675,23 @@ impl<'a> SceneBuilder<'a> {
                 let owner = self.widget_field_owner(*annotation_ref, dictionary);
                 let field = owner.as_ref().unwrap_or(dictionary);
                 let field_type = field.get("FT").and_then(PdfValue::as_name);
-                let parent = dictionary
-                    .get("Parent")
-                    .and_then(PdfValue::as_reference)
-                    .filter(|parent| {
-                        parent != annotation_ref && self.field_counts.get(parent) == Some(&1)
-                    });
                 let limit = self.limits.max_string_bytes;
                 let mut available = limit.saturating_mul(3);
-                let name = map_widget_label(
-                    *annotation_ref,
-                    dictionary.get("T"),
-                    parent,
-                    self.limits.max_nesting,
-                    &mut self.widget_label_work,
-                    |reference| self.reader.label_object(reference).ok().map(Cow::Owned),
-                    |bytes| decode_pdf_text_string(bytes, limit, &mut available),
-                )
-                .transpose()?
-                .flatten()
-                .filter(|name| !name.is_empty() && !name.chars().any(char::is_control));
+                let name = field.get("T").and_then(|label| {
+                    resolve_label_value(
+                        label,
+                        self.limits.max_nesting,
+                        &mut self.widget_label_work,
+                        &mut |reference| self.reader.label_object(reference).ok().map(Cow::Owned),
+                    )
+                });
+                let name = name
+                    .as_deref()
+                    .and_then(PdfValue::as_bytes)
+                    .map(|bytes| decode_pdf_text_string(bytes, limit, &mut available))
+                    .transpose()?
+                    .flatten()
+                    .filter(|name| !name.is_empty() && !name.chars().any(char::is_control));
                 let saved = field.get("V");
                 let value = if field_type == Some("Btn")
                     && field
@@ -1629,7 +1744,7 @@ impl<'a> SceneBuilder<'a> {
     }
 
     fn widget_field_owner(
-        &self,
+        &mut self,
         widget: PdfObjectRef,
         dictionary: &BTreeMap<String, PdfValue>,
     ) -> Option<BTreeMap<String, PdfValue>> {
@@ -1637,11 +1752,20 @@ impl<'a> SceneBuilder<'a> {
         let parent_ref = parent.as_reference()?;
         if parent_ref == widget
             || self.field_counts.get(&parent_ref) != Some(&1)
-            || ["FT", "T", "V"]
-                .iter()
-                .any(|key| dictionary.contains_key(*key))
+            || ["FT", "V"].iter().any(|key| dictionary.contains_key(*key))
         {
             return None;
+        }
+        if let Some(label) = dictionary.get("T") {
+            let label = resolve_label_value(
+                label,
+                self.limits.max_nesting,
+                &mut self.widget_label_work,
+                &mut |reference| self.reader.label_object(reference).ok().map(Cow::Owned),
+            )?;
+            if !matches!(*label, PdfValue::Null) {
+                return None;
+            }
         }
         let PdfValue::Dictionary(field) = self.reader.resolve(parent, 0).ok()? else {
             return None;
@@ -1654,9 +1778,17 @@ impl<'a> SceneBuilder<'a> {
         {
             return None;
         }
-        let children = self.reader.resolve(field.get("Kids")?, 1).ok()?;
-        matches!(children.as_array(), Some([PdfValue::Reference(child)]) if *child == widget)
-            .then_some(field)
+        let children = resolve_label_value(
+            field.get("Kids")?,
+            self.limits.max_nesting,
+            &mut self.widget_label_work,
+            &mut |reference| self.reader.label_object(reference).ok().map(Cow::Owned),
+        )?;
+        if !matches!(children.as_array(), Some([PdfValue::Reference(child)]) if *child == widget) {
+            return None;
+        }
+        drop(children);
+        Some(field)
     }
 
     fn push_element(&mut self, element: PdfSceneElement) -> Result<(), PdfReadError> {
@@ -1769,9 +1901,17 @@ fn is_known_noop(operator: &str) -> bool {
 }
 
 impl ContentToken {
+    fn precise_number(&self) -> f64 {
+        match self {
+            Self::Number((_, value)) => *value,
+            Self::Integer(value) => *value as f64,
+            _ => unreachable!("validated numeric operand"),
+        }
+    }
+
     fn number(&self) -> Option<LayoutUnit> {
         match self {
-            Self::Number(value) => Some(*value),
+            Self::Number((value, _)) => Some(*value),
             Self::Integer(value) => value
                 .checked_mul(LayoutUnit::UNITS_PER_POINT)
                 .map(LayoutUnit::from_raw),
@@ -2443,7 +2583,7 @@ fn parse_signed_i64(bytes: &[u8]) -> Result<i64, PdfReadError> {
     i64::try_from(value).map_err(|_| PdfReadError::NumericLimit)
 }
 
-fn parse_decimal(bytes: &[u8]) -> Result<LayoutUnit, PdfReadError> {
+fn parse_decimal(bytes: &[u8]) -> Result<(LayoutUnit, f64), PdfReadError> {
     if bytes.is_empty() || bytes.len() > 32 {
         return Err(PdfReadError::NumericLimit);
     }
@@ -2503,9 +2643,12 @@ fn parse_decimal(bytes: &[u8]) -> Result<LayoutUnit, PdfReadError> {
     let rounded = (numerator.unsigned_abs() + denominator as u128 / 2) / denominator as u128;
     let rounded = i128::try_from(rounded).map_err(|_| PdfReadError::NumericLimit)?;
     let value = if negative { -rounded } else { rounded };
-    i64::try_from(value)
-        .map(LayoutUnit::from_raw)
-        .map_err(|_| PdfReadError::NumericLimit)
+    let rounded = i64::try_from(value).map_err(|_| PdfReadError::NumericLimit)?;
+    let precise = whole as f64 + fraction as f64 / denominator as f64;
+    Ok((
+        LayoutUnit::from_raw(rounded),
+        if negative { -precise } else { precise },
+    ))
 }
 
 #[cfg(test)]

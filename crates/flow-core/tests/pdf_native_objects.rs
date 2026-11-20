@@ -509,14 +509,25 @@ fn saved_native_images_have_representable_placement_or_a_partial_diagnostic() {
 }
 
 #[test]
-fn images_proven_outside_the_effective_clip_do_not_make_the_scene_partial() {
+fn collapsed_image_diagnostics_account_for_unrounded_clip_visibility() {
     let image = stream(
         "/Type /XObject /Subtype /Image /ColorSpace /DeviceGray /Width 1 /Height 1 /BitsPerComponent 8",
         &[7],
     );
-    for contents in [
-        &b"q 0 0 40 40 re W n 1 0 0 1 60 60 cm /I Do Q"[..],
-        &b"q 0 0 10 10 re W n 20 20 10 10 re W n 0.001 0 0 1 5 5 cm /I Do Q"[..],
+    for (contents, partial) in [
+        (&b"q 0 0 40 40 re W n 1 0 0 1 60 60 cm /I Do Q"[..], false),
+        (
+            &b"q 0 0 40 40 re W n 0.001 0 0 1 60 60 cm /I Do Q"[..],
+            false,
+        ),
+        (
+            &b"q 0 0 10 10 re W n 20 20 10 10 re W n 0.001 0 0 1 5 5 cm /I Do Q"[..],
+            false,
+        ),
+        (
+            &b"q 5 5 0.001 1 re W n 0.001 0 0 1 5 5 cm /I Do Q"[..],
+            true,
+        ),
     ] {
         let source = fixture(
             contents,
@@ -532,8 +543,14 @@ fn images_proven_outside_the_effective_clip_do_not_make_the_scene_partial() {
                 .iter()
                 .all(|element| matches!(element, PdfSceneElement::Clip { .. }))
         );
-        assert!(!page.partial && !scene.report.partial);
-        assert!(page.report.diagnostics.is_empty());
+        assert_eq!(page.partial, partial);
+        assert_eq!(scene.report.partial, partial);
+        if partial {
+            assert!(matches!(page.report.diagnostics.as_slice(), [diagnostic]
+                if diagnostic.code == PdfReadDiagnosticCode::PartialPage));
+        } else {
+            assert!(page.report.diagnostics.is_empty());
+        }
     }
 }
 

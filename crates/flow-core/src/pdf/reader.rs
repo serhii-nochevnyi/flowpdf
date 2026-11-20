@@ -453,7 +453,7 @@ pub(super) fn decode_pdf_text_string(
     Ok(Some(text))
 }
 
-fn resolve_label_value<'value, 'object: 'value>(
+pub(super) fn resolve_label_value<'value, 'object: 'value>(
     value: &'value PdfValue,
     max_nesting: usize,
     work: &mut usize,

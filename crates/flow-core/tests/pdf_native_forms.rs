@@ -222,6 +222,34 @@ fn read_only_appearance_retains_verified_name_without_a_setter() {
 }
 
 #[test]
+fn public_widget_metadata_does_not_inherit_labels_from_rejected_split_fields() {
+    let bytes = build_pdf(&[
+        b"<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [5 0 R] >> >>".to_vec(),
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 500] /Annots [4 0 R 6 0 R] >>".to_vec(),
+        b"<< /Subtype /Widget /Parent 5 0 R /Rect [10 10 30 30] >>".to_vec(),
+        b"<< /FT /Tx /T (recipient) /V (saved) /Kids 7 0 R >>".to_vec(),
+        b"<< /Subtype /Widget /Parent 5 0 R /Rect [40 10 60 30] /FT /Btn /V /Yes >>".to_vec(),
+        b"[4 0 R 6 0 R]".to_vec(),
+    ]);
+    let reader = open_pdf(&bytes, Default::default()).unwrap();
+    let scene = read_pdf_scene(&reader, &PdfSceneRequest::default()).unwrap();
+    let [
+        PdfSceneElement::Form { value: first },
+        PdfSceneElement::Form { value: second },
+    ] = scene.pages[0].elements.as_slice()
+    else {
+        panic!("expected two form widgets");
+    };
+    assert_eq!(first.name, None);
+    assert_eq!(first.field_type, None);
+    assert_eq!(first.value, None);
+    assert_eq!(second.name, None);
+    assert_eq!(second.field_type.as_deref(), Some("Btn"));
+    assert_eq!(second.value.as_deref(), Some("Yes"));
+}
+
+#[test]
 fn named_read_only_widgets_keep_their_labels_after_a_page_rewrite() {
     let form = "/Type /XObject /Subtype /Form /BBox [0 0 20 20] /Resources <<>>";
     let max_label = format!("<{}>", "E9".repeat(32));
