@@ -1426,7 +1426,8 @@ fn page_state(
     use pages::NativePageCapability;
     let capability_bytes = graph.pages.len() * std::mem::size_of::<NativePageCapability>();
     spend(remaining, capability_bytes)?;
-    let restrictions = pages::restrictions(graph, &scene.pages, *remaining)?;
+    let workspace = Workspace::new(*remaining);
+    let restrictions = pages::restrictions(graph, &scene.pages, &workspace)?;
     if restrictions.is_none() {
         *remaining += capability_bytes;
     }

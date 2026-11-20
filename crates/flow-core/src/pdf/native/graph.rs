@@ -5,6 +5,7 @@ use thiserror::Error;
 use super::super::reader::{
     PdfObjectRef, PdfReadError, PdfReaderLimits, PdfValue, open_pdf_retained,
 };
+use super::verifier::{Reservation, Workspace};
 
 // @contract: Callers may lower the hard edit ceilings.
 #[derive(Debug, Clone, Copy)]
@@ -543,13 +544,13 @@ impl NativePdfGraph {
     pub(super) fn trailer_references(
         &self,
         work: &mut usize,
+        reservation: &mut Reservation<'_>,
     ) -> Result<BTreeSet<PdfObjectRef>, NativeEditError> {
-        let mut retained = self.retained;
-        let mut refs = Vec::new();
+        let mut refs = BTreeSet::new();
         for value in self.trailer.values() {
-            collect_refs(value, &mut refs, work, &mut retained)?;
+            collect_reference_set(value, &mut refs, work, reservation)?;
         }
-        Ok(refs.into_iter().collect())
+        Ok(refs)
     }
 
     pub(super) fn check_page_removals(
@@ -559,28 +560,38 @@ impl NativePdfGraph {
         page_tree_edges: PageTreeEdges<'_>,
         trailer: &BTreeSet<PdfObjectRef>,
         work: &mut usize,
-        mut retained: usize,
+        workspace: &Workspace,
     ) -> Result<(), NativeEditError> {
+        use NativeEditError::Budget;
+
+        let mut edges = workspace.scope();
         let mut replacement_owners = BTreeMap::<_, BTreeSet<_>>::new();
         for (&owner, values) in replacements {
-            let mut refs = Vec::new();
             for value in values.values() {
-                collect_refs(value, &mut refs, work, &mut retained)?;
-            }
-            for target in refs {
-                replacement_owners.entry(target).or_default().insert(owner);
+                visit_refs(value, work, &mut |target| {
+                    if !replacement_owners.contains_key(&target) {
+                        edges
+                            .tree_entry::<(PdfObjectRef, BTreeSet<PdfObjectRef>)>()
+                            .map_err(|_| Budget)?;
+                    }
+                    edges
+                        .insert(replacement_owners.entry(target).or_default(), owner)
+                        .map_err(|_| Budget)?;
+                    Ok(())
+                })?;
             }
         }
 
+        let mut visited = workspace.scope();
         let mut seen = BTreeSet::new();
+        let mut stack = workspace.scope();
         let mut pending = Vec::new();
         for &target in removed {
-            spend(&mut retained, 128)?;
-            pending.push(target);
+            stack.push(&mut pending, target).map_err(|_| Budget)?;
         }
         while let Some(target) = pending.pop() {
             spend(work, 1)?;
-            if !seen.insert(target) {
+            if !visited.insert(&mut seen, target).map_err(|_| Budget)? {
                 continue;
             }
             if trailer.contains(&target) {
@@ -595,8 +606,7 @@ impl NativePdfGraph {
                             .removed_links
                             .is_some_and(|edges| edges.contains(&(owner, target)))
                     {
-                        spend(&mut retained, 128)?;
-                        pending.push(owner);
+                        stack.push(&mut pending, owner).map_err(|_| Budget)?;
                     }
                 }
             }
@@ -604,13 +614,11 @@ impl NativePdfGraph {
                 && !removed.contains(&target)
                 && children.contains(&target)
             {
-                spend(&mut retained, 128)?;
-                pending.push(parent);
+                stack.push(&mut pending, parent).map_err(|_| Budget)?;
             }
             if let Some(owners) = replacement_owners.get(&target) {
                 for &owner in owners {
-                    spend(&mut retained, 128)?;
-                    pending.push(owner);
+                    stack.push(&mut pending, owner).map_err(|_| Budget)?;
                 }
             }
         }
@@ -845,25 +853,48 @@ pub(super) fn collect_refs(
     work: &mut usize,
     retained: &mut usize,
 ) -> Result<(), NativeEditError> {
+    visit_refs(value, work, &mut |reference| {
+        spend(retained, 128)?;
+        refs.push(reference);
+        Ok(())
+    })
+}
+
+pub(super) fn collect_reference_set(
+    value: &PdfValue,
+    refs: &mut BTreeSet<PdfObjectRef>,
+    work: &mut usize,
+    reservation: &mut Reservation<'_>,
+) -> Result<(), NativeEditError> {
+    visit_refs(value, work, &mut |reference| {
+        reservation
+            .insert(refs, reference)
+            .map_err(|_| NativeEditError::Budget)?;
+        Ok(())
+    })
+}
+
+pub(super) fn visit_refs(
+    value: &PdfValue,
+    work: &mut usize,
+    visit: &mut impl FnMut(PdfObjectRef) -> Result<(), NativeEditError>,
+) -> Result<(), NativeEditError> {
     spend(work, 1)?;
     match value {
-        PdfValue::Reference(reference) => {
-            spend(retained, 128)?;
-            refs.push(*reference);
-        }
+        PdfValue::Reference(reference) => visit(*reference)?,
         PdfValue::Array(values) => {
             for value in values {
-                collect_refs(value, refs, work, retained)?;
+                visit_refs(value, work, visit)?;
             }
         }
         PdfValue::Dictionary(dict) => {
             for value in dict.values() {
-                collect_refs(value, refs, work, retained)?;
+                visit_refs(value, work, visit)?;
             }
         }
         PdfValue::Stream(stream) => {
             for value in stream.dict.values() {
-                collect_refs(value, refs, work, retained)?;
+                visit_refs(value, work, visit)?;
             }
         }
         _ => {}
@@ -1147,8 +1178,11 @@ mod tests {
         let removed = BTreeSet::from([page]);
         let mut replacements = BTreeMap::from([(parent, BTreeMap::new())]);
         let mut work = graph.remaining_work();
-        let trailer = graph.trailer_references(&mut work).unwrap();
-        let retained = graph.remaining_retained();
+        let workspace = Workspace::new(graph.remaining_retained());
+        let mut trailer_refs = workspace.scope();
+        let trailer = graph
+            .trailer_references(&mut work, &mut trailer_refs)
+            .unwrap();
 
         assert_eq!(
             graph.check_page_removals(
@@ -1157,7 +1191,7 @@ mod tests {
                 PageTreeEdges::default(),
                 &trailer,
                 &mut work,
-                retained
+                &workspace
             ),
             Ok(())
         );
@@ -1172,7 +1206,7 @@ mod tests {
                 PageTreeEdges::default(),
                 &trailer,
                 &mut work,
-                retained
+                &workspace
             ),
             Err(NativeEditError::Unsupported)
         );
@@ -1183,7 +1217,7 @@ mod tests {
                 PageTreeEdges::default(),
                 &trailer,
                 &mut 0,
-                retained
+                &workspace
             ),
             Err(NativeEditError::Budget)
         );
