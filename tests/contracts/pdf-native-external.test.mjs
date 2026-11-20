@@ -210,6 +210,58 @@ test('a refused open retains the source without requesting a session snapshot', 
   assert.equal(operationOutput(session, { id: 'refused', input }, { outcome }), input)
 })
 
+test('definitive application refusals fail fixture comparison while missing targets remain unavailable', (t) => {
+  const source = loadFixtures().find(({ id }) => id === 'edit-families')
+  const cases = [
+    ['rotatePage', 'open', 'native-fixture-admission', ['open']],
+    ['deleteFinalPage', 'command', 'native-operation-setup', ['open', 'deletePage', 'close']],
+    ['rotatePage', 'command', 'native-operation-refused', ['open', 'rotatePage', 'close']],
+    ['replaceText', null, 'native-operation-target', ['open', 'close']],
+  ]
+  for (const [name, failedStep, reason, expectedCalls] of cases) {
+    const operation = source.spec.operations.find((entry) => entry.operation === name)
+    const directory = scratchDirectory(t, 'flowpdf-application-outcome-')
+    const requests = []
+    const compared = []
+    const refuse = { status: 'failed', code: 'FLOW_PDF_NATIVE_UNSUPPORTED' }
+    const respond = (reply) => (json) => {
+      const { operation, requestId, originStoreHash, command } = JSON.parse(json)
+      requests.push(command?.kind ?? operation)
+      return JSON.stringify({ operation, requestId, ...reply(originStoreHash) })
+    }
+    const wasm = {
+      native_pdf_open: respond((originStoreHash) => failedStep === 'open' ? refuse : {
+        status: 'opened',
+        snapshot: {
+          originStoreHash, binding: { revision: 0 }, outputHash: [0],
+          outputHex: source.input.toString('hex'), scene: {}, pageState: { order: [1, 2, 3] },
+        },
+      }),
+      native_pdf_command: respond(() => {
+        assert.equal(failedStep, 'command')
+        return refuse
+      }),
+      native_pdf_close: respond(() => ({ status: 'closed' })),
+      verify_native_pdf_response: () => true,
+    }
+    const evidence = { status: 'unavailable', fixtures: [] }
+    const { json } = structuralReadback(source.spec.operations.find((entry) => entry.operation === 'rotatePage').pages)
+    compareFixtures([{ ...source, spec: { ...source.spec, operations: [operation] } }], wasm, directory,
+      (check, args) => {
+        compared.push([check, basename(args.at(-1))])
+        return Buffer.from(JSON.stringify(json))
+      }, evidence)
+    const status = failedStep ? 'fail' : 'unavailable'
+    assert.equal(evidence.reason, reason, name)
+    assert.equal(evidence.status, status, name)
+    assert.equal(evidence.fixtures[0].operations[0].status, status, name)
+    assert.deepEqual([externalExitCode(status), externalExitCode(status, true)], failedStep ? [1, 1] : [0, 2])
+    assert.deepEqual(requests, expectedCalls, name)
+    assert.deepEqual(compared, [['structure', 'source.pdf']], name)
+    assert.deepEqual(readdirSync(directory), ['source.pdf'], name)
+  }
+})
+
 test('redaction refusal preserves the verifier classification through bounded cleanup', (t) => {
   const redaction = loadFixtures().find(({ id }) => id === 'redaction')
   const { input, sourceHash, spec } = redaction
@@ -233,6 +285,7 @@ test('redaction refusal preserves the verifier classification through bounded cl
     ['failed', 'none', 'fail', [1, 1]],
     ['failed', 'close', 'fail', [1, 1]],
     ['failed', 'cancel', 'fail', [1, 1]],
+    ['publish-refused', 'none', 'fail', [1, 1]],
     ['inconclusive', 'none', 'unavailable', [0, 2]],
     ['inconclusive', 'close', 'unavailable', [0, 2]],
     ['inconclusive', 'cancel', 'unavailable', [0, 2]],
@@ -242,6 +295,7 @@ test('redaction refusal preserves the verifier classification through bounded cl
   ]) {
     const label = `${verdict}, ${cleanupFailure} cleanup failure`
     const hasCandidate = verdict !== 'missing-candidate'
+    const publishRefused = verdict === 'publish-refused'
     const directory = scratchDirectory(t, 'flowpdf-redaction-contract-')
     const requests = []
     const invocations = []
@@ -265,7 +319,10 @@ test('redaction refusal preserves the verifier classification through bounded cl
             if (verdict === 'missing-verdict') {
               return { status: 'failed', code: 'FLOW_PDF_NATIVE_REDACTION_CANDIDATE_UNAVAILABLE' }
             }
-            return { status: 'redaction', redaction: { candidate, verification: { status: verdict } } }
+            return { status: 'redaction', redaction: { candidate, verification: { status: publishRefused ? 'passed' : verdict } } }
+          case 'publish':
+            assert.ok(publishRefused)
+            return { status: 'failed', code: 'FLOW_PDF_NATIVE_RECONCILIATION_REQUIRED' }
           case 'cancel':
             if (cleanupFailure === 'cancel') throw new Error('controlled cancellation failure')
             pending = false
@@ -289,11 +346,14 @@ test('redaction refusal preserves the verifier classification through bounded cl
         redactRequest(index + 2, { kind: 'addMark', pageId: 42, rect: rectPt.map((point) => point * 1000) })),
       redactRequest(stageId, { kind: 'stage' }),
       ...(hasCandidate ? [redactRequest(stageId, { kind: 'verify', candidate }),
+        ...(publishRefused ? [redactRequest(stageId, { kind: 'publish', candidate })] : []),
         redactRequest(stageId, { kind: 'cancel', candidate })] : []),
       { ...request('close', stageId + 1), binding },
     ], label)
     assert.equal(evidence.status, status, label)
-    assert.equal(evidence.reason, hasCandidate ? 'native-redaction-verification' : 'native-redaction-candidate', label)
+    const reason = publishRefused ? 'native-redaction-publication' :
+      hasCandidate ? 'native-redaction-verification' : 'native-redaction-candidate'
+    assert.equal(evidence.reason, reason, label)
     assert.deepEqual([externalExitCode(evidence.status, false), externalExitCode(evidence.status, true)], exitCodes, label)
     assert.deepEqual(evidence.fixtures[0].operations, [{
       operation: 'redact', status, affectedPages: operation.affectedPages, pageChecks: [], checks: {},

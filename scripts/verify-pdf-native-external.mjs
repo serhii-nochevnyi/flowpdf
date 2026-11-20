@@ -469,10 +469,12 @@ export function operationOutput(session, fixture, operation) {
       !session.opened.snapshot && !session.current(), 'native-refusal')
     return input
   }
+  requireMatch(session.opened.status !== 'failed', 'native-fixture-admission')
   requireInput(session.current(), 'native-fixture-admission')
   if (name === 'preserve') return exactSnapshot(session.current())
   for (const { operation: setup, ...parameters } of request?.after ?? []) {
     const result = session.command(familyCommand(setup, parameters, session.current()))
+    requireMatch(result.status !== 'failed', 'native-operation-setup')
     requireInput(result.status === 'applied', 'native-operation-setup')
   }
   const base = session.current()
@@ -503,6 +505,7 @@ export function operationOutput(session, fixture, operation) {
     requireMatch(output.equals(exactSnapshot(base)), 'native-refusal-readback')
     return output
   }
+  requireMatch(reply.status !== 'failed', 'native-operation-refused')
   requireInput(['applied', 'published'].includes(reply.status), 'native-operation-unavailable')
   const output = exactSnapshot(reply.snapshot)
   requireMatch(!output.equals(input), 'native-rewrite')
