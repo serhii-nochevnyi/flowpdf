@@ -263,17 +263,24 @@ enum Font {
     Embedded(Ref, Box<FieldFont>),
 }
 
+fn font_resource(reference: Option<Ref>) -> Value {
+    match reference {
+        Some(reference) => Value::Reference(reference),
+        None => Value::Dictionary(dictionary([
+            ("Type", name("Font")),
+            ("Subtype", name("Type1")),
+            ("BaseFont", name("Helvetica")),
+            ("Encoding", name("WinAnsiEncoding")),
+        ])),
+    }
+}
+
 impl Font {
     fn resource(&self) -> Value {
-        match self {
-            Self::Simple => Value::Dictionary(dictionary([
-                ("Type", name("Font")),
-                ("Subtype", name("Type1")),
-                ("BaseFont", name("Helvetica")),
-                ("Encoding", name("WinAnsiEncoding")),
-            ])),
-            Self::Embedded(reference, _) => Value::Reference(*reference),
-        }
+        font_resource(match self {
+            Self::Simple => None,
+            Self::Embedded(reference, _) => Some(*reference),
+        })
     }
 
     fn operand(&self, value: &str, [width, height]: [i64; 2]) -> FieldResult<String> {
@@ -303,7 +310,7 @@ struct Form {
     owner: Option<Ref>,
     fields: Vec<Ref>,
     names: BTreeMap<String, Ref>,
-    font: FieldResult<Font>,
+    font: Option<FieldResult<Font>>,
     trailer_refs: BTreeSet<Ref>,
 }
 
@@ -348,7 +355,7 @@ fn load_form(
             owner: None,
             fields: vec![],
             names: BTreeMap::new(),
-            font: Ok(Font::Simple),
+            font: None,
             trailer_refs,
         });
     };
@@ -393,28 +400,6 @@ fn load_form(
             _ => return Err(Profile.into()),
         }
     }
-    let font = (|| {
-        let Some(resources) = values.get("DR") else {
-            return Ok(Font::Simple);
-        };
-        let resources = resource_value(graph, resources)?;
-        let Some(fonts) = resources.get("Font") else {
-            return Ok(Font::Simple);
-        };
-        let fonts = resource_value(graph, fonts)?;
-        let Some(font) = fonts.get(FONT) else {
-            return Ok(Font::Simple);
-        };
-        if simple_font(font) {
-            return Ok(Font::Simple);
-        }
-        let reference = font.as_reference().ok_or(Appearance)?;
-        let font = dict(graph, reference).map_err(|_| Appearance)?;
-        Ok(Font::Embedded(
-            reference,
-            Box::new(FieldFont::admit(graph, font).ok_or(Appearance)?),
-        ))
-    })();
     for &field in &fields {
         let values = dict(graph, field).map_err(|_| Reference)?;
         if values.get("FT").is_some_and(|value| {
@@ -434,9 +419,69 @@ fn load_form(
         owner: Some(owner),
         fields,
         names,
-        font,
+        font: None,
         trailer_refs,
     })
+}
+
+fn form_font_reference(graph: &NativePdfGraph, form: &Form) -> FieldResult<Option<Ref>> {
+    let Some(owner) = form.owner else {
+        return Ok(None);
+    };
+    let values = pages::form_dict(graph, owner).map_err(|_| Reference)?;
+    let Some(resources) = values.get("DR") else {
+        return Ok(None);
+    };
+    let resources = resource_value(graph, resources)?;
+    let Some(fonts) = resources.get("Font") else {
+        return Ok(None);
+    };
+    let fonts = resource_value(graph, fonts)?;
+    let Some(font) = fonts.get(FONT) else {
+        return Ok(None);
+    };
+    if simple_font(font) {
+        return Ok(None);
+    }
+    font.as_reference().map(Some).ok_or(Appearance)
+}
+
+fn admit_form_font(
+    graph: &NativePdfGraph,
+    form: &mut Form,
+    reference: Option<Ref>,
+    remaining: &mut usize,
+) -> Result<(), NativeSessionError> {
+    if form.font.is_some() {
+        return Ok(());
+    }
+    let font = match (|| -> Result<Font, NativeSessionError> {
+        let Some(reference) = reference else {
+            return Ok(Font::Simple);
+        };
+        let font = dict(graph, reference).map_err(|_| Appearance)?;
+        Ok(Font::Embedded(
+            reference,
+            Box::new(FieldFont::admit(graph, font, remaining)?),
+        ))
+    })() {
+        Ok(font) => Ok(font),
+        Err(NativeSessionError::Field(reason)) => Err(reason),
+        Err(NativeSessionError::Text(_)) => Err(Appearance),
+        Err(error) => return Err(error),
+    };
+    form.font = Some(font);
+    Ok(())
+}
+
+impl Form {
+    fn text_font(&self) -> FieldResult<&Font> {
+        self.font
+            .as_ref()
+            .ok_or(Appearance)?
+            .as_ref()
+            .map_err(|&reason| reason)
+    }
 }
 
 fn simple_font(value: &Value) -> bool {
@@ -478,26 +523,41 @@ impl FieldValue {
     }
 }
 
-fn appearance_stream(dimensions: [i64; 2], data: Vec<u8>, font: Option<&Font>) -> PdfStream {
-    let [width, height] = dimensions;
+fn appearance_dictionary([width, height]: [i64; 2], length: usize, font: Option<Value>) -> Dict {
     let resources = font.map_or_else(Dict::new, |font| {
-        dictionary([(
-            "Font",
-            Value::Dictionary(dictionary([(FONT, font.resource())])),
-        )])
+        dictionary([("Font", Value::Dictionary(dictionary([(FONT, font)])))])
     });
+    dictionary([
+        ("Type", name("XObject")),
+        ("Subtype", name("Form")),
+        ("BBox", numbers([0, 0, width, height])),
+        ("Resources", Value::Dictionary(resources)),
+        ("Length", Value::Integer(length as i64)),
+    ])
+}
+
+fn appearance_stream(dimensions: [i64; 2], data: Vec<u8>, font: Option<&Font>) -> PdfStream {
     PdfStream {
-        dict: dictionary([
-            ("Type", name("XObject")),
-            ("Subtype", name("Form")),
-            ("BBox", numbers([0, 0, width, height])),
-            ("Resources", Value::Dictionary(resources)),
-            ("Length", Value::Integer(data.len() as i64)),
-        ]),
+        dict: appearance_dictionary(dimensions, data.len(), font.map(Font::resource)),
         encoded: data.clone(),
         data,
         source_offset: 0,
     }
+}
+
+const TEXT_APPEARANCE_SUFFIX: &str = "> Tj ET\nQ\n";
+
+fn appearance_background([w, h]: [i64; 2]) -> String {
+    format!(
+        "q 1 g 0 0 {w} {h} re f 0 G 1 w 1 1 {} {} re S\n",
+        w - 2,
+        h - 2
+    )
+}
+
+fn text_appearance_prefix(size: [i64; 2]) -> String {
+    let background = appearance_background(size);
+    format!("{background}BT /{FONT} 10 Tf 0 g 2 4 Td <")
 }
 
 fn appearances(
@@ -505,21 +565,17 @@ fn appearances(
     size: [i64; 2],
     value: &FieldValue,
 ) -> FieldResult<Vec<(Option<&'static str>, PdfStream)>> {
-    let [w, h] = size;
-    let background = format!(
-        "q 1 g 0 0 {w} {h} re f 0 G 1 w 1 1 {} {} re S\n",
-        w - 2,
-        h - 2
-    );
     match value {
         FieldValue::Text(text) => {
-            let font = form.font.as_ref().map_err(|&error| error)?;
+            let font = form.text_font()?;
             let hex = font.operand(text, size)?;
-            let data =
-                format!("{background}BT /{FONT} 10 Tf 0 g 2 4 Td <{hex}> Tj ET\nQ\n").into_bytes();
+            let prefix = text_appearance_prefix(size);
+            let data = format!("{prefix}{hex}{TEXT_APPEARANCE_SUFFIX}").into_bytes();
             Ok(vec![(None, appearance_stream(size, data, Some(font)))])
         }
         FieldValue::Checkbox { .. } => {
+            let [w, h] = size;
+            let background = appearance_background(size);
             let mark = format!(
                 "{background}2 w 2 2 m {} {} l 2 {} m {} 2 l S\nQ\n",
                 w - 2,
@@ -538,7 +594,7 @@ fn appearances(
     }
 }
 
-fn stream_matches(graph: &NativePdfGraph, actual: &Value, expected: &PdfStream) -> bool {
+fn same_appearance_dictionary(a: &Dict, b: &Dict) -> bool {
     fn same(left: &Value, right: &Value) -> bool {
         match (left, right) {
             (Value::Name(a), Value::Name(b)) => a == b,
@@ -547,17 +603,18 @@ fn stream_matches(graph: &NativePdfGraph, actual: &Value, expected: &PdfStream) 
             (Value::Array(a), Value::Array(b)) => {
                 a.len() == b.len() && a.iter().zip(b).all(|(a, b)| same(a, b))
             }
-            (Value::Dictionary(a), Value::Dictionary(b)) => same_dict(a, b),
+            (Value::Dictionary(a), Value::Dictionary(b)) => same_appearance_dictionary(a, b),
             _ => false,
         }
     }
-    fn same_dict(a: &Dict, b: &Dict) -> bool {
-        a.len() == b.len()
-            && b.iter()
-                .all(|(key, value)| a.get(key).is_some_and(|entry| same(entry, value)))
-    }
+    a.len() == b.len()
+        && b.iter()
+            .all(|(key, value)| a.get(key).is_some_and(|entry| same(entry, value)))
+}
+
+fn stream_matches(graph: &NativePdfGraph, actual: &Value, expected: &PdfStream) -> bool {
     matches!(actual.as_reference().and_then(|reference| graph.objects.get(&reference)),
-        Some(Value::Stream(actual)) if actual.data == expected.data && same_dict(&actual.dict, &expected.dict))
+        Some(Value::Stream(actual)) if actual.data == expected.data && same_appearance_dictionary(&actual.dict, &expected.dict))
 }
 
 struct Admitted {
@@ -641,11 +698,12 @@ fn recognize_identity(
 
 fn recognize_appearance(
     graph: &NativePdfGraph,
-    form: &Form,
+    form: &mut Form,
     page: &NativePdfNotePage,
     widget: Ref,
     (field, field_name): (Ref, String),
-) -> FieldResult<Admitted> {
+    remaining: &mut usize,
+) -> Result<Admitted, NativeSessionError> {
     let widget_data = dict(graph, widget).map_err(|_| Reference)?;
     let fields = dict(graph, field).map_err(|_| Reference)?;
     if fields.get("Q").is_some_and(|v| v.as_integer() != Some(0))
@@ -661,7 +719,7 @@ fn recognize_appearance(
                 .iter()
                 .any(|key| widget_data.contains_key(*key))
     {
-        return Err(Profile);
+        return Err(Profile.into());
     }
     let bounds = rect(widget_data.get("Rect").ok_or(Geometry)?).ok_or(Geometry)?;
     let size = dimensions(page, bounds)?;
@@ -684,15 +742,56 @@ fn recognize_appearance(
             if widget_data.contains_key("AS")
                 || fields.get("DA").is_some_and(|v| v.as_bytes() != Some(DA))
             {
-                return Err(Appearance);
+                return Err(Appearance.into());
             }
-            if fields.contains_key("DV") {
-                form.font
-                    .as_ref()
-                    .map_err(|&error| error)?
-                    .operand(&get_text("DV")?, size)?;
+            let Some(Value::Stream(stream)) = ap
+                .as_reference()
+                .and_then(|reference| graph.objects.get(&reference))
+            else {
+                return Err(Appearance.into());
+            };
+            let text = get_text("V")?;
+            let reference = form_font_reference(graph, form)?;
+            let prefix = text_appearance_prefix(size);
+            let expected =
+                appearance_dictionary(size, stream.data.len(), Some(font_resource(reference)));
+            let hex = stream
+                .data
+                .strip_prefix(prefix.as_bytes())
+                .and_then(|data| data.strip_suffix(TEXT_APPEARANCE_SUFFIX.as_bytes()));
+            let scalars = text.chars().count();
+            if !same_appearance_dictionary(&stream.dict, &expected)
+                || !hex.is_some_and(|hex| {
+                    [scalars * 2, scalars * 4].contains(&hex.len())
+                        && hex
+                            .iter()
+                            .all(|byte| matches!(byte, b'0'..=b'9' | b'A'..=b'F'))
+                })
+            {
+                return Err(Appearance.into());
             }
-            FieldValue::Text(get_text("V")?)
+            drop(expected);
+            drop(prefix);
+            let default = fields
+                .contains_key("DV")
+                .then(|| get_text("DV"))
+                .transpose()?;
+            if form.font.is_none() {
+                let mut available = *remaining;
+                spend(
+                    &mut available,
+                    field_name.capacity()
+                        + text.capacity()
+                        + default.as_ref().map_or(0, String::capacity),
+                )?;
+                let before = available;
+                admit_form_font(graph, form, reference, &mut available)?;
+                spend(remaining, before - available)?;
+            }
+            if let Some(default) = default {
+                form.text_font()?.operand(&default, size)?;
+            }
+            FieldValue::Text(text)
         }
         Some("Btn") => {
             let states = ap
@@ -711,14 +810,14 @@ fn recognize_appearance(
                     .get("DV")
                     .is_some_and(|v| !v.as_name().is_some_and(|v| states.contains_key(v)))
             {
-                return Err(Appearance);
+                return Err(Appearance.into());
             }
             FieldValue::Checkbox {
                 checked: state == on,
                 on: on.clone(),
             }
         }
-        _ => return Err(Profile),
+        _ => return Err(Profile.into()),
     };
     for (state, stream) in appearances(form, size, &value)? {
         let actual = match &value {
@@ -729,7 +828,7 @@ fn recognize_appearance(
                 .ok_or(Appearance)?,
         };
         if !stream_matches(graph, actual, &stream) {
-            return Err(Appearance);
+            return Err(Appearance.into());
         }
     }
     Ok(Admitted {
@@ -821,7 +920,7 @@ pub(super) fn project(
     }
     let mut work = graph.remaining_work();
     let mut available = *remaining;
-    let (form, form_bytes) = match load_form(graph, &mut work, &mut available) {
+    let (mut form, mut form_bytes) = match load_form(graph, &mut work, &mut available) {
         Ok(form) => (Ok(form), *remaining - available),
         Err(NativeSessionError::Field(reason)) => (Err(reason), 0),
         Err(error) => return Err(error),
@@ -836,12 +935,18 @@ pub(super) fn project(
             spend(&mut work, data.get("AP").map_or(0, |_| MAX_TEXT))?;
         }
         let admitted = form
-            .as_ref()
-            .map_err(|&error| error.into())
+            .as_mut()
+            .map_err(|error| NativeSessionError::from(*error))
             .and_then(|form| {
                 let identity =
                     recognize_identity(graph, form, page, object, &mut work, *remaining)?;
-                recognize_appearance(graph, form, page, object, identity).map_err(Into::into)
+                let mut available = *remaining;
+                let admitted =
+                    recognize_appearance(graph, form, page, object, identity, &mut available);
+                let bytes = *remaining - available;
+                spend(remaining, bytes)?;
+                form_bytes += bytes;
+                admitted
             });
         let admitted = match admitted {
             Ok(admitted) => Ok(admitted),
@@ -1120,13 +1225,29 @@ pub(super) fn stage(
     current: &[NativeFieldView],
     command: &NativeFieldCommand,
 ) -> Result<ExpectedField, NativeSessionError> {
-    use NativeFieldCommand::*;
     command.validate()?;
     let budget = graph.remaining_work();
     let mut work = budget;
-    let mut remaining = graph.remaining_retained();
-    let mut form = load_form(graph, &mut work, &mut remaining)?;
+    let available = graph.remaining_retained();
+    let mut remaining = available;
+    let form = load_form(graph, &mut work, &mut remaining)?;
     graph.charge_page_work(budget - work)?;
+    let mut form_bytes = available - remaining;
+    graph.charge_page_retained(form_bytes)?;
+    let result = stage_form(graph, pages, current, command, form, &mut form_bytes);
+    graph.release_page_retained(form_bytes);
+    result
+}
+
+fn stage_form(
+    graph: &mut NativePdfGraph,
+    pages: &[NativePdfNotePage],
+    current: &[NativeFieldView],
+    command: &NativeFieldCommand,
+    mut form: Form,
+    form_bytes: &mut usize,
+) -> Result<ExpectedField, NativeSessionError> {
+    use NativeFieldCommand::*;
     let page_at = |page: u32| pages.get(page as usize).ok_or(Geometry);
     let target = command
         .target()
@@ -1147,10 +1268,28 @@ pub(super) fn stage(
         graph.charge_page_work(old_page.annotations.len() + form.fields.len())?;
         let mut work = graph.remaining_work();
         let budget = work;
-        let identity =
-            recognize_identity(graph, &form, old_page, view.object, &mut work, remaining)?;
+        let identity = recognize_identity(
+            graph,
+            &form,
+            old_page,
+            view.object,
+            &mut work,
+            graph.remaining_retained(),
+        )?;
         form.names.clear();
-        let admitted = recognize_appearance(graph, &form, old_page, view.object, identity)?;
+        let available = graph.remaining_retained();
+        let mut remaining = available;
+        let admitted = recognize_appearance(
+            graph,
+            &mut form,
+            old_page,
+            view.object,
+            identity,
+            &mut remaining,
+        )?;
+        let bytes = available - remaining;
+        graph.charge_page_retained(bytes)?;
+        *form_bytes += bytes;
         graph.charge_page_work(budget - work)?;
         graph.reserve_page_copy(admitted.field)?;
         if admitted.field != view.object {
@@ -1190,10 +1329,7 @@ pub(super) fn stage(
                             .as_bytes()
                             .and_then(|bytes| decode(bytes, MAX_TEXT))
                             .ok_or(Profile)?;
-                        form.font
-                            .as_ref()
-                            .map_err(|&reason| reason)?
-                            .operand(&default, size)?;
+                        form.text_font()?.operand(&default, size)?;
                     }
                 }
                 if *page != view.page {
@@ -1246,6 +1382,16 @@ pub(super) fn stage(
         if form.names.contains_key(field_name) {
             return Err(Reference.into());
         }
+        if let FieldValue::Text(text) = &value {
+            let mut remaining = graph.remaining_retained();
+            spend(&mut remaining, text.capacity())?;
+            let available = remaining;
+            let reference = form_font_reference(graph, &form)?;
+            admit_form_font(graph, &mut form, reference, &mut remaining)?;
+            let bytes = available - remaining;
+            graph.charge_page_retained(bytes)?;
+            *form_bytes += bytes;
+        }
         form.names.clear();
         let owner = install_form(graph, &form)?;
         form.owner = Some(owner);
@@ -1269,7 +1415,7 @@ pub(super) fn stage(
     };
 
     if value.kind() == NativeFieldKind::Text {
-        let font = form.font.as_ref().map_err(|&reason| reason)?;
+        let font = form.text_font()?;
         ensure_default_font(graph, form.owner.ok_or(Reference)?, font)?;
         dict_mut(graph, field)?.insert("DA".into(), Value::String(DA.to_vec()));
     }
