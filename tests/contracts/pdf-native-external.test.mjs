@@ -391,7 +391,7 @@ test('editing and removing notes reject exact retired contents in unlinked saved
   }
 })
 
-test('widget readback compares PDF field types and requires distinct Off and Yes Forms', () => {
+test('widget readback compares field types and checkbox flags and requires distinct Off and Yes Forms', () => {
   const [source] = editFamilies.operations
   const operation = { pages: source.pages.slice(0, 1), fieldReadback: source.fieldReadback,
     noteReadback: [], removed: [] }
@@ -414,6 +414,21 @@ test('widget readback compares PDF field types and requires distinct Off and Yes
   }
   const check = (expected = operation) => checkStructure(pdfStructure(json), null, expected)
   check()
+  checkbox['/Ff'] = 0
+  check()
+  checkbox['/Ff'] = '15 0 R'
+  objects['obj:15 0 R'] = { value: 0 }
+  check()
+  for (const flags of [1 << 15, 1 << 16]) {
+    checkbox['/Ff'] = flags
+    assert.throws(() => check(), /field-structure/)
+    objects['obj:15 0 R'].value = flags
+    checkbox['/Ff'] = '15 0 R'
+    assert.throws(() => check(), /field-structure/)
+  }
+  delete objects['obj:15 0 R']
+  assert.throws(() => check(), /field-structure/)
+  delete checkbox['/Ff']
   for (const widget of [textWidget, checkbox]) {
     const fieldType = widget['/FT']
     widget['/FT'] = '/Ch'

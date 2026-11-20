@@ -203,6 +203,8 @@ describe('accepted page preview', () => {
     lane.deliver(preview, previewReply(preview.request))
     await expect(pending).resolves.toBeNull()
     lane.deliver(dispatch, redactionReply(dispatch.request))
+    const readback = await lane.take()
+    lane.deliver(readback, markSnapshotReply(readback.request, original))
     await marking
     expect(lane.coordinator.snapshot()).toMatchObject({ phase: 'ready', accepted: original })
     lane.coordinator.dispose()
@@ -965,12 +967,22 @@ function boundRedactionReply(request: Extract<NativePdfRequest, { operation: 're
   } as const
 }
 
+function markSnapshotReply(request: NativePdfRequest, snapshot: NativePdfVerifiedSnapshot) {
+  if (request.operation !== 'snapshot') throw new Error('expected snapshot')
+  return {
+    ...request, status: 'unseen', snapshot, code: null,
+    limits: NATIVE_PDF_LIMITS, resultHash: 'cd'.repeat(32),
+  } as const
+}
+
 async function redactionMarked(lane: ReturnType<typeof fakePort>) {
   const initial = await opened(lane)
   const marking = lane.coordinator.markRedaction(mark, 1)
   const dispatch = await lane.take()
   expect(dispatch.request).toMatchObject({ operation: 'redaction', action: mark })
   lane.deliver(dispatch, redactionReply(dispatch.request))
+  const readback = await lane.take()
+  lane.deliver(readback, markSnapshotReply(readback.request, initial))
   await marking
   return initial
 }
@@ -1003,6 +1015,13 @@ async function deliverWasmRedaction(lane: ReturnType<typeof fakePort>, kind: Nat
   const reply = JSON.parse(wasm.native_pdf_redaction(JSON.stringify(dispatch.request))) as NativePdfResponse
   lane.deliver(dispatch, reply)
   return reply
+}
+
+async function deliverWasmMark(lane: ReturnType<typeof fakePort>, kind: 'addMark' | 'removeMark' | 'clearMarks') {
+  const receipt = await deliverWasmRedaction(lane, kind)
+  const readback = await lane.take()
+  expect(readback.request).toMatchObject({ operation: 'snapshot', requestId: receipt.requestId })
+  lane.deliver(readback, JSON.parse(wasm.native_pdf_snapshot(JSON.stringify(readback.request))))
 }
 
 async function closeRedactionFixture(lane: ReturnType<typeof fakePort>) {
@@ -1043,7 +1062,7 @@ describe('native redaction quarantine', () => {
     if (!origin || !edge) throw new Error('expected two in-crop marks')
     for (const [index, rect] of [origin, edge].entries()) {
       const marking = lane.coordinator.markRedaction({ kind: 'addMark', pageId, rect }, index + 1)
-      await deliverWasmRedaction(lane, 'addMark')
+      await deliverWasmMark(lane, 'addMark')
       await expect(marking).resolves.toMatchObject({ markCount: index + 1, published: false })
     }
     const outside = [edge[0], edge[1], edge[2] + 1, edge[3]] as const
@@ -1053,7 +1072,7 @@ describe('native redaction quarantine', () => {
     await refused
     expect(lane.coordinator.snapshot().accepted).toBe(accepted)
     const clearing = lane.coordinator.markRedaction({ kind: 'clearMarks' }, 0)
-    await deliverWasmRedaction(lane, 'clearMarks')
+    await deliverWasmMark(lane, 'clearMarks')
     await clearing
     await closeRedactionFixture(lane)
   })
@@ -1097,7 +1116,7 @@ describe('native redaction quarantine', () => {
     const initial = await openRedactionFixture(lane)
     const pageId = initial.pageState.order[0]!
     const marking = lane.coordinator.markRedaction({ kind: 'addMark', pageId, rect: [12_000, 12_000, 13_000, 13_000] }, 1)
-    await deliverWasmRedaction(lane, 'addMark')
+    await deliverWasmMark(lane, 'addMark')
     await marking
 
     const applying = lane.coordinator.applyRedaction([pageId])
@@ -1137,7 +1156,7 @@ describe('native redaction quarantine', () => {
     const [markedPage, otherPage] = initial.pageState.order
     const mark = { kind: 'addMark', pageId: markedPage!, rect: [12_000, 12_000, 13_000, 13_000] } as const
     const marking = lane.coordinator.markRedaction(mark, 1)
-    await deliverWasmRedaction(lane, 'addMark')
+    await deliverWasmMark(lane, 'addMark')
     await marking
 
     vi.useFakeTimers()
@@ -1176,7 +1195,7 @@ describe('native redaction quarantine', () => {
     expect(lane.sent).toEqual([])
 
     const removing = lane.coordinator.markRedaction({ ...mark, kind: 'removeMark' }, 0)
-    await deliverWasmRedaction(lane, 'removeMark')
+    await deliverWasmMark(lane, 'removeMark')
     await expect(removing).resolves.toMatchObject({ markCount: 0 })
     await closeRedactionFixture(lane)
   })
@@ -1195,6 +1214,99 @@ describe('native redaction quarantine', () => {
     await expect(lane.coordinator.applyRedaction([mark.pageId])).rejects.toMatchObject({ code: 'FLOW_PDF_NATIVE_UNSUPPORTED' })
     expect(lane.sent).toHaveLength(0)
     expect(lane.coordinator.snapshot()).toMatchObject({ phase: 'ready', accepted: after })
+  })
+
+  it.each(['direct', 'reconciled'] as const)('refreshes admission on the same ordinary PDF after %s mark settlement', async (mode) => {
+    const lane = fakePort(500, wasm.verify_native_pdf_response)
+    const before = await openRedactionFixture(lane)
+    const pageId = before.pageState.order[0]!
+    const mark = { kind: 'addMark', pageId, rect: [12_000, 12_000, 13_000, 13_000] } as const
+    expect(before.redactionAdmission).toBe('supported')
+
+    function reportUnavailable(readback: NativePdfWorkerRequest) {
+      const json = wasm.native_pdf_snapshot(JSON.stringify(readback.request))
+      expect(wasm.verify_native_pdf_response(json)).toBe(true)
+      const reply = readNativeResponse(json)
+      if (reply?.status !== 'unseen') throw new Error('expected accepted-file readback')
+      expect(reply.snapshot).toEqual(before)
+      lane.verify.mockReturnValueOnce(true)
+      lane.deliver(readback, { ...reply, snapshot: { ...reply.snapshot, redactionAdmission: 'unavailable' } })
+    }
+
+    if (mode === 'reconciled') vi.useFakeTimers()
+    const marking = lane.coordinator.markRedaction(mark, 1)
+    const receipt = await deliverWasmRedaction(lane, 'addMark')
+    expect(receipt).toMatchObject({ status: 'redaction', snapshot: null, redaction: {
+      candidate: null, verification: null, published: false, markCount: 1,
+    } })
+    const readback = await lane.take()
+    expect(readback.request).toEqual({
+      protocolVersion: 1, operation: 'snapshot', requestId: receipt.requestId,
+      binding: before.binding, originStoreHash: before.originStoreHash,
+    })
+    expect(lane.coordinator.snapshot()).toMatchObject({ phase: 'marking', accepted: before })
+    if (mode === 'reconciled') {
+      const lost = expect(marking).rejects.toMatchObject({ code: 'FLOW_PDF_NATIVE_REPLY_LOST' })
+      await vi.advanceTimersByTimeAsync(500)
+      await lost
+      const reconciling = lane.coordinator.reconcile()
+      const retried = await deliverWasmRedaction(lane, 'addMark')
+      expect(retried).toEqual(receipt)
+      const retryReadback = await lane.take()
+      expect(retryReadback.request).toEqual(readback.request)
+      reportUnavailable(retryReadback)
+      await expect(reconciling).resolves.toEqual({ status: 'unseen', snapshot: { ...before, redactionAdmission: 'unavailable' } })
+    } else {
+      reportUnavailable(readback)
+      await marking
+    }
+
+    const unavailable = lane.coordinator.snapshot().accepted
+    expect(unavailable).toEqual({ ...before, redactionAdmission: 'unavailable' })
+    expect(lane.coordinator.outputBytes()).toEqual(nativeHexBytes(before.outputHex))
+    const secondMark = { ...mark, rect: [42_000, 42_000, 43_000, 43_000] } as const
+    await expect(lane.coordinator.markRedaction(secondMark, 2)).rejects.toMatchObject({ code: 'FLOW_PDF_NATIVE_UNSUPPORTED' })
+    await expect(lane.coordinator.applyRedaction([pageId])).rejects.toMatchObject({ code: 'FLOW_PDF_NATIVE_UNSUPPORTED' })
+    expect(lane.sent).toEqual([])
+
+    const removing = lane.coordinator.markRedaction({ ...mark, kind: 'removeMark' }, 0)
+    await deliverWasmMark(lane, 'removeMark')
+    await expect(removing).resolves.toMatchObject({ markCount: 0 })
+    expect(lane.coordinator.snapshot().accepted).toEqual(before)
+
+    const markingAgain = lane.coordinator.markRedaction(secondMark, 1)
+    await deliverWasmRedaction(lane, 'addMark')
+    reportUnavailable(await lane.take())
+    await markingAgain
+    const clearing = lane.coordinator.markRedaction({ kind: 'clearMarks' }, 0)
+    await deliverWasmMark(lane, 'clearMarks')
+    await expect(clearing).resolves.toMatchObject({ markCount: 0 })
+    expect(lane.coordinator.snapshot().accepted).toEqual(before)
+    await closeRedactionFixture(lane)
+  })
+
+  it('requires reconciliation when mark admission readback describes different accepted bytes', async () => {
+    const lane = fakePort()
+    const before = await opened(lane)
+    const marking = lane.coordinator.markRedaction(mark, 1)
+    const failed = expect(marking).rejects.toMatchObject({ code: 'FLOW_PDF_NATIVE_RESPONSE_INVALID' })
+    const dispatch = await lane.take()
+    lane.deliver(dispatch, redactionReply(dispatch.request))
+    const readback = await lane.take()
+    lane.deliver(readback, markSnapshotReply(readback.request, { ...before, outputHex: '04', redactionAdmission: 'unavailable' }))
+    await failed
+    expect(lane.coordinator.snapshot()).toMatchObject({ phase: 'reconciliationRequired', accepted: before })
+    expect(lane.coordinator.outputBytes()).toBeNull()
+
+    const reconciling = lane.coordinator.reconcile()
+    const retry = await lane.take()
+    expect(retry.request).toEqual(dispatch.request)
+    lane.deliver(retry, redactionReply(retry.request))
+    const lookup = await lane.take()
+    expect(lookup.request).toEqual(readback.request)
+    lane.deliver(lookup, markSnapshotReply(lookup.request, before))
+    await expect(reconciling).resolves.toEqual({ status: 'unseen', snapshot: before })
+    lane.coordinator.dispose()
   })
 
   it.each(['operation', 'response verifier'] as const)('stops processing after a WASM %s throws during verification', async (failure) => {
