@@ -1100,6 +1100,7 @@ pub(super) fn project(
                 )
             }
             Err(NativeSessionError::Object(reason)) => (false, Vec::new(), Some(reason)),
+            Err(Budget) => (false, Vec::new(), None),
             Err(error) => return Err(error),
         };
         result.push(NativeObjectPage {

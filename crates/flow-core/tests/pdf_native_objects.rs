@@ -1,7 +1,7 @@
 use flow_core::layout::LayoutUnit;
 use flow_core::pdf::native::{
-    NativeEditLimits, NativeObjectCommand, NativeObjectRefusal, NativePdfSession,
-    NativeRedactionMark, NativeRequestLookup, NativeSessionError,
+    NativeEditLimits, NativeNoteCommand, NativeObjectCommand, NativeObjectRefusal,
+    NativePdfSession, NativeRedactionMark, NativeRequestLookup, NativeSessionError,
 };
 use flow_core::pdf::{
     PdfPathCommand, PdfReadDiagnosticCode, PdfReaderLimits, PdfSceneElement, PdfSceneRequest,
@@ -425,6 +425,68 @@ fn object_allowance_insertion_accounts_for_the_enclosing_graphics_save() {
             assert_eq!(session.output_bytes(), source);
         }
     }
+}
+
+#[test]
+fn object_scan_workspace_refusal_keeps_vector_page_open_for_notes() {
+    use std::io::Write;
+
+    let mut content = b"10 10 m 20 40 30 40 40 10 c S\n".to_vec();
+    for row in 0..24 {
+        for column in 0..24 {
+            let tint = (row + column) % 9;
+            let x = 10 + 7 * column;
+            let y = 20 + 7 * row;
+            writeln!(
+                &mut content,
+                "[3 2] 0 d 0.25 0.{tint} 0.75 rg {x} {y} 6 6 re B"
+            )
+            .unwrap();
+        }
+    }
+    let source = fixture(&content, false, "", &[]);
+    let limits = NativeEditLimits {
+        max_retained_bytes: 384 * 1024,
+        ..NativeEditLimits::default()
+    };
+    let mut session = NativePdfSession::open_scoped(&source, limits, [7; 16]).unwrap();
+    let binding = session.snapshot().binding;
+    let view = &session.snapshot().scene.object_pages[0];
+    assert!(!view.can_add);
+    assert!(view.objects.is_empty());
+    assert_eq!(view.refusal, None);
+    assert_eq!(
+        apply(
+            &mut session,
+            json!({
+                "kind":"addGraphic", "page":0,
+                "graphic":{
+                    "shape":"rectangle", "points":[[5000,5000],[15000,15000]],
+                    "stroke":null, "fill":[255,0,0], "strokeWidth":0
+                }
+            }),
+        ),
+        Err(NativeSessionError::Budget)
+    );
+    assert_eq!(session.output_bytes(), source);
+    assert_eq!(session.snapshot().binding, binding);
+    assert_eq!(session.lookup(binding, 1), Ok(NativeRequestLookup::Unseen));
+    let page = session.snapshot().scene.pages[0].id;
+    let receipt = session
+        .apply(
+            binding,
+            1,
+            &NativeNoteCommand::Add {
+                page,
+                rect: [60, 60, 80, 80],
+                contents: "Chart note".into(),
+            },
+        )
+        .unwrap();
+    assert_eq!(receipt.binding.revision, 1);
+    assert_eq!(session.snapshot().scene.pages[0].annotations.len(), 1);
+    assert!(!session.snapshot().scene.object_pages[0].can_add);
+    assert_eq!(session.origin_bytes(), source);
 }
 
 #[test]
