@@ -440,14 +440,57 @@ pub(super) fn reserve_content_tokens<'a>(
     max_tokens: usize,
     operand_bytes: usize,
 ) -> Result<Reservation<'a>, NativeEditError> {
-    let possible_array_item_bytes = input
-        .iter()
-        .position(|&byte| byte == b'[')
-        .map_or(0, |start| input.len() - start - 1);
-    let array_bytes = 4 * possible_array_item_bytes.min(max_tokens) * size_of::<ContentToken>();
+    let array_bytes = 4 * possible_array_items(input, max_tokens) * size_of::<ContentToken>();
     workspace
         .reserve(array_bytes + 8 * input.len() + operand_bytes)
         .map_err(|_| NativeEditError::Budget)
+}
+
+fn possible_array_items(input: &[u8], limit: usize) -> usize {
+    let mut bytes = input.iter().copied();
+    let mut arrays = 0_usize;
+    let mut items = 0_usize;
+    while let Some(byte) = bytes.next() {
+        match byte {
+            b'%' => {
+                bytes.by_ref().find(|byte| matches!(byte, b'\r' | b'\n'));
+            }
+            b'(' => {
+                let mut parentheses = 1_usize;
+                while let Some(byte) = bytes.next() {
+                    match byte {
+                        b'\\' => {
+                            bytes.next();
+                        }
+                        b'(' => parentheses += 1,
+                        b')' => {
+                            parentheses -= 1;
+                            if parentheses == 0 {
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                items += usize::from(arrays != 0);
+            }
+            b'<' => {
+                bytes.by_ref().find(|&byte| byte == b'>');
+                items += usize::from(arrays != 0);
+            }
+            b'[' => {
+                items += usize::from(arrays != 0);
+                arrays += 1;
+            }
+            b']' => arrays = arrays.saturating_sub(1),
+            0 | b'\t' | b'\n' | 12 | b'\r' | b' ' => {}
+            _ => items += usize::from(arrays != 0),
+        }
+        if items >= limit {
+            return limit;
+        }
+    }
+    items
 }
 
 struct CMap<'a> {
@@ -1559,6 +1602,17 @@ mod tests {
         assert_eq!(shows[0].codes, b"AA");
         assert_eq!(&content[shows[0].operand.clone()], b"[(AA) 0]");
         assert_eq!(shows[0].origin, [20_125, 100_000]);
+    }
+
+    #[test]
+    fn array_workspace_bounds_array_operands_only() {
+        assert_eq!(possible_array_items(b"% chart [bars]\r1 2 m", 16), 0);
+        assert_eq!(
+            possible_array_items(br"(escaped \) [x] (nested)) <5b> 1 2 m", 16),
+            0
+        );
+        assert_eq!(possible_array_items(b"[(a[b]) [] <5b> 7] TJ", 16), 4);
+        assert_eq!(possible_array_items(b"[(a[b]) [] <5b> 7] TJ", 2), 2);
     }
 
     #[test]

@@ -2032,7 +2032,7 @@ mod tests {
             (1, "q 1 0 0 1 0 25 cm /Chart Do Q"),
             (2, ""),
         ] {
-            let mut paint = String::new();
+            let mut paint = String::from("% chart [bars]\n");
             for bar in 0..125 {
                 let x = f64::from(bar) * 0.5;
                 let height = 0.5 + f64::from((bar * (panel + 3)) % 7) * 0.25;
