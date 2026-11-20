@@ -1795,10 +1795,13 @@ impl<'a> SceneBuilder<'a> {
                         if reference == *annotation_ref {
                             Some(Cow::Borrowed(&value))
                         } else {
-                            self.reader
-                                .non_stream_object(reference)
-                                .ok()
-                                .map(Cow::Owned)
+                            let object = self.reader.non_stream_object(reference).ok()?;
+                            if Some(reference) == parent
+                                && object.as_dictionary()?.contains_key("Parent")
+                            {
+                                return None;
+                            }
+                            Some(Cow::Owned(object))
                         }
                     },
                     |bytes| decode_pdf_text_string(bytes, limit, &mut available),

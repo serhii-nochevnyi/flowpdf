@@ -264,6 +264,27 @@ fn native_and_public_widget_labels_require_consistent_split_field_children() {
 }
 
 #[test]
+fn read_only_nested_widget_keeps_its_native_display_label() {
+    let bytes = build_pdf(&[
+        b"<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [5 0 R] >> >>".to_vec(),
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 500] /Annots [4 0 R] >>".to_vec(),
+        b"<< /Type /Annot /Subtype /Widget /P 3 0 R /Parent 6 0 R /Rect [10 10 30 30] >>".to_vec(),
+        b"<< /T (section) /Kids [6 0 R] >>".to_vec(),
+        b"<< /Parent 5 0 R /FT /Tx /T 7 0 R /V (saved) /Kids [4 0 R] >>".to_vec(),
+        b"(recipient)".to_vec(),
+    ]);
+    let native = session(&bytes);
+    let [widget] = native.snapshot().fields.as_slice() else {
+        panic!("expected a read-only widget");
+    };
+    assert_eq!(widget.name.as_deref(), Some("recipient"));
+    assert!(!widget.can_edit_appearance);
+    assert_eq!(widget.value, None);
+    assert_eq!(native.output_bytes(), bytes);
+}
+
+#[test]
 fn named_read_only_widgets_keep_their_labels_after_a_page_rewrite() {
     let form = "/Type /XObject /Subtype /Form /BBox [0 0 20 20] /Resources <<>>";
     let max_label = format!("<{}>", "E9".repeat(32));
