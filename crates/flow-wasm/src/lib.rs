@@ -1922,19 +1922,27 @@ impl NativeWirePreview {
             && native_lower_hex(&self.rgb_hex)
     }
 
-    fn matches_live_session(&self, binding: NativeBinding, origin_store_hash: &str) -> bool {
+    fn render_evidence(&self, binding: NativeBinding, request_id: u64) -> Option<blake3::Hash> {
+        let mut writer = NativeHashWriter(blake3::Hasher::new(), 0);
+        serde_json::to_writer(&mut writer, &(binding, request_id, self)).ok()?;
+        Some(writer.0.finalize())
+    }
+
+    fn matches_live_session(
+        &self,
+        binding: NativeBinding,
+        request_id: u64,
+        origin_store_hash: &str,
+    ) -> bool {
         NATIVE_REGISTRY.with(|registry| {
             registry.borrow().sessions.iter().any(|entry| {
                 let current = entry.session.snapshot();
                 current.binding == binding
                     && entry.origin_store_hash == origin_store_hash
                     && current.output_hash == self.output_hash
-                    && entry
-                        .session
-                        .redaction_mark_geometry(self.page_id)
-                        .is_ok_and(|geometry| {
-                            geometry.crop_box == self.crop_box && geometry.rotation == self.rotation
-                        })
+                    && entry.last_preview.is_some_and(|evidence| {
+                        self.render_evidence(binding, request_id) == Some(evidence)
+                    })
             })
         })
     }
@@ -2038,6 +2046,7 @@ struct NativeRegistryEntry {
     // @contract: One receipt per live session. Replay expires on revision advance or close.
     open_request_id: u64,
     base_outputs: VecDeque<(u64, [u8; 32])>,
+    last_preview: Option<blake3::Hash>,
     last_mark: Option<NativeRedactionMarkReceipt>,
     last_cancel: Option<blake3::Hash>,
     last_empty_status: Option<blake3::Hash>,
@@ -2223,6 +2232,7 @@ impl NativeRegistry {
             origin_store_hash,
             open_request_id: request_id,
             base_outputs: VecDeque::with_capacity(NATIVE_REQUEST_HISTORY),
+            last_preview: None,
             last_mark: None,
             last_cancel: None,
             last_empty_status: None,
@@ -2299,7 +2309,7 @@ impl NativeRegistry {
                     .session
                     .accepted_page_raster(binding, output_hash, page_id)
                     .map_err(|error| error.code())?;
-                response.preview = Some(NativeWirePreview {
+                let preview = NativeWirePreview {
                     output_hash,
                     page_id,
                     crop_box: raster.crop_box,
@@ -2307,7 +2317,13 @@ impl NativeRegistry {
                     width: raster.width,
                     height: raster.height,
                     rgb_hex: encode_hex(&raster.rgb),
-                });
+                };
+                entry.last_preview = Some(
+                    preview
+                        .render_evidence(binding, request_id)
+                        .ok_or(NATIVE_BUDGET)?,
+                );
+                response.preview = Some(preview);
                 response.status = NativeStatus::Preview;
                 return Ok(());
             }
@@ -2444,11 +2460,9 @@ impl NativeRegistryEntry {
                         rect,
                     };
                     if matches!(action, AddMark { .. }) {
-                        if !self.session.redaction_admitted() {
-                            return Err(
-                                NativeSessionError::Graph(NativeEditError::Unsupported).code()
-                            );
-                        }
+                        self.session
+                            .check_redaction_admission()
+                            .map_err(map_error)?;
                         self.session
                             .add_redaction_mark(binding, mark)
                             .map_err(map_error)?;
@@ -3284,7 +3298,11 @@ fn verify_native_pdf_response_inner(response_json: &str, require_live_session: b
                     .is_some_and(|((binding, store_hash), preview)| {
                         preview.valid(binding)
                             && (!require_live_session
-                                || preview.matches_live_session(binding, store_hash))
+                                || preview.matches_live_session(
+                                    binding,
+                                    response.request_id,
+                                    store_hash,
+                                ))
                     })
         }
         _ => {
