@@ -250,6 +250,20 @@ fn named_read_only_widgets_keep_their_labels_after_a_page_rewrite() {
             NativeFieldRefusal::Profile,
         ),
         (
+            "<EFBBBF436166C3A9>",
+            "<18A080>",
+            "",
+            [Some("ï»¿CafÃ©"), Some("˘€•")],
+            NativeFieldRefusal::Profile,
+        ),
+        (
+            "<417F>",
+            "<FEFFD800>",
+            "",
+            [None, None],
+            NativeFieldRefusal::Reference,
+        ),
+        (
             max_label.as_str(),
             oversized_label.as_str(),
             "",
@@ -302,6 +316,7 @@ fn named_read_only_widgets_keep_their_labels_after_a_page_rewrite() {
         .unwrap();
         pdf.apply_page(snapshot.binding, snapshot.consumed_request + 1, &command)
             .unwrap();
+        assert!(pdf.output_bytes().starts_with(b"%PDF-1.7\n"));
         assert_fields(&pdf);
         assert_fields(&session(pdf.output_bytes()));
     }
@@ -314,7 +329,7 @@ fn supported_checkbox_stays_editable_alongside_read_only_field_names() {
     for (read_only_name, label, collision) in [
         ("(Consent form)", Some("Consent form"), false),
         ("<436166E9>", Some("Café"), false),
-        ("<EFBBBF436166C3A9>", Some("Café"), false),
+        ("<EFBBBF617070726F76616C>", Some("ï»¿approval"), false),
         ("<FEFFD83DDE00>", Some("😀"), false),
         (long_name.as_str(), None, false),
         ("<FEFF0041000A0042>", None, false),
@@ -365,6 +380,7 @@ fn supported_checkbox_stays_editable_alongside_read_only_field_names() {
         let reopened = session(pdf.output_bytes());
         let fields = &reopened.snapshot().fields;
         assert_eq!(fields.len(), 2);
+        assert_eq!(fields[0].name.as_deref(), Some("approval"));
         assert_eq!(fields[0].checked, Some(true));
         assert_eq!(fields[1].name.as_deref(), label);
         assert_eq!(fields[1].refusal, Some(NativeFieldRefusal::Profile));
