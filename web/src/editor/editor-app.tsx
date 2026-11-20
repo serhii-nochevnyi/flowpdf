@@ -453,41 +453,52 @@ export async function mountEditorApp(
   } = {},
 ): Promise<EditorController> {
   const controller = new EditorController(options, dependencies)
-  const reactRoot = createRoot(root)
-  reactRoot.render(
-    <EditorApp
-      controller={controller}
-      options={options}
-      {...(mount.nativePdf === undefined ? {} : { nativePdf: mount.nativePdf })}
-      {...(mount.pdfReconstructionReaderScheduler === undefined
-        ? {}
-        : { pdfReconstructionReaderScheduler: mount.pdfReconstructionReaderScheduler })}
-      {...(dependencies.pdfReaderScheduler === undefined
-        ? {}
-        : { pdfReaderScheduler: dependencies.pdfReaderScheduler })}
-      {...(dependencies.pdfReconstructionScheduler === undefined
-        ? {}
-        : { pdfReconstructionScheduler: dependencies.pdfReconstructionScheduler })}
-      {...(voiceRecognitionConstructor === undefined
-        ? {}
-        : { voiceRecognitionConstructor })}
-    />,
-  )
+  let reactRoot: ReturnType<typeof createRoot> | undefined
+  let unmounted = false
   function unmount() {
+    if (unmounted) return
+    unmounted = true
     mount.signal?.removeEventListener('abort', unmount)
-    reactRoot.unmount()
-    controller.dispose()
+    try {
+      reactRoot?.unmount()
+    } finally {
+      controller.dispose()
+    }
   }
-  if (mount.signal?.aborted) {
-    unmount()
-    return controller
-  }
-  mount.signal?.addEventListener('abort', unmount, { once: true })
   try {
+    reactRoot = createRoot(root)
+    reactRoot.render(
+      <EditorApp
+        controller={controller}
+        options={options}
+        {...(mount.nativePdf === undefined ? {} : { nativePdf: mount.nativePdf })}
+        {...(mount.pdfReconstructionReaderScheduler === undefined
+          ? {}
+          : { pdfReconstructionReaderScheduler: mount.pdfReconstructionReaderScheduler })}
+        {...(dependencies.pdfReaderScheduler === undefined
+          ? {}
+          : { pdfReaderScheduler: dependencies.pdfReaderScheduler })}
+        {...(dependencies.pdfReconstructionScheduler === undefined
+          ? {}
+          : { pdfReconstructionScheduler: dependencies.pdfReconstructionScheduler })}
+        {...(voiceRecognitionConstructor === undefined
+          ? {}
+          : { voiceRecognitionConstructor })}
+      />,
+    )
+    if (mount.signal?.aborted) {
+      unmount()
+      return controller
+    }
+    mount.signal?.addEventListener('abort', unmount, { once: true })
     await controller.initialize()
     return controller
   } catch (error) {
-    if (!mount.signal?.aborted) unmount()
+    try {
+      unmount()
+    } catch {
+      // @invariant: The startup recovery UI receives the original mount failure.
+    }
     throw error
   }
 }

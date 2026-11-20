@@ -49,6 +49,14 @@ function releaseAll(releases: Iterable<() => void>): void {
   if (failures.length > 0) throw failures[0]
 }
 
+function releaseAfterStartupFailure(release: () => void): void {
+  try {
+    release()
+  } catch {
+    // @invariant: The caller reports the original startup failure.
+  }
+}
+
 export function createNativePdfRuntime(
   workerConstructor?: WorkerConstructor,
   sourceStore = new PdfSourceStore(),
@@ -83,8 +91,10 @@ export function createNativePdfRuntime(
       coordinators.add(acquired)
       return acquired
     } catch (error) {
-      if (coordinator === undefined) worker.terminate()
-      else coordinator.dispose()
+      releaseAfterStartupFailure(() => {
+        if (coordinator === undefined) worker.terminate()
+        else coordinator.dispose()
+      })
       throw error
     }
   }
@@ -94,7 +104,7 @@ export function createNativePdfRuntime(
     initial = createCoordinator()
   } catch (error) {
     if (!(error instanceof NativePdfWorkerError)) {
-      sourceStore.close()
+      releaseAfterStartupFailure(() => sourceStore.close())
       throw error
     }
   }
@@ -321,7 +331,7 @@ export function createDefaultWorkerRuntime(
       dispose,
     }
   } catch (error) {
-    dispose()
+    releaseAfterStartupFailure(dispose)
     throw error
   }
 }

@@ -1748,7 +1748,8 @@ describe('native PDF runtime composition', () => {
     }
   })
 
-  it('releases workers, schedulers, and the native coordinator before retrying a late startup failure', async () => {
+  it('preserves a late startup failure while releasing the partially acquired runtime', async () => {
+    await initializeWasm()
     const { createDefaultWorkerRuntime } = await import('../src/layout/layout-runtime.js')
     const { RevisionAwareLayoutScheduler } = await import('../src/layout/layout-worker.js')
     const { RevisionAwarePdfExportScheduler } = await import('../src/pdf/pdf-worker.js')
@@ -1756,6 +1757,7 @@ describe('native PDF runtime composition', () => {
     const { RevisionAwarePdfReconstructionScheduler } = await import('../src/pdf/pdf-reconstruction-worker.js')
     const { PdfSourceStore } = await import('../persistence/pdf-source-store.js')
     const workers: RuntimeWorker[] = []
+    const cleanupFailure = new Error('worker termination unavailable')
     class RuntimeWorker {
       onmessage = null
       onerror = null
@@ -1764,6 +1766,9 @@ describe('native PDF runtime composition', () => {
       terminate = vi.fn()
 
       constructor() {
+        if (workers.length === 4 || workers.length === 5) {
+          this.terminate.mockImplementationOnce(() => { throw cleanupFailure })
+        }
         workers.push(this)
       }
     }
@@ -1808,6 +1813,105 @@ describe('native PDF runtime composition', () => {
       disposeCoordinator.mockRestore()
       closeStore.mockRestore()
     }
+  })
+
+  it('keeps the startup error and retries through the editor entry point when mount and worker cleanup throw', async () => {
+    await initializeWasm()
+    const { IDBFactory } = await import('fake-indexeddb')
+    const { EditorController } = await import('../src/editor/editor-controller.js')
+    const fontCatalog = await import('../src/runtime/font-catalog.js')
+    const loadCatalog = vi.spyOn(fontCatalog, 'loadBundledFontCatalog').mockResolvedValue({
+      identity: 'fonts', faces: [], hyphenation: { identity: 'hyphenation', bytes: new Uint8Array() },
+    })
+    const initialize = vi.spyOn(EditorController.prototype, 'initialize')
+      .mockRejectedValueOnce(new Error('FLOW_EDITOR_INITIALIZE'))
+    const disposeController = vi.spyOn(EditorController.prototype, 'dispose')
+    const render = vi.fn<(element: { props: { controller: typeof EditorController.prototype } }) => void>()
+    const unmount = vi.fn().mockImplementationOnce(() => { throw new Error('private mount cleanup detail') })
+    const createRoot = vi.fn(() => ({ render, unmount }))
+    vi.doMock('react-dom/client', () => ({ createRoot }))
+
+    class StartupElement extends EventTarget {
+      children: StartupElement[] = []
+      textContent = ''
+      disabled = false
+      readonly attributes = new Map<string, string>()
+
+      constructor(readonly tagName: string) {
+        super()
+      }
+
+      setAttribute(name: string, value: string) {
+        this.attributes.set(name, value)
+      }
+
+      replaceChildren(...children: StartupElement[]) {
+        this.children = children
+      }
+    }
+    const workers: StartupWorker[] = []
+    class StartupWorker {
+      onmessage = null
+      onerror = null
+      onmessageerror = null
+      postMessage = vi.fn()
+      terminate = vi.fn()
+
+      constructor() {
+        if (workers.length === 4) {
+          this.terminate.mockImplementationOnce(() => { throw new Error('private worker cleanup detail') })
+        }
+        workers.push(this)
+      }
+    }
+    const appRoot = new StartupElement('div')
+    const page = new EventTarget()
+    vi.stubGlobal('document', {
+      documentElement: { lang: 'en' },
+      querySelector: () => appRoot,
+      createElement: (tagName: string) => new StartupElement(tagName),
+    })
+    vi.stubGlobal('window', page)
+    vi.stubGlobal('indexedDB', new IDBFactory())
+    vi.stubGlobal('Worker', StartupWorker)
+
+    try {
+      // @ts-expect-error -- Vite needs the .tsx extension to select the editor entry point.
+      await import('../src/main.tsx')
+      await vi.waitFor(() => {
+        expect(appRoot.children.map(({ textContent }) => textContent)).toEqual([
+          'The editor could not start. Code: FLOW_EDITOR_INITIALIZE',
+          'Retry startup',
+        ])
+      })
+      const [alert, retry] = appRoot.children
+      expect(alert?.attributes.get('role')).toBe('alert')
+      expect(retry?.tagName).toBe('button')
+      expect(unmount).toHaveBeenCalledOnce()
+      expect(disposeController).toHaveBeenCalledOnce()
+      expect(workers).toHaveLength(6)
+      for (const worker of workers) expect(worker.terminate).toHaveBeenCalledOnce()
+
+      retry!.dispatchEvent(new Event('click'))
+      expect(retry?.disabled).toBe(true)
+      await vi.waitFor(() => {
+        expect(render.mock.calls[1]?.[0].props.controller.snapshot().phase).toBe('empty')
+      })
+      expect(appRoot.children).toEqual([])
+      expect(createRoot).toHaveBeenCalledTimes(2)
+      expect(createRoot).toHaveBeenLastCalledWith(appRoot)
+      expect(workers).toHaveLength(12)
+      for (const worker of workers.slice(6)) expect(worker.terminate).not.toHaveBeenCalled()
+    } finally {
+      page.dispatchEvent(new Event('pagehide'))
+      vi.unstubAllGlobals()
+      vi.doUnmock('react-dom/client')
+      disposeController.mockRestore()
+      initialize.mockRestore()
+      loadCatalog.mockRestore()
+    }
+    expect(unmount).toHaveBeenCalledTimes(2)
+    for (const worker of workers) expect(worker.terminate).toHaveBeenCalledOnce()
   })
 
   it('reports startup failure and allows another attempt without restarting the app', async () => {
