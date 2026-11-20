@@ -2298,7 +2298,6 @@ impl NativeRegistry {
         }
 
         let entry = &mut self.sessions[index.ok_or(NATIVE_BINDING)?];
-        let current = entry.session.snapshot();
         response.status = match request {
             NativeRequest::Preview {
                 output_hash,
@@ -2353,23 +2352,7 @@ impl NativeRegistry {
                 entry.apply(binding, request_id, output_hash, &command)?;
                 NativeStatus::Applied
             }
-            NativeRequest::Snapshot { .. } => {
-                match entry
-                    .session
-                    .lookup(binding, request_id)
-                    .map_err(|error| error.code())?
-                {
-                    NativeRequestLookup::Accepted(_) => NativeStatus::Accepted,
-                    NativeRequestLookup::Unseen => NativeStatus::Unseen,
-                    NativeRequestLookup::ReconciliationRequired
-                        if current.binding.revision.saturating_sub(binding.revision)
-                            > NATIVE_REQUEST_HISTORY as u64 =>
-                    {
-                        NativeStatus::Evicted
-                    }
-                    NativeRequestLookup::ReconciliationRequired => return Err(NATIVE_REVISION),
-                }
-            }
+            NativeRequest::Snapshot { .. } => entry.snapshot_status(binding, request_id)?,
             _ => return Err(NATIVE_DECODE),
         };
         response.snapshot = Some(entry.wire_snapshot());
@@ -2378,6 +2361,28 @@ impl NativeRegistry {
 }
 
 impl NativeRegistryEntry {
+    fn snapshot_status(
+        &self,
+        binding: NativeBinding,
+        request_id: u64,
+    ) -> Result<NativeStatus, &'static str> {
+        let revision = self.session.snapshot().binding.revision;
+        match self
+            .session
+            .lookup(binding, request_id)
+            .map_err(|error| error.code())?
+        {
+            NativeRequestLookup::Accepted(_) => Ok(NativeStatus::Accepted),
+            NativeRequestLookup::Unseen => Ok(NativeStatus::Unseen),
+            NativeRequestLookup::ReconciliationRequired
+                if revision.saturating_sub(binding.revision) > NATIVE_REQUEST_HISTORY as u64 =>
+            {
+                Ok(NativeStatus::Evicted)
+            }
+            NativeRequestLookup::ReconciliationRequired => Err(NATIVE_REVISION),
+        }
+    }
+
     fn encode_open_response(&self, result_limit: usize) -> Result<String, &'static str> {
         let snapshot = self.wire_snapshot();
         let mut response = native_response(NativeOperation::Open);
@@ -3028,6 +3033,9 @@ fn verify_native_snapshot(
                     || entry.session.snapshot().consumed_request != consumed
                     || (response.operation == NativeOperation::Open
                         && entry.open_request_id != request)
+                    || (require_live_session
+                        && response.operation == NativeOperation::Snapshot
+                        && entry.snapshot_status(binding, request).ok() != Some(response.status))
             })
         {
             return None;
@@ -3278,10 +3286,21 @@ fn verify_native_pdf_response_inner(response_json: &str, require_live_session: b
         }
         (NativeOperation::Close, NativeStatus::Closed) => {
             response.request_id > 0
-                && binding_present
-                && store_present
                 && response.snapshot.is_none()
                 && response.code.is_none()
+                && response
+                    .binding
+                    .zip(response.origin_store_hash.as_deref())
+                    .is_some_and(|(binding, store_hash)| {
+                        !require_live_session
+                            || NATIVE_REGISTRY.with(|registry| {
+                                registry.borrow().closed.iter().any(|closed| {
+                                    closed.binding == binding
+                                        && closed.origin_store_hash == store_hash
+                                        && closed.request_id == response.request_id
+                                })
+                            })
+                    })
         }
         (NativeOperation::Redaction, NativeStatus::Redaction | NativeStatus::Published) => {
             verify_native_redaction_response(&response, require_live_session).is_some()
