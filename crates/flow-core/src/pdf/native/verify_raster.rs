@@ -10,6 +10,7 @@ use super::super::scene::{ContentToken, separated_content_streams};
 use super::verifier::STANDALONE_WORKSPACE;
 use super::verifier::{
     MAX_COORD, NativeRedactionGeometry, NativeRedactionMark, NativeRedactionPageEvidence,
+    NativeVerificationFailure,
     NativeVerificationFailure::{Budget, RasterMismatch, Structure, UnsupportedProfile},
     POINT, Rect, Reservation, VerifyResult, Workspace, contains, intersects, spend, valid_rect,
 };
@@ -177,11 +178,15 @@ impl Default for Graphics {
     }
 }
 
-pub(super) fn within_pixel_budget<E>(
-    mut pages: impl Iterator<Item = Result<NativeRedactionGeometry, E>>,
-) -> bool {
+pub(super) fn check_pixel_budget<E>(
+    pages: impl Iterator<Item = Result<NativeRedactionGeometry, E>>,
+    map_error: impl Fn(NativeVerificationFailure) -> E,
+) -> Result<(), E> {
     let mut pixels_left = MAX_TOTAL_PIXELS;
-    pages.all(|page| page.is_ok_and(|geometry| Grid::new(geometry, &mut pixels_left).is_ok()))
+    for page in pages {
+        Grid::new(page?, &mut pixels_left).map_err(&map_error)?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1653,6 +1658,13 @@ impl RasterOutline<'_> {
 
 impl Grid {
     fn new(geometry: NativeRedactionGeometry, cumulative: &mut usize) -> VerifyResult<Self> {
+        if !valid_rect(geometry.media_box)
+            || !valid_rect(geometry.crop_box)
+            || !contains(geometry.media_box, geometry.crop_box)
+            || !matches!(geometry.rotation, 0 | 90 | 180 | 270)
+        {
+            return Err(UnsupportedProfile);
+        }
         let [l, b, r, t] = geometry.crop_box;
         let [w, h] = if matches!(geometry.rotation, 90 | 270) {
             [t - b, r - l]
@@ -2171,10 +2183,14 @@ mod tests {
         assert_eq!(remaining, 0);
         assert_eq!(Grid::new(geometry, &mut remaining).err(), Some(Budget));
         geometry.crop_box[2] += 1;
+        let mut remaining = MAX_TOTAL_PIXELS;
         assert_eq!(
-            Grid::new(geometry, &mut MAX_TOTAL_PIXELS.clone()).err(),
-            Some(Budget)
+            Grid::new(geometry, &mut remaining).err(),
+            Some(UnsupportedProfile)
         );
+        assert_eq!(remaining, MAX_TOTAL_PIXELS);
+        geometry.media_box = geometry.crop_box;
+        assert_eq!(Grid::new(geometry, &mut remaining).err(), Some(Budget));
     }
 
     #[test]

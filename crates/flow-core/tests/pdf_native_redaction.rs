@@ -554,13 +554,17 @@ fn admission_tracks_the_workspace_left_by_the_live_session() {
 
     let mut session = open_with_budget(lower).unwrap();
     let binding = session.snapshot().binding;
+    let consumed_request = session.snapshot().consumed_request;
     let mark = mark(&session, 0, [12_000, 12_000, 13_000, 13_000]);
     assert!(session.redaction_admitted());
     assert_eq!(verify_projection(&session, true, true), Ok(true));
     assert_eq!(verify_projection(&session, true, false), Ok(true));
 
     session.add_redaction_mark(binding, mark).unwrap();
-    assert!(!session.redaction_admitted());
+    assert_eq!(
+        session.check_redaction_admission(),
+        Err(NativeSessionError::Budget)
+    );
     assert_eq!(verify_projection(&session, false, true), Ok(true));
     assert_eq!(verify_projection(&session, true, true), Ok(false));
     assert_eq!(verify_projection(&session, false, false), Ok(true));
@@ -571,6 +575,8 @@ fn admission_tracks_the_workspace_left_by_the_live_session() {
     );
     assert!(session.redaction_candidate_status().is_none());
     assert_eq!(session.redaction_marks(), &[mark]);
+    assert_eq!(session.redaction_marks_binding(), Some(binding));
+    assert_eq!(session.snapshot().consumed_request, consumed_request);
     assert_accepted(&session, &source, 0, &source);
 
     session.remove_redaction_mark(binding, mark).unwrap();
@@ -762,6 +768,38 @@ fn accepted_page_preview_refuses_a_constrained_session_without_mutation() {
         session.redaction_candidate_status().unwrap().status(),
         NativeVerificationStatus::Pending
     );
+}
+
+#[test]
+fn page_geometry_errors_preserve_their_type_in_redaction_preflight() {
+    for (crop, error) in [
+        ("/CropBox [-1 0 100 100]", NativeEditError::Unsupported),
+        ("/CropBox null", NativeEditError::Malformed),
+    ] {
+        let source = pdf(
+            vec![
+                b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+                b"<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 /MediaBox [0 0 100 100] >>".to_vec(),
+                b"<< /Type /Page /Parent 2 0 R >>".to_vec(),
+                format!("<< /Type /Page /Parent 2 0 R {crop} >>").into_bytes(),
+            ],
+            "",
+        );
+        let mut session = open(&source);
+        let binding = session.snapshot().binding;
+        let mark = mark(&session, 0, [12_000, 12_000, 13_000, 13_000]);
+        let refusal = Err(NativeSessionError::Graph(error));
+
+        assert_eq!(session.redaction_mark_geometry(mark.page_id), Ok(GEOMETRY));
+        assert_eq!(session.check_redaction_admission(), refusal.clone());
+        assert_eq!(session.add_redaction_mark(binding, mark), refusal.clone());
+        assert_eq!(session.stage_redaction(binding, 1).map(|_| ()), refusal);
+        assert_eq!(session.lookup(binding, 1), Ok(NativeRequestLookup::Unseen));
+        assert!(session.redaction_marks().is_empty());
+        assert!(session.redaction_marks_binding().is_none());
+        assert!(session.redaction_candidate_status().is_none());
+        assert_accepted(&session, &source, 0, &source);
+    }
 }
 
 #[test]

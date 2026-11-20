@@ -1134,6 +1134,47 @@ fn cancelling_a_verified_redaction_keeps_the_base_and_prevents_publication() {
 }
 
 #[test]
+fn redaction_wire_preserves_page_geometry_refusal_codes() {
+    for (crop, code) in [
+        ("/CropBox [-1 0 100 100]", "FLOW_PDF_NATIVE_UNSUPPORTED"),
+        ("/CropBox null", "FLOW_PDF_NATIVE_GRAPH_MALFORMED"),
+    ] {
+        let source = fixture_pdf(&[
+            "<< /Type /Catalog /Pages 2 0 R >>",
+            "<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 /MediaBox [0 0 100 100] >>",
+            "<< /Type /Page /Parent 2 0 R >>",
+            &format!("<< /Type /Page /Parent 2 0 R {crop} >>"),
+        ]);
+        let opened = call(native_pdf_open, open_request(source.as_bytes()));
+        assert_eq!(opened["status"], "opened", "{opened}");
+        let base = &opened["snapshot"];
+        assert_eq!(base["redactionAdmission"], "unavailable");
+        let page = &base["pageState"]["order"][0];
+        for action in [
+            json!({"kind":"addMark","pageId":page,"rect":[12000,12000,13000,13000]}),
+            json!({"kind":"stage"}),
+        ] {
+            let refused = call(native_pdf_redaction, redaction_request(2, base, action));
+            assert_eq!(refused["status"], "failed", "{refused}");
+            assert_eq!(refused["code"], code);
+            assert!(refused["redaction"].is_null());
+            status_only(&refused);
+        }
+
+        let unchanged = call(native_pdf_snapshot, bound("snapshot", 2, base));
+        assert_eq!(unchanged["status"], "unseen");
+        assert_eq!(unchanged["snapshot"], *base);
+        let status = call(
+            native_pdf_redaction,
+            redaction_request(3, base, json!({"kind":"status","candidate":null})),
+        );
+        assert_eq!(status["redaction"]["markCount"], 0, "{status}");
+        assert!(status["redaction"]["candidate"].is_null());
+        status_only(&status);
+    }
+}
+
+#[test]
 fn redaction_wire_refuses_marks_on_oversized_pages() {
     let source = redaction_pdf(3_000);
     let opened = call(native_pdf_open, open_request(source.as_bytes()));
@@ -1141,18 +1182,16 @@ fn redaction_wire_refuses_marks_on_oversized_pages() {
     let base = &opened["snapshot"];
     assert_eq!(base["redactionAdmission"], "unavailable");
     let page = &base["pageState"]["order"][0];
-    let refused = call(
-        native_pdf_redaction,
-        redaction_request(
-            2,
-            base,
-            json!({"kind":"addMark","pageId":page,"rect":[12000,12000,13000,13000]}),
-        ),
-    );
-    assert_eq!(refused["status"], "failed", "{refused}");
-    assert_eq!(refused["code"], "FLOW_PDF_NATIVE_BUDGET_EXHAUSTED");
-    assert!(refused["redaction"].is_null());
-    status_only(&refused);
+    for action in [
+        json!({"kind":"addMark","pageId":page,"rect":[12000,12000,13000,13000]}),
+        json!({"kind":"stage"}),
+    ] {
+        let refused = call(native_pdf_redaction, redaction_request(2, base, action));
+        assert_eq!(refused["status"], "failed", "{refused}");
+        assert_eq!(refused["code"], "FLOW_PDF_NATIVE_BUDGET_EXHAUSTED");
+        assert!(refused["redaction"].is_null());
+        status_only(&refused);
+    }
 
     let unchanged = call(native_pdf_snapshot, bound("snapshot", 2, base));
     assert_eq!(unchanged["status"], "unseen");
