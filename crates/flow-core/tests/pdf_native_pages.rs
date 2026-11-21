@@ -1479,7 +1479,16 @@ fn object_budget_overflow_refuses_blank_insertion() {
 }
 
 #[test]
-fn split_text_widget_and_direct_form_clone_as_independent_owners() {
+fn split_text_widget_with_indirect_arrays_clones_as_independent_owners() {
+    assert_split_text_widget_owners("7 0 R", "8 0 R");
+}
+
+#[test]
+fn split_text_widget_with_direct_arrays_clones_as_independent_owners() {
+    assert_split_text_widget_owners("[4 0 R]", "[4 0 R]");
+}
+
+fn assert_split_text_widget_owners(annots: &str, kids: &str) {
     let file = build_pdf(&[
         (
             0,
@@ -1489,13 +1498,21 @@ fn split_text_widget_and_direct_form_clone_as_independent_owners() {
             0,
             "<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 100 100] /CropBox [10 10 90 90] >>",
         ),
-        (0, "<< /Type /Page /Parent 2 0 R /Annots [4 0 R] >>"),
+        (
+            0,
+            &format!("<< /Type /Page /Parent 2 0 R /Annots {annots} >>"),
+        ),
         (
             0,
             "<< /Type /Annot /Subtype /Widget /P 3 0 R /Parent 5 0 R /Rect [20 20 40 40] >>",
         ),
-        (0, "<< /FT /Tx /T (customer) /V (data) /Kids [4 0 R] >>"),
+        (
+            0,
+            &format!("<< /FT /Tx /T (customer) /V (data) /Kids {kids} >>"),
+        ),
         (0, "[5 0 R]"),
+        (0, "[4 0 R]"),
+        (0, "[4 0 R]"),
     ]);
     let mut session =
         NativePdfSession::open_scoped(&file, NativeEditLimits::default(), [6; 16]).unwrap();
@@ -1507,6 +1524,12 @@ fn split_text_widget_and_direct_form_clone_as_independent_owners() {
         session.snapshot().scene.pages[1].geometry.unwrap().bounds(),
         [10, 10, 90, 90]
     );
+    let [original, copied] = session.snapshot().fields.as_slice() else {
+        panic!("expected two independent fields");
+    };
+    assert_eq!((original.page, copied.page), (0, 1));
+    assert_ne!(original.id, copied.id);
+    assert_ne!(original.object, copied.object);
     let output = String::from_utf8_lossy(session.output_bytes());
     assert_eq!(output.matches("/Subtype /Widget").count(), 2);
     assert_eq!(output.matches("/FT /Tx").count(), 2);
@@ -1616,7 +1639,7 @@ fn copy_name_inventory_uses_the_live_projection_and_staging_budgets() {
             0,
             "<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 /MediaBox [0 0 300 500] >>",
         ),
-        (0, "<< /Type /Page /Parent 2 0 R /Annots [5 0 R] >>"),
+        (0, "<< /Type /Page /Parent 2 0 R /Annots 8 0 R >>"),
         (0, "<< /Type /Page /Parent 2 0 R /Annots [7 0 R] >>"),
         (
             0,
@@ -1629,6 +1652,7 @@ fn copy_name_inventory_uses_the_live_projection_and_staging_budgets() {
                 "<< /Type /Annot /Subtype /Widget /P 4 0 R /Rect [40 60 80 90] /FT /Tx /Ff 1 /T ({long_name}) >>"
             ),
         ),
+        (0, "[5 0 R]"),
     ]);
     let limits = NativeEditLimits {
         max_retained_bytes: 256 * 1024,
@@ -1657,6 +1681,8 @@ fn copy_name_inventory_uses_the_live_projection_and_staging_budgets() {
     assert_eq!(pdf.snapshot().binding, accepted.binding);
     assert_eq!(pdf.snapshot().consumed_request, accepted.consumed_request);
     assert_eq!(pdf.snapshot().page_state, accepted.page_state);
+    assert_eq!(pdf.snapshot().scene.scene_hash, accepted.scene.scene_hash);
+    assert_eq!(pdf.snapshot().fields, accepted.fields);
     assert_eq!(
         pdf.lookup(accepted.binding, 1),
         Ok(NativeRequestLookup::Unseen)
@@ -1666,7 +1692,7 @@ fn copy_name_inventory_uses_the_live_projection_and_staging_budgets() {
     let mut near_limit = NativePdfSession::open_scoped(
         &bytes,
         NativeEditLimits {
-            max_retained_bytes: 464 * 1024,
+            max_retained_bytes: 480 * 1024,
             ..limits
         },
         [3; 16],
@@ -1676,9 +1702,13 @@ fn copy_name_inventory_uses_the_live_projection_and_staging_budgets() {
     let duplicate = command("duplicatePage", 0, near_limit.snapshot());
     near_limit.apply_page(binding, 1, &duplicate).unwrap();
     assert_eq!(near_limit.snapshot().scene.pages.len(), 3);
-    assert!(near_limit.snapshot().fields.iter().any(|field| {
-        field.name.as_deref() == Some("FlowPDFCopy5_0") && field.page == 1
-    }));
+    assert!(
+        near_limit
+            .snapshot()
+            .fields
+            .iter()
+            .any(|field| { field.name.as_deref() == Some("FlowPDFCopy5_0") && field.page == 1 })
+    );
 }
 
 #[test]
