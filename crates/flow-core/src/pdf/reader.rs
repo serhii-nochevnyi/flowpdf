@@ -890,14 +890,14 @@ impl PdfReader {
             .get("MediaBox")
             .map(|value| self.resolve(value, depth + 1))
             .transpose()?
-            .map(|value| parse_page_box(&value))
+            .map(|value| parse_page_box(&value, false))
             .transpose()?;
         let crop_box = dictionary
             .get("CropBox")
             .map(|value| self.resolve(value, depth + 1))
             .transpose()?
             .filter(|value| !matches!(value, PdfValue::Null))
-            .map(|value| parse_page_box(&value))
+            .map(|value| parse_page_box(&value, true))
             .transpose()?;
         let resources = dictionary
             .get("Resources")
@@ -1316,7 +1316,7 @@ fn refs_from_array(value: &PdfValue) -> Result<Vec<PdfObjectRef>, PdfReadError> 
         .collect()
 }
 
-fn parse_page_box(value: &PdfValue) -> Result<PageBox, PdfReadError> {
+fn parse_page_box(value: &PdfValue, allow_precise_only: bool) -> Result<PageBox, PdfReadError> {
     let values = value.as_array().ok_or(PdfReadError::PageTreeInvalid)?;
     if values.len() != 4 {
         return Err(PdfReadError::PageTreeInvalid);
@@ -1329,15 +1329,24 @@ fn parse_page_box(value: &PdfValue) -> Result<PageBox, PdfReadError> {
     let (y0, y1) = (y0.min(y1), y0.max(y1));
     let width = x1.checked_sub(x0).map_err(|_| PdfReadError::NumericLimit)?;
     let height = y1.checked_sub(y0).map_err(|_| PdfReadError::NumericLimit)?;
-    if width.raw() <= 0 || height.raw() <= 0 {
-        return Err(PdfReadError::PageTreeInvalid);
-    }
     let precise = |index: usize| {
         values[index]
             .as_precise_number()
             .ok_or(PdfReadError::NumericLimit)
     };
     let (left, top, right, bottom) = (precise(0)?, precise(1)?, precise(2)?, precise(3)?);
+    let edges = [
+        left.min(right),
+        top.min(bottom),
+        left.max(right),
+        top.max(bottom),
+    ];
+    let [x_min, y_min, x_max, y_max] = edges;
+    let has_layout_area = width.raw() > 0 && height.raw() > 0;
+    let has_precise_area = x_min < x_max && y_min < y_max;
+    if !(has_layout_area || allow_precise_only && has_precise_area) {
+        return Err(PdfReadError::PageTreeInvalid);
+    }
     Ok(PageBox {
         layout: LayoutRect {
             x: x0,
@@ -1345,12 +1354,7 @@ fn parse_page_box(value: &PdfValue) -> Result<PageBox, PdfReadError> {
             width,
             height,
         },
-        edges: [
-            left.min(right),
-            top.min(bottom),
-            left.max(right),
-            top.max(bottom),
-        ],
+        edges,
     })
 }
 
