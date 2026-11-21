@@ -284,7 +284,14 @@ fn native_and_public_widget_labels_require_consistent_split_field_children() {
             b"(recipient)".to_vec(),
         ]);
         let native = session(&bytes);
-        let reader = open_pdf(&bytes, Default::default()).unwrap();
+        let reader = open_pdf(
+            &bytes,
+            PdfReaderLimits {
+                max_string_bytes: 16,
+                ..Default::default()
+            },
+        )
+        .unwrap();
         let scene = read_pdf_scene(&reader, &PdfSceneRequest::default()).unwrap();
         let [
             PdfSceneElement::Form { value: first },

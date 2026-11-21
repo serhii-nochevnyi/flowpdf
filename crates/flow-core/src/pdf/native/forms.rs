@@ -9,7 +9,8 @@ use serde::{Deserialize, Deserializer, Serialize};
 
 use super::super::{
     reader::{
-        PdfObjectRef as Ref, PdfStream, PdfValue as Value, decode_pdf_text_string, map_widget_label,
+        PdfObjectRef as Ref, PdfStream, PdfValue as Value, WidgetLabelLimits,
+        decode_pdf_text_string, map_widget_label,
     },
     scene::{NativePdfAnnotation, NativePdfNotePage, NativeReadOnlyAnnotation},
 };
@@ -1036,7 +1037,10 @@ pub(super) fn project(
                 object,
                 data.get("T"),
                 data.get("Parent").and_then(Value::as_reference),
-                graph.limits.max_nesting,
+                WidgetLabelLimits {
+                    max_nesting: graph.limits.max_nesting,
+                    scratch_bytes: *remaining,
+                },
                 &mut work,
                 |reference| graph.objects.get(&reference).map(Cow::Borrowed),
                 |bytes| decode_pdf_text_string(bytes, MAX_NAME, &mut available),
@@ -1635,6 +1639,120 @@ fn stage_form(
 mod tests {
     use super::super::{NativeEditLimits, NativePdfSession, tests::redaction_fixture};
     use super::*;
+
+    #[test]
+    fn split_widget_label_reserves_unique_child_scratch_before_decode() {
+        use super::super::super::reader::WIDGET_LABEL_ENTRY_BYTES;
+
+        let source = redaction_fixture("");
+        let limits = NativeEditLimits::default();
+        let session = NativePdfSession::open_scoped(&source, limits, [7; 16]).unwrap();
+        let mut page = session.snapshot().scene.pages[0].clone();
+        let mut graph = NativePdfGraph::open(&source, limits).unwrap();
+        let label = b"recipient";
+        let label_ref = pages::allocate_value(&mut graph, Value::String(label.to_vec())).unwrap();
+        let parent = pages::allocate(
+            &mut graph,
+            dictionary([("FT", name("Tx")), ("T", Value::Reference(label_ref))]),
+        )
+        .unwrap();
+        let child = || {
+            dictionary([
+                ("Subtype", name("Widget")),
+                ("Parent", Value::Reference(parent)),
+                ("P", Value::Reference(page.object)),
+            ])
+        };
+        let widget = pages::allocate(&mut graph, child()).unwrap();
+        let peer = pages::allocate(&mut graph, child()).unwrap();
+        let children = pages::allocate_value(&mut graph, refs([widget, peer])).unwrap();
+        dict_mut(&mut graph, parent)
+            .unwrap()
+            .insert("Kids".into(), Value::Reference(children));
+        let catalog = pages::catalog(&graph).unwrap();
+        dict_mut(&mut graph, catalog).unwrap().insert(
+            "AcroForm".into(),
+            Value::Dictionary(dictionary([("Fields", refs([parent]))])),
+        );
+        dict_mut(&mut graph, page.object)
+            .unwrap()
+            .insert("Annots".into(), refs([widget, peer]));
+        graph.refresh_page_graph(&BTreeSet::new()).unwrap();
+        page.annotations = [widget, peer]
+            .into_iter()
+            .map(|object| NativePdfAnnotation::ReadOnly {
+                object: Some(object),
+                profile: NativeReadOnlyAnnotation::Widget,
+                rect: None,
+            })
+            .collect();
+
+        let peak = 2 * WIDGET_LABEL_ENTRY_BYTES;
+        for (scratch, initial_work) in [(peak, 5), (peak - 1, 5), (peak, 4)] {
+            let mut available = scratch;
+            let mut work = initial_work;
+            let result = map_widget_label(
+                widget,
+                None,
+                Some(parent),
+                WidgetLabelLimits {
+                    max_nesting: 4,
+                    scratch_bytes: scratch,
+                },
+                &mut work,
+                |reference| graph.objects.get(&reference).map(Cow::Borrowed),
+                |bytes| decode_pdf_text_string(bytes, MAX_NAME, &mut available),
+            );
+            match (scratch, initial_work) {
+                (_, 4) => {
+                    assert!(result.is_none());
+                    assert_eq!(available, scratch);
+                }
+                (scratch, _) if scratch < peak => {
+                    assert!(matches!(
+                        result,
+                        Some(Err(super::super::super::reader::PdfReadError::StreamLimit))
+                    ));
+                    assert_eq!(available, scratch);
+                }
+                _ => {
+                    let name = result.unwrap().unwrap().unwrap();
+                    assert_eq!(name, "recipient");
+                    assert_eq!(available + name.capacity(), scratch);
+                    assert_eq!(work, 0);
+                }
+            }
+        }
+
+        let mut inventory_remaining = graph.remaining_retained();
+        load_form(
+            &graph,
+            &mut graph.remaining_work(),
+            &mut inventory_remaining,
+        )
+        .unwrap();
+        let inventory_bytes = graph.remaining_retained() - inventory_remaining;
+        let view_bytes = 4 * size_of::<NativeFieldView>();
+        let label_bytes = 3 * label.len();
+        let allowance = inventory_bytes + view_bytes + label_bytes + peak;
+        let binding = session.snapshot().binding;
+        let mut remaining = allowance;
+        let fields = project(&graph, std::slice::from_ref(&page), binding, &mut remaining).unwrap();
+        assert_eq!(fields.len(), 2);
+        for (field, object) in fields.iter().zip([widget, peer]) {
+            assert_eq!(field.object, object);
+            assert_eq!(field.name.as_deref(), Some("recipient"));
+            assert!(!field.can_edit_appearance);
+        }
+        assert_eq!(remaining, allowance - view_bytes - 2 * label_bytes);
+
+        remaining = allowance - 1;
+        assert_eq!(
+            project(&graph, &[page], binding, &mut remaining),
+            Err(NativeSessionError::Budget)
+        );
+        assert_eq!(remaining, peak - 1);
+    }
 
     #[test]
     fn owned_field_text_charges_before_allocation() {
