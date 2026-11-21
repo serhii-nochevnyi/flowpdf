@@ -18,6 +18,40 @@ function scratchDirectory(t, prefix) {
   return directory
 }
 
+function nativeResponder(respond) {
+  return (json) => {
+    const request = JSON.parse(json)
+    const { operation, requestId, originStoreHash, binding = null } = request
+    return JSON.stringify({ operation, requestId, originStoreHash, binding, ...respond(request) })
+  }
+}
+
+function openedReply({ originStoreHash, epoch, bytesHex }, details = {}) {
+  const originHash = Array.from(Buffer.from(originStoreHash, 'hex'))
+  const binding = { epoch, sessionId: 1, originHash, revision: 0 }
+  return { status: 'opened', binding, snapshot: {
+    originStoreHash, binding, outputHash: originHash, outputHex: bytesHex, ...details,
+  } }
+}
+
+function assertRejectedComparison(t, source, operation, sourceStructure, wasm, label, reason = 'native-response-binding') {
+  const directory = scratchDirectory(t, 'flowpdf-reply-binding-')
+  const compared = []
+  const evidence = { status: 'unavailable', fixtures: [] }
+  compareFixtures([{ ...source, spec: { ...source.spec, operations: [operation] } }], wasm, directory,
+    (check, args) => {
+      compared.push([check, basename(args.at(-1))])
+      return Buffer.from(JSON.stringify(sourceStructure))
+    }, evidence)
+  assert.equal(evidence.status, 'fail', label)
+  assert.equal(evidence.reason, reason, label)
+  assert.equal(evidence.fixtures[0].operations[0].status, 'fail', label)
+  assert.equal(Object.hasOwn(evidence.fixtures[0].operations[0], 'outputHash'), false, label)
+  assert.deepEqual([externalExitCode(evidence.status), externalExitCode(evidence.status, true)], [1, 1], label)
+  assert.deepEqual(compared, [['structure', 'source.pdf']], label)
+  assert.deepEqual(readdirSync(directory), ['source.pdf'], label)
+}
+
 test('the external verifier loads and validates the pinned fixture corpus', () => {
   const fixtures = loadFixtures()
   assert.deepEqual(fixtures.map(({ id }) => id), JSON.parse(fixture('manifest.json')).fixtures.map(({ id }) => id))
@@ -71,10 +105,7 @@ test('external comparisons use the executables probed before changing directorie
     return [tool, probe.executable]
   }))
   const wasm = {
-    native_pdf_open: (json) => {
-      const { operation: name, requestId } = JSON.parse(json)
-      return JSON.stringify({ operation: name, requestId, status: 'failed', code: operation.outcome, snapshot: null })
-    },
+    native_pdf_open: nativeResponder(() => ({ status: 'failed', code: operation.outcome, snapshot: null })),
     verify_native_pdf_response: () => true,
   }
   const evidence = { status: 'unavailable', commands: {}, fixtures: [] }
@@ -151,37 +182,48 @@ test('a refused edit confirms the live state against the base after setup', () =
   const baseBytes = fixture('notes-preservation.pdf')
   const operation = editFamilies.operations.find(({ operation }) => operation === 'deleteFinalPage')
 
-  for (const change of [{}, { binding: { revision: 3 } }, { outputHash: [3] }, { outputHex: input.toString('hex') }]) {
+  const cases = [
+    ['matching refusal and readback', {}],
+    ['wrong nested revision', { revision: 3 }, 'native-refusal-readback'],
+    ['wrong nested session', { sessionId: 2 }, 'native-refusal-readback'],
+    ['wrong output hash', { outputHash: Array(32).fill(3) }, 'native-refusal-readback'],
+    ['wrong output bytes', { outputHex: input.toString('hex') }, 'native-refusal-readback'],
+    ['wrong refusal source', {}, 'native-response-binding', { originStoreHash: '0'.repeat(64) }],
+    ['wrong refusal revision', {}, 'native-response-binding', { revision: 1 }],
+    ['wrong readback revision', {}, 'native-response-binding', {}, { revision: 1 }],
+  ]
+  for (const [label, { revision, sessionId, ...change }, reason, refusalChange = {}, readbackChange] of cases) {
     let commands = 0
     let liveChecks = 0
     let base
-    const respond = (handler) => (json) => {
-      const { operation, requestId, originStoreHash, binding, ...payload } = JSON.parse(json)
-      return JSON.stringify({ operation, requestId, binding, ...handler(originStoreHash, binding, payload, requestId) })
-    }
-    const snapshot = (originStoreHash, revision, bytes) => ({
-      originStoreHash, binding: { revision }, outputHash: [revision], outputHex: bytes.toString('hex'),
-      scene: {}, pageState: { order: [1, 2, 3].slice(revision) },
-    })
+    const { revision: refusalRevision, ...refusal } = refusalChange
     const wasm = {
-      native_pdf_open: respond((originStoreHash) => ({ status: 'opened', snapshot: snapshot(originStoreHash, 0, input) })),
-      native_pdf_command: respond((originStoreHash, binding, { command, outputHash }) => {
-        assert.equal(binding.revision, commands)
-        assert.deepEqual(outputHash, [commands])
+      native_pdf_open: nativeResponder((request) => {
+        const opened = openedReply(request, { scene: {}, pageState: { order: [1, 2, 3] } })
+        base = opened.snapshot
+        return opened
+      }),
+      native_pdf_command: nativeResponder(({ binding, command, outputHash }) => {
+        assert.deepEqual(binding, base.binding)
+        assert.deepEqual(outputHash, base.outputHash)
         assert.equal(command.kind, 'deletePage')
         commands++
         if (commands < 3) {
-          base = snapshot(originStoreHash, commands, baseBytes)
+          base = { ...base, binding: { ...binding, revision: commands }, outputHash: Array(32).fill(commands),
+            outputHex: baseBytes.toString('hex'), pageState: { order: base.pageState.order.slice(1) } }
           return { status: 'applied', snapshot: base }
         }
-        return { status: 'failed', code: operation.outcome, snapshot: null }
+        return { status: 'failed', code: operation.outcome, snapshot: null, ...refusal,
+          binding: { ...binding, revision: refusalRevision ?? binding.revision } }
       }),
-      native_pdf_snapshot: respond((originStoreHash, binding, _payload, requestId) => {
+      native_pdf_snapshot: nativeResponder(({ originStoreHash, binding, requestId }) => {
         assert.equal(commands, 3)
         assert.equal(requestId, 4)
         assert.equal(originStoreHash, base.originStoreHash)
         assert.deepEqual(binding, base.binding)
-        return { status: 'unseen', snapshot: { ...base, ...change } }
+        return { status: 'unseen', binding: { ...binding, ...readbackChange }, snapshot: { ...base, ...change,
+          binding: { ...binding, revision: revision ?? binding.revision, sessionId: sessionId ?? binding.sessionId },
+        } }
       }),
       verify_native_pdf_response: (json) => JSON.parse(json).operation !== 'snapshot',
       verify_native_pdf_worker_response: (json) => {
@@ -191,23 +233,81 @@ test('a refused edit confirms the live state against the base after setup', () =
     }
     const session = nativeSession(wasm, input)
     const run = () => operationOutput(session, { id: 'edit-families', input }, operation)
-    if (Object.keys(change).length) assert.throws(run, /native-refusal-readback/)
+    if (reason) assert.throws(run, { status: 'fail', message: reason }, label)
     else assert.deepEqual(run(), baseBytes)
-    assert.equal(liveChecks, 1)
+    assert.deepEqual(session.current(), base, label)
+    assert.equal(liveChecks, Object.keys(refusalChange).length ? 0 : 1, label)
   }
 })
 
 test('a refused open retains the source without requesting a session snapshot', () => {
   const input = fixture('refused.pdf')
   const outcome = 'FLOW_PDF_NATIVE_UNSUPPORTED'
-  const session = nativeSession({
-    native_pdf_open: (json) => {
-      const { operation, requestId } = JSON.parse(json)
-      return JSON.stringify({ operation, requestId, status: 'failed', code: outcome, snapshot: null })
-    },
+  const open = (change = () => ({})) => nativeSession({
+    native_pdf_open: nativeResponder((request) => ({
+      status: 'failed', code: outcome, snapshot: null, ...change(request),
+    })),
     verify_native_pdf_response: () => true,
   }, input)
+  const session = open()
   assert.equal(operationOutput(session, { id: 'refused', input }, { outcome }), input)
+  assert.throws(() => open(() => ({ originStoreHash: '0'.repeat(64) })),
+    { status: 'fail', message: 'native-response-binding' })
+  assert.throws(() => open((request) => ({ binding: openedReply(request).binding })),
+    { status: 'fail', message: 'native-response-binding' })
+})
+
+test('verified replies with mismatched request identity stop external comparison', (t) => {
+  const source = loadFixtures().find(({ id }) => id === 'edit-families')
+  const operation = source.spec.operations.find(({ operation }) => operation === 'rotatePage')
+  const { json } = structuralReadback(operation.pages)
+  const outputHex = fixture('notes-preservation.pdf').toString('hex')
+  const otherSource = '0'.repeat(64)
+  const cases = [
+    ['open', 'operation', { operation: 'command' }],
+    ['open', 'request ID', { requestId: 2 }],
+    ['open', 'source', { originStoreHash: otherSource }],
+    ['open', 'epoch', { epoch: Array(16).fill(2) }],
+    ['open', 'bytes', { outputHex }, 'native-origin'],
+    ['command', 'session ID', { sessionId: 2 }],
+    ['command', 'epoch', { epoch: Array(16).fill(2) }],
+    ['command', 'native origin', { originHash: Array(32).fill(2) }],
+    ['command', 'revision', { revision: 1 }],
+    ['close', 'revision', { revision: 0 }],
+  ]
+  for (const [step, field, { operation: replyOperation, requestId, originStoreHash, outputHex: openHex, ...bindingChange },
+    reason = 'native-response-binding'] of cases) {
+    const label = `${step} ${field}`
+    const verified = []
+    let base
+    const wasm = {
+      native_pdf_open: nativeResponder((request) => {
+        const opened = openedReply(request, { scene: {}, pageState: { order: [1, 2, 3] } })
+        base = opened.snapshot
+        if (step !== 'open') return opened
+        const binding = { ...opened.binding, ...bindingChange }
+        return { ...opened, operation: replyOperation ?? request.operation, requestId: requestId ?? request.requestId,
+          originStoreHash: originStoreHash ?? request.originStoreHash, binding,
+          snapshot: { ...base, binding, outputHex: openHex ?? request.bytesHex } }
+      }),
+      native_pdf_command: nativeResponder(({ binding }) => {
+        assert.deepEqual(binding, base.binding, label)
+        const replyBinding = step === 'command' ? { ...binding, ...bindingChange } : binding
+        const snapshot = { ...base, binding: { ...replyBinding, revision: replyBinding.revision + 1 }, outputHex }
+        return { status: 'applied', binding: replyBinding, snapshot }
+      }),
+      native_pdf_close: nativeResponder(({ binding }) => {
+        assert.equal(binding.revision, step === 'close' ? 1 : 0, label)
+        return { status: 'closed', binding: step === 'close' ? { ...binding, ...bindingChange } : binding }
+      }),
+      verify_native_pdf_response: (response) => {
+        verified.push(JSON.parse(response).operation)
+        return true
+      },
+    }
+    assertRejectedComparison(t, source, operation, json, wasm, label, reason)
+    assert.deepEqual(verified, step === 'open' ? [replyOperation ?? 'open'] : ['open', 'command', 'close'], label)
+  }
 })
 
 test('definitive application refusals fail fixture comparison while missing targets remain unavailable', (t) => {
@@ -224,19 +324,13 @@ test('definitive application refusals fail fixture comparison while missing targ
     const requests = []
     const compared = []
     const refuse = { status: 'failed', code: 'FLOW_PDF_NATIVE_UNSUPPORTED' }
-    const respond = (reply) => (json) => {
-      const { operation, requestId, originStoreHash, command } = JSON.parse(json)
-      requests.push(command?.kind ?? operation)
-      return JSON.stringify({ operation, requestId, ...reply(originStoreHash) })
-    }
+    const respond = (reply) => nativeResponder((request) => {
+      requests.push(request.command?.kind ?? request.operation)
+      return reply(request)
+    })
     const wasm = {
-      native_pdf_open: respond((originStoreHash) => failedStep === 'open' ? refuse : {
-        status: 'opened',
-        snapshot: {
-          originStoreHash, binding: { revision: 0 }, outputHash: [0],
-          outputHex: source.input.toString('hex'), scene: {}, pageState: { order: [1, 2, 3] },
-        },
-      }),
+      native_pdf_open: respond((request) => failedStep === 'open' ? refuse :
+        openedReply(request, { scene: {}, pageState: { order: [1, 2, 3] } })),
       native_pdf_command: respond(() => {
         assert.equal(failedStep, 'command')
         return refuse
@@ -290,18 +384,12 @@ test('a verified text capability refusal contradicts an admitted fixture target'
     const requests = []
     const verified = []
     const compared = []
-    const respond = (reply) => (request) => {
-      const { operation, requestId, originStoreHash } = JSON.parse(request)
-      requests.push(operation)
-      return JSON.stringify({ operation, requestId, ...reply(originStoreHash) })
-    }
+    const respond = (reply) => nativeResponder((request) => {
+      requests.push(request.operation)
+      return reply(request)
+    })
     const wasm = {
-      native_pdf_open: respond((originStoreHash) => ({
-        status: 'opened', snapshot: {
-          originStoreHash, binding: { revision: 0 }, outputHash: [0], outputHex: source.input.toString('hex'),
-          scene: { textPages },
-        },
-      })),
+      native_pdf_open: respond((request) => openedReply(request, { scene: { textPages } })),
       native_pdf_close: respond(() => ({ status: closeStatus })),
       verify_native_pdf_response: (response) => {
         verified.push(JSON.parse(response).operation)
@@ -353,17 +441,8 @@ test('a verified object capability refusal contradicts an admitted fixture targe
     const verified = []
     const compared = []
     const wasm = {
-      native_pdf_open: (request) => {
-        const { operation, requestId, originStoreHash } = JSON.parse(request)
-        return JSON.stringify({ operation, requestId, status: 'opened', snapshot: {
-          originStoreHash, binding: { revision: 0 }, outputHash: [0], outputHex: source.input.toString('hex'),
-          scene: { objectPages },
-        } })
-      },
-      native_pdf_close: (request) => {
-        const { operation, requestId } = JSON.parse(request)
-        return JSON.stringify({ operation, requestId, status: 'closed' })
-      },
+      native_pdf_open: nativeResponder((request) => openedReply(request, { scene: { objectPages } })),
+      native_pdf_close: nativeResponder(() => ({ status: 'closed' })),
       verify_native_pdf_response: (response) => {
         verified.push(JSON.parse(response).operation)
         return true
@@ -425,33 +504,32 @@ test('redaction refusal preserves the verifier classification through bounded cl
     const requests = []
     const invocations = []
     let pending = false
-    const respond = (reply) => (json) => {
-      const submitted = JSON.parse(json)
+    const respond = (reply) => nativeResponder((submitted) => {
       requests.push(submitted)
-      const { operation, requestId, binding, originStoreHash } = submitted
-      return JSON.stringify({ operation, requestId, binding, originStoreHash, ...reply(submitted) })
-    }
+      return reply(submitted)
+    })
     const wasm = {
-      native_pdf_open: respond(() => ({ status: 'opened', snapshot })),
-      native_pdf_redaction: respond(({ action }) => {
+      native_pdf_open: respond(() => ({ status: 'opened', binding, snapshot })),
+      native_pdf_redaction: respond(({ action, acceptedHash }) => {
+        const result = (details) => ({ status: 'redaction', redaction: { action: action.kind, acceptedHash, ...details } })
         switch (action.kind) {
-          case 'addMark': return { status: 'redaction' }
+          case 'addMark': return result({ candidate: null, verification: null })
           case 'stage':
-            if (!hasCandidate) return { status: 'redaction' }
+            if (!hasCandidate) return result({ candidate: null, verification: null })
             pending = true
-            return { status: 'redaction', redaction: { candidate, verification: { status: 'pending' } } }
+            return result({ candidate, verification: { status: 'pending' } })
           case 'verify':
             if (verdict === 'missing-verdict') {
               return { status: 'failed', code: 'FLOW_PDF_NATIVE_REDACTION_CANDIDATE_UNAVAILABLE' }
             }
-            return { status: 'redaction', redaction: { candidate, verification: { status: publishRefused ? 'passed' : verdict } } }
+            return result({ candidate, verification: { status: publishRefused ? 'passed' : verdict } })
           case 'publish':
             assert.ok(publishRefused)
             return { status: 'failed', code: 'FLOW_PDF_NATIVE_RECONCILIATION_REQUIRED' }
           case 'cancel':
             if (cleanupFailure === 'cancel') throw new Error('controlled cancellation failure')
             pending = false
-            return { status: 'redaction', redaction: { candidate, verification: null } }
+            return result({ candidate, verification: null })
           default: assert.fail(`unexpected redaction action: ${action.kind}`)
         }
       }),
@@ -485,6 +563,85 @@ test('redaction refusal preserves the verifier classification through bounded cl
     }], label)
     assert.deepEqual(invocations, [['structure', join(directory, 'source.pdf')]], label)
     assert.deepEqual(readdirSync(directory), ['source.pdf'], label)
+  }
+})
+
+test('redaction replies match the accepted PDF, action and staged candidate before comparison', (t) => {
+  const source = loadFixtures().find(({ id }) => id === 'redaction')
+  const [operation] = source.spec.operations
+  const { json } = structuralReadback(operation.pages)
+  const output = fixture('notes-preservation.pdf')
+  const candidate = { hash: Array(32).fill(7), validatorVersion: 1,
+    validatorProfile: 'classic-xref-owned-144dpi-v1', affectedPages: [42, 43] }
+  const cases = [
+    ['addMark', 'action', { action: 'removeMark' }],
+    ['stage', 'accepted hash', { acceptedHash: candidate.hash }],
+    ['verify', 'candidate hash', { candidate: { ...candidate, hash: Array(32).fill(8) } }],
+    ['verify', 'validator version', { candidate: { ...candidate, validatorVersion: 2 } }],
+    ['verify', 'validator profile', { candidate: { ...candidate, validatorProfile: 'other' } }],
+    ['verify', 'candidate page order', { candidate: { ...candidate, affectedPages: [43, 42] } }],
+    ['publish', 'candidate hash', { candidate: { ...candidate, hash: Array(32).fill(8) } }],
+    ['publish', 'accepted hash', { acceptedHash: candidate.hash }],
+    ['cancel', 'missing candidate', { candidate: null }],
+    ['publish', 'matching publication'],
+  ]
+  for (const [step, field, change] of cases) {
+    const label = `${step} ${field}`
+    const calls = []
+    let base
+    const wasm = {
+      native_pdf_open: nativeResponder((request) => {
+        const opened = openedReply(request, { pageState: { order: [42, 43] } })
+        base = opened.snapshot
+        return opened
+      }),
+      native_pdf_redaction: nativeResponder(({ action, acceptedHash, binding, requestId }) => {
+        assert.deepEqual(acceptedHash, base.outputHash, label)
+        assert.deepEqual(binding, base.binding, label)
+        if (Object.hasOwn(action, 'candidate')) assert.deepEqual(action.candidate, candidate, label)
+        calls.push([action.kind, requestId])
+        const redaction = {
+          action: action.kind, acceptedHash, candidate: action.kind === 'addMark' ? null : candidate,
+          verification: action.kind === 'addMark' || action.kind === 'cancel' ? null :
+            { status: action.kind === 'stage' ? 'pending' : 'passed' },
+          ...(action.kind === step ? change : {}),
+        }
+        if (action.kind !== 'publish') return { status: 'redaction', redaction }
+        return { status: 'published', redaction, snapshot: { ...base, binding: { ...binding, revision: 1 },
+          outputHash: redaction.candidate.hash, outputHex: output.toString('hex') } }
+      }),
+      native_pdf_close: nativeResponder(({ binding }) => {
+        calls.push(['close', binding.revision])
+        return { status: 'closed' }
+      }),
+      verify_native_pdf_response: () => true,
+    }
+    const stageId = operation.request.marks.length + 2
+    if (!change) {
+      const session = nativeSession(wasm, source.input)
+      assert.deepEqual(operationOutput(session, source, operation), output)
+      assert.deepEqual(session.current().outputHash, candidate.hash)
+      session.close()
+      assert.deepEqual(calls.slice(-4), [
+        ['stage', stageId], ['verify', stageId], ['publish', stageId], ['close', 1],
+      ])
+      continue
+    }
+    if (step === 'cancel') {
+      const session = nativeSession(wasm, source.input)
+      const [{ rectPt }] = operation.request.marks
+      session.redact({ kind: 'addMark', pageId: base.pageState.order[0], rect: rectPt.map((point) => point * 1000) })
+      session.redact({ kind: 'stage' })
+      assert.throws(() => session.redact({ kind: 'cancel', candidate }, true),
+        { status: 'fail', message: 'native-response-binding' })
+      assert.equal(session.current().binding.revision, 0)
+      session.close()
+      continue
+    }
+    assertRejectedComparison(t, source, operation, json, wasm, label)
+    const cleanup = step === 'verify' || step === 'publish' ? [['cancel', stageId]] : []
+    assert.deepEqual(calls.slice(-2 - cleanup.length),
+      [[step, step === 'addMark' ? 2 : stageId], ...cleanup, ['close', 0]], label)
   }
 })
 

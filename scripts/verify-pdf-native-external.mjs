@@ -360,21 +360,34 @@ export function nativeSession(wasm, input) {
   let snapshot
   function exchange(operation, payload, retry = false) {
     const binding = snapshot?.binding
-    const response = wasm[`native_pdf_${operation}`](JSON.stringify({
+    const request = {
       protocolVersion: 1, requestId: retry ? requestId : ++requestId, operation,
       originStoreHash, ...(binding ? { binding } : {}), ...payload,
-    }))
+    }
+    const response = wasm[`native_pdf_${operation}`](JSON.stringify(request))
     requireMatch(operation === 'snapshot' ? wasm.verify_native_pdf_worker_response(response) :
       wasm.verify_native_pdf_response(response), 'native-response')
     const reply = JSON.parse(response)
-    requireMatch(reply.operation === operation && reply.requestId === requestId &&
-      (operation !== 'snapshot' || same(reply.binding, binding)) &&
-      (!reply.snapshot || reply.snapshot.originStoreHash === originStoreHash), 'native-response-binding')
-    if (reply.snapshot) snapshot = reply.snapshot
+    requireMatch(reply.operation === request.operation && reply.requestId === request.requestId &&
+      reply.originStoreHash === request.originStoreHash &&
+      (!reply.snapshot || reply.snapshot.originStoreHash === request.originStoreHash), 'native-response-binding')
+    if (operation === 'open') {
+      requireMatch(reply.status === 'failed' ? reply.binding === null :
+        reply.status === 'opened' && same(reply.binding?.epoch, request.epoch), 'native-response-binding')
+      if (reply.status === 'opened') requireMatch(exactSnapshot(reply.snapshot).equals(input), 'native-origin')
+    } else {
+      requireMatch(same(reply.binding, request.binding), 'native-response-binding')
+    }
+    if (operation === 'redaction' && reply.status !== 'failed') {
+      const { action, acceptedHash } = request
+      requireMatch(reply.redaction?.action === action.kind && same(reply.redaction.acceptedHash, acceptedHash) &&
+        (!Object.hasOwn(action, 'candidate') || same(reply.redaction.candidate, action.candidate)),
+        'native-response-binding')
+    }
+    if (reply.snapshot && operation !== 'snapshot') snapshot = reply.snapshot
     return reply
   }
   const opened = exchange('open', { epoch: Array(16).fill(1), bytesHex: input.toString('hex') })
-  if (snapshot) requireMatch(exactSnapshot(snapshot).equals(input), 'native-origin')
   return {
     opened,
     current: () => snapshot,
@@ -503,7 +516,7 @@ export function operationOutput(session, fixture, operation) {
     requireMatch(reply.status === 'failed' && reply.code === outcome && !reply.snapshot &&
       !reply.redaction && !reply.preview, 'native-refusal')
     const { status, snapshot } = session.readback()
-    requireMatch(status === 'unseen' && snapshot?.binding.revision === base.binding.revision &&
+    requireMatch(status === 'unseen' && same(snapshot?.binding, base.binding) &&
       same(snapshot.outputHash, base.outputHash), 'native-refusal-readback')
     const output = exactSnapshot(snapshot)
     requireMatch(output.equals(exactSnapshot(base)), 'native-refusal-readback')
