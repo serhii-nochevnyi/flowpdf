@@ -392,13 +392,15 @@ function one(targets) {
   return targets[0]
 }
 
-function familyCommand(op, request, snapshot) {
+function familyCommand(op, request, snapshot, outcome) {
   const page = request.page - 1
   const { objectPages, textPages } = snapshot.scene
   if (op.startsWith('replaceText')) {
     const { page, sourceText, baselinePt } = request.target
+    const textPage = textPages?.find((entry) => entry.page === page - 1)
+    requireMatch(outcome !== 'admitted' || !textPage?.refusal, 'native-operation-target-refused')
     const [x, y] = milli(baselinePt)
-    const island = one(textPages?.find((entry) => entry.page === page - 1)?.islands.filter(({ text, bounds }) =>
+    const island = one(textPage?.islands.filter(({ text, bounds }) =>
       text === sourceText && bounds[0] >= x - 1000 && bounds[0] <= x && bounds[1] <= y + 1000 && bounds[3] > y))
     return { kind: 'replaceText', island: island.id, text: request.text }
   }
@@ -473,7 +475,7 @@ export function operationOutput(session, fixture, operation) {
   requireInput(session.current(), 'native-fixture-admission')
   if (name === 'preserve') return exactSnapshot(session.current())
   for (const { operation: setup, ...parameters } of request?.after ?? []) {
-    const result = session.command(familyCommand(setup, parameters, session.current()))
+    const result = session.command(familyCommand(setup, parameters, session.current(), 'admitted'))
     requireMatch(result.status !== 'failed', 'native-operation-setup')
     requireInput(result.status === 'applied', 'native-operation-setup')
   }
@@ -493,7 +495,7 @@ export function operationOutput(session, fixture, operation) {
   } else if (name.startsWith('redact')) {
     reply = redact(session, operation)
   } else {
-    reply = session.command(familyCommand(name, request, base))
+    reply = session.command(familyCommand(name, request, base, outcome))
   }
   if (outcome !== 'admitted') {
     requireMatch(reply.status === 'failed' && reply.code === outcome && !reply.snapshot &&
