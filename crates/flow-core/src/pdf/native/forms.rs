@@ -208,10 +208,22 @@ fn decode_saved_text(value: &Value, remaining: &mut usize) -> Result<String, Nat
         .ok_or_else(|| Profile.into())
 }
 
-fn text_string(value: &str) -> Value {
-    let mut bytes = vec![0xfe, 0xff];
-    bytes.extend(value.encode_utf16().flat_map(u16::to_be_bytes));
-    Value::String(bytes)
+// @contract: The caller reserves the encoded length before allocating the buffer.
+fn encode_saved_text(
+    graph: &mut NativePdfGraph,
+    text: &str,
+    length: usize,
+) -> Result<Value, NativeEditError> {
+    let mut bytes = Vec::new();
+    bytes
+        .try_reserve_exact(length)
+        .map_err(|_| NativeEditError::Budget)?;
+    graph.charge_page_retained(bytes.capacity() - length)?;
+    bytes.extend_from_slice(&[0xfe, 0xff]);
+    for unit in text.encode_utf16() {
+        bytes.extend_from_slice(&unit.to_be_bytes());
+    }
+    Ok(Value::String(bytes))
 }
 
 fn rect(value: &Value) -> Option<[i64; 4]> {
@@ -544,13 +556,6 @@ impl FieldValue {
         match self {
             Self::Text(_) => None,
             Self::Checkbox { checked, on } => Some(if *checked { on } else { "Off" }),
-        }
-    }
-
-    fn pdf_value(&self) -> Value {
-        match self {
-            Self::Text(text) => text_string(text),
-            Self::Checkbox { .. } => name(self.state().unwrap_or("Off")),
         }
     }
 }
@@ -1286,7 +1291,8 @@ fn apply_appearance(
     value: &FieldValue,
     initialize: bool,
 ) -> Result<(), NativeSessionError> {
-    let normal = match value {
+    let state = value.state();
+    let (normal, saved, default) = match value {
         FieldValue::Text(text) => {
             let font = form.text_font()?;
             let mut remaining = graph.remaining_retained();
@@ -1294,18 +1300,26 @@ fn apply_appearance(
             let content = AppearanceContent::new(size, AppearanceKind::Text(&hex))?;
             let dictionary_bytes =
                 text_appearance_dictionary_bytes(matches!(font, Font::Embedded(..)));
-            // @invariant: The normal dictionary can reuse the hex operand's allowance after it drops.
-            let scratch_bytes = hex.capacity().saturating_sub(NORMAL_APPEARANCE_BYTES);
+            let text_length = (1 + text.encode_utf16().count()) * size_of::<u16>();
+            let saved_bytes = text_length * (1 + usize::from(initialize));
+            let retained_bytes = NORMAL_APPEARANCE_BYTES + saved_bytes;
+            // @invariant: The saved strings and normal dictionary can reuse the dropped hex buffer's allowance.
+            let scratch_bytes = hex.capacity().saturating_sub(retained_bytes);
             reserve_appearance(
                 graph,
                 content.len(),
                 1,
-                dictionary_bytes + NORMAL_APPEARANCE_BYTES + scratch_bytes,
+                dictionary_bytes + retained_bytes + scratch_bytes,
             )?;
             let normal = allocate_appearance(graph, size, &content, Some(font));
             drop(hex);
             graph.release_page_retained(scratch_bytes);
-            normal?
+            let normal = normal?;
+            let saved = encode_saved_text(graph, text, text_length)?;
+            let default = initialize
+                .then(|| encode_saved_text(graph, text, text_length))
+                .transpose()?;
+            (normal, saved, default)
         }
         FieldValue::Checkbox { on, .. } => {
             let off = AppearanceContent::new(size, AppearanceKind::Checkbox(false))?;
@@ -1319,18 +1333,20 @@ fn apply_appearance(
             )?;
             let off = allocate_appearance(graph, size, &off, None)?;
             let checked = allocate_appearance(graph, size, &checked, None)?;
-            Value::Dictionary(dictionary([("Off", off), (on.as_str(), checked)]))
+            let normal = Value::Dictionary(dictionary([("Off", off), (on.as_str(), checked)]));
+            let state = state.unwrap_or("Off");
+            (normal, name(state), initialize.then(|| name(state)))
         }
     };
     let field_data = dict_mut(graph, field)?;
-    field_data.insert("V".into(), value.pdf_value());
-    if initialize {
-        field_data.insert("DV".into(), value.pdf_value());
+    field_data.insert("V".into(), saved);
+    if let Some(default) = default {
+        field_data.insert("DV".into(), default);
     }
     let data = dict_mut(graph, widget)?;
     data.insert("Rect".into(), numbers(bounds));
     data.insert("AP".into(), Value::Dictionary(dictionary([("N", normal)])));
-    if let Some(state) = value.state() {
+    if let Some(state) = state {
         data.insert("AS".into(), name(state));
     }
     Ok(())
@@ -1661,7 +1677,7 @@ mod tests {
     }
 
     #[test]
-    fn text_appearance_reserves_its_peak_and_releases_the_hex_buffer() {
+    fn text_appearance_reserves_saved_value_and_default() {
         let source = redaction_fixture("");
         let form = Form {
             owner: None,
@@ -1671,50 +1687,61 @@ mod tests {
             font: Some(Ok(Font::Simple)),
             trailer_refs: BTreeSet::new(),
         };
-        let text = "Approved for delivery. ".repeat(44);
-        let hex_bytes = text.len() * 2;
-        let length =
-            b"q 1 g 0 0 12000 30 re f 0 G 1 w 1 1 11998 28 re S\nBT /FlowField 10 Tf 0 g 2 4 Td <"
-                .len()
-                + hex_bytes
-                + TEXT_APPEARANCE_SUFFIX.len();
+        let value = FieldValue::Text("Paid".into());
+        let encoded = b"\xfe\xff\0P\0a\0i\0d";
+        let length = b"q 1 g 0 0 80 20 re f 0 G 1 w 1 1 78 18 re S\nBT /FlowField 10 Tf 0 g 2 4 Td <50616964> Tj ET\nQ\n"
+            .len();
         let stream_bytes = text_appearance_dictionary_bytes(false)
             + APPEARANCE_STREAM_OBJECT_BYTES.max(REPLACEMENT_STREAM_OVERHEAD)
             + 2 * length;
-        assert!(hex_bytes > NORMAL_APPEARANCE_BYTES);
-        let value = FieldValue::Text(text);
-        for short_by in [1, 0] {
-            let mut graph = NativePdfGraph::open(&source, NativeEditLimits::default()).unwrap();
-            let widget = pages::allocate(&mut graph, dictionary([("FT", name("Tx"))])).unwrap();
-            let objects = graph.objects.len();
-            let remaining = stream_bytes + hex_bytes - short_by;
-            graph
-                .charge_page_retained(graph.remaining_retained() - remaining)
-                .unwrap();
-            let result = apply_appearance(
-                &mut graph,
-                widget,
-                widget,
-                &form,
-                [0, 0, 12000, 30],
-                [12000, 30],
-                &value,
-                false,
-            );
-            if short_by == 0 {
-                result.unwrap();
-                let normal = &dict(&graph, widget).unwrap()["AP"].as_dictionary().unwrap()["N"];
-                let stream = appearance_at(&graph, normal).unwrap();
-                assert_eq!(stream.data.capacity(), length);
-                assert_eq!(stream.encoded.capacity(), length);
-                assert_eq!(
-                    graph.remaining_retained(),
-                    hex_bytes - NORMAL_APPEARANCE_BYTES
+        for initialize in [true, false] {
+            let needed = stream_bytes
+                + NORMAL_APPEARANCE_BYTES
+                + (1 + usize::from(initialize)) * encoded.len();
+            for short_by in [1, 0] {
+                let mut graph = NativePdfGraph::open(&source, NativeEditLimits::default()).unwrap();
+                let mut field = dictionary([("FT", name("Tx"))]);
+                if !initialize {
+                    field.insert("DV".into(), Value::String(b"Unpaid".to_vec()));
+                }
+                let widget = pages::allocate(&mut graph, field).unwrap();
+                let objects = graph.objects.len();
+                let remaining = needed - short_by;
+                graph
+                    .charge_page_retained(graph.remaining_retained() - remaining)
+                    .unwrap();
+                let result = apply_appearance(
+                    &mut graph,
+                    widget,
+                    widget,
+                    &form,
+                    [10, 10, 90, 30],
+                    [80, 20],
+                    &value,
+                    initialize,
                 );
-            } else {
-                assert_eq!(result, Err(NativeSessionError::Budget));
-                assert_eq!(graph.objects.len(), objects);
-                assert_eq!(graph.remaining_retained(), remaining);
+                let field = dict(&graph, widget).unwrap();
+                if short_by == 0 {
+                    result.unwrap();
+                    let normal = &field["AP"].as_dictionary().unwrap()["N"];
+                    let stream = appearance_at(&graph, normal).unwrap();
+                    assert_eq!(stream.data.capacity(), length);
+                    assert_eq!(stream.encoded.capacity(), length);
+                    assert_eq!(field["V"].as_bytes(), Some(encoded.as_slice()));
+                    let default = if initialize {
+                        encoded.as_slice()
+                    } else {
+                        b"Unpaid"
+                    };
+                    assert_eq!(field["DV"].as_bytes(), Some(default));
+                    assert_eq!(graph.remaining_retained(), 0);
+                } else {
+                    assert_eq!(result, Err(NativeSessionError::Budget));
+                    assert!(!field.contains_key("V"));
+                    assert!(!field.contains_key("AP"));
+                    assert_eq!(graph.objects.len(), objects);
+                    assert_eq!(graph.remaining_retained(), remaining);
+                }
             }
         }
     }
