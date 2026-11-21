@@ -1489,15 +1489,19 @@ fn edited_stream(
     })
 }
 
-fn retain_reachable(graph: &mut NativePdfGraph, remaining: &mut usize) -> Result<()> {
-    let mut work = graph.remaining_work();
+fn retain_reachable(
+    graph: &mut NativePdfGraph,
+    work: &mut ScanWork,
+    remaining: &mut usize,
+) -> Result<()> {
     let mut pending = Vec::new();
     for value in graph.trailer.values() {
-        collect_refs(value, &mut pending, &mut work, remaining)?;
+        collect_refs(value, &mut pending, &mut work.remaining, remaining)?;
     }
     let mut reachable = BTreeSet::new();
     let mut reverse = BTreeMap::<_, BTreeSet<_>>::new();
     while let Some(reference) = pending.pop() {
+        work.spend(1)?;
         if !reachable.insert(reference) {
             continue;
         }
@@ -1508,14 +1512,16 @@ fn retain_reachable(graph: &mut NativePdfGraph, remaining: &mut usize) -> Result
         collect_refs(
             graph.objects.get(&reference).ok_or(State)?,
             &mut children,
-            &mut work,
+            &mut work.remaining,
             remaining,
         )?;
         for child in children {
+            work.spend(2)?;
             reverse.entry(child).or_default().insert(reference);
             pending.push(child);
         }
     }
+    work.spend(graph.objects.len())?;
     graph
         .objects
         .retain(|reference, _| reachable.contains(reference));
@@ -1575,8 +1581,9 @@ pub(super) fn stage(
     use NativeSessionError::{Postcondition, TargetUnavailable};
 
     let workspace = Workspace::new(graph.remaining_retained());
+    let starting_work = graph.remaining_work();
     let mut work = ScanWork {
-        remaining: graph.remaining_work(),
+        remaining: starting_work,
         refusal: Budget,
     };
     let before = scan(graph, page, &mut work, &workspace)?;
@@ -1762,7 +1769,7 @@ pub(super) fn stage(
     if let Some(resources) = override_resources {
         dict.insert("Resources".into(), PdfValue::Dictionary(resources));
     }
-    retain_reachable(graph, &mut remaining)?;
+    retain_reachable(graph, &mut work, &mut remaining)?;
 
     let _edit_memory = workspace
         .reserve(workspace.remaining() - remaining)
@@ -1813,6 +1820,7 @@ pub(super) fn stage(
         changed,
     };
     drop(after);
+    graph.charge_page_work(starting_work - work.remaining)?;
     // Keep the expected signatures charged through serialization and reopen verification.
     Ok((expected, workspace.remaining()))
 }
@@ -1887,5 +1895,74 @@ mod tests {
                 .any(|bytes| bytes == b"(10 20 30 40 re f) Tj")
         );
         assert_eq!(session.origin_bytes(), source);
+    }
+
+    #[test]
+    fn object_staging_charges_scans_and_reachability_to_the_graph() {
+        use super::{NativePdfGraph, NativeSessionError, ScanWork, Workspace, scan, stage};
+
+        let content = miniz_oxide::deflate::compress_to_vec_zlib(b"10 20 30 40 re f", 6);
+        let source = super::super::tests::fixture("", &content);
+        let limits = NativeEditLimits::default();
+        let session = NativePdfSession::open_scoped(&source, limits, [4; 16]).unwrap();
+        let before = session.snapshot();
+        let page = &before.scene.pages[0];
+        let view = &before.scene.object_pages[0].objects[0];
+        let command = serde_json::from_value(json!({
+            "kind": "moveObject",
+            "target": {"page": 0, "id": view.id, "profile": view.profile},
+            "transform": [1, 0, 0, 1, 10, 0],
+        }))
+        .unwrap();
+        let graph = NativePdfGraph::open(&source, limits).unwrap();
+        let starting = graph.remaining_work();
+        let mut scan_work = ScanWork {
+            remaining: starting,
+            refusal: NativeSessionError::Budget,
+        };
+        scan(
+            &graph,
+            page,
+            &mut scan_work,
+            &Workspace::new(graph.remaining_retained()),
+        )
+        .unwrap();
+        let single_scan = starting - scan_work.remaining;
+        let mut graph = graph;
+        stage(
+            &mut graph,
+            page,
+            before.binding,
+            before.output_hash,
+            &command,
+        )
+        .unwrap();
+        let total = starting - graph.remaining_work();
+        assert!(total > single_scan);
+
+        let mut tight = NativePdfGraph::open(&source, limits).unwrap();
+        tight.charge_page_work(starting - total + 1).unwrap();
+        assert_eq!(
+            stage(
+                &mut tight,
+                page,
+                before.binding,
+                before.output_hash,
+                &command
+            )
+            .err(),
+            Some(NativeSessionError::Budget)
+        );
+        let mut exact = NativePdfGraph::open(&source, limits).unwrap();
+        exact.charge_page_work(starting - total).unwrap();
+        stage(
+            &mut exact,
+            page,
+            before.binding,
+            before.output_hash,
+            &command,
+        )
+        .unwrap();
+        assert_eq!(exact.remaining_work(), 0);
     }
 }
