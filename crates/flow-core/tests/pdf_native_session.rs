@@ -635,17 +635,23 @@ fn public_scene_checks_stream_boundaries_after_note_rewrite() {
     };
 
     let stream = |data: &str| format!("<< /Length {} >>\nstream\n{data}\nendstream", data.len());
-    for (first, separator, partial, show_second) in [
-        ("10 20 5 5 re f % Artwork", "\n", false, true),
-        ("10 20 5 5 re f % Artwork", " ", true, false),
-        ("10 20 5 5 re f ", "", true, true),
+    for (first, second, partial, show_second) in [
+        (
+            "10 20 5 5 re f % Artwork",
+            "\n30 40 5 5 re f\n",
+            false,
+            true,
+        ),
+        ("10 20 5 5 re f % Artwork", " 30 40 5 5 re f\n", true, false),
+        ("10 20 5 5 re f ", "30 40 5 5 re f\n", true, true),
+        ("10 20 5 5 re f ", "re\n", true, false),
     ] {
         let source = pdf_with_objects(&[
             "<< /Type /Catalog /Pages 2 0 R >>",
             "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
             "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Contents [4 0 R 5 0 R] >>",
             &stream(first),
-            &stream(&format!("{separator}30 40 5 5 re f\n")),
+            &stream(second),
         ]);
         let mut session =
             NativePdfSession::open_scoped(source.as_bytes(), NativeEditLimits::default(), [1; 16])

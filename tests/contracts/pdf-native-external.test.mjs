@@ -326,6 +326,67 @@ test('a verified text capability refusal contradicts an admitted fixture target'
   }
 })
 
+test('a verified object capability refusal contradicts an admitted fixture target', (t) => {
+  const source = loadFixtures().find(({ id }) => id === 'edit-families')
+  const admitted = source.spec.operations.find(({ operation }) => operation === 'replaceImage')
+  const expectedRefusal = source.spec.operations.find(({ operation }) => operation === 'moveObjectInvalidGeometry')
+  const { page, rectPt } = admitted.request.target
+  const image = {
+    id: Array(32).fill(1), kind: 'image', profile: 'rasterRgb8',
+    bounds: rectPt.map((point) => point * 1000), operations: ['replace', 'move', 'remove'],
+  }
+  const refused = 'FLOW_PDF_NATIVE_OBJECT_STATE'
+  const projected = (objects, refusedPage) => admitted.pages.map(({ page: number }) => number === refusedPage
+    ? { page: number - 1, canAdd: false, objects: [], refusal: refused }
+    : { page: number - 1, canAdd: true, objects: number === page ? objects : [], refusal: null })
+  const { json } = structuralReadback(admitted.pages)
+  const cases = [
+    ['target page refused', admitted, projected([], page), 'fail'],
+    ['projection omitted', admitted, undefined, 'unavailable'],
+    ['another page refused', admitted, projected([], 1), 'unavailable'],
+    ['no image matched', admitted, projected([{ ...image, bounds: [1000, 1000, 2000, 2000] }]), 'unavailable'],
+    ['multiple images matched', admitted, projected([image, { ...image, id: Array(32).fill(2) }]), 'unavailable'],
+    ['projection refusal for an expected command refusal', expectedRefusal, projected([], page), 'unavailable'],
+  ]
+  for (const [label, operation, objectPages, status] of cases) {
+    const directory = scratchDirectory(t, 'flowpdf-object-capability-')
+    const verified = []
+    const compared = []
+    const wasm = {
+      native_pdf_open: (request) => {
+        const { operation, requestId, originStoreHash } = JSON.parse(request)
+        return JSON.stringify({ operation, requestId, status: 'opened', snapshot: {
+          originStoreHash, binding: { revision: 0 }, outputHash: [0], outputHex: source.input.toString('hex'),
+          scene: { objectPages },
+        } })
+      },
+      native_pdf_close: (request) => {
+        const { operation, requestId } = JSON.parse(request)
+        return JSON.stringify({ operation, requestId, status: 'closed' })
+      },
+      verify_native_pdf_response: (response) => {
+        verified.push(JSON.parse(response).operation)
+        return true
+      },
+    }
+    const evidence = { status: 'unavailable', fixtures: [] }
+    compareFixtures([{ ...source, spec: { ...source.spec, operations: [operation] } }], wasm, directory,
+      (check, args) => {
+        compared.push([check, basename(args.at(-1))])
+        return Buffer.from(JSON.stringify(json))
+      }, evidence)
+
+    assert.equal(evidence.status, status, label)
+    assert.equal(evidence.reason, status === 'fail' ? 'native-operation-target-refused' : 'native-operation-target', label)
+    assert.equal(evidence.fixtures[0].operations[0].status, status, label)
+    assert.deepEqual([externalExitCode(evidence.status, false), externalExitCode(evidence.status, true)],
+      status === 'fail' ? [1, 1] : [0, 2], label)
+    assert.deepEqual(verified, ['open', 'close'], label)
+    assert.deepEqual(compared, [['structure', 'source.pdf']], label)
+    assert.deepEqual(readdirSync(directory), ['source.pdf'], label)
+  }
+})
+
 test('redaction refusal preserves the verifier classification through bounded cleanup', (t) => {
   const redaction = loadFixtures().find(({ id }) => id === 'redaction')
   const { input, sourceHash, spec } = redaction

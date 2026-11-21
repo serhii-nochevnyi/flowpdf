@@ -1,9 +1,11 @@
 use flow_core::pdf::native::{
-    NATIVE_MAX_FIELD_NAME_BYTES, NativeEditLimits, NativeFieldCommand, NativeFieldRefusal,
-    NativeNoteCommand, NativePageCommand, NativePdfSession, NativeRequestLookup,
-    NativeSessionError,
+    NATIVE_MAX_FIELD_NAME_BYTES, NativeEditError, NativeEditLimits, NativeFieldCommand,
+    NativeFieldRefusal, NativeNoteCommand, NativePageCommand, NativePdfSession,
+    NativeRequestLookup, NativeSessionError,
 };
-use flow_core::pdf::{PdfReaderLimits, PdfSceneElement, PdfSceneRequest, open_pdf, read_pdf_scene};
+use flow_core::pdf::{
+    PdfReadError, PdfReaderLimits, PdfSceneElement, PdfSceneRequest, open_pdf, read_pdf_scene,
+};
 use serde_json::json;
 
 fn build_pdf(objects: &[Vec<u8>]) -> Vec<u8> {
@@ -1085,28 +1087,95 @@ fn ordinary_field_additions_respect_the_live_retained_allowance() {
     }
 }
 
+fn apply_at_retained_boundary(
+    source: &[u8],
+    command: impl Fn(&NativePdfSession) -> NativeFieldCommand,
+) -> NativePdfSession {
+    let open = |max_retained_bytes| {
+        NativePdfSession::open_scoped(
+            source,
+            NativeEditLimits {
+                max_retained_bytes,
+                ..NativeEditLimits::default()
+            },
+            [7; 16],
+        )
+    };
+    let apply = |pdf: &mut NativePdfSession| {
+        let command = command(pdf);
+        pdf.apply_field(pdf.snapshot().binding, 1, &command)
+    };
+    let allowance_refusal = |error: &NativeSessionError| {
+        matches!(
+            error,
+            NativeSessionError::Budget
+                | NativeSessionError::Graph(NativeEditError::Reader(PdfReadError::InputSizeLimit))
+        )
+    };
+    let (mut low, mut high) = (1, NativeEditLimits::default().max_retained_bytes);
+    while low < high {
+        let mid = low + (high - low) / 2;
+        match open(mid).and_then(|mut pdf| apply(&mut pdf)) {
+            Ok(_) => high = mid,
+            Err(error) if allowance_refusal(&error) => low = mid + 1,
+            Err(error) => panic!("unexpected refusal at {mid} bytes: {error:?}"),
+        }
+    }
+
+    let mut constrained = open(low - 1).unwrap();
+    let accepted = constrained.snapshot().clone();
+    let error = apply(&mut constrained).unwrap_err();
+    assert!(
+        allowance_refusal(&error),
+        "unexpected refusal one byte below the fitting allowance: {error:?}"
+    );
+    assert_eq!(constrained.output_bytes(), source);
+    assert_eq!(constrained.snapshot().binding, accepted.binding);
+    assert_eq!(constrained.snapshot().output_hash, accepted.output_hash);
+    assert_eq!(constrained.snapshot().fields, accepted.fields);
+    assert_eq!(
+        constrained.snapshot().consumed_request,
+        accepted.consumed_request
+    );
+    assert_eq!(
+        constrained.lookup(accepted.binding, 1),
+        Ok(NativeRequestLookup::Unseen)
+    );
+
+    let mut fitting = open(low).unwrap();
+    let binding = fitting.snapshot().binding;
+    let receipt = apply(&mut fitting).unwrap();
+    assert_eq!(receipt.binding.revision, binding.revision + 1);
+    assert_eq!(
+        fitting.lookup(binding, 1),
+        Ok(NativeRequestLookup::Accepted(receipt))
+    );
+    fitting
+}
+
 #[test]
-fn ordinary_text_field_edit_round_trips_in_the_public_scene() {
-    let mut pdf = session(&imported_checkbox("[10 10 30 30]", "", "Off"));
-    apply(
-        &mut pdf,
-        json!({"kind":"addTextField","page":0,"rect":[40,40,160,60],"name":"recipient","value":"Original"}),
-    )
-    .unwrap();
+fn ordinary_text_field_creation_and_update_respect_the_retained_allowance() {
+    let source = imported_checkbox("[10 10 30 30]", "", "Off");
+    let pdf = apply_at_retained_boundary(&source, |_| NativeFieldCommand::AddTextField {
+        page: 0,
+        rect: [40, 40, 160, 60],
+        name: "recipient".into(),
+        value: "Original".into(),
+    });
     assert_saved_value(pdf.output_bytes(), "recipient", "Tx", "Original");
-    let id = pdf
-        .snapshot()
-        .fields
-        .iter()
-        .find(|field| field.name.as_deref() == Some("recipient"))
-        .unwrap()
-        .id;
-    apply(
-        &mut pdf,
-        json!({"kind":"setFieldText","field":id,"value":"Updated"}),
-    )
-    .unwrap();
-    assert_saved_value(pdf.output_bytes(), "recipient", "Tx", "Updated");
+    let updated = apply_at_retained_boundary(pdf.output_bytes(), |reopened| {
+        let field = reopened
+            .snapshot()
+            .fields
+            .iter()
+            .find(|field| field.name.as_deref() == Some("recipient"))
+            .unwrap();
+        NativeFieldCommand::SetFieldText {
+            field: field.id,
+            value: "Updated".into(),
+        }
+    });
+    assert_saved_value(updated.output_bytes(), "recipient", "Tx", "Updated");
 }
 
 #[test]
