@@ -256,6 +256,17 @@ fn passive_checkbox_exception_requires_reciprocal_mapped_state() {
 }
 
 #[test]
+fn stream_dictionary_cannot_use_the_checkbox_state_exception() {
+    let mut objects = imported_field_objects("[10 10 30 30]", "", "Off", "Btn", "", "");
+    objects[2] = b"<< /Type /Page /Parent 2 0 R /Annots [7 0 R] /Contents 10 0 R >>".to_vec();
+    objects.push(stream("/FT /Btn /Kids [7 0 R] /V /Launch", b"q Q"));
+    assert!(matches!(
+        NativePdfSession::open_scoped(&build_pdf(&objects), NativeEditLimits::default(), [7; 16]),
+        Err(NativeSessionError::Graph(NativeEditError::Unsupported))
+    ));
+}
+
+#[test]
 fn duplicate_page_keeps_indirect_form_fields_independently_editable() {
     let form = "/Type /XObject /Subtype /Form /BBox [0 0 20 20] /Resources <<>>";
     let source = build_pdf(&[

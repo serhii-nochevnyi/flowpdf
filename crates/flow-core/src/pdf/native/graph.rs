@@ -1073,6 +1073,7 @@ fn visit_refs_charged(
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum DictionaryRole {
     Object,
+    Stream,
     Trailer,
     Catalog,
     AcroForm,
@@ -1088,12 +1089,14 @@ impl DictionaryRole {
             (Self::Trailer, "Root") => Self::Catalog,
             (Self::Catalog, "AcroForm") => Self::AcroForm,
             (Self::AcroForm, "DR") => Self::Resources,
-            (Self::Object | Self::Trailer | Self::Catalog | Self::AcroForm, "Resources") => {
-                Self::Resources
-            }
-            (Self::Object | Self::Trailer | Self::Catalog | Self::AcroForm, "AP") => {
-                Self::Appearance
-            }
+            (
+                Self::Object | Self::Stream | Self::Trailer | Self::Catalog | Self::AcroForm,
+                "Resources",
+            ) => Self::Resources,
+            (
+                Self::Object | Self::Stream | Self::Trailer | Self::Catalog | Self::AcroForm,
+                "AP",
+            ) => Self::Appearance,
             (Self::Appearance, "N" | "R" | "D")
             | (
                 Self::Resources,
@@ -1145,7 +1148,7 @@ fn inspect(
             }
             inspect_dict(
                 &stream.dict,
-                DictionaryRole::Object,
+                DictionaryRole::Stream,
                 depth,
                 limits,
                 work,
