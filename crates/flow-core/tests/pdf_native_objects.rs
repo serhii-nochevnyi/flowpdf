@@ -1565,6 +1565,81 @@ fn jpeg_asset_replaces_only_one_use_of_a_shared_raster() {
 }
 
 #[test]
+fn png_add_and_replace_keep_flate_samples_and_refuse_atomically_when_constrained() {
+    use image::ImageEncoder as _;
+
+    let image = stream(
+        "/Type /XObject /Subtype /Image /ColorSpace /DeviceGray /Width 1 /Height 1 /BitsPerComponent 8",
+        &[7],
+    );
+    let source = fixture(
+        b"q 10 0 0 10 5 5 cm /I Do Q",
+        false,
+        "/Resources << /XObject << /I 6 0 R >> >>",
+        &[image],
+    );
+    let mut noise = vec![0; 32 * 32 * 3];
+    blake3::Hasher::new().finalize_xof().fill(&mut noise);
+    for (side, data) in [(1, &[30, 100, 200][..]), (32, noise.as_slice())] {
+        let mut png = Vec::new();
+        image::codecs::png::PngEncoder::new(&mut png)
+            .write_image(data, side, side, image::ExtendedColorType::Rgb8)
+            .unwrap();
+        let hex: String = png.iter().map(|byte| format!("{byte:02x}")).collect();
+        let sample_hex: String = data.iter().map(|byte| format!("{byte:02x}")).collect();
+        let add =
+            json!({"kind":"addImage","page":0,"bounds":[20000,20000,25000,25000],"assetHex":hex});
+
+        let mut roomy = open(&source);
+        let replace = json!({"kind":"replaceImage","target":target(&roomy, 0, 0),"assetHex":hex});
+        apply(&mut roomy, replace).unwrap();
+        apply(&mut roomy, add.clone()).unwrap();
+        let reader = open_pdf(roomy.output_bytes(), Default::default()).unwrap();
+        let scene = read_pdf_scene(&reader, &PdfSceneRequest::default()).unwrap();
+        let images: Vec<_> = scene.pages[0]
+            .elements
+            .iter()
+            .filter_map(|element| match element {
+                PdfSceneElement::Image { value } => Some(value),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(images.len(), 2);
+        for image in images {
+            assert_eq!(image.filter, "FlateDecode");
+            assert_eq!((image.width, image.height), (side, side));
+            assert_eq!(image.data_hex, sample_hex);
+        }
+
+        let limits = NativeEditLimits {
+            max_retained_bytes: 480 * 1024,
+            ..NativeEditLimits::default()
+        };
+        let mut constrained = NativePdfSession::open_scoped(&source, limits, [7; 16]).unwrap();
+        let before = constrained.snapshot().clone();
+        assert!(before.scene.object_pages[0].can_add);
+        let replace =
+            json!({"kind":"replaceImage","target":target(&constrained, 0, 0),"assetHex":hex});
+        for command in [add, replace] {
+            assert_eq!(
+                apply(&mut constrained, command),
+                Err(NativeSessionError::Budget)
+            );
+            let after = constrained.snapshot();
+            assert_eq!(after.binding, before.binding);
+            assert_eq!(after.consumed_request, before.consumed_request);
+            assert_eq!(after.output_hash, before.output_hash);
+            assert_eq!(after.scene.object_pages, before.scene.object_pages);
+            assert_eq!(
+                constrained.lookup(before.binding, 1),
+                Ok(NativeRequestLookup::Unseen)
+            );
+            assert_eq!(constrained.output_bytes(), source);
+        }
+    }
+}
+
+#[test]
 fn display_p3_png_refuses_without_mutating_the_accepted_snapshot() {
     let header = "89504e470d0a1a0a0000000d4948445200000001000000010802000000907753de";
     let display_p3 = concat!(

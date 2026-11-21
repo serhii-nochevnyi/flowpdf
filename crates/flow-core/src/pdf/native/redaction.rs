@@ -2,7 +2,8 @@ use std::collections::{BTreeMap, BTreeSet, btree_map::Entry};
 use std::mem::size_of;
 
 use miniz_oxide::deflate::core::{
-    CompressorOxide, TDEFLFlush, TDEFLStatus, compress, create_comp_flags_from_zip_params,
+    CompressorOxide, TDEFLFlush, TDEFLStatus, compress, compress_to_output,
+    create_comp_flags_from_zip_params,
 };
 
 use super::super::reader::{PdfObjectRef, PdfReaderLimits, PdfStream, PdfValue, single_filter};
@@ -19,7 +20,7 @@ const POINT: i64 = 1_000;
 const MAX_COORD: i64 = 1_000_000 * POINT;
 const MAX_STREAM: usize = 512 * 1024;
 // @invariant: miniz_oxide 0.8.9's fixed encoder buffers use under 320 KiB, leaving room for temporaries.
-const ZLIB_ENCODER_SCRATCH: usize = 512 * 1024;
+pub(super) const ZLIB_ENCODER_SCRATCH: usize = 512 * 1024;
 const MAX_FORM_DEPTH: usize = 8;
 const MAX_PAGES: usize = 256;
 const ENTRY_BYTES: usize = 128;
@@ -2065,9 +2066,38 @@ fn apply(
 }
 
 fn compress_rewritten_stream(data: &[u8]) -> Option<Vec<u8>> {
-    let mut output = vec![0; data.len() - 1];
-    let flags = create_comp_flags_from_zip_params(6, 1, 0);
-    let mut encoder = CompressorOxide::new(flags);
+    compress_zlib_bounded(data, data.len().checked_sub(1)?)
+}
+
+fn zlib_flags() -> u32 {
+    create_comp_flags_from_zip_params(6, 1, 0)
+}
+
+pub(super) fn bounded_zlib_size(data: &[u8], cap: usize) -> Option<usize> {
+    let mut length = 0;
+    let (status, consumed) = compress_to_output(
+        &mut CompressorOxide::new(zlib_flags()),
+        data,
+        TDEFLFlush::Finish,
+        |chunk| {
+            if chunk.len() > cap - length {
+                return false;
+            }
+            length += chunk.len();
+            true
+        },
+    );
+    (status == TDEFLStatus::Done && consumed == data.len()).then_some(length)
+}
+
+pub(super) fn compress_zlib_bounded(data: &[u8], capacity: usize) -> Option<Vec<u8>> {
+    let mut output = Vec::new();
+    output.try_reserve_exact(capacity).ok()?;
+    if output.capacity() > capacity {
+        return None;
+    }
+    output.resize(capacity, 0);
+    let mut encoder = CompressorOxide::new(zlib_flags());
     let (status, consumed, written) = compress(&mut encoder, data, &mut output, TDEFLFlush::Finish);
     if status != TDEFLStatus::Done || consumed != data.len() {
         return None;

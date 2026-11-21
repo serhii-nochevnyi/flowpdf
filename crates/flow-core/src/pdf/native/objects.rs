@@ -1238,6 +1238,18 @@ fn check_png_color_chunks(mut chunks: &[u8]) -> Result<()> {
     Err(Asset.into())
 }
 
+fn encode_png_samples(data: &[u8], max_output: usize, remaining: &mut usize) -> Result<Vec<u8>> {
+    use super::redaction::{ZLIB_ENCODER_SCRATCH, bounded_zlib_size, compress_zlib_bounded};
+
+    let mut available = *remaining;
+    spend(&mut available, ZLIB_ENCODER_SCRATCH)?;
+    let size = bounded_zlib_size(data, available.min(max_output)).ok_or(Budget)?;
+    spend(&mut available, size)?;
+    let encoded = compress_zlib_bounded(data, size).ok_or(Budget)?;
+    spend(remaining, encoded.capacity())?;
+    Ok(encoded)
+}
+
 fn image_source(hex: &str, graph: &NativePdfGraph, remaining: &mut usize) -> Result<PdfStream> {
     fn nibble(b: u8) -> Result<u8> {
         match b {
@@ -1326,18 +1338,21 @@ fn image_source(hex: &str, graph: &NativePdfGraph, remaining: &mut usize) -> Res
     if samples > decoded_limit {
         return Err(NativeSessionError::Budget);
     }
-    if jpeg.is_some() {
-        spend(remaining, samples)?;
+    spend(remaining, samples)?;
+    let png_decode_scratch = if jpeg.is_some() {
+        0
     } else {
-        spend(remaining, samples * 3 + 4096)?;
-    }
+        samples * 2 + 4096
+    };
+    spend(remaining, png_decode_scratch)?;
     let mut data = vec![0; samples];
     decoder.read_image(&mut data).map_err(|_| Asset)?;
+    *remaining += png_decode_scratch;
     let (filter, encoded) = match format {
         ImageFormat::Jpeg => ("DCTDecode", bytes),
         _ => (
             "FlateDecode",
-            miniz_oxide::deflate::compress_to_vec_zlib(&data, 6),
+            encode_png_samples(&data, graph.limits.max_output_bytes, remaining)?,
         ),
     };
     if encoded.len() > graph.limits.max_output_bytes {
@@ -1822,6 +1837,34 @@ pub(super) fn verify(
 mod tests {
     use crate::pdf::native::{NativeEditLimits, NativePdfSession};
     use serde_json::json;
+
+    #[test]
+    fn png_encoder_reserves_scratch_and_exact_output_before_compression() {
+        use super::{Budget, encode_png_samples};
+        use crate::pdf::native::redaction::ZLIB_ENCODER_SCRATCH;
+        use miniz_oxide::{deflate::compress_to_vec_zlib, inflate::decompress_to_vec_zlib};
+
+        let mut noise = vec![0; 4096];
+        blake3::Hasher::new().finalize_xof().fill(&mut noise);
+        for data in [&[7][..], &noise] {
+            let size = compress_to_vec_zlib(data, 6).len();
+            assert!(size > data.len());
+            let peak = ZLIB_ENCODER_SCRATCH + size;
+            for (mut remaining, max_output) in [(peak - 1, size), (peak, size - 1)] {
+                let before = remaining;
+                assert_eq!(
+                    encode_png_samples(data, max_output, &mut remaining),
+                    Err(Budget)
+                );
+                assert_eq!(remaining, before);
+            }
+            let mut remaining = peak;
+            let encoded = encode_png_samples(data, size, &mut remaining).unwrap();
+            assert_eq!(encoded.capacity(), size);
+            assert_eq!(remaining, ZLIB_ENCODER_SCRATCH);
+            assert_eq!(decompress_to_vec_zlib(&encoded).unwrap(), data);
+        }
+    }
 
     #[test]
     fn graphic_staging_checks_exact_paint_span_and_accepted_snapshot() {
