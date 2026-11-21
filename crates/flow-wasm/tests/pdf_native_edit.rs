@@ -1045,6 +1045,56 @@ fn redaction_wire_uses_the_accepted_revision_after_an_ordinary_edit() {
 }
 
 #[test]
+fn redaction_wire_selectively_removes_stored_marks_after_page_rotation() {
+    let source = redaction_pdf(100);
+    let opened = call(native_pdf_open, open_request(source.as_bytes()));
+    assert_eq!(opened["status"], "opened", "{opened}");
+    let base = &opened["snapshot"];
+    let page_id = &base["pageState"]["order"][0];
+    let first = [12000, 12000, 13000, 13000];
+    let second = [42000, 42000, 43000, 43000];
+    let mark = |kind, rect| json!({"kind":kind,"pageId":page_id,"rect":rect});
+    for (request_id, rect, count) in [(2, first, 1), (3, second, 2)] {
+        let added = call(
+            native_pdf_redaction,
+            redaction_request(request_id, base, mark("addMark", rect)),
+        );
+        assert_eq!(added["redaction"]["markCount"], count, "{added}");
+    }
+
+    let rotated = page_edit(
+        base,
+        4,
+        json!({"kind":"rotatePage","target":{"page":0,"stableId":page_id},"degrees":90}),
+    );
+    assert_eq!(rotated["status"], "applied", "{rotated}");
+    let accepted = &rotated["snapshot"];
+    assert_eq!(accepted["scene"]["pages"][0]["geometry"]["rotation"], 90);
+    assert_eq!(accepted["pageState"]["order"][0], *page_id);
+
+    let remove = redaction_request(5, accepted, mark("removeMark", first));
+    let removed = call(native_pdf_redaction, remove.clone());
+    assert_eq!(removed["status"], "redaction", "{removed}");
+    assert_eq!(removed["redaction"]["markCount"], 1);
+    assert_eq!(call(native_pdf_redaction, remove), removed);
+
+    let readback = call(native_pdf_snapshot, bound("snapshot", 5, accepted));
+    assert_eq!(readback["status"], "unseen", "{readback}");
+    assert_eq!(readback["snapshot"], *accepted);
+
+    let missing = call(
+        native_pdf_redaction,
+        redaction_request(6, accepted, mark("removeMark", first)),
+    );
+    assert_eq!(missing["code"], "FLOW_PDF_NATIVE_REDACTION_MARK_INVALID");
+    let remaining = call(
+        native_pdf_redaction,
+        redaction_request(6, accepted, mark("removeMark", second)),
+    );
+    assert_eq!(remaining["redaction"]["markCount"], 0, "{remaining}");
+}
+
+#[test]
 fn redaction_wire_releases_only_the_verified_exact_output() {
     let source = redaction_pdf(100);
     let opened = call(native_pdf_open, open_request(source.as_bytes()));
