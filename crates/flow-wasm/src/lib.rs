@@ -10,8 +10,9 @@ use flow_core::pdf::native::{
     NativeFieldRefusal, NativeFieldView, NativeObjectCommand, NativeObjectKind,
     NativeObjectOperation, NativeObjectPage, NativeObjectRefusal, NativePageCommand,
     NativePageState, NativeRedactionCandidateStatus, NativeRedactionMark,
-    NativeRedactionPageEvidence, NativeTextCommand, NativeTextPage, NativeTextRefusal,
-    NativeVerificationLane, NativeVerificationStatus, VersionedNativeRedactionEvidence,
+    NativeRedactionMarkAction, NativeRedactionPageEvidence, NativeTextCommand, NativeTextPage,
+    NativeTextRefusal, NativeVerificationLane, NativeVerificationStatus,
+    VersionedNativeRedactionEvidence,
 };
 use flow_core::pdf::{
     NATIVE_MAX_NOTE_BYTES, NATIVE_REQUEST_HISTORY, NativeBinding, NativeEditError,
@@ -2047,16 +2048,8 @@ struct NativeRegistryEntry {
     open_request_id: u64,
     base_outputs: VecDeque<(u64, [u8; 32])>,
     last_preview: Option<blake3::Hash>,
-    last_mark: Option<NativeRedactionMarkReceipt>,
     last_cancel: Option<blake3::Hash>,
     last_empty_status: Option<blake3::Hash>,
-}
-
-struct NativeRedactionMarkReceipt {
-    request_id: u64,
-    binding: NativeBinding,
-    accepted_hash: [u8; 32],
-    action: NativeWireRedactionAction,
 }
 
 #[derive(Default)]
@@ -2233,7 +2226,6 @@ impl NativeRegistry {
             open_request_id: request_id,
             base_outputs: VecDeque::with_capacity(NATIVE_REQUEST_HISTORY),
             last_preview: None,
-            last_mark: None,
             last_cancel: None,
             last_empty_status: None,
         };
@@ -2260,13 +2252,6 @@ impl NativeRegistry {
                     .session
                     .check_close(binding, request_id)
                     .map_err(|error| error.code())?;
-                if entry
-                    .last_mark
-                    .as_ref()
-                    .is_some_and(|last| request_id <= last.request_id)
-                {
-                    return Err(NativeSessionError::InvalidRequest.code());
-                }
                 let consumed_request = entry.session.snapshot().consumed_request;
                 let entry = self.sessions.swap_remove(index);
                 if self.closed.len() == NATIVE_PDF_SESSIONS {
@@ -2424,24 +2409,23 @@ impl NativeRegistryEntry {
         if current.output_hash != accepted_hash {
             return Err(NATIVE_BINDING);
         }
-        if request_id <= current.consumed_request
-            || self
-                .last_mark
-                .as_ref()
-                .is_some_and(|last| request_id <= last.request_id)
-        {
-            if self.last_mark.as_ref().is_some_and(|last| {
-                last.request_id == request_id
-                    && last.binding == binding
-                    && last.accepted_hash == accepted_hash
-                    && last.action == action
-            }) {
+        let map_error = |error| native_session_error_code(error, NATIVE_POSTCONDITION);
+        let mark_action = match action {
+            AddMark { page_id, rect } => Some(NativeRedactionMarkAction::Add { page_id, rect }),
+            RemoveMark { page_id, rect } => {
+                Some(NativeRedactionMarkAction::Remove { page_id, rect })
+            }
+            ClearMarks {} => Some(NativeRedactionMarkAction::Clear),
+            _ => None,
+        };
+        if let Some(mark_action) = mark_action {
+            if self
+                .session
+                .is_redaction_mark_replay(binding, request_id, accepted_hash, mark_action)
+                .map_err(map_error)?
+            {
                 return Ok(result);
             }
-            return Err(NativeSessionError::InvalidRequest.code());
-        }
-        let map_error = |error| native_session_error_code(error, NATIVE_POSTCONDITION);
-        if matches!(action, AddMark { .. } | RemoveMark { .. } | ClearMarks {}) {
             if self.session.redaction_candidate_status().is_some() {
                 return Err(NATIVE_REDACTION_BUSY);
             }
@@ -2453,8 +2437,9 @@ impl NativeRegistryEntry {
             {
                 return Err(NATIVE_RECONCILE);
             }
-            match action {
-                AddMark { page_id, rect } | RemoveMark { page_id, rect } => {
+            match mark_action {
+                NativeRedactionMarkAction::Add { page_id, rect }
+                | NativeRedactionMarkAction::Remove { page_id, rect } => {
                     let geometry = self
                         .session
                         .redaction_mark_geometry(page_id)
@@ -2464,31 +2449,33 @@ impl NativeRegistryEntry {
                         geometry,
                         rect,
                     };
-                    if matches!(action, AddMark { .. }) {
+                    if matches!(mark_action, NativeRedactionMarkAction::Add { .. }) {
                         self.session
-                            .add_redaction_mark(binding, mark)
+                            .add_redaction_mark(binding, request_id, mark)
                             .map_err(map_error)?;
                     } else {
                         self.session
-                            .remove_redaction_mark(binding, mark)
+                            .remove_redaction_mark(binding, request_id, mark)
                             .map_err(map_error)?;
                     }
                 }
-                _ => self
+                NativeRedactionMarkAction::Clear => self
                     .session
-                    .clear_redaction_marks(binding)
+                    .clear_redaction_marks(binding, request_id)
                     .map_err(map_error)?,
             }
-            self.last_mark = Some(NativeRedactionMarkReceipt {
-                request_id,
-                binding,
-                accepted_hash,
-                action,
-            });
             self.last_cancel = None;
             self.last_empty_status = None;
             result.mark_count = self.session.redaction_marks().len();
             return Ok(result);
+        }
+        if request_id <= current.consumed_request
+            || self
+                .session
+                .last_redaction_mark()
+                .is_some_and(|last| request_id <= last.request_id)
+        {
+            return Err(NativeSessionError::InvalidRequest.code());
         }
         match &action {
             Stage {} => {
@@ -2638,12 +2625,19 @@ impl NativeRegistryEntry {
             return false;
         }
         match redaction.action {
-            AddMark | RemoveMark | ClearMarks => self.last_mark.as_ref().is_some_and(|last| {
-                last.binding == binding
-                    && last.request_id == request_id
-                    && last.accepted_hash == redaction.accepted_hash
-                    && last.action.kind() == redaction.action
-            }),
+            AddMark | RemoveMark | ClearMarks => {
+                self.session.last_redaction_mark().is_some_and(|last| {
+                    let kind = match last.action {
+                        NativeRedactionMarkAction::Add { .. } => AddMark,
+                        NativeRedactionMarkAction::Remove { .. } => RemoveMark,
+                        NativeRedactionMarkAction::Clear => ClearMarks,
+                    };
+                    last.binding == binding
+                        && last.request_id == request_id
+                        && last.accepted_hash == redaction.accepted_hash
+                        && kind == redaction.action
+                })
+            }
             Cancel | Status if redaction.verification.is_none() => {
                 let receipt = if redaction.action == Cancel {
                     self.last_cancel
@@ -2691,8 +2685,8 @@ impl NativeRegistryEntry {
             }
             NativeRequestLookup::Unseen
                 if self
-                    .last_mark
-                    .as_ref()
+                    .session
+                    .last_redaction_mark()
                     .is_some_and(|last| request_id <= last.request_id) =>
             {
                 return Err(NATIVE_RECONCILE);

@@ -148,10 +148,12 @@ fn bounded_session_and_standalone_verifier_agree_on_marked_pages() {
         mark(order[0], [11_000, 11_000, 13_000, 13_000]),
         mark(order[0], [14_000, 14_000, 16_000, 16_000]),
     ];
-    for &mark in &marks {
-        session.add_redaction_mark(binding, mark).unwrap();
+    for (index, &mark) in marks.iter().enumerate() {
+        session
+            .add_redaction_mark(binding, index as u64 + 1, mark)
+            .unwrap();
     }
-    let NativeRedactionStage::Pending(candidate) = session.stage_redaction(binding, 1).unwrap()
+    let NativeRedactionStage::Pending(candidate) = session.stage_redaction(binding, 4).unwrap()
     else {
         panic!("expected pending status");
     };
@@ -163,25 +165,25 @@ fn bounded_session_and_standalone_verifier_agree_on_marked_pages() {
         session.redaction_candidate_status().unwrap().affected_pages,
         expected
     );
-    let evidence = session.verify_redaction(binding, 1).unwrap();
+    let evidence = session.verify_redaction(binding, 4).unwrap();
     assert!(evidence.checks_passed(), "{evidence:?}");
     assert_eq!(evidence.identity().unwrap().affected_pages(), expected);
     for lane in [evidence.structure(), evidence.text(), evidence.raster()] {
         assert_eq!(lane.covered_pages(), expected);
     }
 
-    let receipt = session.publish_redaction(binding, 1).unwrap();
+    let receipt = session.publish_redaction(binding, 4).unwrap();
     assert_eq!(receipt.output_hash, candidate.candidate_hash);
     let bytes = session.redacted_output_bytes().unwrap();
     let context = NativeRedactionContext {
         binding,
-        request_id: 1,
+        request_id: 4,
         accepted_hash: binding.origin_hash,
         page_order: &order,
     };
     let policy = NativeRedactionPolicy {
         binding,
-        request_id: 1,
+        request_id: 4,
         candidate_hash: candidate.candidate_hash,
         marks: &marks,
     };
@@ -811,12 +813,12 @@ fn session_redacts_embedded_font_text_and_publishes_only_the_verified_hash() {
     let base = session.snapshot().binding;
     let order = session.snapshot().page_state.order.clone();
     let mark = mark(order[0], [11_000, 11_000, 13_000, 13_000]);
-    session.add_redaction_mark(base, mark).unwrap();
-    let NativeRedactionStage::Pending(candidate) = session.stage_redaction(base, 1).unwrap() else {
+    session.add_redaction_mark(base, 1, mark).unwrap();
+    let NativeRedactionStage::Pending(candidate) = session.stage_redaction(base, 2).unwrap() else {
         panic!("expected pending status");
     };
-    assert!(session.verify_redaction(base, 1).unwrap().checks_passed());
-    let receipt = session.publish_redaction(base, 1).unwrap();
+    assert!(session.verify_redaction(base, 2).unwrap().checks_passed());
+    let receipt = session.publish_redaction(base, 2).unwrap();
     let bytes = session.redacted_output_bytes().unwrap();
     assert_eq!(receipt.output_hash, candidate.candidate_hash);
     assert_eq!(blake3::hash(bytes).as_bytes(), &candidate.candidate_hash);
@@ -826,13 +828,13 @@ fn session_redacts_embedded_font_text_and_publishes_only_the_verified_hash() {
     let context = NativeRedactionContext {
         binding: base,
         accepted_hash: base.origin_hash,
-        request_id: 1,
+        request_id: 2,
         page_order: &order,
     };
     let policy = NativeRedactionPolicy {
         binding: base,
         candidate_hash: candidate.candidate_hash,
-        request_id: 1,
+        request_id: 2,
         marks: &[mark],
     };
     let evidence = session.accepted_redaction_evidence().unwrap();
