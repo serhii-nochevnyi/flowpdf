@@ -10,7 +10,15 @@ fn fixture(
     extra_mapping: &str,
     shared: bool,
 ) -> Vec<u8> {
-    build_fixture(content, simple, embedded, extra_mapping, shared, false)
+    build_fixture(
+        content,
+        simple,
+        embedded,
+        extra_mapping,
+        shared,
+        false,
+        "/F1",
+    )
 }
 
 fn build_fixture(
@@ -20,6 +28,7 @@ fn build_fixture(
     extra_mapping: &str,
     shared: bool,
     private_alias: bool,
+    font_alias: &str,
 ) -> Vec<u8> {
     fn stream(dict: &str, bytes: &[u8]) -> Vec<u8> {
         let mut object = format!("<< /Length {} {dict} >>\nstream\n", bytes.len()).into_bytes();
@@ -47,7 +56,7 @@ fn build_fixture(
         "/CIDInit /ProcSet findresource begin 12 dict begin begincmap\n/CMapType 2 def\n/CMapName /Example def\n1 begincodespacerange\n<{low}> <{high}>\nendcodespacerange\n{count} beginbfchar\n{mappings}\n{extra_mapping}\nendbfchar\nendcmap\nCMapName currentdict /CMap defineresource pop\nend end"
     );
     let make_page = |contents: &str| {
-        format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 5 0 R >> >> /Contents {contents} >>").into_bytes()
+        format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << {font_alias} 5 0 R >> >> /Contents {contents} >>").into_bytes()
     };
     let mut objects = vec![
         b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
@@ -97,6 +106,24 @@ const SIMPLE_CONTENT: &str =
 
 fn open(bytes: &[u8]) -> NativePdfSession {
     NativePdfSession::open_scoped(bytes, NativeEditLimits::default(), [7; 16]).unwrap()
+}
+
+#[test]
+fn native_text_declines_font_aliases_outside_the_exact_retained_name_profile() {
+    let content = "BT /Fé 12 Tf 20 100 Td <0001> Tj ET";
+    let bytes = build_fixture(content, false, true, "", false, false, "/F#C3#A9");
+    let reader = open_pdf(&bytes, PdfReaderLimits::default()).unwrap();
+    let scene = read_pdf_scene(&reader, &PdfSceneRequest::default()).unwrap();
+    assert!(matches!(
+        scene.pages[0].elements.as_slice(),
+        [PdfSceneElement::Text { value }] if value.text == "A"
+    ));
+
+    let session = open(&bytes);
+    let text = &session.snapshot().scene.text_pages[0];
+    assert!(text.islands.is_empty());
+    assert_eq!(text.refusal, Some(NativeTextRefusal::Layout));
+    assert_eq!(session.output_bytes(), bytes);
 }
 
 #[test]
@@ -249,7 +276,7 @@ fn core_refuses_replacement_when_recognition_workspace_is_exhausted() {
 #[test]
 fn core_refuses_replacement_when_shared_decoded_budget_is_exhausted() {
     let content = format!("{}{CID_CONTENT}", " ".repeat(1024));
-    let bytes = build_fixture(&content, false, true, "", false, true);
+    let bytes = build_fixture(&content, false, true, "", false, true, "/F1");
     let limits = NativeEditLimits {
         max_total_decoded_bytes: 2 * include_bytes!("../data/NotoSans-Regular.ttf").len() + 4500,
         ..NativeEditLimits::default()
@@ -357,7 +384,7 @@ fn core_refuses_unproven_fonts_mappings_and_layout() {
 
 #[test]
 fn private_alias_keeps_its_original_stream_during_copy_on_write() {
-    let bytes = build_fixture(CID_CONTENT, false, true, "", false, true);
+    let bytes = build_fixture(CID_CONTENT, false, true, "", false, true, "/F1");
     let mut session = open(&bytes);
     let binding = session.snapshot().binding;
     let island = session.snapshot().scene.text_pages[0].islands[0].id;
