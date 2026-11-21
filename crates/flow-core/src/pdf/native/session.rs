@@ -1462,6 +1462,7 @@ impl NativePdfSession {
                 )?;
                 let expected_bytes = expected.retained_bytes();
                 drop(expected);
+                scene_limit += expected_bytes;
                 scene_remaining += expected_bytes;
                 (NativeNoteId(0), None, object)
             }
@@ -1892,6 +1893,50 @@ mod tests {
         )
         .unwrap();
         let state = page_state(&fresh, &session.ids, None, &scene, &mut remaining).unwrap();
+        assert_eq!(fields, session.snapshot.fields);
+        assert_eq!(state, session.snapshot.page_state);
+        assert_eq!(session.remaining_retained, remaining);
+    }
+
+    #[test]
+    fn accepted_object_balance_matches_fresh_projection() {
+        let source = super::super::tests::redaction_fixture("10 10 10 10 re f 40 40 10 10 re f");
+        let limits = NativeEditLimits::default();
+        let mut session = NativePdfSession::open_scoped(&source, limits, [7; 16]).unwrap();
+        let page = &session.snapshot.scene.object_pages[0];
+        assert_eq!(page.objects.len(), 2);
+        let target = objects::NativeObjectTarget {
+            page: page.page,
+            id: page.objects[0].id,
+            profile: page.objects[0].profile,
+        };
+        let kept_bounds = page.objects[1].bounds;
+        let receipt = session
+            .apply_object(
+                session.snapshot.binding,
+                1,
+                &NativeObjectCommand::RemoveObject { target },
+            )
+            .unwrap();
+        assert_eq!(receipt.binding.revision, 1);
+        let objects = &session.snapshot.scene.object_pages[0].objects;
+        assert_eq!(objects.len(), 1);
+        assert_eq!(objects[0].bounds, kept_bounds);
+
+        let fresh = NativePdfGraph::open(session.output_bytes(), limits).unwrap();
+        let (scene, mut remaining) = accepted_scene(
+            &fresh,
+            &session.ids,
+            receipt.output_hash,
+            receipt.binding,
+            source.len(),
+            1,
+            fresh.remaining_retained(),
+        )
+        .unwrap();
+        let fields = forms::project(&fresh, &scene.pages, receipt.binding, &mut remaining).unwrap();
+        let state = page_state(&fresh, &session.ids, None, &scene, &mut remaining).unwrap();
+        assert_eq!(scene.object_pages, session.snapshot.scene.object_pages);
         assert_eq!(fields, session.snapshot.fields);
         assert_eq!(state, session.snapshot.page_state);
         assert_eq!(session.remaining_retained, remaining);
