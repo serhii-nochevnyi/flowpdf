@@ -464,17 +464,6 @@ fn reference(dict: &Dict, key: &str) -> Result<Ref, NativeEditError> {
         .ok_or(Malformed)
 }
 
-fn array_refs(
-    graph: &NativePdfGraph,
-    value: &PdfValue,
-    work: &mut usize,
-) -> Result<Vec<Ref>, NativeEditError> {
-    reference_array(graph, value, work)?
-        .iter()
-        .map(|value| value.as_reference().ok_or(Unsupported))
-        .collect()
-}
-
 fn reference_array<'a>(
     graph: &'a NativePdfGraph,
     value: &'a PdfValue,
@@ -623,15 +612,7 @@ fn edit_kids<T>(
     })
 }
 
-pub(super) fn annotations(graph: &NativePdfGraph, page: Ref) -> Result<Vec<Ref>, NativeEditError> {
-    dict(graph, page)?
-        .get("Annots")
-        .map_or(Ok(Vec::new()), |annots| {
-            array_refs(graph, annots, &mut graph.remaining_work())
-        })
-}
-
-fn annotation_refs<'a>(
+pub(super) fn annotation_refs<'a>(
     graph: &'a NativePdfGraph,
     page: Ref,
     work: &mut usize,

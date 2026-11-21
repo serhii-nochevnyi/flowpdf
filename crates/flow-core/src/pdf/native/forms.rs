@@ -15,7 +15,7 @@ use super::super::{
 };
 use super::{
     NativeBinding, NativeEditError, NativeSessionError,
-    graph::{NativePdfGraph, collect_refs, spend},
+    graph::{NativePdfGraph, collect_refs, spend, visit_refs},
     pages::{self, dict, dict_mut, refs},
     text::FieldFont,
 };
@@ -1113,6 +1113,10 @@ fn replace_annots(
     widget: Ref,
     add: bool,
 ) -> Result<(), NativeSessionError> {
+    let work_budget = graph.remaining_work();
+    let available = graph.remaining_retained();
+    let mut work = work_budget;
+    let mut remaining = available;
     if let Some(slot) = dict(graph, page)?.get("Annots") {
         if pages::exclusive_container(graph, page, slot)?
             .as_array()
@@ -1120,36 +1124,60 @@ fn replace_annots(
         {
             return Err(Reference.into());
         }
+        if let Some(container) = slot.as_reference() {
+            if form.trailer_refs.contains(&container) {
+                return Err(Reference.into());
+            }
+            let mut occurrences = 0;
+            visit_refs(&graph.objects[&page], &mut work, &mut |reference| {
+                occurrences += usize::from(reference == container);
+                Ok(())
+            })?;
+            if occurrences != 1 {
+                return Err(Reference.into());
+            }
+        }
     }
-    if let Some(container) = dict(graph, page)?
+    let source = pages::annotation_refs(graph, page, &mut work)?;
+    let direct_slots = dict(graph, page)?
         .get("Annots")
-        .and_then(Value::as_reference)
-        && (form.trailer_refs.contains(&container)
-            || !singular(
-                &owner_refs(
-                    graph,
-                    page,
-                    &mut graph.remaining_work(),
-                    graph.remaining_retained(),
-                )?,
-                container,
-            ))
-    {
-        return Err(Reference.into());
-    }
-    let mut annots = pages::annotations(graph, page)?;
-    graph.reserve_page_copy(page)?;
-    graph.charge_page_work(annots.len())?;
+        .and_then(Value::as_array)
+        .map_or(0, <[_]>::len);
+    let keep = |reference| add || reference != widget;
+    let count = source.iter().try_fold(usize::from(add), |count, value| {
+        let reference = value.as_reference().ok_or(NativeEditError::Unsupported)?;
+        count
+            .checked_add(usize::from(keep(reference)))
+            .ok_or(NativeEditError::Budget)
+    })?;
+    spend(&mut work, source.len())?;
+    graph.reserve_page_value(page, &mut work, &mut remaining)?;
+    let installed_bytes = count
+        .saturating_sub(direct_slots)
+        .checked_mul(size_of::<Value>())
+        .ok_or(NativeEditError::Budget)?;
+    spend(&mut remaining, installed_bytes)?;
+    let mut annots = Vec::new();
+    annots
+        .try_reserve_exact(count)
+        .map_err(|_| NativeEditError::Budget)?;
+    annots.extend(
+        source
+            .iter()
+            .filter_map(Value::as_reference)
+            .filter(|&reference| keep(reference))
+            .map(Value::Reference),
+    );
     if add {
-        annots.push(widget);
-    } else {
-        annots.retain(|&entry| entry != widget);
+        annots.push(Value::Reference(widget));
     }
+    graph.charge_page_work(work_budget - work)?;
+    graph.charge_page_retained(available - remaining)?;
     let page = dict_mut(graph, page)?;
     if annots.is_empty() {
         page.remove("Annots");
     } else {
-        page.insert("Annots".into(), refs(annots));
+        page.insert("Annots".into(), Value::Array(annots));
     }
     Ok(())
 }
@@ -1812,6 +1840,95 @@ mod tests {
                 assert_eq!(graph.objects.len(), objects);
                 assert_eq!(graph.remaining_retained(), remaining);
                 assert_eq!(graph.remaining_decoded(), decoded);
+            }
+        }
+    }
+
+    #[test]
+    fn annots_reserve_the_installed_slots_and_work_before_replacement() {
+        let source = redaction_fixture("");
+        for (indirect, add) in [(false, false), (false, true), (true, false), (true, true)] {
+            for (retained_shortfall, work_shortfall) in [(0, 0), (1, 0), (0, 1)] {
+                let mut graph = NativePdfGraph::open(&source, NativeEditLimits::default()).unwrap();
+                let page = graph.pages[0];
+                let note =
+                    pages::allocate(&mut graph, dictionary([("Subtype", name("Text"))])).unwrap();
+                let allocate_widget = |graph: &mut NativePdfGraph| {
+                    pages::allocate(graph, dictionary([("Subtype", name("Widget"))])).unwrap()
+                };
+                let existing_widget = (!add).then(|| allocate_widget(&mut graph));
+                let old = refs(std::iter::once(note).chain(existing_widget));
+                let old = if indirect {
+                    Value::Reference(pages::allocate_value(&mut graph, old).unwrap())
+                } else {
+                    old
+                };
+                dict_mut(&mut graph, page)
+                    .unwrap()
+                    .insert("Annots".into(), old.clone());
+                graph.refresh_page_graph(&BTreeSet::new()).unwrap();
+                let widget = existing_widget.unwrap_or_else(|| allocate_widget(&mut graph));
+                let available = graph.remaining_retained();
+                let mut remaining = available;
+                let available_work = graph.remaining_work();
+                let mut work = available_work;
+                let form = load_form(&graph, &mut work, &mut remaining).unwrap();
+                remaining = available;
+                work = available_work;
+                if indirect {
+                    visit_refs(&graph.objects[&page], &mut work, &mut |_| Ok(())).unwrap();
+                }
+                let slots = pages::annotation_refs(&graph, page, &mut work).unwrap();
+                spend(&mut work, slots.len()).unwrap();
+                graph
+                    .reserve_page_value(page, &mut work, &mut remaining)
+                    .unwrap();
+                let added_slots = match (indirect, add) {
+                    (true, _) => 1 + usize::from(add),
+                    (false, true) => 1,
+                    (false, false) => 0,
+                };
+                let needed = available - remaining + added_slots * size_of::<Value>();
+                let needed_work = available_work - work;
+                graph
+                    .charge_page_retained(available - needed + retained_shortfall)
+                    .unwrap();
+                graph.charge_page_work(work + work_shortfall).unwrap();
+
+                let result = replace_annots(&mut graph, &form, page, widget, add);
+                let annots = &dict(&graph, page).unwrap()["Annots"];
+                if retained_shortfall == 0 && work_shortfall == 0 {
+                    result.unwrap();
+                    let installed = annots.as_array().unwrap();
+                    assert_eq!(installed.len(), 1 + usize::from(add));
+                    assert_eq!(installed[0].as_reference(), Some(note));
+                    assert_eq!(
+                        installed.get(1).and_then(Value::as_reference),
+                        add.then_some(widget)
+                    );
+                    assert_eq!(graph.remaining_retained(), 0);
+                    assert_eq!(graph.remaining_work(), 0);
+                } else {
+                    assert_eq!(result, Err(NativeSessionError::Budget));
+                    if indirect {
+                        assert_eq!(annots.as_reference(), old.as_reference());
+                    } else {
+                        let retained = annots.as_array().unwrap();
+                        assert_eq!(retained.len(), 2 - usize::from(add));
+                        assert_eq!(retained[0].as_reference(), Some(note));
+                        assert_eq!(
+                            retained.get(1).and_then(Value::as_reference),
+                            existing_widget
+                        );
+                    }
+                    assert_eq!(graph.remaining_retained(), needed - retained_shortfall);
+                    assert_eq!(graph.remaining_work(), needed_work - work_shortfall);
+                }
+                if let Some(old_array) = old.as_reference() {
+                    let retained = graph.objects[&old_array].as_array().unwrap();
+                    assert_eq!(retained.len(), 2 - usize::from(add));
+                    assert_eq!(retained[0].as_reference(), Some(note));
+                }
             }
         }
     }
