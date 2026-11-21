@@ -262,6 +262,70 @@ test('definitive application refusals fail fixture comparison while missing targ
   }
 })
 
+test('a verified text capability refusal contradicts an admitted fixture target', (t) => {
+  const source = loadFixtures().find(({ id }) => id === 'edit-families')
+  const admitted = source.spec.operations.find(({ operation }) => operation === 'replaceText')
+  const expectedRefusal = source.spec.operations.find(({ operation }) => operation === 'replaceTextAbsentCode')
+  const { page, sourceText, baselinePt: [x, y] } = admitted.request.target
+  const targetPage = page - 1
+  const island = {
+    id: Array(32).fill(1), text: sourceText, profile: 'identityHCidFontType2', operator: 'Tj', maxAdvance: 20_000,
+    bounds: [x * 1000, (y - 1) * 1000, (x + 10) * 1000, (y + 1) * 1000],
+  }
+  const refused = { page: targetPage, islands: [], refusal: expectedRefusal.outcome }
+  const projected = (islands) => [{ page: targetPage, islands, refusal: null }]
+  const { json } = structuralReadback(admitted.pages)
+  const cases = [
+    ['target page refused', admitted, [refused], 'fail', 'closed'],
+    ['target page refused with failed close', admitted, [refused], 'fail', 'failed'],
+    ['projection omitted', admitted, undefined, 'unavailable', 'closed'],
+    ['another page refused', admitted, [{ ...refused, page }], 'unavailable', 'closed'],
+    ['no island matched', admitted, projected([{ ...island, text: 'A' }]), 'unavailable', 'closed'],
+    ['multiple islands matched', admitted, projected([island, { ...island, id: Array(32).fill(2) }]),
+      'unavailable', 'closed'],
+    ['projection refusal for an expected command refusal', expectedRefusal, [refused], 'unavailable', 'closed'],
+  ]
+  for (const [label, operation, textPages, status, closeStatus] of cases) {
+    const directory = scratchDirectory(t, 'flowpdf-text-capability-')
+    const requests = []
+    const verified = []
+    const compared = []
+    const respond = (reply) => (request) => {
+      const { operation, requestId, originStoreHash } = JSON.parse(request)
+      requests.push(operation)
+      return JSON.stringify({ operation, requestId, ...reply(originStoreHash) })
+    }
+    const wasm = {
+      native_pdf_open: respond((originStoreHash) => ({
+        status: 'opened', snapshot: {
+          originStoreHash, binding: { revision: 0 }, outputHash: [0], outputHex: source.input.toString('hex'),
+          scene: { textPages },
+        },
+      })),
+      native_pdf_close: respond(() => ({ status: closeStatus })),
+      verify_native_pdf_response: (response) => {
+        verified.push(JSON.parse(response).operation)
+        return true
+      },
+    }
+    const evidence = { status: 'unavailable', fixtures: [] }
+    compareFixtures([{ ...source, spec: { ...source.spec, operations: [operation] } }], wasm, directory,
+      (check, args) => {
+        compared.push([check, basename(args.at(-1))])
+        return Buffer.from(JSON.stringify(json))
+      }, evidence)
+    assert.equal(evidence.status, status, label)
+    assert.equal(evidence.reason, status === 'fail' ? 'native-operation-target-refused' : 'native-operation-target', label)
+    assert.equal(evidence.fixtures[0].operations[0].status, status, label)
+    assert.deepEqual([externalExitCode(evidence.status), externalExitCode(evidence.status, true)],
+      status === 'fail' ? [1, 1] : [0, 2], label)
+    assert.deepEqual(requests, ['open', 'close'], label)
+    assert.deepEqual(verified, requests, label)
+    assert.deepEqual(compared, [['structure', 'source.pdf']], label)
+    assert.deepEqual(readdirSync(directory), ['source.pdf'], label)
+  }
+})
+
 test('redaction refusal preserves the verifier classification through bounded cleanup', (t) => {
   const redaction = loadFixtures().find(({ id }) => id === 'redaction')
   const { input, sourceHash, spec } = redaction
