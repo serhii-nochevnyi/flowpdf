@@ -277,43 +277,40 @@ function widgetReference(input, page, fields, policy) {
   return Buffer.concat([input, Buffer.from(revision, 'ascii')])
 }
 
-export function compareRaster(page, policy, actual, source, glyphReference) {
+export function compareRaster(page, policy, actual, source, glyphReference, imagePaintCount = 0) {
   const { widthPx: width, heightPx: height, rotation } = page
   const rule = page.raster ?? page
   const size = width * height * 3
   if (![width, height].every((dimension) => Number.isSafeInteger(dimension) && dimension > 0) ||
     size > byteLimit || actual.length !== size) return false
   if (rule.comparison === 'equal-to-source' || rule.comparison === 'source-only') return actual.equals(source)
-  if (rule.comparison === 'source-transformed') {
-    if (source?.length !== size) return false
-    for (let y = 0; y < height; y++) {
-      for (let x = 0; x < width; x++) {
-        const index = (y * width + x) * 3
-        const previous = ((width - 1 - x) * height + y) * 3
-        if (!actual.subarray(index, index + 3).equals(source.subarray(previous, previous + 3))) return false
-      }
-    }
-    return true
-  }
+  if (rule.comparison === 'source-transformed') return actual.equals(source)
   const analytic = rule.comparison === 'analytic-full-page'
   const blank = analytic && rule.fills.length === 0
   if ((!analytic && rule.comparison !== 'source-with-patches') || (!blank && rotation !== 0)) return false
   if (!analytic && source?.length !== size) return false
-  const expected = analytic ? Buffer.alloc(size) : Buffer.from(source)
   const paints = (analytic ? rule.fills : rule.patches).map((paint) => ({
     ...paint, bounds: paintBounds(paint, page, policy.dpi / 72),
   }))
   if (paints.some(({ glyphRun }) => glyphRun && glyphReference?.length !== size)) return false
-  for (let y = 0; y < height; y++) {
-    for (let x = 0; x < width; x++) {
-      const index = (y * width + x) * 3
-      const paint = paints.findLast(({ bounds: [x0, y0, x1, y1] }) => x >= x0 && x < x1 && y >= y0 && y < y1)
-      const rgb = paint?.glyphRun ? glyphReference.subarray(index, index + 3) : paint?.rgb ??
-        (analytic ? policy.backgroundRgb : source.subarray(index, index + 3))
-      expected.set(rgb, index)
+  function expectedPixels(terminalPixels) {
+    const expected = analytic ? Buffer.alloc(size) : Buffer.from(source)
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        const index = (y * width + x) * 3
+        const paint = paints.findLast(({ bounds: [x0, y0, x1, y1] }, index) => {
+          const extension = Number(index < terminalPixels)
+          return x >= x0 && x < x1 + extension && y >= y0 && y < y1 + extension
+        })
+        const rgb = paint?.glyphRun ? glyphReference.subarray(index, index + 3) : paint?.rgb ??
+          (analytic ? policy.backgroundRgb : source.subarray(index, index + 3))
+        expected.set(rgb, index)
+      }
     }
+    return expected
   }
-  if (analytic && digest(expected) !== rule.sha256Rgb8) return false
+  if (analytic && digest(expectedPixels(0)) !== rule.sha256Rgb8) return false
+  const expected = expectedPixels(imagePaintCount)
   if (blank) return actual.equals(expected)
   for (let y = 0; y < height; y++) {
     for (let x = 0; x < width; x++) {
@@ -553,6 +550,18 @@ function pdfString(value) {
   return undefined
 }
 
+export function parseQpdfJson(buffer) {
+  const tokens = /"(?:[^"\\]|\\[\s\S])*"|([[:,][ \t\r\n]*)([+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+))(?=[ \t\r\n]*[,}\]])/g
+  const json = buffer.toString('utf8').replace(tokens, (token, separator, number) => {
+    if (!number) return token
+    const negative = number.startsWith('-')
+    const [integer, fraction] = number.replace(/^[+-]/, '').split('.')
+    const whole = integer.replace(/^0+(?=\d)/, '') || '0'
+    return separator + (negative ? '-' : '') + whole + (fraction ? '.' + fraction : '')
+  })
+  return JSON.parse(json)
+}
+
 export function pdfStructure(json) {
   const [{ jsonversion }, objects] = json.qpdf
   requireMatch(jsonversion === 2 && json.pages.length <= 16, 'structure-format')
@@ -723,6 +732,7 @@ function compareFixture(fixture, wasm, directory, invoke, observations) {
   const inputPath = join(directory, 'source.pdf')
   const outputPath = join(directory, 'output.pdf')
   const glyphPath = join(directory, 'glyph-reference.pdf')
+  const rotatedPath = join(directory, 'rotation-reference.pdf')
   const widgetPath = join(directory, 'widget-reference.pdf')
   const alternatePath = join(directory, 'checkbox-alternate.pdf')
   writeFileSync(inputPath, fixture.input, { mode: 0o600 })
@@ -730,7 +740,7 @@ function compareFixture(fixture, wasm, directory, invoke, observations) {
   const observation = { fixture: fixture.id, sourceHash: fixture.sourceHash,
     expectationHash: fixture.expectationHash, rasterVersion: spec.raster.version, dpi: spec.raster.dpi, operations: [] }
   observations.push(observation)
-  const inspect = (path) => pdfStructure(JSON.parse(invoke('structure', ['qpdf', '--json=2', '--json-stream-data=none',
+  const inspect = (path) => pdfStructure(parseQpdfJson(invoke('structure', ['qpdf', '--json=2', '--json-stream-data=none',
     '--json-key=qpdf', '--json-key=pages', '--decode-level=none', path])))
   const source = inspect(inputPath)
   const showObject = (path, ref, ...args) => {
@@ -771,16 +781,20 @@ function compareFixture(fixture, wasm, directory, invoke, observations) {
         evidence.pageChecks.push(pageEvidence)
         const text = invoke('text', ['pdftotext', '-f', num, '-l', num, '-enc', 'UTF-8', '-nopgbrk', '-raw',
           outputPath, '-']).toString('utf8').replace(/\s+/gu, ' ').trim()
-        requireMatch(text === page.text, 'page-text')
+        const widgets = (operation.fieldReadback ?? []).filter((field) => field.page === page.page)
+        const fieldText = widgets.filter((field) => !field.appearanceState).map(({ value }) => value)
+        const expectedText = [page.text, ...fieldText].filter(Boolean).join(' ')
+        requireMatch(text === expectedText, 'page-text')
         pageEvidence.text = 'pass'
         const sourcePage = page.sourcePage === undefined ? page.page : page.sourcePage
         const comparison = page.raster?.comparison ?? page.comparison
-        const turned = comparison === 'source-transformed'
         let reference
-        if (sourcePage !== null && comparison !== 'analytic-full-page') {
+        if (sourcePage !== null && comparison === 'source-transformed') {
+          invoke('rotation-reference', ['qpdf', `--rotate=${page.rotation}:${sourcePage}`, inputPath, rotatedPath])
+          reference = raster(rotatedPath, sourcePage, page.widthPx, page.heightPx)
+        } else if (sourcePage !== null && comparison !== 'analytic-full-page') {
           if (!sources.has(sourcePage)) {
-            sources.set(sourcePage, raster(inputPath, sourcePage, turned ? page.heightPx : page.widthPx,
-              turned ? page.widthPx : page.heightPx))
+            sources.set(sourcePage, raster(inputPath, sourcePage, page.widthPx, page.heightPx))
           }
           reference = sources.get(sourcePage)
         }
@@ -797,9 +811,16 @@ function compareFixture(fixture, wasm, directory, invoke, observations) {
           glyphReference = raster(glyphPath, sourcePage, page.widthPx, page.heightPx)
         }
         const contentRaster = raster(outputPath, page.page, page.widthPx, page.heightPx)
-        requireMatch(compareRaster(page, spec.raster, contentRaster, reference, glyphReference), 'page-raster')
+        let imagePaintCount = 0
+        if (comparison === 'source-with-patches') {
+          if (operation.operation === 'addImage' || operation.operation === 'replaceImage') imagePaintCount = 1
+          if (operation.operation === 'moveObject' && operation.request.target.kind === 'image') imagePaintCount = 2
+        } else if (operation.operation === 'redact' && comparison === 'analytic-full-page') {
+          imagePaintCount = 2
+        }
+        requireMatch(compareRaster(page, spec.raster, contentRaster, reference, glyphReference, imagePaintCount),
+          'page-raster')
         pageEvidence.raster = 'pass'
-        const widgets = (operation.fieldReadback ?? []).filter((field) => field.page === page.page)
         const vacated = source.fields.filter((field) => field.page === sourcePage &&
           !widgets.some(({ rectPt }) => same(rectPt, field.rectPt)))
         if (widgets.length || vacated.length) {
