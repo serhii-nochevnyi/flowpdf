@@ -807,8 +807,7 @@ impl NativePdfSession {
             &scene,
             &mut scene_remaining,
         )?;
-        // The verified bytes preserve geometry, and matching the accepted order
-        // also preserves the uniqueness of its IDs.
+        // @invariant: Verified bytes preserve geometry and the accepted order proves unique IDs.
         if !state.has_shape_for_count(scene.pages.len())
             || state.order != self.snapshot.page_state.order
         {
