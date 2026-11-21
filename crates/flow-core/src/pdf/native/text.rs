@@ -334,7 +334,12 @@ fn shows(
                 else {
                     return Err(Layout.into());
                 };
-                if name.is_empty() || name.contains('#') || *size <= 0 {
+                if name.is_empty()
+                    || !name
+                        .bytes()
+                        .all(|byte| byte.is_ascii_graphic() && !matches!(byte, b'#' | b'{' | b'}'))
+                    || *size <= 0
+                {
                     return Err(Layout.into());
                 }
                 let raw_name =
