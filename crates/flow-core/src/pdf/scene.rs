@@ -795,9 +795,9 @@ impl<'a> SceneBuilder<'a> {
                     let Some(&last_byte) = stream.data.last() else {
                         continue;
                     };
-                    if let Some((previous_ref, previous_byte, open_comment)) = previous
-                        && !separated_content_streams(&[previous_byte], &stream.data)
-                    {
+                    let uncertain = previous
+                        .filter(|(_, byte, _)| !separated_content_streams(&[*byte], &stream.data));
+                    if let Some((previous_ref, _, open_comment)) = uncertain {
                         if open_comment {
                             self.report_partial(previous_ref);
                             break;
@@ -810,7 +810,14 @@ impl<'a> SceneBuilder<'a> {
                         *content_ref,
                         0,
                         self.page.resources.as_ref(),
-                    )?;
+                    );
+                    let end = match (end, uncertain) {
+                        (Err(PdfReadError::Syntax), Some((previous_ref, _, _))) => {
+                            self.report_partial(previous_ref);
+                            break;
+                        }
+                        (result, _) => result?,
+                    };
                     if end.pending_operands && index + 1 < self.page.contents.len() {
                         // @contract: An operator's operand span refers to its own stream.
                         self.report_partial(*content_ref);
@@ -833,7 +840,9 @@ impl<'a> SceneBuilder<'a> {
                 Err(error) => return Err(error),
             }
         }
-        if !self.report.partial && let Some(object_ref) = unverified_boundary {
+        if !self.report.partial
+            && let Some(object_ref) = unverified_boundary
+        {
             self.report_partial(object_ref);
         }
         let partial = self.report.partial;
