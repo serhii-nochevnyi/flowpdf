@@ -324,6 +324,47 @@ fn mark_requests_order_mutations_without_consuming_document_receipts() {
 }
 
 #[test]
+fn removed_redaction_mark_replays_after_page_rotation() {
+    let source = fixture();
+    let mut session = open(&source);
+    let binding = session.snapshot().binding;
+    let original = mark(&session, 0, [10_000, 10_000, 20_000, 20_000]);
+    session.add_redaction_mark(binding, 1, original).unwrap();
+    let stable_id = session.snapshot().page_state.order[0];
+    let rotate = NativePageCommand::RotatePage {
+        target: NativePageTarget { page: 0, stable_id },
+        degrees: 90,
+    };
+    session.apply_page(binding, 2, &rotate).unwrap();
+
+    let current = session.snapshot().binding;
+    let current_geometry = session.redaction_mark_geometry(original.page_id).unwrap();
+    assert_ne!(current_geometry, original.geometry);
+    assert_eq!(session.redaction_marks(), &[original]);
+    session.remove_redaction_mark(current, 3, original).unwrap();
+    let receipt = session.last_redaction_mark();
+    session.remove_redaction_mark(current, 3, original).unwrap();
+    assert_eq!(session.last_redaction_mark(), receipt);
+    assert_eq!(session.lookup(current, 3), Ok(NativeRequestLookup::Unseen));
+    assert_eq!(
+        session.remove_redaction_mark(
+            current,
+            3,
+            NativeRedactionMark {
+                geometry: current_geometry,
+                ..original
+            }
+        ),
+        Err(NativeSessionError::InvalidRedactionMark)
+    );
+    assert_eq!(
+        session.remove_redaction_mark(binding, 3, original),
+        Err(NativeSessionError::RevisionMismatch)
+    );
+    assert!(session.redaction_marks().is_empty());
+}
+
+#[test]
 fn marks_and_quarantine_keep_accepted_bytes_and_scene_until_exact_publication() {
     let source = fixture();
     let mut session = open(&source);
