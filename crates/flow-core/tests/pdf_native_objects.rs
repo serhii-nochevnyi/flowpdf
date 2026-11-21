@@ -1745,3 +1745,48 @@ fn retained_jpeg_move_preserves_encoded_stream_and_rejects_invalid_profiles() {
         );
     }
 }
+
+#[test]
+fn object_work_refusal_preserves_the_accepted_document() {
+    let source = fixture(b"10 20 30 40 re f\n", true, "", &[]);
+    let tight = NativeEditLimits {
+        max_work: 745,
+        ..NativeEditLimits::default()
+    };
+    let mut session = NativePdfSession::open_scoped(&source, tight, [7; 16]).unwrap();
+    let before = session.snapshot().clone();
+    assert_eq!(objects(&session, 0)[0]["operations"][1], "move");
+    let command = |session: &NativePdfSession| {
+        json!({
+            "kind": "moveObject",
+            "target": target(session, 0, 0),
+            "transform": [1, 0, 0, 1, 10, 0]
+        })
+    };
+    let tight_command = command(&session);
+    assert_eq!(
+        apply(&mut session, tight_command),
+        Err(NativeSessionError::Budget)
+    );
+    assert_eq!(session.output_bytes(), source);
+    assert_eq!(session.origin_bytes(), source);
+    assert_eq!(session.snapshot().binding, before.binding);
+    assert_eq!(session.snapshot().consumed_request, before.consumed_request);
+    assert_eq!(
+        session.lookup(before.binding, 1),
+        Ok(NativeRequestLookup::Unseen)
+    );
+
+    let mut roomy = open(&source);
+    let roomy_command = command(&roomy);
+    apply(&mut roomy, roomy_command).unwrap();
+    assert_eq!(
+        objects(&roomy, 0)[0]["bounds"],
+        json!([20000, 20000, 50000, 60000])
+    );
+    assert_eq!(
+        objects(&roomy, 1)[0]["bounds"],
+        json!([10000, 20000, 40000, 60000])
+    );
+    assert_eq!(roomy.snapshot().consumed_request, 1);
+}
