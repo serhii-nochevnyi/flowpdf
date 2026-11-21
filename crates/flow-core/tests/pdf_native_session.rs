@@ -517,13 +517,20 @@ fn public_scene_keeps_stream_provenance_and_reports_split_operands_after_note_re
     };
 
     let stream = |data: &str| format!("<< /Length {} >>\nstream\n{data}\nendstream", data.len());
-    for split_operand in [false, true] {
+    for (second, third, split_operand) in [
+        (" f Q\n", "10 20 5 5 re f\n", false),
+        (
+            " f Q BT /F1 10 Tf 40 60 Td (A)\n",
+            "Tj ET 10 20 5 5 re f\n",
+            true,
+        ),
+        (
+            " f Q BT /F1 10 Tf 40 60 Td [(A)\n",
+            "] TJ ET 10 20 5 5 re f\n",
+            true,
+        ),
+    ] {
         let first = "q 1 0 0 1 20 30 cm 10 20 5 5 re\n";
-        let (second, third) = if split_operand {
-            (" f Q BT /F1 10 Tf 40 60 Td (A)\n", "Tj ET 10 20 5 5 re f\n")
-        } else {
-            (" f Q\n", "10 20 5 5 re f\n")
-        };
         let source = pdf_with_objects(&[
             "<< /Type /Catalog /Pages 2 0 R >>",
             "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",

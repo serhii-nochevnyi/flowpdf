@@ -537,6 +537,49 @@ fn stroke_readback_reports_collapsed_closing_segments() {
 }
 
 #[test]
+fn shorthand_curve_uses_the_closed_subpath_start_across_streams() {
+    for (curve, partial) in [
+        ("60 70 65 64 v S", false),
+        ("50.004 50 50.004 50 v S", true),
+    ] {
+        let bytes = pdf(vec![
+            (1, b"<< /Type /Catalog /Pages 2 0 R >>".to_vec()),
+            (2, b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec()),
+            (
+                3,
+                b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Contents [4 0 R 5 0 R] >>"
+                    .to_vec(),
+            ),
+            stream(4, "", b"1 w 50 50 m 80 50 l 80 80 l h\n"),
+            stream(5, "", curve.as_bytes()),
+        ]);
+        let reader = open_pdf(&bytes, PdfReaderLimits::default()).unwrap();
+        let scene = read_pdf_scene(&reader, &PdfSceneRequest::default()).unwrap();
+        let page = &scene.pages[0];
+        let [PdfSceneElement::Path { value }] = page.elements.as_slice() else {
+            panic!("missing stroke");
+        };
+        assert!(value.stroke && !value.fill);
+        assert!(matches!(
+            value.commands.get(4),
+            Some(PdfPathCommand::CurveTo { x1, y1, .. }) if x1.raw() == 50 * 64 && y1.raw() == 50 * 64
+        ));
+        assert_eq!(value.provenance.object_ref.object_number, 5);
+        assert_eq!(value.provenance.invocation_path, [1]);
+        assert_eq!(page.partial, partial, "{curve}");
+        assert_eq!(scene.report.partial, partial, "{curve}");
+        if partial {
+            assert!(matches!(
+                page.report.diagnostics.as_slice(),
+                [diagnostic] if diagnostic.code == PdfReadDiagnosticCode::PartialPage
+                    && diagnostic.page_index == Some(0)
+                    && diagnostic.object_number == Some(5)
+            ));
+        }
+    }
+}
+
+#[test]
 fn equivalent_default_crop_keeps_content_clip_visibility_and_diagnostics() {
     for crop in ["", "/CropBox [0 0 200 200]", "/CropBox [-10 -10 210 210]"] {
         let bytes = pdf(vec![
@@ -814,4 +857,85 @@ fn link_resolution_does_not_consume_widget_readback_budget() {
                 && value.value.as_deref() == Some("saved"))
         }));
     }
+}
+
+#[test]
+fn unfinished_text_array_across_page_streams_preserves_committed_paint() {
+    let first = b"10 20 5 5 re f\nBT /F1 12 Tf 20 40 Td [(Hello) 0 0 0\n";
+    let second = b"] TJ ET\n";
+    let fixture = |contents, streams: Vec<_>| {
+        let mut objects = vec![
+            (1, b"<< /Type /Catalog /Pages 2 0 R >>".to_vec()),
+            (2, b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec()),
+            (3, format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Resources << /Font << /F1 6 0 R >> >> /Contents {contents} >>").into_bytes()),
+            (6, b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding /MissingWidth 500 >>".to_vec()),
+        ];
+        objects.extend(streams);
+        pdf(objects)
+    };
+    let limits = PdfReaderLimits {
+        max_array_items: 4,
+        ..Default::default()
+    };
+    let split = fixture(
+        "[4 0 R 5 0 R]",
+        vec![stream(4, "", first), stream(5, "", second)],
+    );
+    let reader = open_pdf(&split, limits.clone()).unwrap();
+    let scene = read_pdf_scene(&reader, &PdfSceneRequest::default()).unwrap();
+    let page = &scene.pages[0];
+    assert!(matches!(
+        page.elements.as_slice(),
+        [PdfSceneElement::Path { value }] if value.fill && value.provenance.object_ref.object_number == 4
+            && value.provenance.invocation_path == [0]
+    ));
+    assert!(page.partial && scene.report.partial);
+    assert!(matches!(
+        page.report.diagnostics.as_slice(),
+        [diagnostic] if diagnostic.code == PdfReadDiagnosticCode::PartialPage
+            && diagnostic.page_index == Some(0)
+            && diagnostic.object_number == Some(4)
+    ));
+
+    let joined = fixture(
+        "4 0 R",
+        vec![stream(4, "", &[first.as_slice(), second].concat())],
+    );
+    let reader = open_pdf(&joined, limits.clone()).unwrap();
+    let scene = read_pdf_scene(&reader, &PdfSceneRequest::default()).unwrap();
+    let page = &scene.pages[0];
+    assert!(matches!(
+        page.elements.as_slice(),
+        [PdfSceneElement::Path { .. }, PdfSceneElement::Text { value }] if value.text == "Hello"
+            && value.provenance.object_ref.object_number == 4
+            && value.provenance.operator.as_deref() == Some("TJ")
+            && value.provenance.invocation_path == [0]
+    ));
+    // Glyph advance rectangles do not bound the painted glyphs.
+    assert!(page.partial && scene.report.partial);
+    assert!(matches!(
+        page.report.diagnostics.as_slice(),
+        [diagnostic] if diagnostic.code == PdfReadDiagnosticCode::PartialPage
+            && diagnostic.page_index == Some(0)
+            && diagnostic.object_number == Some(4)
+    ));
+
+    let truncated = fixture("4 0 R", vec![stream(4, "", first)]);
+    let reader = open_pdf(&truncated, limits.clone()).unwrap();
+    assert!(matches!(
+        read_pdf_scene(&reader, &PdfSceneRequest::default()),
+        Err(PdfReadError::Syntax)
+    ));
+    let over_limit = fixture(
+        "[4 0 R 5 0 R]",
+        vec![
+            stream(4, "", &[first.as_slice(), b"0\n"].concat()),
+            stream(5, "", second),
+        ],
+    );
+    let reader = open_pdf(&over_limit, limits).unwrap();
+    assert!(matches!(
+        read_pdf_scene(&reader, &PdfSceneRequest::default()),
+        Err(PdfReadError::TokenLimit)
+    ));
 }

@@ -591,6 +591,7 @@ struct GraphicsState {
     in_text: bool,
     path: Vec<RawPathCommand>,
     current_point: Option<(LayoutUnit, LayoutUnit)>,
+    subpath_start: Option<(LayoutUnit, LayoutUnit)>,
     clip: SceneClip,
     line_width: Option<f64>,
     miter_limit: Option<f64>,
@@ -623,6 +624,7 @@ impl GraphicsState {
             in_text: false,
             path: Vec::new(),
             current_point: None,
+            subpath_start: None,
             clip: SceneClip {
                 bounds,
                 rectangular: true,
@@ -811,6 +813,7 @@ impl<'a> SceneBuilder<'a> {
                         *content_ref,
                         0,
                         self.page.resources.as_ref(),
+                        index + 1 < self.page.contents.len(),
                     );
                     let end = match (end, uncertain) {
                         (Err(PdfReadError::Syntax), Some((previous_ref, _, _))) => {
@@ -863,6 +866,7 @@ impl<'a> SceneBuilder<'a> {
         object_ref: PdfObjectRef,
         depth: usize,
         resources: Option<&PdfValue>,
+        has_next_page_stream: bool,
     ) -> Result<ContentStreamEnd, PdfReadError> {
         if depth > self.limits.max_form_depth {
             self.report.push(PdfReadDiagnostic::blocked(
@@ -875,7 +879,16 @@ impl<'a> SceneBuilder<'a> {
         let mut cursor = ContentCursor::for_scene(&stream.data, self.limits.clone());
         let mut operands = Vec::new();
         let mut operand_span = None::<[u32; 2]>;
-        while let Some((token, offset)) = cursor.next()? {
+        loop {
+            let (token, offset) = match cursor.next() {
+                Err(PdfReadError::Syntax) if has_next_page_stream && cursor.unfinished_array => {
+                    break;
+                }
+                result => match result? {
+                    Some(token) => token,
+                    None => break,
+                },
+            };
             match token {
                 ContentToken::Word(operator) => {
                     let stream_offset = stream
@@ -913,7 +926,7 @@ impl<'a> SceneBuilder<'a> {
             }
         }
         Ok(ContentStreamEnd {
-            pending_operands: !operands.is_empty(),
+            pending_operands: cursor.unfinished_array || !operands.is_empty(),
             open_comment: cursor.open_comment,
         })
     }
@@ -955,6 +968,7 @@ impl<'a> SceneBuilder<'a> {
                 self.state.extend_path_paint_bounds([px, py, px, py]);
                 self.state.path.push(RawPathCommand::MoveTo(x, y, [px, py]));
                 self.state.current_point = Some((x, y));
+                self.state.subpath_start = self.state.current_point;
             }
             "l" => {
                 let (x, y) = two_numbers(operands)?;
@@ -1025,8 +1039,12 @@ impl<'a> SceneBuilder<'a> {
                     .push(RawPathCommand::LineTo(x, y1, [px, top]));
                 self.state.path.push(RawPathCommand::Close);
                 self.state.current_point = Some((x, y));
+                self.state.subpath_start = self.state.current_point;
             }
-            "h" => self.state.path.push(RawPathCommand::Close),
+            "h" => {
+                self.state.path.push(RawPathCommand::Close);
+                self.state.current_point = self.state.subpath_start;
+            }
             "W" | "W*" => {
                 if !self.state.path.is_empty() {
                     self.state.pending_clip = Some((
@@ -1161,6 +1179,7 @@ impl<'a> SceneBuilder<'a> {
         let paint_bounds = self.state.path_paint_bounds.take();
         let path_ctm_changed = std::mem::take(&mut self.state.path_ctm_changed);
         self.state.current_point = None;
+        self.state.subpath_start = None;
 
         if path_ctm_changed {
             if pending_clip.is_some() {
@@ -1670,11 +1689,17 @@ impl<'a> SceneBuilder<'a> {
                 self.state.clip = clip;
                 self.state.path.clear();
                 self.state.current_point = None;
+                self.state.subpath_start = None;
                 self.state.pending_clip = None;
                 self.state.path_ctm_changed = false;
                 self.invocation_path.push(provenance.stream_offset);
-                let result =
-                    self.interpret_stream(&stream, xobject_ref, depth + 1, effective_resources);
+                let result = self.interpret_stream(
+                    &stream,
+                    xobject_ref,
+                    depth + 1,
+                    effective_resources,
+                    false,
+                );
                 self.invocation_path.pop();
                 self.emit_elements = caller_emit_elements;
                 if !self.state_stack.is_empty() {
@@ -2663,6 +2688,7 @@ pub(super) struct ContentCursor<'a> {
     limits: PdfReaderLimits,
     tokens: usize,
     array_depth: usize,
+    unfinished_array: bool,
     decode_names: bool,
     open_comment: bool,
 }
@@ -2675,6 +2701,7 @@ impl<'a> ContentCursor<'a> {
             limits,
             tokens: 0,
             array_depth: 0,
+            unfinished_array: false,
             decode_names: false,
             open_comment: false,
         }
@@ -2872,16 +2899,21 @@ impl<'a> ContentCursor<'a> {
         let mut values = Vec::new();
         loop {
             self.skip_space();
-            if self.bytes.get(self.position) == Some(&b']') {
-                self.position += 1;
-                return Ok(ContentToken::Array(values));
+            match self.bytes.get(self.position) {
+                Some(b']') => {
+                    self.position += 1;
+                    return Ok(ContentToken::Array(values));
+                }
+                None => {
+                    self.unfinished_array = true;
+                    return Err(PdfReadError::Syntax);
+                }
+                _ if values.len() >= self.limits.max_array_items => {
+                    return Err(PdfReadError::TokenLimit);
+                }
+                _ => {}
             }
-            if values.len() >= self.limits.max_array_items {
-                return Err(PdfReadError::TokenLimit);
-            }
-            let Some((value, _)) = self.next()? else {
-                return Err(PdfReadError::Syntax);
-            };
+            let (value, _) = self.next()?.ok_or(PdfReadError::Syntax)?;
             values.push(value);
         }
     }
