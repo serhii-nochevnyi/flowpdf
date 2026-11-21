@@ -436,6 +436,42 @@ fn imported_notes_keep_identity_across_renumbering_and_aliases_remain_read_only(
     assert_eq!(session.output_bytes(), bytes);
 }
 
+#[test]
+fn imported_note_projection_checks_exact_identity() {
+    let source = graph::fixture("", "/Annots [30 5 R]");
+    let limits = NativeEditLimits::default();
+    let session = NativePdfSession::open_scoped(&source, limits, [1; 16]).unwrap();
+    let snapshot = session.snapshot();
+    let page = &snapshot.scene.pages[0];
+    let [NativePdfAnnotation::PlainNote(note)] = page.annotations.as_slice() else {
+        panic!("expected a plain imported note");
+    };
+    let id = serde_json::to_value(note.id).unwrap().as_u64().unwrap();
+    let verify = |limits, live, id| {
+        NativePdfSession::verify_page_and_field_projection_with_objects(
+            &source,
+            limits,
+            snapshot.binding,
+            snapshot.scene.scene_hash,
+            Some(&snapshot.scene.object_pages),
+            &snapshot.page_state,
+            &snapshot.fields,
+            &[(0, note.object, id)],
+            session.redaction_admitted(),
+            live,
+        )
+    };
+    assert_eq!(verify(limits, None, id), Ok(true));
+    assert_eq!(verify(limits, None, id + 1), Ok(false));
+
+    let constrained = NativeEditLimits {
+        max_retained_bytes: 1,
+        ..limits
+    };
+    assert_eq!(verify(constrained, Some(&session), id), Ok(true));
+    assert_eq!(verify(constrained, Some(&session), id + 1), Ok(false));
+}
+
 fn pdf_with_objects(objects: &[&str]) -> String {
     let mut source = "%PDF-1.7\n".to_owned();
     let mut offsets = Vec::new();
