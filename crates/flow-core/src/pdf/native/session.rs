@@ -907,20 +907,40 @@ impl NativePdfSession {
         Ok(())
     }
 
+    fn request_record(
+        &self,
+        binding: NativeBinding,
+        request_id: u64,
+    ) -> Result<Option<&RequestRecord>, NativeSessionError> {
+        self.check_identity(binding, request_id)?;
+        let record = self
+            .records
+            .iter()
+            .find(|record| record.receipt.request_id == request_id);
+        if record.is_some_and(|record| binding.revision != record.base_revision) {
+            return Err(NativeSessionError::RevisionMismatch);
+        }
+        Ok(record)
+    }
+
+    /// Returns a retained ordinary edit receipt for the submitted base binding and request.
+    pub fn ordinary_command_receipt(
+        &self,
+        binding: NativeBinding,
+        request_id: u64,
+    ) -> Result<Option<NativeEditReceipt>, NativeSessionError> {
+        Ok(self
+            .request_record(binding, request_id)?
+            .filter(|record| record.digest.is_some())
+            .map(|record| record.receipt))
+    }
+
     pub fn lookup(
         &self,
         binding: NativeBinding,
         request_id: u64,
     ) -> Result<NativeRequestLookup, NativeSessionError> {
-        self.check_identity(binding, request_id)?;
-        if let Some(record) = self
-            .records
-            .iter()
-            .find(|r| r.receipt.request_id == request_id)
-        {
-            if binding.revision != record.base_revision {
-                return Err(NativeSessionError::RevisionMismatch);
-            }
+        if let Some(record) = self.request_record(binding, request_id)? {
             return Ok(NativeRequestLookup::Accepted(record.receipt));
         }
         if request_id <= self.snapshot.consumed_request || request_id <= self.last_redaction_request

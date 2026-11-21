@@ -2697,12 +2697,18 @@ impl NativeRegistryEntry {
                 return Err(NATIVE_RECONCILE);
             }
             NativeRequestLookup::Unseen => current.output_hash,
-            NativeRequestLookup::Accepted(_) => self
-                .base_outputs
-                .iter()
-                .find(|(id, _)| *id == request_id)
-                .map(|(_, output)| *output)
-                .ok_or(NATIVE_RECONCILE)?,
+            NativeRequestLookup::Accepted(_) => {
+                // @contract: Snapshot history also records redaction publications.
+                self.session
+                    .ordinary_command_receipt(binding, request_id)
+                    .map_err(|error| error.code())?
+                    .ok_or(NATIVE_RECONCILE)?;
+                self.base_outputs
+                    .iter()
+                    .find(|(id, _)| *id == request_id)
+                    .map(|(_, output)| *output)
+                    .ok_or(NATIVE_RECONCILE)?
+            }
             NativeRequestLookup::ReconciliationRequired => return Err(NATIVE_RECONCILE),
         };
         if output_hash != expected_output {
@@ -3053,6 +3059,24 @@ fn verify_native_snapshot(
             })
         {
             return None;
+        }
+        if require_live_session
+            && matches!(
+                (response.operation, response.status),
+                (NativeOperation::Command, NativeStatus::Applied)
+            )
+        {
+            let receipt = entry?
+                .session
+                .ordinary_command_receipt(binding, request)
+                .ok()??;
+            if receipt.binding != snapshot.binding
+                || receipt.request_id != request
+                || receipt.output_hash != snapshot.output_hash
+                || receipt.scene_hash != snapshot.scene.scene_hash
+            {
+                return None;
+            }
         }
         // @contract: Wire imports already fit the redaction origin ceiling.
         NativePdfSession::verify_page_and_field_projection_with_objects(
