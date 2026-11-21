@@ -140,6 +140,7 @@ for (const [profile, revision, expanded] of [
   ['reviewed readback', readbackRevision, true],
   ['reviewed image replacement', 'ad75722669c534a081dceb3069b16f7b17b78a0c', true],
   ['reviewed image replacement and redaction feedback', redactionFeedbackRevision, true],
+  ['previous reviewed six-suite redaction profile', '3850e46e18fa518133fb59ea71e41d19abe854c7', true],
 ]) {
   test(`accepts the exact ${profile} harness`, (t) => {
     const paths = ['.github/workflows/pdf-native-note-tracer.yml', 'package.json',
@@ -199,6 +200,17 @@ test('refuses the recovery note suite with a different reviewed redaction suite'
   if (!recovery || !redaction) return
   const { command } = fixture({ historicalFiles: new Map([...recovery, ...redaction]) })
   assert.throws(() => requirePassedCi('HEAD', command), { message: 'NATIVE_NOTE_TRACER_HARNESS_NOT_APPROVED' })
+})
+
+test('binds the raw snapshot and preview readback suite to the exact reviewed browser profile', (t) => {
+  const { command, state } = fixture()
+  assert.deepEqual(requirePassedCi('HEAD', command), { repository: repo, sha, run: 7, attempt: 3, job: 73 })
+  state.changedPath = redactionSuite
+  assert.throws(() => requirePassedCi('HEAD', command), { message: 'NATIVE_NOTE_TRACER_HARNESS_NOT_APPROVED' })
+  const olderObjects = harnessFilesFrom(t, readbackRevision, [objectsSuite])
+  if (!olderObjects) return
+  const mixed = fixture({ historicalFiles: olderObjects })
+  assert.throws(() => requirePassedCi('HEAD', mixed.command), { message: 'NATIVE_NOTE_TRACER_HARNESS_NOT_APPROVED' })
 })
 
 test('refuses raw redaction assertions with the earlier recovery note suite', (t) => {
