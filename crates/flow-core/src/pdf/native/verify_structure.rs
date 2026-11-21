@@ -487,9 +487,15 @@ pub(super) fn coverage(
     let workspace = evidence_bytes.workspace();
     let mut covered = evidence_bytes.page_evidence(affected_pages(order, marks).count())?;
     for (index, &page_id) in order.iter().enumerate() {
-        let mut page_bytes = workspace.scope();
-        let geometry = accepted.page(index, &mut page_bytes)?.geometry;
-        if candidate.page(index, &mut page_bytes)?.geometry != geometry {
+        let geometry = {
+            let mut page_bytes = workspace.scope();
+            accepted.page(index, &mut page_bytes)?.geometry
+        };
+        let candidate_geometry = {
+            let mut page_bytes = workspace.scope();
+            candidate.page(index, &mut page_bytes)?.geometry
+        };
+        if candidate_geometry != geometry {
             return Err(Coverage);
         }
         let mut marked = false;
@@ -1202,11 +1208,11 @@ mod tests {
         let candidate =
             Document::open(&result, Side::Candidate, &workspace, &mut documents).unwrap();
         let remaining = workspace.remaining();
-        let mut page_scratch = workspace.scope();
-        let geometry = accepted.page(0, &mut page_scratch).unwrap().geometry;
-        candidate.page(0, &mut page_scratch).unwrap();
-        let scratch = remaining - workspace.remaining();
-        drop(page_scratch);
+        let geometry = {
+            let mut page_scratch = workspace.scope();
+            accepted.page(0, &mut page_scratch).unwrap().geometry
+        };
+        let scratch = size_of::<PdfObjectRef>();
         let capacity = size_of::<NativeRedactionPageEvidence>();
         let marks = [NativeRedactionMark {
             page_id: 1,
