@@ -1,7 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet, btree_map::Entry};
 use std::mem::size_of;
 
-use miniz_oxide::deflate::compress_to_vec_zlib;
+use miniz_oxide::deflate::core::{
+    CompressorOxide, TDEFLFlush, TDEFLStatus, compress, create_comp_flags_from_zip_params,
+};
 
 use super::super::reader::{PdfObjectRef, PdfReaderLimits, PdfStream, PdfValue, single_filter};
 use super::super::scene::{ContentCursor, ContentToken, separated_content_streams};
@@ -16,6 +18,9 @@ use super::verify_structure::MAX_INPUT;
 const POINT: i64 = 1_000;
 const MAX_COORD: i64 = 1_000_000 * POINT;
 const MAX_STREAM: usize = 512 * 1024;
+// miniz_oxide 0.8.9 uses fixed LZ codes, a dictionary and two hash-chain tables,
+// Huffman tables, and a local output buffer. Allow headroom above their combined 320 KiB ceiling.
+const ZLIB_ENCODER_SCRATCH: usize = 512 * 1024;
 const MAX_FORM_DEPTH: usize = 8;
 const MAX_PAGES: usize = 256;
 const ENTRY_BYTES: usize = 128;
@@ -2023,37 +2028,56 @@ fn apply(
             graph.release_page_retained(size);
         }
         graph.reserve_replacement_stream(size)?;
+        let scratch_reserved =
+            size >= 1024 && graph.charge_page_retained(ZLIB_ENCODER_SCRATCH).is_ok();
         let Some(PdfValue::Stream(stream)) = graph.objects.get_mut(&id) else {
             return Err(Malformed);
         };
         if let Some(replacement) = replacement {
             stream.data = replacement;
         }
-        stream.dict.remove("Filter");
-        stream.encoded = if size >= 1024 {
-            let compressed = compress_to_vec_zlib(&stream.data, 6);
-            if compressed.len() < size {
-                stream
-                    .dict
-                    .insert("Filter".into(), PdfValue::Name("FlateDecode".into()));
-                compressed
-            } else {
-                drop(compressed);
-                stream.data.clone()
-            }
+        // The replacement reservation pays for one saved buffer of up to `size` bytes.
+        let compressed = if scratch_reserved {
+            compress_rewritten_stream(&stream.data)
         } else {
+            None
+        };
+        stream.encoded = if let Some(compressed) = compressed {
+            stream
+                .dict
+                .insert("Filter".into(), PdfValue::Name("FlateDecode".into()));
+            compressed
+        } else {
+            stream.dict.remove("Filter");
             stream.data.clone()
         };
         stream.dict.insert(
             "Length".into(),
             PdfValue::Integer(stream.encoded.len() as i64),
         );
+        if scratch_reserved {
+            // The encoder is gone and the replacement reservation still covers saved capacity.
+            graph.release_page_retained(ZLIB_ENCODER_SCRATCH);
+        }
     }
     let edit_bytes = edits.retained();
     drop(edits);
     drop(roles);
     graph.release_page_retained(role_bytes + edit_bytes);
     graph.refresh_page_graph(&BTreeSet::new())
+}
+
+fn compress_rewritten_stream(data: &[u8]) -> Option<Vec<u8>> {
+    // A complete stream that fits this buffer is strictly smaller than the raw data.
+    let mut output = vec![0; data.len() - 1];
+    let flags = create_comp_flags_from_zip_params(6, 1, 0);
+    let mut encoder = CompressorOxide::new(flags);
+    let (status, consumed, written) = compress(&mut encoder, data, &mut output, TDEFLFlush::Finish);
+    if status != TDEFLStatus::Done || consumed != data.len() {
+        return None;
+    }
+    output.truncate(written);
+    Some(output)
 }
 
 #[cfg(test)]
@@ -2111,6 +2135,63 @@ mod tests {
         assert_eq!(apply(&mut graph, roles, edits), Err(Budget));
         assert_eq!(graph.remaining_work(), work);
         assert_eq!(graph.remaining_retained(), available);
+    }
+
+    #[test]
+    fn compressed_and_budget_limited_streams_reopen_with_the_same_scrubbed_content() {
+        let retained_paint = "40 40 10 10 re\nf\n".repeat(80);
+        let source = redaction_fixture(&format!("10 10 10 10 re f\n{retained_paint}"));
+        let limits = NativeEditLimits::default();
+        let spent = [
+            (2 * ZLIB_ENCODER_SCRATCH, Some("FlateDecode")),
+            (ZLIB_ENCODER_SCRATCH - 1, None),
+        ]
+        .map(|(allowance, filter)| {
+            let mut graph = NativePdfGraph::open(&source, limits).unwrap();
+            let mark = NativeRedactionMark {
+                page_id: 1,
+                geometry: geometry(&graph, 0).unwrap(),
+                rect: [12_000, 12_000, 13_000, 13_000],
+            };
+            graph
+                .charge_page_retained(graph.remaining_retained() - allowance)
+                .unwrap();
+            scrub(&mut graph, &[1], &[mark]).unwrap();
+
+            let output = writer::rewrite(&graph).unwrap();
+            let reopen_limits = NativeEditLimits {
+                max_retained_bytes: graph.remaining_retained(),
+                max_total_decoded_bytes: graph.remaining_decoded(),
+                ..limits
+            };
+            let reopened = NativePdfGraph::open(&output, reopen_limits).unwrap();
+            let page = dict(&reopened, reopened.pages[0]).unwrap();
+            let contents = reference(get(page, "Contents").unwrap()).unwrap();
+            let saved = stream(&reopened, contents).unwrap();
+            assert_eq!(saved.data, retained_paint.as_bytes());
+            assert_eq!(name(&saved.dict, "Filter"), filter);
+            assert_eq!(
+                saved.dict["Length"].as_integer(),
+                Some(saved.encoded.len() as i64)
+            );
+            if filter.is_some() {
+                assert!(saved.encoded.len() < retained_paint.len());
+            } else {
+                assert_eq!(saved.encoded, retained_paint.as_bytes());
+            }
+            assert_eq!(graph.original_bytes(), source);
+            allowance - graph.remaining_retained()
+        });
+        assert_eq!(spent[0], spent[1]);
+    }
+
+    #[test]
+    fn bounded_compressor_discards_output_that_cannot_fit() {
+        let mut input = vec![0; 32 * 1024];
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"redaction compressor test");
+        hasher.finalize_xof().fill(&mut input);
+        assert!(compress_rewritten_stream(&input).is_none());
     }
 
     #[test]
