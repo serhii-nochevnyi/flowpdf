@@ -1779,7 +1779,6 @@ mod tests {
         session.add_redaction_mark(binding, first).unwrap();
         assert_eq!(session.redaction_marks.capacity(), 1);
         let staged = session.stage_redaction(binding, 1).unwrap();
-        // Cache admission before tightening the allowance to isolate mark buffer growth.
         assert_eq!(session.check_redaction_admission(), Ok(()));
         let peak = session.candidate.as_ref().unwrap().retained()
             + 3 * std::mem::size_of::<NativeRedactionMark>();
