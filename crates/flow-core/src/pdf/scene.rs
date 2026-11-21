@@ -784,7 +784,17 @@ impl<'a> SceneBuilder<'a> {
                 vec![u32::try_from(index).map_err(|_| PdfReadError::NumericLimit)?];
             match self.reader.object(*content_ref) {
                 Ok(PdfValue::Stream(stream)) => {
-                    self.interpret_stream(&stream, *content_ref, 0, self.page.resources.as_ref())?;
+                    let has_pending_operands = self.interpret_stream(
+                        &stream,
+                        *content_ref,
+                        0,
+                        self.page.resources.as_ref(),
+                    )?;
+                    if has_pending_operands && index + 1 < self.page.contents.len() {
+                        // @contract: An operator's operand span refers to its own stream.
+                        self.report_partial(*content_ref);
+                        break;
+                    }
                 }
                 Ok(_) => self.report.push(PdfReadDiagnostic::warning(
                     PdfReadDiagnosticCode::PartialPage,
@@ -818,14 +828,14 @@ impl<'a> SceneBuilder<'a> {
         object_ref: PdfObjectRef,
         depth: usize,
         resources: Option<&PdfValue>,
-    ) -> Result<(), PdfReadError> {
+    ) -> Result<bool, PdfReadError> {
         if depth > self.limits.max_form_depth {
             self.report.push(PdfReadDiagnostic::blocked(
                 PdfReadDiagnosticCode::FormDepthLimit,
                 Some(self.page_index),
                 Some(object_ref.object_number),
             ));
-            return Ok(());
+            return Ok(false);
         }
         let mut cursor = ContentCursor::for_scene(&stream.data, self.limits.clone());
         let mut operands = Vec::new();
@@ -867,7 +877,7 @@ impl<'a> SceneBuilder<'a> {
                 }
             }
         }
-        Ok(())
+        Ok(!operands.is_empty())
     }
 
     fn dispatch_operator(
@@ -1626,7 +1636,7 @@ impl<'a> SceneBuilder<'a> {
                 }
                 self.state = caller_state;
                 self.state_stack = caller_stack;
-                result
+                result.map(|_| ())
             }
             _ => {
                 self.report.push(
