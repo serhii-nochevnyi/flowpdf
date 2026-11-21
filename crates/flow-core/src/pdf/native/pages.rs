@@ -1990,6 +1990,14 @@ mod tests {
         let available = refreshed.remaining_retained();
         refreshed.refresh_page_graph(&BTreeSet::new()).unwrap();
         let refresh_bytes = available - refreshed.remaining_retained();
+        let workspace = Workspace::new(available);
+        let mut visited = workspace.scope();
+        for _ in 0..2 {
+            visited.tree_entry::<Ref>().unwrap();
+        }
+        let peak = refresh_bytes
+            + (available - workspace.remaining())
+            + refreshed.pages.capacity() * size_of::<Ref>();
         let order_bytes = refreshed.pages.len() * size_of::<Ref>();
         let page = refreshed.pages[0];
         let command = NativePageCommand::ReorderPage {
@@ -2003,12 +2011,15 @@ mod tests {
         for short_by in [0, 1] {
             let mut graph = open();
             graph
-                .charge_page_retained(available - refresh_bytes - order_bytes + short_by)
+                .charge_page_retained(available - peak - order_bytes + short_by)
                 .unwrap();
             let result = stage(&mut graph, command, 0, &[]);
             if short_by == 0 {
                 assert_eq!(result, Ok(page));
-                assert_eq!(graph.remaining_retained(), order_bytes);
+                assert_eq!(
+                    graph.remaining_retained(),
+                    peak + order_bytes - refresh_bytes
+                );
             } else {
                 assert_eq!(result, Err(NativeSessionError::Budget));
             }

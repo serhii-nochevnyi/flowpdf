@@ -1741,7 +1741,7 @@ fn page_order_workspace_pdf(indirect: bool) -> Vec<u8> {
     let mut objects = vec![
         "<< /Type /Catalog /Pages 2 0 R >>".into(),
         format!(
-            "<< /Type /Pages /Kids [3 0 R 4 0 R] /Count {} >>",
+            "<< /Type /Pages /Kids [3 0 R 4 0 R] /Count {} /Resources <<>> >>",
             2 * PER_PARENT
         ),
         format!(
@@ -1764,6 +1764,52 @@ fn page_order_workspace_pdf(indirect: bool) -> Vec<u8> {
             .map(|object| (0, object.as_str()))
             .collect::<Vec<_>>(),
     )
+}
+
+#[test]
+fn nested_page_rotation_refuses_retained_budget_exhaustion_atomically() {
+    for indirect in [false, true] {
+        let bytes = page_order_workspace_pdf(indirect);
+        let limits = NativeEditLimits {
+            max_retained_bytes: 258 * 1024,
+            ..NativeEditLimits::default()
+        };
+        let mut session = NativePdfSession::open_scoped(&bytes, limits, [3; 16]).unwrap();
+        let before = session.snapshot().clone();
+        let rotate = NativePageCommand::RotatePage {
+            target: NativePageTarget {
+                page: 0,
+                stable_id: before.page_state.order[0],
+            },
+            degrees: 90,
+        };
+
+        assert_eq!(
+            session.apply_page(before.binding, 1, &rotate),
+            Err(NativeSessionError::Budget),
+            "indirect Kids: {indirect}"
+        );
+        let after = session.snapshot();
+        assert_eq!(session.output_bytes(), bytes);
+        assert_eq!(after.binding, before.binding);
+        assert_eq!(after.consumed_request, before.consumed_request);
+        assert_eq!(after.page_state, before.page_state);
+        assert_eq!(after.scene.scene_hash, before.scene.scene_hash);
+        assert_eq!(
+            session.lookup(before.binding, 1),
+            Ok(NativeRequestLookup::Unseen)
+        );
+
+        let mut ample =
+            NativePdfSession::open_scoped(&bytes, NativeEditLimits::default(), [3; 16]).unwrap();
+        let binding = ample.snapshot().binding;
+        ample.apply_page(binding, 1, &rotate).unwrap();
+        assert_eq!(ample.snapshot().page_state.order, before.page_state.order);
+        assert_eq!(
+            ample.snapshot().scene.pages[0].geometry.unwrap().rotation(),
+            90
+        );
+    }
 }
 
 #[test]

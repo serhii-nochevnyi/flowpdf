@@ -115,6 +115,14 @@ pub struct NativePdfGraph {
     decoded: usize,
 }
 
+struct PageValidation<'a> {
+    seen: BTreeSet<PdfObjectRef>,
+    order: Vec<PdfObjectRef>,
+    seen_bytes: Reservation<'a>,
+    order_bytes: Reservation<'a>,
+    work: usize,
+}
+
 pub(super) fn spend(remaining: &mut usize, amount: usize) -> Result<(), NativeEditError> {
     *remaining = remaining
         .checked_sub(amount)
@@ -658,7 +666,6 @@ impl NativePdfGraph {
         self.objects
             .retain(|reference, _| reachable.contains(reference));
         self.reverse = reverse;
-        self.pages.clear();
         self.validate_pages()
     }
 
@@ -680,27 +687,59 @@ impl NativePdfGraph {
             .get("Pages")
             .and_then(PdfValue::as_reference)
             .ok_or(NativeEditError::Malformed)?;
-        let mut seen = BTreeSet::new();
-        let mut work = self.work;
-        self.walk_pages(pages, None, false, 0, &mut seen, &mut work)?;
-        self.work = work;
-        if self.pages.is_empty() {
+        let workspace = Workspace::new(self.retained);
+        let mut validation = PageValidation {
+            seen: BTreeSet::new(),
+            order: Vec::new(),
+            seen_bytes: workspace.scope(),
+            order_bytes: workspace.scope(),
+            work: self.work,
+        };
+        self.walk_pages(pages, None, false, 0, &mut validation)?;
+        if validation.order.is_empty() {
             return Err(NativeEditError::Malformed);
         }
+        let PageValidation {
+            seen,
+            order,
+            seen_bytes,
+            order_bytes,
+            work,
+        } = validation;
+        let previous_order_bytes = self
+            .pages
+            .capacity()
+            .checked_mul(size_of::<PdfObjectRef>())
+            .ok_or(NativeEditError::Budget)?;
+        drop(seen);
+        drop(seen_bytes);
+        let retained = workspace
+            .remaining()
+            .checked_add(previous_order_bytes)
+            .ok_or(NativeEditError::Budget)?;
+        self.pages = order;
+        self.retained = retained;
+        self.work = work;
+        drop(order_bytes);
         Ok(())
     }
 
     fn walk_pages(
-        &mut self,
+        &self,
         reference: PdfObjectRef,
         parent: Option<PdfObjectRef>,
         inherited_box: bool,
         depth: usize,
-        seen: &mut BTreeSet<PdfObjectRef>,
-        work: &mut usize,
+        validation: &mut PageValidation<'_>,
     ) -> Result<usize, NativeEditError> {
+        let work = &mut validation.work;
         spend(work, 1)?;
-        if depth > self.limits.max_nesting || !seen.insert(reference) {
+        if depth > self.limits.max_nesting
+            || !validation
+                .seen_bytes
+                .insert(&mut validation.seen, reference)
+                .map_err(|_| NativeEditError::Budget)?
+        {
             return Err(NativeEditError::Malformed);
         }
         let dict = self
@@ -719,18 +758,19 @@ impl NativePdfGraph {
             return Err(NativeEditError::Malformed);
         }
         let has_box = if let Some(value) = dict.get("MediaBox") {
-            let values = self
+            let [left, bottom, right, top] = self
                 .resolve_metered(value, work)?
                 .as_array()
-                .ok_or(NativeEditError::Malformed)?;
-            if values.len() != 4 || values.iter().any(|v| v.as_number().is_none()) {
+                .ok_or(NativeEditError::Malformed)?
+            else {
                 return Err(NativeEditError::Malformed);
-            }
-            let numbers: Vec<_> = values
-                .iter()
-                .map(|v| v.as_number().unwrap().raw())
-                .collect();
-            if numbers[0] >= numbers[2] || numbers[1] >= numbers[3] {
+            };
+            let [Some(left), Some(bottom), Some(right), Some(top)] =
+                [left, bottom, right, top].map(PdfValue::as_number)
+            else {
+                return Err(NativeEditError::Malformed);
+            };
+            if left.raw() >= right.raw() || bottom.raw() >= top.raw() {
                 return Err(NativeEditError::Malformed);
             }
             true
@@ -780,7 +820,10 @@ impl NativePdfGraph {
                         }
                     }
                 }
-                self.pages.push(reference);
+                validation
+                    .order_bytes
+                    .push(&mut validation.order, reference)
+                    .map_err(|_| NativeEditError::Budget)?;
                 Ok(1)
             }
             Some("Pages") => {
@@ -789,24 +832,20 @@ impl NativePdfGraph {
                     .as_array()
                     .ok_or(NativeEditError::Malformed)?;
                 spend(work, kids.len())?;
-                let kids: Vec<_> = kids
-                    .iter()
-                    .map(|v| v.as_reference().ok_or(NativeEditError::Malformed))
-                    .collect::<Result<_, _>>()?;
                 let expected = dict
                     .get("Count")
                     .and_then(PdfValue::as_integer)
                     .ok_or(NativeEditError::Malformed)?;
                 let mut count = 0usize;
                 for child in kids {
+                    let child = child.as_reference().ok_or(NativeEditError::Malformed)?;
                     count = count
                         .checked_add(self.walk_pages(
                             child,
                             Some(reference),
                             has_box,
                             depth + 1,
-                            seen,
-                            work,
+                            validation,
                         )?)
                         .ok_or(NativeEditError::Budget)?;
                 }
@@ -1238,6 +1277,37 @@ mod tests {
         graph.validate_pages().unwrap();
         assert_eq!(graph.work, 0);
         assert_eq!(graph.pages.len(), 1);
+    }
+
+    #[test]
+    fn page_validation_charges_visited_nodes_and_order_together() {
+        let payload = miniz_oxide::deflate::compress_to_vec_zlib(b"q Q", 6);
+        let bytes = super::super::tests::fixture("", &payload);
+        let mut graph = NativePdfGraph::open(&bytes, NativeEditLimits::default()).unwrap();
+        let order = graph.pages.clone();
+        let work = graph.work;
+
+        let allowance = graph.retained;
+        let workspace = Workspace::new(allowance);
+        let mut visited = workspace.scope();
+        visited.tree_entry::<PdfObjectRef>().unwrap();
+        visited.tree_entry::<PdfObjectRef>().unwrap();
+        let visited_bytes = allowance - workspace.remaining();
+        let required = visited_bytes + graph.pages.capacity() * size_of::<PdfObjectRef>();
+
+        for retained in [0, visited_bytes, required - 1] {
+            graph.retained = retained;
+            assert_eq!(graph.validate_pages(), Err(NativeEditError::Budget));
+            assert_eq!(graph.pages, order);
+            assert_eq!(graph.work, work);
+            assert_eq!(graph.retained, retained);
+        }
+        graph.retained = required;
+        graph.validate_pages().unwrap();
+        assert_eq!(graph.pages, order);
+        assert_eq!(graph.retained, required);
+        graph.validate_pages().unwrap();
+        assert_eq!(graph.retained, required);
     }
 
     #[test]
