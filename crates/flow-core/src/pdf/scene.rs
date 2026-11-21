@@ -1180,7 +1180,9 @@ impl<'a> SceneBuilder<'a> {
             };
             if visible {
                 // @contract: Only provenance records the fill rule for painted paths.
-                if matches!(operator, "f*" | "B*" | "b*") {
+                if matches!(operator, "f*" | "B*" | "b*")
+                    || (stroke && contains_collapsed_stroke(&commands))
+                {
                     self.report_partial(provenance.object_ref);
                 }
                 self.push_element(PdfSceneElement::Path {
@@ -2253,6 +2255,42 @@ fn transform_path(
             RawPathCommand::Close => Ok(PdfPathCommand::ClosePath),
         })
         .collect()
+}
+
+fn contains_collapsed_stroke(commands: &[PdfPathCommand]) -> bool {
+    let mut current = None;
+    let mut start = None;
+    for command in commands {
+        match *command {
+            PdfPathCommand::MoveTo { x, y } => {
+                start = Some((x, y));
+                current = start;
+            }
+            PdfPathCommand::LineTo { x, y } => {
+                let next = Some((x, y));
+                if current == next {
+                    return true;
+                }
+                current = next;
+            }
+            PdfPathCommand::CurveTo {
+                x1,
+                y1,
+                x2,
+                y2,
+                x3,
+                y3,
+            } => {
+                let next = Some((x3, y3));
+                if current == next && (x1, y1) == (x3, y3) && (x2, y2) == (x3, y3) {
+                    return true;
+                }
+                current = next;
+            }
+            PdfPathCommand::ClosePath => current = start,
+        }
+    }
+    false
 }
 
 fn path_bounds(commands: &[PdfPathCommand]) -> Result<LayoutRect, PdfReadError> {

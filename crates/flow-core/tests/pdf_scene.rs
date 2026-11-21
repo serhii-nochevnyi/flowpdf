@@ -479,6 +479,36 @@ fn stroke_readback_proves_containment_against_the_active_clip() {
 }
 
 #[test]
+fn stroke_readback_reports_collapsed_fixed_point_segments() {
+    for (path, partial, has_extent) in [
+        ("50 50 m 50.004 50 l", true, false),
+        ("50 50 m 50.004 50.004 50.004 50 50.004 50 c", true, false),
+        ("50 50 m 55 50 l 55.004 50 l", true, true),
+        ("50 50 m 51 50 l", false, true),
+        ("50 50 m 50 51 l", false, true),
+    ] {
+        let scene = read_content_scene(&format!("1 w {path} S"));
+        let page = &scene.pages[0];
+        let [PdfSceneElement::Path { value }] = page.elements.as_slice() else {
+            panic!("missing stroke for {path}");
+        };
+        assert!(value.stroke && !value.fill);
+        assert_eq!(
+            value.rect.width.raw() > 0 || value.rect.height.raw() > 0,
+            has_extent
+        );
+        assert_eq!(page.partial, partial, "{path}");
+        assert_eq!(scene.report.partial, partial, "{path}");
+        assert_eq!(page.report.diagnostics.len(), usize::from(partial));
+        if partial {
+            let diagnostic = &page.report.diagnostics[0];
+            assert_eq!(diagnostic.code, PdfReadDiagnosticCode::PartialPage);
+            assert_eq!(diagnostic.object_number, Some(4));
+        }
+    }
+}
+
+#[test]
 fn equivalent_default_crop_keeps_content_clip_visibility_and_diagnostics() {
     for crop in ["", "/CropBox [0 0 200 200]", "/CropBox [-10 -10 210 210]"] {
         let bytes = pdf(vec![
