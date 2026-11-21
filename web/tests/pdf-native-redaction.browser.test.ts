@@ -9,7 +9,8 @@ import { createNativePdfRuntime } from '../src/layout/layout-runtime.js'
 import { hashPdfSourceBytes, PdfSourceStore } from '../persistence/pdf-source-store.js'
 import { nativePdfText, type NativePdfMessage } from '../src/pdf/pdf-native-edit-messages.js'
 import {
-  isNativeWorkerResponse, matchesNativeResponse, nativeBytesHex, nativeHexBytes, readNativeResponse,
+  isNativeWorkerResponse, matchesNativeResponse, nativeBytesHex, nativeDispatchId, nativeHexBytes, readNativeResponse,
+  NATIVE_PDF_PROTOCOL_VERSION,
   type NativePdfRedactionResult, type NativePdfRequest, type NativePdfWorkerRequest, type NativePdfWorkerResponse,
 } from '../src/pdf/pdf-native-edit-protocol.js'
 import { NativePdfEditCoordinator, type NativePdfWorkerPort } from '../src/pdf/pdf-native-edit-worker.js'
@@ -100,13 +101,29 @@ function controlledWorker() {
   const dispatched = new Map<number, NativePdfRequest>()
   const rawReplies: unknown[] = []
   const syntheticRefusals = new Set<string>()
+  const rawReadDispatches = new Set<number>()
+  let nextRawDispatchId = 0xffffffff
+  async function readRaw(request: Extract<NativePdfRequest, { operation: 'snapshot' | 'preview' }>) {
+    const dispatchId = nextRawDispatchId--
+    rawReadDispatches.add(dispatchId)
+    port.postMessage({ dispatchId, request })
+    const received = () => rawReplies.find((message) => nativeDispatchId(message) === dispatchId)
+    await expect.poll(received).toBeDefined()
+    const message = received()
+    if (!isNativeWorkerResponse(message) || message.type !== 'response') throw Error('Missing raw readback response')
+    expect(verify_native_pdf_response(message.json)).toBe(true)
+    const reply = readNativeResponse(message.json)
+    if (reply === null) throw Error('Invalid raw readback payload')
+    expect(matchesNativeResponse(request, reply)).toBe(true)
+    return reply
+  }
   const control = {
     fault: null as Fault,
     refusePreview: false,
     dropMarkReplies: 0,
     hold: null as Action | null,
     resume: undefined as (() => void) | undefined,
-    requests, previewPages, dispatched, rawReplies,
+    requests, previewPages, dispatched, rawReplies, readRaw,
     die: () => port.onerror?.(new ErrorEvent('error')),
   }
   const port: NativePdfWorkerPort = {
@@ -130,6 +147,7 @@ function controlledWorker() {
   worker.onmessageerror = (event) => port.onmessageerror?.(event)
   worker.onmessage = ({ data }: MessageEvent<NativePdfWorkerResponse>) => {
     rawReplies.push(data)
+    if (rawReadDispatches.has(data.dispatchId)) return
     if (data.type !== 'response') {
       port.onmessage?.(new MessageEvent('message', { data }))
       return
@@ -561,6 +579,23 @@ for (const locale of ['en', 'uk'] as const) {
       }
       expect((await getDownload('redaction.downloadPrior')).bytes).toEqual(ordinaryBytes)
 
+      const readbackIdentity = {
+        protocolVersion: NATIVE_PDF_PROTOCOL_VERSION,
+        requestId: 0xffffffff,
+        binding: ordinary.binding,
+        originStoreHash: ordinary.originStoreHash,
+      } as const
+      const snapshotRequest = { ...readbackIdentity, operation: 'snapshot' } as const
+      const previewRequest = {
+        ...readbackIdentity, operation: 'preview', outputHash: ordinary.outputHash, pageId: ordinary.pageState.order[0]!,
+      } as const
+      const priorSnapshot = await lane.control.readRaw(snapshotRequest)
+      expect(priorSnapshot).toMatchObject({ status: 'unseen' })
+      if (priorSnapshot.operation !== 'snapshot' || priorSnapshot.status === 'failed') throw Error('Missing accepted snapshot')
+      expect(priorSnapshot.snapshot).toEqual(ordinary)
+      const priorPreview = await lane.control.readRaw(previewRequest)
+      expect(priorPreview).toMatchObject({ status: 'preview', snapshot: null })
+
       lane.control.hold = 'publish'
       lane.control.resume = undefined
       if (locale === 'uk') lane.control.fault = 'lostPublish'
@@ -583,6 +618,9 @@ for (const locale of ['en', 'uk'] as const) {
       const verified = unpublished.at(-1)!
       expect(verified.request.action.kind).toBe('verify')
       expect(verified.reply).toMatchObject({ status: 'redaction', redaction: { verification: { status: 'passed' } } })
+      expect(await lane.control.readRaw(snapshotRequest)).toEqual(priorSnapshot)
+      expect(await lane.control.readRaw(previewRequest)).toEqual(priorPreview)
+      expect(lane.control.resume).toBeTypeOf('function')
       lane.control.resume!()
       if (locale === 'uk') {
         await expect.element(button('session.reconcile'), { timeout: 6_000 }).toBeVisible()
