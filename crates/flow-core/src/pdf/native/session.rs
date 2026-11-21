@@ -1269,9 +1269,15 @@ impl NativePdfSession {
             &mut remaining,
             self.mark_bytes() + self.candidate.as_ref().map_or(0, Candidate::retained),
         )?;
+        let mut staged_id_bytes = (self.ids.len()
+            + usize::from(matches!(
+                command,
+                Command::Note(NativeNoteCommand::Add { .. })
+            )))
+            * OBJECT_ID_BYTES;
         spend(
             &mut remaining,
-            4096 + content_cost + annotation_cost + (self.ids.len() + 1) * OBJECT_ID_BYTES,
+            4096 + content_cost + annotation_cost + staged_id_bytes,
         )?;
         let digest = command_digest(command)?;
         // @security: Reserve output bytes separately from the writer workspace and reopen graph.
@@ -1323,6 +1329,8 @@ impl NativePdfSession {
                     &workspace,
                 )?;
                 if let Some(object) = expected.new_object {
+                    staged.charge_page_retained(OBJECT_ID_BYTES)?;
+                    staged_id_bytes += OBJECT_ID_BYTES;
                     ids.insert(object, NativeNoteId(0));
                 }
                 Expected::Text(expected)
@@ -1334,10 +1342,11 @@ impl NativePdfSession {
                     &self.snapshot.fields,
                     command,
                 )?;
-                ids.retain(|reference, _| staged.objects.contains_key(reference));
-                for reference in staged.objects.keys() {
-                    ids.entry(*reference).or_insert(NativeNoteId(0));
-                }
+                let mut remaining = staged.remaining_retained();
+                staged_id_bytes += reconcile_staged_ids(&staged, &mut ids, &mut remaining, || {
+                    Ok(NativeNoteId(0))
+                })?;
+                staged_remaining = Some(remaining);
                 Expected::Field(expected)
             }
             Command::Page(command) => {
@@ -1345,17 +1354,16 @@ impl NativePdfSession {
                 let index = target.page as usize;
                 let selected =
                     pages::stage(&mut staged, command, index, &self.snapshot.scene.pages)?;
-                ids.retain(|reference, _| staged.objects.contains_key(reference));
-                for reference in staged.objects.keys() {
-                    if let std::collections::btree_map::Entry::Vacant(entry) = ids.entry(*reference)
-                    {
-                        if next_page_object_id >= PAGE_OBJECT_ID_LIMIT {
-                            return Err(NativeSessionError::Budget);
-                        }
-                        entry.insert(NativeNoteId(next_page_object_id));
-                        next_page_object_id += 1;
+                let mut remaining = staged.remaining_retained();
+                staged_id_bytes += reconcile_staged_ids(&staged, &mut ids, &mut remaining, || {
+                    if next_page_object_id >= PAGE_OBJECT_ID_LIMIT {
+                        return Err(NativeSessionError::Budget);
                     }
-                }
+                    let id = NativeNoteId(next_page_object_id);
+                    next_page_object_id += 1;
+                    Ok(id)
+                })?;
+                staged_remaining = Some(remaining);
                 Expected::Page(ids[&selected].0)
             }
             Command::Object(command) => {
@@ -1380,18 +1388,17 @@ impl NativePdfSession {
                 if !capabilities.can_add && matches!(command, AddGraphic { .. } | AddImage { .. }) {
                     return Err(NativeSessionError::Budget);
                 }
-                let (expected, remaining) = objects::stage(
+                let (expected, mut remaining) = objects::stage(
                     &mut staged,
                     page,
                     binding,
                     self.snapshot.output_hash,
                     command,
                 )?;
+                staged_id_bytes += reconcile_staged_ids(&staged, &mut ids, &mut remaining, || {
+                    Ok(NativeNoteId(0))
+                })?;
                 staged_remaining = Some(remaining);
-                ids.retain(|reference, _| staged.objects.contains_key(reference));
-                for reference in staged.objects.keys() {
-                    ids.entry(*reference).or_insert(NativeNoteId(0));
-                }
                 Expected::Object(expected)
             }
         };
@@ -1412,12 +1419,16 @@ impl NativePdfSession {
         reopen_limits.max_source_bytes = reopen_limits.max_output_bytes;
         reopen_limits.max_total_decoded_bytes = staged.remaining_decoded();
         reopen_limits.max_retained_bytes = staged_remaining;
-        let (reopened, ids) = reopen_rewrite(&staged, &output, output_budget, reopen_limits, &ids)?;
+        let (reopened, remapped_ids) =
+            reopen_rewrite(&staged, &output, output_budget, reopen_limits, &ids)?;
+        drop(ids);
+        let ids = remapped_ids;
         let output_hash = *blake3::hash(&output).as_bytes();
         let output_capacity = output.capacity();
         drop(staged);
         drop(output);
-        let mut scene_limit = reopened.limits.max_retained_bytes + output_capacity;
+        let released = output_capacity + staged_id_bytes;
+        let mut scene_limit = reopened.limits.max_retained_bytes + released;
         let next_binding = NativeBinding {
             revision,
             ..binding
@@ -1429,7 +1440,7 @@ impl NativePdfSession {
             next_binding,
             self.origin_bytes().len(),
             record_count,
-            reopened.remaining_retained() + output_capacity,
+            reopened.remaining_retained() + released,
         )?;
         let fields = forms::project(&reopened, &scene.pages, next_binding, &mut scene_remaining)?;
         let selected_page = match &expected {
@@ -1758,6 +1769,30 @@ fn verify_note(
     }
 }
 
+fn reconcile_staged_ids(
+    staged: &NativePdfGraph,
+    ids: &mut BTreeMap<PdfObjectRef, NativeNoteId>,
+    remaining: &mut usize,
+    mut new_id: impl FnMut() -> Result<NativeNoteId, NativeSessionError>,
+) -> Result<usize, NativeSessionError> {
+    let missing = staged
+        .objects
+        .keys()
+        .filter(|object| !ids.contains_key(object))
+        .count();
+    let bytes = missing
+        .checked_mul(OBJECT_ID_BYTES)
+        .ok_or(NativeSessionError::Budget)?;
+    spend(remaining, bytes)?;
+    ids.retain(|reference, _| staged.objects.contains_key(reference));
+    for &reference in staged.objects.keys() {
+        if let std::collections::btree_map::Entry::Vacant(entry) = ids.entry(reference) {
+            entry.insert(new_id()?);
+        }
+    }
+    Ok(bytes)
+}
+
 fn reopen_rewrite(
     staged: &NativePdfGraph,
     output: &Vec<u8>,
@@ -1958,6 +1993,51 @@ mod tests {
             detached_notes_match(&snapshot.scene, snapshot.binding, &notes, peak),
             Ok(false)
         );
+    }
+
+    #[test]
+    fn copied_annotations_require_all_staged_ids_before_insertion() {
+        let bytes = super::super::tests::redaction_fixture("q Q");
+        let limits = NativeEditLimits::default();
+        let mut session = NativePdfSession::open_scoped(&bytes, limits, [7; 16]).unwrap();
+        session
+            .apply(
+                session.snapshot.binding,
+                1,
+                &NativeNoteCommand::Add {
+                    page: NativePageId(0),
+                    rect: [10, 10, 30, 30],
+                    contents: "Delivery note".into(),
+                },
+            )
+            .unwrap();
+        let mut staged = NativePdfGraph::open(session.output_bytes(), limits).unwrap();
+        let duplicate = NativePageCommand::DuplicatePage {
+            target: pages::NativePageTarget {
+                page: 0,
+                stable_id: session.snapshot.page_state.order[0],
+            },
+        };
+        let copied =
+            pages::stage(&mut staged, duplicate, 0, &session.snapshot.scene.pages).unwrap();
+        assert_eq!(staged.objects.len(), session.ids.len() + 2);
+        let required = 2 * OBJECT_ID_BYTES;
+        for short_by in [0, 1] {
+            let mut remaining = required - short_by;
+            let mut ids = session.ids.clone();
+            let result =
+                reconcile_staged_ids(&staged, &mut ids, &mut remaining, || Ok(NativeNoteId(99)));
+            if short_by == 0 {
+                assert_eq!(result, Ok(required));
+                assert_eq!(remaining, 0);
+                assert_eq!(ids[&copied], NativeNoteId(99));
+                assert_eq!(ids.len(), staged.objects.len());
+            } else {
+                assert_eq!(result, Err(NativeSessionError::Budget));
+                assert_eq!(ids, session.ids);
+                assert_eq!(remaining, required - 1);
+            }
+        }
     }
 
     #[test]

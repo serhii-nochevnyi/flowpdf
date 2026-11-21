@@ -1488,8 +1488,8 @@ fn split_text_widget_with_direct_arrays_clones_as_independent_owners() {
     assert_split_text_widget_owners("[4 0 R]", "[4 0 R]");
 }
 
-fn assert_split_text_widget_owners(annots: &str, kids: &str) {
-    let file = build_pdf(&[
+fn split_text_widget_pdf(annots: &str, kids: &str) -> Vec<u8> {
+    build_pdf(&[
         (
             0,
             "<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields 6 0 R >> >>",
@@ -1513,7 +1513,11 @@ fn assert_split_text_widget_owners(annots: &str, kids: &str) {
         (0, "[5 0 R]"),
         (0, "[4 0 R]"),
         (0, "[4 0 R]"),
-    ]);
+    ])
+}
+
+fn assert_split_text_widget_owners(annots: &str, kids: &str) {
+    let file = split_text_widget_pdf(annots, kids);
     let mut session =
         NativePdfSession::open_scoped(&file, NativeEditLimits::default(), [6; 16]).unwrap();
     let duplicate = command("duplicatePage", 0, session.snapshot());
@@ -1543,6 +1547,61 @@ fn assert_split_text_widget_owners(annots: &str, kids: &str) {
     assert_eq!(output.matches("/Subtype /Widget").count(), 1);
     assert_eq!(output.matches("/FT /Tx").count(), 1);
     assert!(!output.contains("/T <637573746F6D6572>"));
+}
+
+#[test]
+fn duplicate_with_indirect_widget_arrays_refuses_atomically_one_byte_below_fit() {
+    let bytes = split_text_widget_pdf("7 0 R", "8 0 R");
+    let open = |max_retained_bytes| {
+        NativePdfSession::open_scoped(
+            &bytes,
+            NativeEditLimits {
+                max_retained_bytes,
+                ..NativeEditLimits::default()
+            },
+            [6; 16],
+        )
+    };
+    let duplicate = |session: &mut NativePdfSession| {
+        let command = command("duplicatePage", 0, session.snapshot());
+        session.apply_page(session.snapshot().binding, 1, &command)
+    };
+    let (mut low, mut high) = (1, NativeEditLimits::default().max_retained_bytes);
+    while low < high {
+        let mid = low + (high - low) / 2;
+        match open(mid).and_then(|mut session| duplicate(&mut session)) {
+            Ok(_) => high = mid,
+            Err(
+                NativeSessionError::Budget
+                | NativeSessionError::Graph(NativeEditError::Reader(PdfReadError::InputSizeLimit)),
+            ) => low = mid + 1,
+            Err(error) => panic!("unexpected refusal at {mid} bytes: {error:?}"),
+        }
+    }
+    let mut constrained = open(low - 1).unwrap();
+    let before = constrained.snapshot().clone();
+    assert_eq!(duplicate(&mut constrained), Err(NativeSessionError::Budget));
+    let after = constrained.snapshot();
+    assert_eq!(constrained.output_bytes(), bytes);
+    assert_eq!(after.binding, before.binding);
+    assert_eq!(after.output_hash, before.output_hash);
+    assert_eq!(after.page_state, before.page_state);
+    assert_eq!(after.fields, before.fields);
+    assert_eq!(after.consumed_request, before.consumed_request);
+    assert_eq!(
+        constrained.lookup(before.binding, 1),
+        Ok(NativeRequestLookup::Unseen)
+    );
+
+    let mut exact = open(low).unwrap();
+    let receipt = duplicate(&mut exact).unwrap();
+    let order = &exact.snapshot().page_state.order;
+    assert_eq!(order[0], before.page_state.order[0]);
+    assert_ne!(order[0], order[1]);
+    assert_eq!(receipt.selected_page, Some(order[1]));
+    let fields = &exact.snapshot().fields;
+    assert_eq!(fields.len(), 2);
+    assert_ne!(fields[0].object, fields[1].object);
 }
 
 #[test]
