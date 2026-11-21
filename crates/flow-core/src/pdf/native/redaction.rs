@@ -1002,6 +1002,30 @@ struct Graphics {
     width: i64,
 }
 
+// @invariant: Stack capacity stays charged across nested Form scans until the stack is dropped.
+struct GraphicsStack<'w> {
+    saved: Vec<Graphics>,
+    memory: Reservation<'w>,
+}
+
+impl<'w> GraphicsStack<'w> {
+    fn new(workspace: &'w Workspace) -> Self {
+        Self {
+            saved: Vec::new(),
+            memory: workspace.scope(),
+        }
+    }
+
+    fn save(&mut self, graphics: Graphics) -> Result<()> {
+        if self.saved.len() >= 32 {
+            return Err(Unsupported);
+        }
+        self.memory
+            .push(&mut self.saved, graphics)
+            .map_err(|_| Budget)
+    }
+}
+
 struct Path {
     start: usize,
     output: usize,
@@ -1424,7 +1448,7 @@ impl<'a, 'w> Scan<'a, 'w> {
             clip: page.geometry.crop_box,
             marks: &page_marks,
         };
-        let mut saved = Vec::new();
+        let mut stack = GraphicsStack::new(self.workspace);
         if let Some(contents) = node.get("Contents") {
             let list = resolve(graph, contents)?
                 .as_array()
@@ -1436,11 +1460,11 @@ impl<'a, 'w> Scan<'a, 'w> {
                 if !separated_content_streams(previous, data) {
                     return Err(Unsupported);
                 }
-                graphics = self.content(id, graphics, &mut saved, scope, &mut used)?;
+                graphics = self.content(id, graphics, &mut stack, scope, &mut used)?;
                 previous = data;
             }
         }
-        if !saved.is_empty() {
+        if !stack.saved.is_empty() {
             return Err(Unsupported);
         }
         if let Some(list) = node.get("Annots") {
@@ -1477,7 +1501,7 @@ impl<'a, 'w> Scan<'a, 'w> {
         &mut self,
         id: Object,
         mut graphics: Graphics,
-        saved: &mut Vec<Graphics>,
+        stack: &mut GraphicsStack<'w>,
         scope: Scope<'a, '_>,
         used: &mut UsedResources,
     ) -> Result<Graphics> {
@@ -1609,8 +1633,8 @@ impl<'a, 'w> Scan<'a, 'w> {
                         });
                     }
                     "n" if args.is_empty() => {}
-                    "q" if args.is_empty() && saved.len() < 32 => saved.push(graphics),
-                    "Q" if args.is_empty() => graphics = saved.pop().ok_or(Unsupported)?,
+                    "q" if args.is_empty() => stack.save(graphics)?,
+                    "Q" if args.is_empty() => graphics = stack.saved.pop().ok_or(Unsupported)?,
                     "cm" => {
                         graphics.matrix = graphics.matrix.then(Matrix::new(numbers(&args)?)?)?
                     }
@@ -1715,11 +1739,11 @@ impl<'a, 'w> Scan<'a, 'w> {
             None => scope.resources,
         };
         let mut used = UsedResources::new();
-        let mut saved = Vec::new();
+        let mut stack = GraphicsStack::new(self.workspace);
         self.content(
             id,
             Graphics { matrix, ..graphics },
-            &mut saved,
+            &mut stack,
             Scope {
                 resources,
                 clip,
@@ -1727,7 +1751,7 @@ impl<'a, 'w> Scan<'a, 'w> {
             },
             &mut used,
         )?;
-        if !saved.is_empty() {
+        if !stack.saved.is_empty() {
             return Err(Unsupported);
         }
         self.active_forms.remove(&id);
@@ -2140,6 +2164,36 @@ mod tests {
             }),
         );
         writer::rewrite(&graph).unwrap()
+    }
+
+    #[test]
+    fn nested_graphics_stacks_reserve_capacity_from_the_scan_workspace() {
+        let stack_bytes = 4 * size_of::<Graphics>();
+        let workspace = Workspace::new(2 * stack_bytes);
+        let graphics = Graphics {
+            matrix: Matrix::IDENTITY,
+            width: POINT,
+        };
+
+        let mut page = GraphicsStack::new(&workspace);
+        page.save(graphics).unwrap();
+        page.saved.pop().unwrap();
+        assert_eq!(workspace.remaining(), stack_bytes);
+
+        let mut form = GraphicsStack::new(&workspace);
+        form.save(graphics).unwrap();
+        assert_eq!(workspace.remaining(), 0);
+
+        let mut nested = GraphicsStack::new(&workspace);
+        assert_eq!(nested.save(graphics), Err(Budget));
+        assert_eq!(nested.saved.capacity(), 0);
+        assert_eq!(workspace.remaining(), 0);
+
+        drop(form);
+        assert_eq!(workspace.remaining(), stack_bytes);
+        nested.save(graphics).unwrap();
+        drop((nested, page));
+        assert_eq!(workspace.remaining(), 2 * stack_bytes);
     }
 
     #[test]
