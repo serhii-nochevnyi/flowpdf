@@ -1154,6 +1154,31 @@ fn apply_at_retained_boundary(
 }
 
 #[test]
+fn checkbox_add_to_indirect_annots_preserves_existing_note_and_widget() {
+    let source = build_pdf(&[
+        b"<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [6 0 R] >> >>".to_vec(),
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 300 500] >>".to_vec(),
+        b"<< /Type /Page /Parent 2 0 R /Annots 4 0 R >>".to_vec(),
+        b"[5 0 R 6 0 R]".to_vec(),
+        b"<< /Type /Annot /Subtype /Text /Rect [10 10 30 30] /Contents (Delivery note) /P 3 0 R >>".to_vec(),
+        b"<< /Type /Annot /Subtype /Widget /Rect [40 40 60 60] /P 3 0 R /FT /Btn /T (agreement) /V /Off /AS /Off >>".to_vec(),
+    ]);
+    let pdf = apply_at_retained_boundary(&source, |_| NativeFieldCommand::AddCheckboxField {
+        page: 0,
+        rect: [80, 40, 100, 60],
+        name: "approval".into(),
+        checked: true,
+    });
+    let reopened = session(pdf.output_bytes());
+    assert_eq!(reopened.snapshot().fields.len(), 2);
+    assert_saved_value(pdf.output_bytes(), "agreement", "Btn", "Off");
+    assert_saved_value(pdf.output_bytes(), "approval", "Btn", "Yes");
+    assert!(reopened.snapshot().scene.pages[0].annotations.iter().any(|annotation| {
+        matches!(annotation, flow_core::pdf::NativePdfAnnotation::PlainNote(note) if note.contents == "Delivery note")
+    }));
+}
+
+#[test]
 fn ordinary_text_field_creation_and_update_respect_the_retained_allowance() {
     let source = imported_checkbox("[10 10 30 30]", "", "Off");
     let pdf = apply_at_retained_boundary(&source, |_| NativeFieldCommand::AddTextField {
