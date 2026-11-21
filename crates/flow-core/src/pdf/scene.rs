@@ -1535,7 +1535,7 @@ impl<'a> SceneBuilder<'a> {
         }
         if !glyphs.is_empty() {
             if self.state.clip.is_empty() {
-                if self.invocation_path.len() > 1 && !self.state.paint_clip.is_empty() {
+                if !self.state.paint_clip.is_empty() {
                     self.report_partial(provenance.object_ref);
                 }
                 return Ok(());
