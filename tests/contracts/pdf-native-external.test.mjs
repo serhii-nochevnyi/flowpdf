@@ -418,9 +418,12 @@ test('a verified text capability refusal contradicts an admitted fixture target'
   }
 })
 
-test('a verified object capability refusal contradicts an admitted fixture target', (t) => {
+test('admitted object edits require verified insertion or target capabilities', (t) => {
   const source = loadFixtures().find(({ id }) => id === 'edit-families')
   const admitted = source.spec.operations.find(({ operation }) => operation === 'replaceImage')
+  const addGraphic = source.spec.operations.find(({ operation }) => operation === 'addGraphic')
+  const addImage = source.spec.operations.find(({ operation }) => operation === 'addImage')
+  const move = source.spec.operations.find(({ operation }) => operation === 'moveObject')
   const expectedRefusal = source.spec.operations.find(({ operation }) => operation === 'moveObjectInvalidGeometry')
   const { page, rectPt } = admitted.request.target
   const image = {
@@ -431,8 +434,15 @@ test('a verified object capability refusal contradicts an admitted fixture targe
   const projected = (objects, refusedPage) => admitted.pages.map(({ page: number }) => number === refusedPage
     ? { page: number - 1, canAdd: false, objects: [], refusal: refused }
     : { page: number - 1, canAdd: true, objects: number === page ? objects : [], refusal: null })
+  const withoutInsertion = (operation) => projected([]).map((entry) =>
+    entry.page === operation.request.page - 1 ? { ...entry, canAdd: false } : entry)
+  const immovableImage = { ...image, operations: ['replace', 'remove'] }
   const { json } = structuralReadback(admitted.pages)
   const cases = [
+    ['graphic insertion denied', addGraphic, withoutInsertion(addGraphic), 'fail'],
+    ['image insertion denied', addImage, withoutInsertion(addImage), 'fail'],
+    ['insertion capability omitted with projection', addImage, undefined, 'unavailable'],
+    ['matched image cannot move', move, projected([immovableImage]), 'fail'],
     ['target page refused', admitted, projected([], page), 'fail'],
     ['projection omitted', admitted, undefined, 'unavailable'],
     ['another page refused', admitted, projected([], 1), 'unavailable'],
@@ -468,6 +478,29 @@ test('a verified object capability refusal contradicts an admitted fixture targe
     assert.deepEqual(compared, [['structure', 'source.pdf']], label)
     assert.deepEqual(readdirSync(directory), ['source.pdf'], label)
   }
+
+  let base
+  let commands = 0
+  const session = nativeSession({
+    native_pdf_open: nativeResponder((request) => {
+      const reply = openedReply(request, { scene: { objectPages: projected([immovableImage]) } })
+      base = reply.snapshot
+      return reply
+    }),
+    native_pdf_command: nativeResponder(({ command }) => {
+      commands++
+      assert.deepEqual(command, { kind: 'moveObject', target: { page: page - 1, id: image.id, profile: image.profile },
+        transform: expectedRefusal.request.transform })
+      return { status: 'failed', code: expectedRefusal.outcome }
+    }),
+    native_pdf_snapshot: nativeResponder(() => ({ status: 'unseen', snapshot: base })),
+    native_pdf_close: nativeResponder(() => ({ status: 'closed' })),
+    verify_native_pdf_response: () => true,
+    verify_native_pdf_worker_response: () => true,
+  }, source.input)
+  assert.deepEqual(operationOutput(session, source, expectedRefusal), source.input)
+  assert.equal(commands, 1)
+  session.close()
 })
 
 test('redaction refusal preserves the verifier classification through bounded cleanup', (t) => {
@@ -480,7 +513,7 @@ test('redaction refusal preserves the verifier classification through bounded cl
   const outputHex = input.toString('hex')
   const snapshot = { originStoreHash: sourceHash, binding, outputHash: originHash, outputHex,
     pageState: { order: [42, 43] } }
-  const candidate = { hash: Array(32).fill(7), validatorVersion: 1,
+  const expectedCandidate = { hash: Array(32).fill(7), validatorVersion: 1,
     validatorProfile: 'classic-xref-owned-144dpi-v1', affectedPages: [42] }
   const { json: sourceStructure } = structuralReadback(operation.pages)
   const stageId = operation.request.marks.length + 2
@@ -490,6 +523,7 @@ test('redaction refusal preserves the verifier classification through bounded cl
   })
 
   for (const [verdict, cleanupFailure, status, exitCodes] of [
+    ['wrong-coverage', 'none', 'fail', [1, 1]],
     ['failed', 'none', 'fail', [1, 1]],
     ['failed', 'close', 'fail', [1, 1]],
     ['failed', 'cancel', 'fail', [1, 1]],
@@ -503,6 +537,8 @@ test('redaction refusal preserves the verifier classification through bounded cl
   ]) {
     const label = `${verdict}, ${cleanupFailure} cleanup failure`
     const hasCandidate = verdict !== 'missing-candidate'
+    const wrongCoverage = verdict === 'wrong-coverage'
+    const candidate = wrongCoverage ? { ...expectedCandidate, affectedPages: [42, 43] } : expectedCandidate
     const publishRefused = verdict === 'publish-refused'
     const directory = scratchDirectory(t, 'flowpdf-redaction-contract-')
     const requests = []
@@ -552,13 +588,13 @@ test('redaction refusal preserves the verifier classification through bounded cl
       ...operation.request.marks.map(({ rectPt }, index) =>
         redactRequest(index + 2, { kind: 'addMark', pageId: 42, rect: rectPt.map((point) => point * 1000) })),
       redactRequest(stageId, { kind: 'stage' }),
-      ...(hasCandidate ? [redactRequest(stageId, { kind: 'verify', candidate }),
-        ...(publishRefused ? [redactRequest(stageId, { kind: 'publish', candidate })] : []),
-        redactRequest(stageId, { kind: 'cancel', candidate })] : []),
+      ...(hasCandidate && !wrongCoverage ? [redactRequest(stageId, { kind: 'verify', candidate })] : []),
+      ...(publishRefused ? [redactRequest(stageId, { kind: 'publish', candidate })] : []),
+      ...(hasCandidate ? [redactRequest(stageId, { kind: 'cancel', candidate })] : []),
       { ...request('close', stageId + 1), binding },
     ], label)
     assert.equal(evidence.status, status, label)
-    const reason = publishRefused ? 'native-redaction-publication' :
+    const reason = wrongCoverage ? 'native-redaction-coverage' : publishRefused ? 'native-redaction-publication' :
       hasCandidate ? 'native-redaction-verification' : 'native-redaction-candidate'
     assert.equal(evidence.reason, reason, label)
     assert.deepEqual([externalExitCode(evidence.status, false), externalExitCode(evidence.status, true)], exitCodes, label)
@@ -572,18 +608,20 @@ test('redaction refusal preserves the verifier classification through bounded cl
 
 test('redaction replies match the accepted PDF, action and staged candidate before comparison', (t) => {
   const source = loadFixtures().find(({ id }) => id === 'redaction')
-  const [operation] = source.spec.operations
+  const [fixtureOperation] = source.spec.operations
+  const [firstMark, ...remainingMarks] = fixtureOperation.request.marks
+  const operation = { ...fixtureOperation, request: { marks: [{ ...firstMark, page: 2 }, firstMark, ...remainingMarks] } }
   const { json } = structuralReadback(operation.pages)
   const output = fixture('notes-preservation.pdf')
   const candidate = { hash: Array(32).fill(7), validatorVersion: 1,
-    validatorProfile: 'classic-xref-owned-144dpi-v1', affectedPages: [42, 43] }
+    validatorProfile: 'classic-xref-owned-144dpi-v1', affectedPages: [43, 42] }
   const cases = [
     ['addMark', 'action', { action: 'removeMark' }],
     ['stage', 'accepted hash', { acceptedHash: candidate.hash }],
     ['verify', 'candidate hash', { candidate: { ...candidate, hash: Array(32).fill(8) } }],
     ['verify', 'validator version', { candidate: { ...candidate, validatorVersion: 2 } }],
     ['verify', 'validator profile', { candidate: { ...candidate, validatorProfile: 'other' } }],
-    ['verify', 'candidate page order', { candidate: { ...candidate, affectedPages: [43, 42] } }],
+    ['verify', 'candidate page order', { candidate: { ...candidate, affectedPages: [42, 43] } }],
     ['publish', 'candidate hash', { candidate: { ...candidate, hash: Array(32).fill(8) } }],
     ['publish', 'accepted hash', { acceptedHash: candidate.hash }],
     ['cancel', 'missing candidate', { candidate: null }],
@@ -595,7 +633,7 @@ test('redaction replies match the accepted PDF, action and staged candidate befo
     let base
     const wasm = {
       native_pdf_open: nativeResponder((request) => {
-        const opened = openedReply(request, { pageState: { order: [42, 43] } })
+        const opened = openedReply(request, { pageState: { order: [43, 42] } })
         base = opened.snapshot
         return opened
       }),
@@ -633,8 +671,9 @@ test('redaction replies match the accepted PDF, action and staged candidate befo
     }
     if (step === 'cancel') {
       const session = nativeSession(wasm, source.input)
-      const [{ rectPt }] = operation.request.marks
-      session.redact({ kind: 'addMark', pageId: base.pageState.order[0], rect: rectPt.map((point) => point * 1000) })
+      for (const { page, rectPt } of operation.request.marks) {
+        session.redact({ kind: 'addMark', pageId: base.pageState.order[page - 1], rect: rectPt.map((point) => point * 1000) })
+      }
       session.redact({ kind: 'stage' })
       assert.throws(() => session.redact({ kind: 'cancel', candidate }, true),
         { status: 'fail', message: 'native-response-binding' })
