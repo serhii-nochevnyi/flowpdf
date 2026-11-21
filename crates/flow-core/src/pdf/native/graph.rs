@@ -118,7 +118,8 @@ pub struct NativePdfGraph {
 struct PageValidation<'a> {
     seen: BTreeSet<PdfObjectRef>,
     order: Vec<PdfObjectRef>,
-    bytes: Reservation<'a>,
+    seen_bytes: Reservation<'a>,
+    order_bytes: Reservation<'a>,
     work: usize,
 }
 
@@ -690,16 +691,36 @@ impl NativePdfGraph {
         let mut validation = PageValidation {
             seen: BTreeSet::new(),
             order: Vec::new(),
-            bytes: workspace.scope(),
+            seen_bytes: workspace.scope(),
+            order_bytes: workspace.scope(),
             work: self.work,
         };
         self.walk_pages(pages, None, false, 0, &mut validation)?;
         if validation.order.is_empty() {
             return Err(NativeEditError::Malformed);
         }
-        self.work = validation.work;
-        self.retained = workspace.remaining();
-        self.pages = validation.order;
+        let PageValidation {
+            seen,
+            order,
+            seen_bytes,
+            order_bytes,
+            work,
+        } = validation;
+        let previous_order_bytes = self
+            .pages
+            .capacity()
+            .checked_mul(size_of::<PdfObjectRef>())
+            .ok_or(NativeEditError::Budget)?;
+        drop(seen);
+        drop(seen_bytes);
+        let retained = workspace
+            .remaining()
+            .checked_add(previous_order_bytes)
+            .ok_or(NativeEditError::Budget)?;
+        self.pages = order;
+        self.retained = retained;
+        self.work = work;
+        drop(order_bytes);
         Ok(())
     }
 
@@ -715,7 +736,7 @@ impl NativePdfGraph {
         spend(work, 1)?;
         if depth > self.limits.max_nesting
             || !validation
-                .bytes
+                .seen_bytes
                 .insert(&mut validation.seen, reference)
                 .map_err(|_| NativeEditError::Budget)?
         {
@@ -800,7 +821,7 @@ impl NativePdfGraph {
                     }
                 }
                 validation
-                    .bytes
+                    .order_bytes
                     .push(&mut validation.order, reference)
                     .map_err(|_| NativeEditError::Budget)?;
                 Ok(1)
@@ -1272,14 +1293,21 @@ mod tests {
         visited.tree_entry::<PdfObjectRef>().unwrap();
         visited.tree_entry::<PdfObjectRef>().unwrap();
         let visited_bytes = allowance - workspace.remaining();
+        let required = visited_bytes + graph.pages.capacity() * size_of::<PdfObjectRef>();
 
-        for retained in [0, visited_bytes] {
+        for retained in [0, visited_bytes, required - 1] {
             graph.retained = retained;
             assert_eq!(graph.validate_pages(), Err(NativeEditError::Budget));
             assert_eq!(graph.pages, order);
             assert_eq!(graph.work, work);
             assert_eq!(graph.retained, retained);
         }
+        graph.retained = required;
+        graph.validate_pages().unwrap();
+        assert_eq!(graph.pages, order);
+        assert_eq!(graph.retained, required);
+        graph.validate_pages().unwrap();
+        assert_eq!(graph.retained, required);
     }
 
     #[test]

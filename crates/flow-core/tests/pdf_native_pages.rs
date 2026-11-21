@@ -1666,7 +1666,7 @@ fn copy_name_inventory_uses_the_live_projection_and_staging_budgets() {
     let mut near_limit = NativePdfSession::open_scoped(
         &bytes,
         NativeEditLimits {
-            max_retained_bytes: 468 * 1024,
+            max_retained_bytes: 464 * 1024,
             ..limits
         },
         [3; 16],
@@ -1771,7 +1771,7 @@ fn nested_page_rotation_refuses_retained_budget_exhaustion_atomically() {
     for indirect in [false, true] {
         let bytes = page_order_workspace_pdf(indirect);
         let limits = NativeEditLimits {
-            max_retained_bytes: 282 * 1024,
+            max_retained_bytes: 258 * 1024,
             ..NativeEditLimits::default()
         };
         let mut session = NativePdfSession::open_scoped(&bytes, limits, [3; 16]).unwrap();
