@@ -427,7 +427,9 @@ function familyCommand(op, request, snapshot, outcome) {
   if (op === 'addGraphic') return { kind: op, page, graphic }
   if (op === 'addImage') return { kind: op, page, bounds: milli(request.rectPt), assetHex: request.assetPngHex }
   const targetPage = request.target.page - 1
-  const { id, profile } = one(objectPages?.find((entry) => entry.page === targetPage)?.objects.filter(
+  const objectPage = objectPages?.find((entry) => entry.page === targetPage)
+  requireMatch(outcome !== 'admitted' || !objectPage?.refusal, 'native-operation-target-refused')
+  const { id, profile } = one(objectPage?.objects.filter(
     ({ kind, bounds }) => kind === (request.target.kind === 'path' ? 'graphic' : 'image') &&
       same(bounds, milli(request.target.rectPt)),
   ))
