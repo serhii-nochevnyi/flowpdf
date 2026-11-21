@@ -1087,29 +1087,8 @@ impl NativePdfSession {
             scene =
                 NativePdfNoteScene::new(hash, scene.pages, scene.text_pages, scene.object_pages)?;
         }
-        let mut projected_notes = projected_notes(&scene);
-        let mut seen = BTreeSet::new();
-        let notes_match = claimed_notes
-            .iter()
-            .all(|&(claimed_page, claimed_object, id)| {
-                let Some((page, object, projected_id)) = projected_notes.next() else {
-                    return false;
-                };
-                let valid_id = if binding.revision == 0 {
-                    id == projected_id
-                } else {
-                    id != 0
-                        && (id < FIRST_ADDED_NOTE_ID
-                            || (id > FIRST_ADDED_NOTE_ID
-                                && id - FIRST_ADDED_NOTE_ID <= binding.revision)
-                            || (FIRST_PAGE_OBJECT_ID..PAGE_OBJECT_ID_LIMIT).contains(&id))
-                };
-                page == claimed_page && object == claimed_object && valid_id && seen.insert(id)
-            })
-            && projected_notes.next().is_none();
-        drop(seen);
         if scene.scene_hash != claimed_scene
-            || !notes_match
+            || !detached_notes_match(&scene, binding, claimed_notes, remaining)?
             || !state.valid_in_workspace(scene.pages.len(), &Workspace::new(remaining))?
             || forms::project(&graph, &scene.pages, binding, &mut remaining)? != claimed_fields
         {
@@ -1595,6 +1574,41 @@ impl NativePdfSession {
     }
 }
 
+fn detached_notes_match(
+    scene: &NativePdfNoteScene,
+    binding: NativeBinding,
+    claimed: &[(u32, PdfObjectRef, u64)],
+    remaining: usize,
+) -> Result<bool, NativeSessionError> {
+    let workspace = Workspace::new(remaining);
+    let mut uniqueness = workspace.scope();
+    let mut seen = BTreeSet::new();
+    let mut projected = projected_notes(scene);
+    for &(claimed_page, claimed_object, id) in claimed {
+        let Some((page, object, projected_id)) = projected.next() else {
+            return Ok(false);
+        };
+        let valid_id = if binding.revision == 0 {
+            id == projected_id
+        } else {
+            id != 0
+                && (id < FIRST_ADDED_NOTE_ID
+                    || (id > FIRST_ADDED_NOTE_ID && id - FIRST_ADDED_NOTE_ID <= binding.revision)
+                    || (FIRST_PAGE_OBJECT_ID..PAGE_OBJECT_ID_LIMIT).contains(&id))
+        };
+        if page != claimed_page
+            || object != claimed_object
+            || !valid_id
+            || !uniqueness
+                .insert(&mut seen, id)
+                .map_err(|_| NativeSessionError::Budget)?
+        {
+            return Ok(false);
+        }
+    }
+    Ok(projected.next().is_none())
+}
+
 fn command_digest(command: Command<'_>) -> Result<[u8; 32], NativeSessionError> {
     let mut digest = blake3::Hasher::new();
     match command {
@@ -1890,6 +1904,61 @@ enum FailurePoint {
 mod tests {
     use super::super::notes::NativePageId;
     use super::*;
+
+    #[test]
+    fn detached_note_identity_checks_reserve_exact_live_scratch() {
+        let source = super::super::tests::redaction_fixture("q Q");
+        let limits = NativeEditLimits::default();
+        let mut session = NativePdfSession::open_scoped(&source, limits, [7; 16]).unwrap();
+        for (request_id, rect) in [(1, [20, 30, 40, 50]), (2, [60, 70, 80, 90])] {
+            session
+                .apply(
+                    session.snapshot.binding,
+                    request_id,
+                    &NativeNoteCommand::Add {
+                        page: NativePageId(0),
+                        rect,
+                        contents: format!("Review note {request_id}"),
+                    },
+                )
+                .unwrap();
+        }
+        let snapshot = session.snapshot();
+        let mut notes = projected_notes(&snapshot.scene).collect::<Vec<_>>();
+        assert_eq!(notes.len(), 2);
+        let verify = |notes: &[_]| {
+            NativePdfSession::verify_page_and_field_projection_with_objects(
+                session.output_bytes(),
+                limits,
+                snapshot.binding,
+                snapshot.scene.scene_hash,
+                None,
+                &snapshot.page_state,
+                &snapshot.fields,
+                notes,
+                session.redaction_admitted(),
+                None,
+            )
+        };
+        assert_eq!(verify(&notes), Ok(true));
+
+        let peak = notes.len() * (128 + 12 * std::mem::size_of::<u64>());
+        assert_eq!(
+            detached_notes_match(&snapshot.scene, snapshot.binding, &notes, peak),
+            Ok(true)
+        );
+        assert_eq!(
+            detached_notes_match(&snapshot.scene, snapshot.binding, &notes, peak - 1),
+            Err(NativeSessionError::Budget)
+        );
+
+        notes[1].2 = notes[0].2;
+        assert_eq!(verify(&notes), Ok(false));
+        assert_eq!(
+            detached_notes_match(&snapshot.scene, snapshot.binding, &notes, peak),
+            Ok(false)
+        );
+    }
 
     #[test]
     fn page_postconditions_reserve_and_refund_live_scratch() {

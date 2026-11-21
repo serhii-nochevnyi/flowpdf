@@ -176,6 +176,16 @@ fn verifies_original_storage_digest_and_stable_note_identity() {
             let swapped =
                 rehash_with_replacement(&swapped, &note_prefix(ids[1], 1), &note_prefix(ids[0], 1));
             assert!(!verify_native_pdf_worker_response(swapped));
+            let duplicate =
+                rehash_with_replacement(&applied, &note_prefix(ids[1], 1), &note_prefix(ids[0], 1));
+            let intact = applied.clone();
+            std::thread::spawn(move || {
+                assert!(verify_native_pdf_response(intact));
+                assert!(!verify_native_pdf_response(duplicate));
+            })
+            .join()
+            .unwrap();
+
             let reconciled = call(native_pdf_snapshot, bound("snapshot", request_id, &current));
             assert_eq!(reconciled["status"], "accepted");
             assert_eq!(reconciled["snapshot"], response["snapshot"]);
