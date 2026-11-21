@@ -1823,6 +1823,7 @@ fn nested_page_rotation_refuses_retained_budget_exhaustion_atomically() {
         assert_eq!(session.output_bytes(), bytes);
         assert_eq!(after.binding, before.binding);
         assert_eq!(after.consumed_request, before.consumed_request);
+        assert_eq!(after.output_hash, before.output_hash);
         assert_eq!(after.page_state, before.page_state);
         assert_eq!(after.scene.scene_hash, before.scene.scene_hash);
         assert_eq!(
@@ -1833,11 +1834,21 @@ fn nested_page_rotation_refuses_retained_budget_exhaustion_atomically() {
         let mut ample =
             NativePdfSession::open_scoped(&bytes, NativeEditLimits::default(), [3; 16]).unwrap();
         let binding = ample.snapshot().binding;
-        ample.apply_page(binding, 1, &rotate).unwrap();
-        assert_eq!(ample.snapshot().page_state.order, before.page_state.order);
+        let receipt = ample.apply_page(binding, 1, &rotate).unwrap();
+        let after = ample.snapshot();
+        assert_eq!(receipt.selected_page, Some(before.page_state.order[0]));
+        assert_eq!(after.page_state.order, before.page_state.order);
+        let rotated = after.scene.pages[0].geometry.unwrap();
+        assert_eq!(rotated.rotation(), 90);
         assert_eq!(
-            ample.snapshot().scene.pages[0].geometry.unwrap().rotation(),
-            90
+            rotated.bounds(),
+            before.scene.pages[0].geometry.unwrap().bounds()
+        );
+        assert!(
+            after.scene.pages[1..]
+                .iter()
+                .map(|page| page.geometry)
+                .eq(before.scene.pages[1..].iter().map(|page| page.geometry))
         );
     }
 }

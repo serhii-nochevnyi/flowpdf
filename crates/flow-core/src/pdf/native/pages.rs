@@ -116,7 +116,7 @@ pub struct NativePageCapability {
 }
 
 impl NativePageState {
-    pub fn valid_for_count(&self, count: usize) -> bool {
+    pub(super) fn has_shape_for_count(&self, count: usize) -> bool {
         count > 0
             && self.order.len() == count
             && self
@@ -126,8 +126,30 @@ impl NativePageState {
             && self.max_position as usize == count - 1
             && self.can_delete == (count > 1)
             && self.order.iter().all(|id| (1..(1 << 53)).contains(id))
-            && self.order.iter().copied().collect::<BTreeSet<_>>().len() == count
             && self.selected.is_none_or(|id| self.order.contains(&id))
+    }
+
+    pub fn valid_for_count(&self, count: usize) -> bool {
+        self.has_shape_for_count(count)
+            && self.order.iter().copied().collect::<BTreeSet<_>>().len() == count
+    }
+
+    pub(super) fn valid_in_workspace(
+        &self,
+        count: usize,
+        workspace: &Workspace,
+    ) -> Result<bool, NativeEditError> {
+        if !self.has_shape_for_count(count) {
+            return Ok(false);
+        }
+        let mut bytes = workspace.scope();
+        let mut seen = BTreeSet::new();
+        for &id in &self.order {
+            if !bytes.insert(&mut seen, id).map_err(|_| Budget)? {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 }
 

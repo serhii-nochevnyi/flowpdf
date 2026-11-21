@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use super::super::reader::{PdfObjectRef, PdfReadError, PdfValue};
-use super::super::scene::{NativePdfAnnotation, NativePdfNoteScene};
+use super::super::scene::{NativePdfAnnotation, NativePdfNotePage, NativePdfNoteScene};
 use super::candidate::{Candidate, NativeRedactionCandidateStatus, NativeRedactionStage};
 use super::forms::{self, NativeFieldCommand, NativeFieldRefusal, NativeFieldView};
 use super::graph::{NativeEditError, NativeEditLimits, NativePdfGraph, collect_refs, spend};
@@ -807,7 +807,9 @@ impl NativePdfSession {
             &scene,
             &mut scene_remaining,
         )?;
-        if !state.valid_for_count(scene.pages.len())
+        // The verified bytes preserve geometry, and matching the accepted order
+        // also preserves the uniqueness of its IDs.
+        if !state.has_shape_for_count(scene.pages.len())
             || state.order != self.snapshot.page_state.order
         {
             return Err(NativeSessionError::Postcondition);
@@ -1090,7 +1092,7 @@ impl NativePdfSession {
         drop(seen);
         if scene.scene_hash != claimed_scene
             || !notes_match
-            || !state.valid_for_count(scene.pages.len())
+            || !state.valid_in_workspace(scene.pages.len(), &Workspace::new(remaining))?
             || forms::project(&graph, &scene.pages, binding, &mut remaining)? != claimed_fields
         {
             return Ok(false);
@@ -1124,7 +1126,7 @@ impl NativePdfSession {
         )?;
         let projected = page_state(&graph, &ids, None, &scene, &mut remaining)?;
         Ok(scene.scene_hash == claimed_scene
-            && state.valid_for_count(scene.pages.len())
+            && state.valid_in_workspace(scene.pages.len(), &Workspace::new(remaining))?
             && state.restrictions == projected.restrictions
             && (binding.revision != 0 || *state == projected))
     }
@@ -1484,11 +1486,23 @@ impl NativePdfSession {
             &scene,
             &mut scene_remaining,
         )?;
-        if !state.valid_for_count(scene.pages.len()) {
-            return Err(NativeSessionError::Postcondition);
-        }
         if let Command::Page(command) = command {
-            self.verify_page_geometry(command, &scene, &state)?;
+            let workspace = Workspace::new(scene_remaining);
+            #[cfg(test)]
+            let workspace = match self.fail_at {
+                Some(FailurePoint::PageVerificationBudget(allowance)) => {
+                    Workspace::new(workspace.remaining().min(allowance))
+                }
+                _ => workspace,
+            };
+            if !state.valid_in_workspace(scene.pages.len(), &workspace)? {
+                return Err(NativeSessionError::Postcondition);
+            }
+            self.verify_page_geometry(command, &scene, &state, &workspace)?;
+        } else if !state.has_shape_for_count(scene.pages.len())
+            || state.order != self.snapshot.page_state.order
+        {
+            return Err(NativeSessionError::Postcondition);
         }
         self.records
             .try_reserve_exact(usize::from(self.records.len() < NATIVE_REQUEST_HISTORY))
@@ -1526,16 +1540,18 @@ impl NativePdfSession {
         command: NativePageCommand,
         scene: &NativePdfNoteScene,
         state: &NativePageState,
+        workspace: &Workspace,
     ) -> Result<(), NativeSessionError> {
         let target = command.target();
         let prior = &self.snapshot;
-        let positions: BTreeMap<_, _> = prior
-            .page_state
-            .order
-            .iter()
-            .copied()
-            .zip(&prior.scene.pages)
-            .collect();
+        let mut positions_bytes = workspace.scope();
+        let mut positions = BTreeMap::new();
+        for (&id, page) in prior.page_state.order.iter().zip(&prior.scene.pages) {
+            positions_bytes
+                .tree_entry::<(u64, &NativePdfNotePage)>()
+                .map_err(|_| NativeSessionError::Budget)?;
+            positions.insert(id, page);
+        }
         let source = &prior.scene.pages[target.page as usize];
         for (page, id) in scene.pages.iter().zip(&state.order) {
             let before = positions.get(id).copied().unwrap_or(source).geometry;
@@ -1846,12 +1862,109 @@ fn equivalent(
 enum FailurePoint {
     Serialize,
     Reopen,
+    PageVerificationBudget(usize),
 }
 
 #[cfg(test)]
 mod tests {
     use super::super::notes::NativePageId;
     use super::*;
+
+    #[test]
+    fn page_postconditions_reserve_and_refund_live_scratch() {
+        use pages::NativePageTarget;
+
+        let source = super::super::tests::redaction_fixture("q Q");
+        let session =
+            NativePdfSession::open_scoped(&source, NativeEditLimits::default(), [7; 16]).unwrap();
+        let before = session.snapshot();
+        let command = NativePageCommand::ReorderPage {
+            target: NativePageTarget {
+                page: 0,
+                stable_id: before.page_state.order[0],
+            },
+            position: 0,
+        };
+        let positions_bytes = 128 + 12 * std::mem::size_of::<(u64, &NativePdfNotePage)>();
+        let unique_bytes = 128 + 12 * std::mem::size_of::<u64>();
+        for short in [0, 1] {
+            let workspace = Workspace::new(positions_bytes - short);
+            let result = session.verify_page_geometry(
+                command,
+                &before.scene,
+                &before.page_state,
+                &workspace,
+            );
+            if short == 0 {
+                assert_eq!(result, Ok(()));
+            } else {
+                assert_eq!(result, Err(NativeSessionError::Budget));
+            }
+            assert_eq!(workspace.remaining(), positions_bytes - short);
+            let workspace = Workspace::new(unique_bytes - short);
+            assert_eq!(
+                before
+                    .page_state
+                    .valid_in_workspace(before.scene.pages.len(), &workspace),
+                if short == 0 {
+                    Ok(true)
+                } else {
+                    Err(NativeEditError::Budget)
+                }
+            );
+            assert_eq!(workspace.remaining(), unique_bytes - short);
+        }
+    }
+
+    #[test]
+    fn page_postcondition_budget_refusal_preserves_accepted_session() {
+        use pages::NativePageTarget;
+
+        let source = super::super::tests::redaction_fixture("q Q");
+        let mut session =
+            NativePdfSession::open_scoped(&source, NativeEditLimits::default(), [7; 16]).unwrap();
+        let before = session.snapshot().clone();
+        let retained = session.remaining_retained;
+        let command = NativePageCommand::RotatePage {
+            target: NativePageTarget {
+                page: 0,
+                stable_id: before.page_state.order[0],
+            },
+            degrees: 90,
+        };
+        let peak = 128 + 12 * std::mem::size_of::<(u64, &NativePdfNotePage)>();
+        let unique_bytes = 128 + 12 * std::mem::size_of::<u64>();
+        for allowance in [unique_bytes - 1, peak - 1] {
+            session.fail_at = Some(FailurePoint::PageVerificationBudget(allowance));
+            assert_eq!(
+                session.apply_page(before.binding, 1, &command),
+                Err(NativeSessionError::Budget)
+            );
+            assert_eq!(session.output_bytes(), source);
+            assert_eq!(session.remaining_retained, retained);
+            let after = session.snapshot();
+            assert_eq!(after.binding, before.binding);
+            assert_eq!(after.consumed_request, before.consumed_request);
+            assert_eq!(after.output_hash, before.output_hash);
+            assert_eq!(after.scene.scene_hash, before.scene.scene_hash);
+            assert_eq!(after.page_state, before.page_state);
+            assert_eq!(
+                session.lookup(before.binding, 1),
+                Ok(NativeRequestLookup::Unseen)
+            );
+        }
+
+        session.fail_at = Some(FailurePoint::PageVerificationBudget(peak));
+        session.apply_page(before.binding, 1, &command).unwrap();
+        assert_eq!(session.snapshot().page_state.order, before.page_state.order);
+        assert_eq!(
+            session.snapshot().scene.pages[0]
+                .geometry
+                .unwrap()
+                .rotation(),
+            90
+        );
+    }
 
     #[test]
     fn accepted_text_field_balance_matches_fresh_projection() {
