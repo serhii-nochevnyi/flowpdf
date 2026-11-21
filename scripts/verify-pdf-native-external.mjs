@@ -437,28 +437,44 @@ function familyCommand(op, request, snapshot, outcome) {
     shape: request.graphic.shape, points: request.graphic.pointsPt.map(milli),
     fill: request.graphic.fill, stroke: request.graphic.stroke, strokeWidth: request.graphic.strokeWidth * 1000,
   }
-  if (op === 'addGraphic') return { kind: op, page, graphic }
-  if (op === 'addImage') return { kind: op, page, bounds: milli(request.rectPt), assetHex: request.assetPngHex }
+  if (op === 'addGraphic' || op === 'addImage') {
+    if (outcome === 'admitted') {
+      const objectPage = objectPages?.find((entry) => entry.page === page)
+      requireMatch(objectPage?.canAdd !== false && !objectPage?.refusal, 'native-operation-target-refused')
+      requireInput(objectPage?.canAdd === true, 'native-operation-target')
+    }
+    if (op === 'addGraphic') return { kind: op, page, graphic }
+    return { kind: op, page, bounds: milli(request.rectPt), assetHex: request.assetPngHex }
+  }
   const targetPage = request.target.page - 1
   const objectPage = objectPages?.find((entry) => entry.page === targetPage)
   requireMatch(outcome !== 'admitted' || !objectPage?.refusal, 'native-operation-target-refused')
-  const { id, profile } = one(objectPage?.objects.filter(
+  const { id, profile, operations } = one(objectPage?.objects.filter(
     ({ kind, bounds }) => kind === (request.target.kind === 'path' ? 'graphic' : 'image') &&
       same(bounds, milli(request.target.rectPt)),
   ))
+  const action = op.startsWith('replace') ? 'replace' : op.startsWith('moveObject') ? 'move' : 'remove'
+  if (outcome === 'admitted') {
+    requireInput(Array.isArray(operations), 'native-operation-target')
+    requireMatch(operations.includes(action), 'native-operation-target-refused')
+  }
   const target = { page: targetPage, id, profile }
   if (op === 'replaceGraphic') return { kind: op, target, graphic }
   if (op === 'replaceImage') return { kind: op, target, assetHex: request.assetPngHex }
-  if (op.startsWith('moveObject')) return { kind: 'moveObject', target,
+  if (action === 'move') return { kind: 'moveObject', target,
     transform: request.transform }
   requireInput(op === 'removeObject', 'native-operation')
   return { kind: op, target }
 }
 
 function redact(session, operation) {
+  const { order } = session.current().pageState
+  const markedPages = new Set()
   for (const { page, rectPt } of operation.request.marks) {
-    const reply = session.redact({ kind: 'addMark', pageId: session.current().pageState.order[page - 1], rect: milli(rectPt) })
+    const pageId = order[page - 1]
+    const reply = session.redact({ kind: 'addMark', pageId, rect: milli(rectPt) })
     if (reply.code) return reply
+    markedPages.add(pageId)
   }
   const staged = session.redact({ kind: 'stage' })
   if (staged.code) return staged
@@ -466,6 +482,7 @@ function redact(session, operation) {
   requireInput(candidate, 'native-redaction-candidate')
   let published
   return withCleanup(() => {
+    requireMatch(same(candidate.affectedPages, order.filter((id) => markedPages.has(id))), 'native-redaction-coverage')
     const verified = session.redact({ kind: 'verify', candidate }, true)
     const verdict = verified.redaction?.verification?.status
     requireMatch(verdict !== 'failed', 'native-redaction-verification')
