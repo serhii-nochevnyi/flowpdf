@@ -18,8 +18,7 @@ use super::verify_structure::MAX_INPUT;
 const POINT: i64 = 1_000;
 const MAX_COORD: i64 = 1_000_000 * POINT;
 const MAX_STREAM: usize = 512 * 1024;
-// miniz_oxide 0.8.9 uses fixed LZ codes, a dictionary and two hash-chain tables,
-// Huffman tables, and a local output buffer. Allow headroom above their combined 320 KiB ceiling.
+// @invariant: miniz_oxide 0.8.9's fixed encoder buffers use under 320 KiB, leaving room for temporaries.
 const ZLIB_ENCODER_SCRATCH: usize = 512 * 1024;
 const MAX_FORM_DEPTH: usize = 8;
 const MAX_PAGES: usize = 256;
@@ -2036,7 +2035,6 @@ fn apply(
         if let Some(replacement) = replacement {
             stream.data = replacement;
         }
-        // The replacement reservation pays for one saved buffer of up to `size` bytes.
         let compressed = if scratch_reserved {
             compress_rewritten_stream(&stream.data)
         } else {
@@ -2056,7 +2054,6 @@ fn apply(
             PdfValue::Integer(stream.encoded.len() as i64),
         );
         if scratch_reserved {
-            // The encoder is gone and the replacement reservation still covers saved capacity.
             graph.release_page_retained(ZLIB_ENCODER_SCRATCH);
         }
     }
@@ -2068,7 +2065,6 @@ fn apply(
 }
 
 fn compress_rewritten_stream(data: &[u8]) -> Option<Vec<u8>> {
-    // A complete stream that fits this buffer is strictly smaller than the raw data.
     let mut output = vec![0; data.len() - 1];
     let flags = create_comp_flags_from_zip_params(6, 1, 0);
     let mut encoder = CompressorOxide::new(flags);
