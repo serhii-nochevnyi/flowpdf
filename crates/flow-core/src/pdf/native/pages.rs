@@ -665,12 +665,37 @@ pub(super) fn form_dict(graph: &NativePdfGraph, owner: Ref) -> Result<&Dict, Nat
     Ok(values)
 }
 
-pub(super) fn form_fields(graph: &NativePdfGraph) -> Result<(Ref, Vec<Ref>), NativeEditError> {
-    let (owner, fields) = form_field_refs(graph, &mut graph.remaining_work(), Budget)?;
-    Ok((
-        owner,
-        fields.iter().filter_map(PdfValue::as_reference).collect(),
-    ))
+pub(super) fn form_fields(
+    graph: &NativePdfGraph,
+    work: &mut usize,
+    remaining: &mut usize,
+) -> Result<(Ref, Vec<Ref>), NativeEditError> {
+    let (owner, values) = form_field_refs(graph, work, Unsupported)?;
+    let mut available = *remaining;
+    spend(&mut available, values.len() * size_of::<Ref>())?;
+    let mut fields = Vec::new();
+    fields.try_reserve_exact(values.len()).map_err(|_| Budget)?;
+    fields.extend(values.iter().filter_map(PdfValue::as_reference));
+    *remaining = available;
+    Ok((owner, fields))
+}
+
+pub(super) fn reserve_form_field_slot(
+    graph: &mut NativePdfGraph,
+    fields: &mut Vec<Ref>,
+) -> Result<usize, NativeEditError> {
+    if fields.len() < fields.capacity() {
+        return Ok(0);
+    }
+    let old_bytes = fields.capacity() * size_of::<Ref>();
+    let new_bytes = (fields.len() + 1) * size_of::<Ref>();
+    graph.charge_page_retained(new_bytes)?;
+    if fields.try_reserve_exact(1).is_err() {
+        graph.release_page_retained(new_bytes);
+        return Err(Budget);
+    }
+    graph.release_page_retained(old_bytes);
+    Ok(new_bytes - old_bytes)
 }
 
 fn form_field_refs<'a>(
@@ -966,11 +991,11 @@ fn copy_annotations(
         copy.remove("NM");
         if let Some(field) = field {
             if fields_update.is_none() {
-                let (form, fields) = form_fields(graph)?;
                 let budget = graph.remaining_work();
                 let mut work = budget;
                 let available = graph.remaining_retained();
                 let mut remaining = available;
+                let (form, fields) = form_fields(graph, &mut work, &mut remaining)?;
                 let names = field_name_inventory(graph, &fields, &mut work, &mut remaining)?;
                 graph.charge_page_work(budget - work)?;
                 inventory_charge = available - remaining;
@@ -981,6 +1006,7 @@ fn copy_annotations(
             if fields.len() >= MAX_FIELDS {
                 return Err(Budget);
             }
+            inventory_charge += reserve_form_field_slot(graph, fields)?;
             let name_entry_charge = FIELD_NAME_ENTRY_BYTES + NATIVE_MAX_FIELD_NAME_BYTES;
             graph.charge_page_retained(name_entry_charge + NATIVE_MAX_FIELD_NAME_BYTES)?;
             inventory_charge += name_entry_charge;
@@ -1010,9 +1036,12 @@ fn copy_annotations(
         }
     }
     if let Some((form, fields, names)) = fields_update {
+        let field_bytes = fields.capacity() * size_of::<Ref>();
         drop(names);
-        graph.release_page_retained(inventory_charge);
-        replace_form_fields(graph, form, fields)?;
+        graph.release_page_retained(inventory_charge - field_bytes);
+        let result = replace_form_fields(graph, form, fields);
+        graph.release_page_retained(field_bytes);
+        result?;
     }
     Ok(copies)
 }
