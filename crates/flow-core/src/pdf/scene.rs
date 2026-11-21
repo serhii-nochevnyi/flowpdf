@@ -459,6 +459,13 @@ impl SceneClip {
     fn is_empty(self) -> bool {
         self.bounds.width.raw() <= 0 || self.bounds.height.raw() <= 0
     }
+
+    fn contains(self, rect: LayoutRect) -> Result<bool, PdfReadError> {
+        Ok(self.bounds.x <= rect.x
+            && self.bounds.y <= rect.y
+            && self.bounds.x.checked_add(self.bounds.width)? >= rect.x.checked_add(rect.width)?
+            && self.bounds.y.checked_add(self.bounds.height)? >= rect.y.checked_add(rect.height)?)
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -483,13 +490,27 @@ impl PaintBounds {
         left <= x0 && bottom <= y0 && right >= x1 && top >= y1
     }
 
+    fn expanded(self, margin: f64) -> Option<Self> {
+        let [left, bottom, right, top] = self.0;
+        let edges = [
+            (left - margin).next_down(),
+            (bottom - margin).next_down(),
+            (right + margin).next_up(),
+            (top + margin).next_up(),
+        ];
+        edges
+            .iter()
+            .all(|edge| edge.is_finite())
+            .then_some(Self(edges))
+    }
+
     fn is_empty(self) -> bool {
         let [left, bottom, right, top] = self.0;
         left >= right || bottom >= top
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 struct PaintMatrix([f64; 6]);
 
 impl PaintMatrix {
@@ -571,8 +592,8 @@ struct GraphicsState {
     path: Vec<RawPathCommand>,
     current_point: Option<(LayoutUnit, LayoutUnit)>,
     clip: SceneClip,
-    line_width: Option<LayoutUnit>,
-    miter_limit: Option<LayoutUnit>,
+    line_width: Option<f64>,
+    miter_limit: Option<f64>,
     path_ctm_changed: bool,
     pending_clip: Option<(
         Vec<RawPathCommand>,
@@ -606,8 +627,8 @@ impl GraphicsState {
                 bounds,
                 rectangular: true,
             },
-            line_width: Some(Matrix::IDENTITY.a),
-            miter_limit: Some(LayoutUnit::from_raw(10 * LayoutUnit::UNITS_PER_POINT)),
+            line_width: Some(1.),
+            miter_limit: Some(10.),
             path_ctm_changed: false,
             pending_clip: None,
         }
@@ -627,8 +648,8 @@ impl GraphicsState {
 
 #[derive(Debug, Clone)]
 enum RawPathCommand {
-    MoveTo(LayoutUnit, LayoutUnit),
-    LineTo(LayoutUnit, LayoutUnit),
+    MoveTo(LayoutUnit, LayoutUnit, [f64; 2]),
+    LineTo(LayoutUnit, LayoutUnit, [f64; 2]),
     CurveTo(
         LayoutUnit,
         LayoutUnit,
@@ -866,14 +887,15 @@ impl<'a> SceneBuilder<'a> {
             "cm" => {
                 if let Some(matrix) = six_numbers(operands) {
                     let ctm = self.state.ctm.multiply(matrix)?;
-                    self.state.path_ctm_changed |=
-                        !self.state.path.is_empty() && self.state.ctm != ctm;
-                    self.state.ctm = ctm;
-                    self.state.paint_ctm = self.state.paint_ctm.and_then(|outer| {
+                    let paint_ctm = self.state.paint_ctm.and_then(|outer| {
                         outer.multiply(PaintMatrix(std::array::from_fn(|i| {
                             operands[operands.len() - 6 + i].precise_number()
                         })))
                     });
+                    self.state.path_ctm_changed |= !self.state.path.is_empty()
+                        && (self.state.ctm != ctm || self.state.paint_ctm != paint_ctm);
+                    self.state.ctm = ctm;
+                    self.state.paint_ctm = paint_ctm;
                 } else {
                     return Err(PdfReadError::Syntax);
                 }
@@ -883,7 +905,7 @@ impl<'a> SceneBuilder<'a> {
                 let [px, py] =
                     std::array::from_fn(|i| operands[operands.len() - 2 + i].precise_number());
                 self.state.extend_path_paint_bounds([px, py, px, py]);
-                self.state.path.push(RawPathCommand::MoveTo(x, y));
+                self.state.path.push(RawPathCommand::MoveTo(x, y, [px, py]));
                 self.state.current_point = Some((x, y));
             }
             "l" => {
@@ -891,7 +913,7 @@ impl<'a> SceneBuilder<'a> {
                 let [px, py] =
                     std::array::from_fn(|i| operands[operands.len() - 2 + i].precise_number());
                 self.state.extend_path_paint_bounds([px, py, px, py]);
-                self.state.path.push(RawPathCommand::LineTo(x, y));
+                self.state.path.push(RawPathCommand::LineTo(x, y, [px, py]));
                 self.state.current_point = Some((x, y));
             }
             "c" => {
@@ -932,24 +954,21 @@ impl<'a> SceneBuilder<'a> {
                 let values = four_number_values(operands)?;
                 let [x, y, width, height] =
                     std::array::from_fn(|i| operands[operands.len() - 4 + i].scene_decimal());
-                self.state.extend_path_paint_bounds([
-                    x.value(),
-                    y.value(),
-                    x.sum(width),
-                    y.sum(height),
-                ]);
+                let [px, py, right, top] = [x.value(), y.value(), x.sum(width), y.sum(height)];
+                self.state.extend_path_paint_bounds([px, py, right, top]);
                 let (x, y, width, height) = (values[0], values[1], values[2], values[3]);
-                self.state.path.push(RawPathCommand::MoveTo(x, y));
+                let x1 = x.checked_add(width)?;
+                let y1 = y.checked_add(height)?;
+                self.state.path.push(RawPathCommand::MoveTo(x, y, [px, py]));
                 self.state
                     .path
-                    .push(RawPathCommand::LineTo(x.checked_add(width)?, y));
-                self.state.path.push(RawPathCommand::LineTo(
-                    x.checked_add(width)?,
-                    y.checked_add(height)?,
-                ));
+                    .push(RawPathCommand::LineTo(x1, y, [right, py]));
                 self.state
                     .path
-                    .push(RawPathCommand::LineTo(x, y.checked_add(height)?));
+                    .push(RawPathCommand::LineTo(x1, y1, [right, top]));
+                self.state
+                    .path
+                    .push(RawPathCommand::LineTo(x, y1, [px, top]));
                 self.state.path.push(RawPathCommand::Close);
                 self.state.current_point = Some((x, y));
             }
@@ -1031,8 +1050,8 @@ impl<'a> SceneBuilder<'a> {
                     }
                 }
             }
-            "w" => self.state.line_width = one_number(operands).ok(),
-            "M" => self.state.miter_limit = one_number(operands).ok(),
+            "w" => self.state.line_width = precise_operand(operands),
+            "M" => self.state.miter_limit = precise_operand(operands),
             "gs" => {
                 self.state.line_width = None;
                 self.state.miter_limit = None;
@@ -1111,16 +1130,13 @@ impl<'a> SceneBuilder<'a> {
             let stroke = matches!(operator, "S" | "s" | "B" | "B*" | "b" | "b*");
             let fill = !matches!(operator, "S" | "s");
             let visible = if stroke {
-                if (self.invocation_path.len() > 1
-                    && self.state.clip.is_empty()
-                    && !self.state.paint_clip.is_empty())
-                    || (fill
-                        && self.state.clip.intersect(rect, true)?.is_empty()
-                        && self.paint_may_be_visible(paint_bounds))
+                if fill
+                    && self.state.clip.intersect(rect, true)?.is_empty()
+                    && self.paint_may_be_visible(paint_bounds)
                 {
                     self.report_partial(provenance.object_ref);
                 }
-                self.stroke_visible(rect, &provenance)?
+                self.stroke_visible(rect, paint_bounds, &provenance)?
             } else {
                 self.bounded_paint_visible(rect, paint_bounds, &provenance)?
             };
@@ -1145,12 +1161,17 @@ impl<'a> SceneBuilder<'a> {
             if let Some(bounds) = paint_bounds {
                 self.state.paint_clip = self.state.paint_clip.intersect(bounds);
             }
+            let rectangular = paint_bounds.is_some()
+                && self
+                    .state
+                    .paint_ctm
+                    .is_some_and(|matrix| is_precise_rectangular_path(&commands, matrix));
             let commands = transform_path(&commands, self.state.ctm)?;
             let rect = path_bounds(&commands)?;
             self.state.clip = self
                 .state
                 .clip
-                .intersect(rect, is_rectangular_path(&commands))?;
+                .intersect(rect, rectangular && is_rectangular_path(&commands))?;
             self.push_element(PdfSceneElement::Clip {
                 value: PdfClipElement {
                     rect,
@@ -1175,58 +1196,37 @@ impl<'a> SceneBuilder<'a> {
     fn stroke_visible(
         &mut self,
         rect: LayoutRect,
+        paint_bounds: Option<PaintBounds>,
         provenance: &PdfSourceProvenance,
     ) -> Result<bool, PdfReadError> {
         let clip = self.state.clip;
+        let stroke_bounds = paint_bounds.and_then(|bounds| self.stroke_bounds(bounds));
         if clip.is_empty() {
+            if self.paint_may_be_visible(stroke_bounds) {
+                self.report_partial(provenance.object_ref);
+            }
             return Ok(false);
         }
-        if let Some(bounds) = self.stroke_bounds(rect)
-            && clip.rectangular
-            && clip.bounds == self.page.media_box
-            && bounds.x > clip.bounds.x
-            && bounds.y > clip.bounds.y
-            && bounds.x.checked_add(bounds.width)? < clip.bounds.x.checked_add(clip.bounds.width)?
-            && bounds.y.checked_add(bounds.height)?
-                < clip.bounds.y.checked_add(clip.bounds.height)?
+        // @contract: Stroke paint can extend beyond the scene's centerline bounds.
+        if !clip.rectangular
+            || !clip.contains(rect)?
+            || !stroke_bounds.is_some_and(|bounds| self.state.paint_clip.contains(bounds))
         {
-            return Ok(true);
+            self.report_partial(provenance.object_ref);
         }
-        // @contract: Stroke geometry can extend beyond the scene rectangle.
-        self.report_partial(provenance.object_ref);
         Ok(true)
     }
 
-    fn stroke_bounds(&self, rect: LayoutRect) -> Option<LayoutRect> {
-        let width = i128::from(self.state.line_width?.raw());
-        let miter = i128::from(self.state.miter_limit?.raw());
-        let unit = i128::from(LayoutUnit::UNITS_PER_POINT);
-        if width <= 0 || miter < unit {
+    fn stroke_bounds(&self, bounds: PaintBounds) -> Option<PaintBounds> {
+        let width = self.state.line_width?;
+        let miter = self.state.miter_limit?;
+        if width <= 0. || miter < 1. {
             return None;
         }
-        let Matrix { a, b, c, d, .. } = self.state.ctm;
-        let scale = (i128::from(a.raw()).abs() + i128::from(c.raw()).abs())
-            .max(i128::from(b.raw()).abs() + i128::from(d.raw()).abs());
+        let PaintMatrix([a, b, c, d, ..]) = self.state.paint_ctm?;
+        let scale = (a.abs() + c.abs()).max(b.abs() + d.abs());
         // @invariant: The margin covers miter joins and projecting square caps.
-        let divisor = 2 * unit * unit;
-        let numerator = width.checked_mul(miter.max(2 * unit))?.checked_mul(scale)?;
-        let margin = LayoutUnit::from_raw(i64::try_from(numerator / divisor + 1).ok()?);
-        Some(LayoutRect {
-            x: rect.x.checked_sub(margin).ok()?,
-            y: rect.y.checked_sub(margin).ok()?,
-            width: rect
-                .width
-                .checked_add(margin)
-                .ok()?
-                .checked_add(margin)
-                .ok()?,
-            height: rect
-                .height
-                .checked_add(margin)
-                .ok()?
-                .checked_add(margin)
-                .ok()?,
-        })
+        bounds.expanded(width * 0.5 * miter.max(2.) * scale)
     }
 
     fn paint_may_be_visible(&self, paint_bounds: Option<PaintBounds>) -> bool {
@@ -1567,11 +1567,11 @@ impl<'a> SceneBuilder<'a> {
                     let [x, y, right, top] = PaintMatrix::pdf_numbers(value)?;
                     (x < right && y < top).then_some([x, y, right, top])
                 });
-                let form_paint_clip = form_paint_ctm
-                    .and_then(|matrix| matrix.bounds(precise_bbox?))
-                    .map_or(self.state.paint_clip, |bounds| {
-                        self.state.paint_clip.intersect(bounds)
-                    });
+                let form_paint_bounds =
+                    form_paint_ctm.and_then(|matrix| matrix.bounds(precise_bbox?));
+                let form_paint_clip = form_paint_bounds.map_or(self.state.paint_clip, |bounds| {
+                    self.state.paint_clip.intersect(bounds)
+                });
                 let Some(bbox) = local_bbox
                     .as_ref()
                     .and_then(|value| parse_bbox(value).ok())
@@ -1586,6 +1586,7 @@ impl<'a> SceneBuilder<'a> {
                 let zero = LayoutUnit::from_raw(0);
                 let rectangular = ((form_ctm.b == zero && form_ctm.c == zero)
                     || (form_ctm.a == zero && form_ctm.d == zero))
+                    && form_paint_bounds.is_some()
                     && form_paint_ctm.is_some_and(PaintMatrix::is_axis_aligned);
                 let clip = self.state.clip.intersect(form_bounds, rectangular)?;
                 self.push_element(PdfSceneElement::Annotation {
@@ -2124,6 +2125,12 @@ fn one_number(values: &[ContentToken]) -> Result<LayoutUnit, PdfReadError> {
         .ok_or(PdfReadError::Syntax)
 }
 
+fn precise_operand(values: &[ContentToken]) -> Option<f64> {
+    let value = values.last()?;
+    value.number()?;
+    Some(value.precise_number())
+}
+
 fn two_numbers(values: &[ContentToken]) -> Result<(LayoutUnit, LayoutUnit), PdfReadError> {
     if values.len() < 2 {
         return Err(PdfReadError::Syntax);
@@ -2184,11 +2191,11 @@ fn transform_path(
     commands
         .iter()
         .map(|command| match command {
-            RawPathCommand::MoveTo(x, y) => {
+            RawPathCommand::MoveTo(x, y, _) => {
                 let (x, y) = matrix.point(*x, *y)?;
                 Ok(PdfPathCommand::MoveTo { x, y })
             }
-            RawPathCommand::LineTo(x, y) => {
+            RawPathCommand::LineTo(x, y, _) => {
                 let (x, y) = matrix.point(*x, *y)?;
                 Ok(PdfPathCommand::LineTo { x, y })
             }
@@ -2317,17 +2324,66 @@ fn transformed_rect(matrix: Matrix, rect: LayoutRect) -> Result<LayoutRect, PdfR
 }
 
 fn is_rectangular_path(commands: &[PdfPathCommand]) -> bool {
+    let commands = match commands {
+        [commands @ .., PdfPathCommand::ClosePath] => commands,
+        _ => commands,
+    };
     let [
         PdfPathCommand::MoveTo { x: x0, y: y0 },
         PdfPathCommand::LineTo { x: x1, y: y1 },
         PdfPathCommand::LineTo { x: x2, y: y2 },
         PdfPathCommand::LineTo { x: x3, y: y3 },
-        PdfPathCommand::ClosePath,
+        closing @ ..,
     ] = commands
     else {
         return false;
     };
+    if !closing.is_empty()
+        && !matches!(closing, [PdfPathCommand::LineTo { x, y }] if x == x0 && y == y0)
+    {
+        return false;
+    }
     (x0 == x3 && x1 == x2 && y0 == y1 && y2 == y3) || (x0 == x1 && x2 == x3 && y0 == y3 && y1 == y2)
+}
+
+fn is_precise_rectangular_path(commands: &[RawPathCommand], matrix: PaintMatrix) -> bool {
+    let commands = match commands {
+        [commands @ .., RawPathCommand::Close] => commands,
+        _ => commands,
+    };
+    let [
+        RawPathCommand::MoveTo(_, _, p0),
+        RawPathCommand::LineTo(_, _, p1),
+        RawPathCommand::LineTo(_, _, p2),
+        RawPathCommand::LineTo(_, _, p3),
+        closing @ ..,
+    ] = commands
+    else {
+        return false;
+    };
+    if !closing.is_empty()
+        && !matches!(closing, [RawPathCommand::LineTo(_, _, point)] if point == p0)
+    {
+        return false;
+    }
+    let PaintMatrix([a, b, c, d, ..]) = matrix;
+    // @invariant: Translation cannot round skew out of edge vectors.
+    let edge = |[x0, y0]: [f64; 2], [x1, y1]: [f64; 2]| {
+        let dx = x1 - x0;
+        let dy = y1 - y0;
+        [a * dx + c * dy, b * dx + d * dy]
+    };
+    let edges = [
+        edge(*p0, *p1),
+        edge(*p1, *p2),
+        edge(*p2, *p3),
+        edge(*p3, *p0),
+    ];
+    let horizontal = |[x, y]: [f64; 2]| x.is_finite() && x != 0. && y == 0.;
+    let vertical = |[x, y]: [f64; 2]| x == 0. && y.is_finite() && y != 0.;
+    let [first, second, third, fourth] = edges;
+    (horizontal(first) && vertical(second) && horizontal(third) && vertical(fourth))
+        || (vertical(first) && horizontal(second) && vertical(third) && horizontal(fourth))
 }
 
 fn parse_bbox(value: &PdfValue) -> Result<LayoutRect, PdfReadError> {

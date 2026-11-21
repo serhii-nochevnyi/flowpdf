@@ -344,6 +344,140 @@ fn form_path_readback_accounts_for_fractional_clip_edges_and_transform() {
     }
 }
 
+fn read_content_scene(content: &str) -> flow_core::pdf::PdfScene {
+    let bytes = pdf(vec![
+        (1, b"<< /Type /Catalog /Pages 2 0 R >>".to_vec()),
+        (2, b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec()),
+        (
+            3,
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Contents 4 0 R >>".to_vec(),
+        ),
+        stream(4, "", content.as_bytes()),
+    ]);
+    let reader = open_pdf(&bytes, Default::default()).unwrap();
+    read_pdf_scene(&reader, &PdfSceneRequest::default()).unwrap()
+}
+
+#[test]
+fn explicit_clip_readback_proves_fractional_edges_and_rectangularity() {
+    for (clip, paint, partial) in [
+        (
+            "20.125 20.125 40 40 re W n",
+            "50.125 50.125 10 10 re f",
+            false,
+        ),
+        (
+            "20.125 20.125 39.996 40 re W n",
+            "50.125 50.125 10 10 re f",
+            true,
+        ),
+        (
+            "20.125 20.125 m 60.125 20.125 l 60.125 60.125 l 20.125 60.125 l W* n",
+            "20.125 40.125 10 10 re f",
+            false,
+        ),
+        (
+            "20.125 20.125 m 60.125 20.125 l 60.125 60.125 l 20.125 60.125 l 20.125 20.125 l W n",
+            "20.125 40.125 10 10 re f",
+            false,
+        ),
+        (
+            "20.125 20.125 m 60.125 20.125 l 60.125 60.125 l 20.125 60.125 l 20.129 20.125 l W n",
+            "20.125 40.125 10 10 re f",
+            true,
+        ),
+        (
+            "20.125 20.125 m 60.125 20.125 l 60.125 60.125 l 20.129 60.125 l h W* n",
+            "20.125 40.125 10 10 re f",
+            true,
+        ),
+        (
+            "1 .004 0 1 0 0 cm 20.125 20.125 40 40 re W n 1 -.004 0 1 0 0 cm",
+            "30.125 20.125 10 10 re f",
+            true,
+        ),
+    ] {
+        let scene = read_content_scene(&format!("{clip} {paint}"));
+        let page = &scene.pages[0];
+        assert!(
+            matches!(
+                page.elements.as_slice(),
+                [PdfSceneElement::Clip { value: clip }, PdfSceneElement::Path { value: path }]
+                    if clip.rect.width.raw() == 40 * 64 && path.fill && !path.stroke
+            ),
+            "{clip} {paint}"
+        );
+        assert_eq!(page.partial, partial, "{clip}");
+        assert_eq!(scene.report.partial, partial);
+        assert_eq!(page.report.diagnostics.len(), usize::from(partial));
+        if partial {
+            assert_eq!(
+                page.report.diagnostics[0].code,
+                PdfReadDiagnosticCode::PartialPage
+            );
+            assert_eq!(page.report.diagnostics[0].object_number, Some(4));
+        }
+    }
+}
+
+#[test]
+fn stroke_readback_proves_containment_against_the_active_clip() {
+    for (clip, paint, retained, partial) in [
+        (
+            "20.125 20.125 80 80 re W n",
+            "1.125 w 35.125 40.125 m 80.125 40.125 l S",
+            true,
+            false,
+        ),
+        (
+            "20.125 20.125 80 80 re W n",
+            "1.125 w 35.125 20.625 m 80.125 20.625 l S",
+            true,
+            true,
+        ),
+        (
+            "20.125 20.125 .004 80 re W n",
+            "1 w 20.125 40 m 25 40 l S",
+            false,
+            true,
+        ),
+        ("", "1 M 150 1.25 m 190 1.25 l S", true, false),
+        (
+            "",
+            "1 M 1 -.004 0 1 0 0 cm 150 1.25 m 190 1.25 l S",
+            true,
+            true,
+        ),
+    ] {
+        let scene = read_content_scene(&format!("{clip} {paint}"));
+        let page = &scene.pages[0];
+        let paint_elements = if clip.is_empty() {
+            page.elements.as_slice()
+        } else {
+            assert!(matches!(page.elements[0], PdfSceneElement::Clip { .. }));
+            &page.elements[1..]
+        };
+        if retained {
+            assert!(matches!(
+                paint_elements,
+                [PdfSceneElement::Path { value }] if value.stroke && !value.fill
+            ));
+        } else {
+            assert!(paint_elements.is_empty());
+        }
+        assert_eq!(page.partial, partial, "{clip} {paint}");
+        assert_eq!(scene.report.partial, partial);
+        assert_eq!(page.report.diagnostics.len(), usize::from(partial));
+        if partial {
+            assert_eq!(
+                page.report.diagnostics[0].code,
+                PdfReadDiagnosticCode::PartialPage
+            );
+            assert_eq!(page.report.diagnostics[0].object_number, Some(4));
+        }
+    }
+}
+
 #[test]
 fn equivalent_default_crop_keeps_content_clip_visibility_and_diagnostics() {
     for crop in ["", "/CropBox [0 0 200 200]", "/CropBox [-10 -10 210 210]"] {
@@ -374,8 +508,8 @@ fn equivalent_default_crop_keeps_content_clip_visibility_and_diagnostics() {
 }
 
 #[test]
-fn wide_stroke_is_partial_with_or_without_materialized_default_crop() {
-    for crop in ["", "/CropBox [0 0 200 200]"] {
+fn page_crop_readback_reports_only_the_stroke_that_can_cross_an_edge() {
+    for crop in ["", "/CropBox [0 0 200 200]", "/CropBox [10 0 100 100]"] {
         let bytes = pdf(vec![
             (1, b"<< /Type /Catalog /Pages 2 0 R >>".to_vec()),
             (2, b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec()),
