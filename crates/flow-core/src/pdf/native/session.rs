@@ -332,6 +332,11 @@ impl NativePdfSession {
     }
 
     pub fn check_redaction_admission(&self) -> Result<(), NativeSessionError> {
+        if !self.redaction_marks.is_empty()
+            && self.redaction_marks_binding != Some(self.snapshot.binding)
+        {
+            return Err(NativeSessionError::RevisionMismatch);
+        }
         self.redaction_admission
             .get_or_init(|| {
                 redaction::check_document(

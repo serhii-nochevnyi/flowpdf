@@ -1142,6 +1142,7 @@ fn redaction_wire_selectively_removes_stored_marks_after_page_rotation() {
     let opened = call(native_pdf_open, open_request(source.as_bytes()));
     assert_eq!(opened["status"], "opened", "{opened}");
     let base = &opened["snapshot"];
+    assert_eq!(base["redactionAdmission"], "supported");
     let page_id = &base["pageState"]["order"][0];
     let first = [12000, 12000, 13000, 13000];
     let second = [42000, 42000, 43000, 43000];
@@ -1163,6 +1164,7 @@ fn redaction_wire_selectively_removes_stored_marks_after_page_rotation() {
     let accepted = &rotated["snapshot"];
     assert_eq!(accepted["scene"]["pages"][0]["geometry"]["rotation"], 90);
     assert_eq!(accepted["pageState"]["order"][0], *page_id);
+    assert_eq!(accepted["redactionAdmission"], "unavailable");
 
     let remove = redaction_request(5, accepted, mark("removeMark", first));
     let removed = call(native_pdf_redaction, remove.clone());
@@ -1184,6 +1186,11 @@ fn redaction_wire_selectively_removes_stored_marks_after_page_rotation() {
         redaction_request(6, accepted, mark("removeMark", second)),
     );
     assert_eq!(remaining["redaction"]["markCount"], 0, "{remaining}");
+    let readback = call(native_pdf_snapshot, bound("snapshot", 6, accepted));
+    assert_eq!(readback["status"], "unseen", "{readback}");
+    let mut restored = accepted.clone();
+    restored["redactionAdmission"] = json!("supported");
+    assert_eq!(readback["snapshot"], restored);
 }
 
 #[test]
