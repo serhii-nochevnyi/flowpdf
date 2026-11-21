@@ -982,12 +982,41 @@ impl NativePdfSession {
         redaction_admitted: bool,
         live: Option<&Self>,
     ) -> Result<bool, NativeSessionError> {
+        Self::verify_page_and_field_projection_with_objects(
+            bytes,
+            limits,
+            binding,
+            claimed_scene,
+            None,
+            state,
+            claimed_fields,
+            claimed_notes,
+            redaction_admitted,
+            live,
+        )
+    }
+
+    /// Accepts a workspace omission only when verifying a detached, post-edit scene.
+    /// Passing no object rows requires the exact projected scene hash.
+    pub fn verify_page_and_field_projection_with_objects(
+        bytes: &[u8],
+        limits: NativeEditLimits,
+        binding: NativeBinding,
+        claimed_scene: [u8; 32],
+        claimed_objects: Option<&[NativeObjectPage]>,
+        state: &NativePageState,
+        claimed_fields: &[NativeFieldView],
+        claimed_notes: &[(u32, PdfObjectRef, u64)],
+        redaction_admitted: bool,
+        live: Option<&Self>,
+    ) -> Result<bool, NativeSessionError> {
         // @security: Live projections are authoritative only for the exact accepted bytes and binding.
         if let Some(session) = live {
             let snapshot = &session.snapshot;
             return Ok(binding == snapshot.binding
                 && bytes == session.output_bytes()
                 && claimed_scene == snapshot.scene.scene_hash
+                && claimed_objects.is_none_or(|rows| rows == snapshot.scene.object_pages)
                 && *state == snapshot.page_state
                 && claimed_fields == snapshot.fields
                 && projected_notes(&snapshot.scene).eq(claimed_notes.iter().copied())
@@ -1002,7 +1031,7 @@ impl NativePdfSession {
         let mut remaining = graph.remaining_retained();
         spend(&mut remaining, graph.objects.len() * OBJECT_ID_BYTES)?;
         let ids = initial_ids(&graph);
-        let (scene, mut remaining) = accepted_scene(
+        let (mut scene, mut remaining) = accepted_scene(
             &graph,
             &ids,
             hash,
@@ -1011,6 +1040,29 @@ impl NativePdfSession {
             0,
             graph.remaining_retained(),
         )?;
+        if let Some(rows) = claimed_objects.filter(|rows| *rows != scene.object_pages) {
+            if binding.revision == 0 || rows.len() != scene.object_pages.len() {
+                return Ok(false);
+            }
+            // @contract: Reopening the bytes can recover object capabilities omitted for workspace.
+            for (row, claim) in scene.object_pages.iter_mut().zip(rows) {
+                if row == claim {
+                    continue;
+                }
+                if row.page != claim.page
+                    || row.refusal.is_some()
+                    || claim.refusal.is_some()
+                    || claim.can_add
+                    || !claim.objects.is_empty()
+                {
+                    return Ok(false);
+                }
+                row.can_add = false;
+                row.objects = Vec::new();
+            }
+            scene =
+                NativePdfNoteScene::new(hash, scene.pages, scene.text_pages, scene.object_pages)?;
+        }
         let mut projected_notes = projected_notes(&scene);
         let mut seen = BTreeSet::new();
         let notes_match = claimed_notes
