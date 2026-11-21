@@ -177,6 +177,142 @@ fn terminal_form_syntax_is_independent_of_a_page_stream_boundary() {
     }
 }
 
+fn scene_with_nested_forms(
+    page: [&str; 2],
+    forms: [&str; 2],
+    limits: PdfReaderLimits,
+) -> Result<flow_core::pdf::PdfScene, PdfReadError> {
+    let bytes = pdf(vec![
+        (1, b"<< /Type /Catalog /Pages 2 0 R >>".to_vec()),
+        (2, b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec()),
+        (3, b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Resources << /XObject << /Outer 6 0 R /Inner 7 0 R >> >> /Contents [4 0 R 5 0 R] >>".to_vec()),
+        stream(4, "", page[0].as_bytes()),
+        stream(5, "", page[1].as_bytes()),
+        stream(6, "/Type /XObject /Subtype /Form /BBox [0 0 150 150]", forms[0].as_bytes()),
+        stream(7, "/Type /XObject /Subtype /Form /BBox [0 0 100 100]", forms[1].as_bytes()),
+    ]);
+    let reader = open_pdf(&bytes, limits).unwrap();
+    read_pdf_scene(&reader, &PdfSceneRequest::default())
+}
+
+#[test]
+fn page_streams_share_the_token_limit_and_preserve_graphics_state() {
+    let first = format!("q 1 0 0 1 10 0 cm {}\n", "q Q ".repeat(22));
+    let page = [first.as_str(), "10 20 5 5 re f Q 10 10 5 5 re f"];
+    let limits = PdfReaderLimits {
+        max_content_tokens: 65,
+        ..Default::default()
+    };
+    let scene = scene_with_nested_forms(page, ["", ""], limits.clone()).unwrap();
+    let page_scene = &scene.pages[0];
+    let [
+        PdfSceneElement::Path { value: translated },
+        PdfSceneElement::Path { value: restored },
+    ] = page_scene.elements.as_slice()
+    else {
+        panic!("expected both paths from the second stream");
+    };
+    assert_eq!(translated.rect.x.raw(), 20 * 64);
+    assert_eq!(restored.rect.x.raw(), 10 * 64);
+    for path in [translated, restored] {
+        assert_eq!(path.provenance.object_ref.object_number, 5);
+        assert_eq!(path.provenance.invocation_path, [1]);
+        assert_eq!(path.provenance.operator.as_deref(), Some("f"));
+    }
+    assert!(!page_scene.partial);
+    assert_eq!(
+        scene_with_nested_forms(
+            page,
+            ["", ""],
+            PdfReaderLimits {
+                max_content_tokens: 64,
+                ..limits
+            },
+        ),
+        Err(PdfReadError::TokenLimit)
+    );
+}
+
+#[test]
+fn repeated_nested_forms_spend_the_page_token_limit_including_array_entries() {
+    let page = ["/Outer Do\n", "/Outer Do 10 10 5 5 re f"];
+    let inner = format!("{}[1 2] 0 d 15 20 5 5 re f", "q Q ".repeat(10));
+    let forms = ["q /Inner Do Q", inner.as_str()];
+    let limits = PdfReaderLimits {
+        max_content_tokens: 80,
+        ..Default::default()
+    };
+    let scene = scene_with_nested_forms(page, forms, limits.clone()).unwrap();
+    let paths: Vec<_> = scene.pages[0]
+        .elements
+        .iter()
+        .filter_map(|element| match element {
+            PdfSceneElement::Path { value } => Some(&value.provenance),
+            _ => None,
+        })
+        .collect();
+    assert!(matches!(paths.as_slice(), [first, second, last]
+        if first.object_ref.object_number == 7 && first.invocation_path.len() == 3
+            && first.invocation_path[0] == 0 && second.object_ref == first.object_ref
+            && second.invocation_path.len() == 3 && second.invocation_path[0] == 1
+            && second.stream_offset == first.stream_offset
+            && last.object_ref.object_number == 5 && last.invocation_path == [1]));
+    assert!(!scene.pages[0].partial);
+    for max_content_tokens in [70, 79] {
+        assert_eq!(
+            scene_with_nested_forms(
+                page,
+                forms,
+                PdfReaderLimits {
+                    max_content_tokens,
+                    ..limits.clone()
+                },
+            ),
+            Err(PdfReadError::TokenLimit)
+        );
+    }
+}
+
+#[test]
+fn form_graphics_saves_count_toward_the_enclosing_stack_limit() {
+    let page = ["q q\n", "/Outer Do Q Q 10 10 5 5 re f"];
+    let forms = ["1 0 0 1 20 0 cm /Inner Do", "q Q 15 20 5 5 re f"];
+    let scene = scene_with_nested_forms(
+        page,
+        forms,
+        PdfReaderLimits {
+            max_nesting: 5,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert!(!scene.pages[0].partial);
+    assert!(
+        matches!(scene.pages[0].elements.last(), Some(PdfSceneElement::Path { value })
+        if value.rect.x.raw() == 10 * 64 && value.provenance.object_ref.object_number == 5
+            && value.provenance.invocation_path == [1])
+    );
+
+    let limits = PdfReaderLimits {
+        max_nesting: 4,
+        ..Default::default()
+    };
+    for (page, forms) in [
+        (page, forms),
+        (["q q q\n", "/Outer Do Q Q Q"], ["/Inner Do", ""]),
+        (["q q q q\n", "q Q Q Q Q Q"], ["", ""]),
+    ] {
+        assert_eq!(
+            scene_with_nested_forms(page, forms, limits.clone()),
+            Err(PdfReadError::TokenLimit)
+        );
+    }
+    assert_eq!(
+        scene_with_nested_forms(page, ["/Inner Do", "Q"], limits),
+        Err(PdfReadError::Syntax)
+    );
+}
+
 #[test]
 fn page_and_form_text_report_only_potential_paint_in_a_collapsed_clip() {
     for (additional_clip, partial) in [("", true), ("80 20 10 12 re W n", false)] {
@@ -225,6 +361,75 @@ endcmap
             diagnostic_objects.as_slice(),
             if partial { &[4, 5][..] } else { &[] }
         );
+    }
+}
+
+#[test]
+fn page_and_form_clips_omit_only_excluded_ordinary_paint() {
+    for in_form in [false, true] {
+        for (kind, paint, retained, partial) in [
+            ("S", "1 w 35 50 m 55 50 l S", true, false),
+            ("S", "8 w 30 103 m 70 103 l S", true, true),
+            ("S", "1 w 30 120 m 70 120 l S", false, false),
+            ("B", "1 M 8 w 30 103 10 10 re B", true, true),
+            ("B", "1 M 8 w 30 120 10 10 re B", false, false),
+            ("f", "40 40 8 4 re f", true, false),
+            ("f", "80 98 8 4 re f", true, true),
+            ("f", "1 0 0 1.004 0 0 cm 80 99.875 8 4 re f", false, false),
+            ("f", "40 40 0 4 re f", false, false),
+            ("f", "40 40 .004 4 re f", false, true),
+            ("f", "40 40 .0000000000000001 4 re f", false, true),
+            ("f", "120 40 .0000000000000001 4 re f", false, false),
+            ("Do", "8 0 0 4 40 40 cm /Im Do", true, false),
+            ("Do", "8 0 0 4 80 98 cm /Im Do", true, true),
+            (
+                "Do",
+                "1 0 0 1.004 0 0 cm 8 0 0 4 80 99.875 cm /Im Do",
+                false,
+                false,
+            ),
+            ("Do", "8 .004 0 4 40 40 cm /Im Do", false, true),
+        ] {
+            let (crop, page_content, paint_stream) = if in_form {
+                ("", "/F Do", 5)
+            } else {
+                ("/CropBox [20 20 100 100]", paint, 4)
+            };
+            let bytes = pdf(vec![
+                (1, b"<< /Type /Catalog /Pages 2 0 R >>".to_vec()),
+                (2, b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec()),
+                (3, format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] {crop} /Resources << /XObject << /F 5 0 R /Im 6 0 R >> >> /Contents 4 0 R >>").into_bytes()),
+                stream(4, "", page_content.as_bytes()),
+                stream(5, "/Type /XObject /Subtype /Form /BBox [20 20 100 100]", paint.as_bytes()),
+                stream(6, "/Type /XObject /Subtype /Image /Width 1 /Height 1 /ColorSpace /DeviceGray /BitsPerComponent 8", &[0x12]),
+            ]);
+            let reader = open_pdf(&bytes, Default::default()).unwrap();
+            let scene = read_pdf_scene(&reader, &PdfSceneRequest::default()).unwrap();
+            let page = &scene.pages[0];
+            let artwork: Vec<_> = page
+                .elements
+                .iter()
+                .filter_map(|element| match element {
+                    PdfSceneElement::Path { value } => Some((&value.provenance, paint_stream)),
+                    PdfSceneElement::Image { value } => Some((&value.provenance, 6)),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(artwork.len(), usize::from(retained), "{in_form} {paint}");
+            if let Some((source, object_number)) = artwork.first() {
+                assert_eq!(source.object_ref.object_number, *object_number);
+                assert_eq!(source.operator.as_deref(), Some(kind));
+                assert_eq!(source.invocation_path.len(), if in_form { 2 } else { 1 });
+            }
+            assert_eq!(page.partial, partial, "{in_form} {paint}");
+            assert_eq!(scene.report.partial, partial);
+            assert_eq!(page.report.diagnostics.len(), usize::from(partial));
+            if partial {
+                let diagnostic = &page.report.diagnostics[0];
+                assert_eq!(diagnostic.code, PdfReadDiagnosticCode::PartialPage);
+                assert_eq!(diagnostic.object_number, Some(paint_stream));
+            }
+        }
     }
 }
 

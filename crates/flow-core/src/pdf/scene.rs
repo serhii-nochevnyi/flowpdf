@@ -732,6 +732,7 @@ struct SceneBuilder<'a> {
     field_counts: &'a BTreeMap<PdfObjectRef, usize>,
     link_work: usize,
     widget_work: usize,
+    remaining_content_tokens: usize,
     elements: Vec<PdfSceneElement>,
     emit_elements: bool,
     report: PdfReadReport,
@@ -764,6 +765,7 @@ impl<'a> SceneBuilder<'a> {
             field_counts,
             link_work: reader.limits().max_content_tokens,
             widget_work: reader.limits().max_content_tokens,
+            remaining_content_tokens: reader.limits().max_content_tokens,
             elements: Vec::new(),
             emit_elements: true,
             report: PdfReadReport::default(),
@@ -880,10 +882,15 @@ impl<'a> SceneBuilder<'a> {
             return Ok(ContentStreamEnd::default());
         }
         let mut cursor = ContentCursor::for_scene(&stream.data, self.limits.clone());
+        let stack_floor = if depth == 0 {
+            0
+        } else {
+            self.state_stack.len()
+        };
         let mut operands = Vec::new();
         let mut operand_span = None::<[u32; 2]>;
         loop {
-            let (token, offset) = match cursor.next_token() {
+            let (token, offset) = match cursor.next_token(&mut self.remaining_content_tokens) {
                 Err(ContentParseError::TruncatedOperand) if has_next_page_stream => {
                     return Ok(ContentStreamEnd {
                         pending_operands: true,
@@ -919,11 +926,17 @@ impl<'a> SceneBuilder<'a> {
                     if operator == "Do" {
                         self.paint_xobject(&operands, object_ref, provenance, depth, resources)?;
                     } else {
-                        self.dispatch_operator(&operator, &operands, provenance, resources)
-                            .map_err(|error| match error {
-                                PdfReadError::Syntax => ContentParseError::OperatorSyntax,
-                                error => error.into(),
-                            })?;
+                        self.dispatch_operator(
+                            &operator,
+                            &operands,
+                            provenance,
+                            resources,
+                            stack_floor,
+                        )
+                        .map_err(|error| match error {
+                            PdfReadError::Syntax => ContentParseError::OperatorSyntax,
+                            error => error.into(),
+                        })?;
                     }
                     operands.clear();
                 }
@@ -951,11 +964,15 @@ impl<'a> SceneBuilder<'a> {
         operands: &[ContentToken],
         provenance: PdfSourceProvenance,
         resources: Option<&PdfValue>,
+        stack_floor: usize,
     ) -> Result<(), PdfReadError> {
         let object_ref = provenance.object_ref;
         match operator {
-            "q" => self.state_stack.push(self.state.clone()),
+            "q" => self.save_state()?,
             "Q" => {
+                if self.state_stack.len() == stack_floor {
+                    return Err(PdfReadError::Syntax);
+                }
                 self.state = self.state_stack.pop().ok_or(PdfReadError::Syntax)?;
             }
             "cm" => {
@@ -1192,6 +1209,15 @@ impl<'a> SceneBuilder<'a> {
         Ok(())
     }
 
+    fn save_state(&mut self) -> Result<(), PdfReadError> {
+        // @invariant: The stack also holds callers' saved states during Form interpretation.
+        if self.state_stack.len() >= self.limits.max_nesting {
+            return Err(PdfReadError::TokenLimit);
+        }
+        self.state_stack.push(self.state.clone());
+        Ok(())
+    }
+
     fn advance_line(&mut self) -> Result<(), PdfReadError> {
         let translation = Matrix {
             a: Matrix::IDENTITY.a,
@@ -1255,20 +1281,23 @@ impl<'a> SceneBuilder<'a> {
             } else {
                 self.bounded_paint_visible(rect, paint_bounds, &provenance)?
             };
+            let lost_fill = fill
+                && (visible || (!stroke && paint_bounds.is_some_and(PaintBounds::is_empty)))
+                && lost_visible_fill_contour(
+                    &self.state.path,
+                    &commands,
+                    self.state.paint_ctm,
+                    self.state.paint_clip,
+                );
+            // @contract: Only provenance records the fill rule for painted paths.
+            if lost_fill
+                || (visible
+                    && (matches!(operator, "f*" | "B*" | "b*")
+                        || (stroke && contains_collapsed_stroke(&commands, &self.state.path))))
+            {
+                self.report_partial(provenance.object_ref);
+            }
             if visible {
-                // @contract: Only provenance records the fill rule for painted paths.
-                if (fill
-                    && lost_visible_fill_contour(
-                        &self.state.path,
-                        &commands,
-                        self.state.paint_ctm,
-                        self.state.paint_clip,
-                    ))
-                    || matches!(operator, "f*" | "B*" | "b*")
-                    || (stroke && contains_collapsed_stroke(&commands, &self.state.path))
-                {
-                    self.report_partial(provenance.object_ref);
-                }
                 self.push_element(PdfSceneElement::Path {
                     value: PdfPathElement {
                         commands,
@@ -1325,10 +1354,11 @@ impl<'a> SceneBuilder<'a> {
     ) -> Result<bool, PdfReadError> {
         let clip = self.state.clip;
         let stroke_bounds = paint_bounds.and_then(|bounds| self.stroke_bounds(bounds));
+        if !self.paint_may_be_visible(stroke_bounds) {
+            return Ok(false);
+        }
         if clip.is_empty() {
-            if self.paint_may_be_visible(stroke_bounds) {
-                self.report_partial(provenance.object_ref);
-            }
+            self.report_partial(provenance.object_ref);
             return Ok(false);
         }
         // @contract: Stroke paint can extend beyond the scene's centerline bounds.
@@ -1364,11 +1394,12 @@ impl<'a> SceneBuilder<'a> {
         paint_bounds: Option<PaintBounds>,
         provenance: &PdfSourceProvenance,
     ) -> Result<bool, PdfReadError> {
+        if !self.paint_may_be_visible(paint_bounds) {
+            return Ok(false);
+        }
         let intersection = self.state.clip.intersect(rect, true)?;
         if intersection.is_empty() {
-            if self.paint_may_be_visible(paint_bounds) {
-                self.report_partial(provenance.object_ref);
-            }
+            self.report_partial(provenance.object_ref);
             return Ok(false);
         }
         if !intersection.rectangular
@@ -1729,10 +1760,10 @@ impl<'a> SceneBuilder<'a> {
                 if clip.is_empty() && form_paint_clip.is_empty() {
                     return Ok(());
                 }
+                let caller_state_index = self.state_stack.len();
+                self.save_state()?;
                 let caller_emit_elements = self.emit_elements;
                 self.emit_elements &= !clip.is_empty();
-                let caller_state = self.state.clone();
-                let caller_stack = std::mem::take(&mut self.state_stack);
                 self.state.ctm = form_ctm;
                 self.state.paint_ctm = form_paint_ctm;
                 self.state.paint_clip = form_paint_clip;
@@ -1753,11 +1784,11 @@ impl<'a> SceneBuilder<'a> {
                 );
                 self.invocation_path.pop();
                 self.emit_elements = caller_emit_elements;
-                if !self.state_stack.is_empty() {
+                if self.state_stack.len() > caller_state_index + 1 {
                     self.report_partial(xobject_ref);
                 }
-                self.state = caller_state;
-                self.state_stack = caller_stack;
+                self.state_stack.truncate(caller_state_index + 1);
+                self.state = self.state_stack.pop().ok_or(PdfReadError::Syntax)?;
                 result.map_err(PdfReadError::from)?;
                 Ok(())
             }
@@ -2915,7 +2946,7 @@ pub(super) struct ContentCursor<'a> {
     bytes: &'a [u8],
     position: usize,
     limits: PdfReaderLimits,
-    tokens: usize,
+    remaining_tokens: usize,
     array_depth: usize,
     decode_names: bool,
     open_comment: bool,
@@ -2926,8 +2957,8 @@ impl<'a> ContentCursor<'a> {
         Self {
             bytes,
             position: 0,
+            remaining_tokens: limits.max_content_tokens,
             limits,
-            tokens: 0,
             array_depth: 0,
             decode_names: false,
             open_comment: false,
@@ -2946,18 +2977,21 @@ impl<'a> ContentCursor<'a> {
     }
 
     pub(super) fn next(&mut self) -> Result<Option<(ContentToken, usize)>, PdfReadError> {
-        self.next_token().map_err(PdfReadError::from)
+        let mut remaining = self.remaining_tokens;
+        let result = self.next_token(&mut remaining);
+        self.remaining_tokens = remaining;
+        result.map_err(PdfReadError::from)
     }
 
-    fn next_token(&mut self) -> Result<Option<(ContentToken, usize)>, ContentParseError> {
+    fn next_token(
+        &mut self,
+        remaining: &mut usize,
+    ) -> Result<Option<(ContentToken, usize)>, ContentParseError> {
         self.skip_space();
         if self.position >= self.bytes.len() {
             return Ok(None);
         }
-        self.tokens = self.tokens.checked_add(1).ok_or(PdfReadError::TokenLimit)?;
-        if self.tokens > self.limits.max_content_tokens {
-            return Err(PdfReadError::TokenLimit.into());
-        }
+        *remaining = remaining.checked_sub(1).ok_or(PdfReadError::TokenLimit)?;
         let offset = self.position;
         let token = match self.bytes[self.position] {
             b'(' => ContentToken::String(self.literal_string()?),
@@ -2972,7 +3006,7 @@ impl<'a> ContentCursor<'a> {
                     return Err(PdfReadError::TokenLimit.into());
                 }
                 self.array_depth += 1;
-                let result = self.array();
+                let result = self.array(remaining);
                 self.array_depth -= 1;
                 result?
             }
@@ -3127,7 +3161,7 @@ impl<'a> ContentCursor<'a> {
         Err(ContentParseError::TruncatedOperand)
     }
 
-    fn array(&mut self) -> Result<ContentToken, ContentParseError> {
+    fn array(&mut self, remaining: &mut usize) -> Result<ContentToken, ContentParseError> {
         self.position += 1;
         let mut values = Vec::new();
         loop {
@@ -3144,7 +3178,7 @@ impl<'a> ContentCursor<'a> {
                 _ => {}
             }
             let (value, _) = self
-                .next_token()?
+                .next_token(remaining)?
                 .ok_or(ContentParseError::TruncatedOperand)?;
             values.push(value);
         }
