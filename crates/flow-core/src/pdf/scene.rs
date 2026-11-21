@@ -4,7 +4,7 @@
 //! elements.  It intentionally does not produce FlowDocument nodes and never
 //! invokes a PDF action, URL, file, or external resource.
 
-use std::collections::BTreeMap;
+use std::{borrow::Cow, collections::BTreeMap};
 
 use serde::{Deserialize, Serialize};
 
@@ -12,8 +12,124 @@ use crate::layout::{LayoutRect, LayoutUnit};
 
 use super::reader::{
     PdfObjectRef, PdfPageRecord, PdfReadDiagnostic, PdfReadDiagnosticCode, PdfReadError,
-    PdfReadReport, PdfReader, PdfReaderLimits, PdfStream, PdfValue, report_active_content,
+    PdfReadReport, PdfReader, PdfReaderLimits, PdfStream, PdfValue, WIDGET_LABEL_ENTRY_BYTES,
+    WidgetLabelLimits, decode_pdf_text_string, map_widget_label, read_scene_name,
+    report_active_content, resolve_annotation_value, scene_name_label, single_filter,
 };
+
+use super::native::{NativeNoteId, NativePageGeometry, NativePageId, NativeTextPage};
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct NativePdfNote {
+    pub id: NativeNoteId,
+    pub object: PdfObjectRef,
+    pub contents: String,
+    pub rect: [i64; 4],
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum NativeReadOnlyAnnotation {
+    Text,
+    Appearance,
+    Link,
+    Widget,
+    Other,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum NativePdfAnnotation {
+    PlainNote(NativePdfNote),
+    ReadOnly {
+        object: Option<PdfObjectRef>,
+        profile: NativeReadOnlyAnnotation,
+        rect: Option<[LayoutUnit; 4]>,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct NativePdfNotePage {
+    pub id: NativePageId,
+    pub object: PdfObjectRef,
+    pub geometry: Option<NativePageGeometry>,
+    pub can_add_note: bool,
+    pub annotations: Vec<NativePdfAnnotation>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct NativePdfNoteScene {
+    pub output_hash: [u8; 32],
+    pub scene_hash: [u8; 32],
+    pub pages: Vec<NativePdfNotePage>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub text_pages: Vec<NativeTextPage>,
+    pub object_pages: Vec<super::native::NativeObjectPage>,
+}
+
+impl NativePdfNoteScene {
+    pub(super) fn new(
+        output_hash: [u8; 32],
+        pages: Vec<NativePdfNotePage>,
+        text_pages: Vec<NativeTextPage>,
+        object_pages: Vec<super::native::NativeObjectPage>,
+    ) -> Result<Self, super::native::NativeSessionError> {
+        struct HashWriter(blake3::Hasher);
+        impl std::io::Write for HashWriter {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.update(bytes);
+                Ok(bytes.len())
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let mut writer = HashWriter(blake3::Hasher::new());
+        writer.0.update(b"flowpdf:accepted-note-scene:v2");
+        writer.0.update(&output_hash);
+        for page in &pages {
+            serde_json::to_writer(
+                &mut writer,
+                &(page.object, page.geometry, page.can_add_note),
+            )
+            .map_err(|_| super::native::NativeSessionError::Postcondition)?;
+            for annotation in &page.annotations {
+                match annotation {
+                    NativePdfAnnotation::PlainNote(note) => serde_json::to_writer(
+                        &mut writer,
+                        &(note.object, note.rect, &note.contents),
+                    ),
+                    NativePdfAnnotation::ReadOnly {
+                        object,
+                        profile,
+                        rect,
+                    } => serde_json::to_writer(&mut writer, &(object, profile, rect)),
+                }
+                .map_err(|_| super::native::NativeSessionError::Postcondition)?;
+            }
+        }
+        if !text_pages.is_empty() {
+            writer.0.update(b"flowpdf:native-text-pages:v1");
+            serde_json::to_writer(&mut writer, &text_pages)
+                .map_err(|_| super::native::NativeSessionError::Postcondition)?;
+        }
+        writer.0.update(b"flowpdf:native-object-pages:v1");
+        serde_json::to_writer(&mut writer, &object_pages)
+            .map_err(|_| super::native::NativeSessionError::Postcondition)?;
+        Ok(Self {
+            output_hash,
+            scene_hash: *writer.0.finalize().as_bytes(),
+            pages,
+            text_pages,
+            object_pages,
+        })
+    }
+}
 
 pub const PDF_SCENE_SCHEMA_VERSION: u32 = 1;
 
@@ -43,6 +159,12 @@ pub struct PdfSourceProvenance {
     pub object_ref: PdfObjectRef,
     pub stream_offset: u32,
     pub operator: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_end: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operand_span: Option<[u32; 2]>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub invocation_path: Vec<u32>,
 }
 
 /// Whether a text code was mapped to Unicode by the source PDF.
@@ -226,6 +348,20 @@ impl Matrix {
         f: LayoutUnit::from_raw(0),
     };
 
+    fn from_pdf_array(value: &PdfValue) -> Result<Self, PdfReadError> {
+        let [a, b, c, d, e, f] = value.as_array().ok_or(PdfReadError::Syntax)? else {
+            return Err(PdfReadError::Syntax);
+        };
+        Ok(Self {
+            a: a.as_number().ok_or(PdfReadError::Syntax)?,
+            b: b.as_number().ok_or(PdfReadError::Syntax)?,
+            c: c.as_number().ok_or(PdfReadError::Syntax)?,
+            d: d.as_number().ok_or(PdfReadError::Syntax)?,
+            e: e.as_number().ok_or(PdfReadError::Syntax)?,
+            f: f.as_number().ok_or(PdfReadError::Syntax)?,
+        })
+    }
+
     fn multiply(self, other: Self) -> Result<Self, PdfReadError> {
         Ok(Self {
             a: mul(self.a, other.a)?.checked_add(mul(self.c, other.b)?)?,
@@ -289,9 +425,159 @@ fn scale_percent(value: LayoutUnit) -> Result<LayoutUnit, PdfReadError> {
         .map_err(|_| PdfReadError::NumericLimit)
 }
 
+#[derive(Debug, Clone, Copy)]
+struct SceneClip {
+    bounds: LayoutRect,
+    rectangular: bool,
+}
+
+impl SceneClip {
+    fn intersect(self, bounds: LayoutRect, rectangular: bool) -> Result<Self, PdfReadError> {
+        let x = self.bounds.x.max(bounds.x);
+        let y = self.bounds.y.max(bounds.y);
+        let right = self
+            .bounds
+            .x
+            .checked_add(self.bounds.width)?
+            .min(bounds.x.checked_add(bounds.width)?);
+        let top = self
+            .bounds
+            .y
+            .checked_add(self.bounds.height)?
+            .min(bounds.y.checked_add(bounds.height)?);
+        Ok(Self {
+            bounds: LayoutRect {
+                x,
+                y,
+                width: right.max(x).checked_sub(x)?,
+                height: top.max(y).checked_sub(y)?,
+            },
+            rectangular: self.rectangular && rectangular,
+        })
+    }
+
+    fn is_empty(self) -> bool {
+        self.bounds.width.raw() <= 0 || self.bounds.height.raw() <= 0
+    }
+
+    fn contains(self, rect: LayoutRect) -> Result<bool, PdfReadError> {
+        Ok(self.bounds.x <= rect.x
+            && self.bounds.y <= rect.y
+            && self.bounds.x.checked_add(self.bounds.width)? >= rect.x.checked_add(rect.width)?
+            && self.bounds.y.checked_add(self.bounds.height)? >= rect.y.checked_add(rect.height)?)
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PaintBounds([f64; 4]);
+
+impl PaintBounds {
+    fn union(self, other: Self) -> Self {
+        let [left, bottom, right, top] = self.0;
+        let [x0, y0, x1, y1] = other.0;
+        Self([left.min(x0), bottom.min(y0), right.max(x1), top.max(y1)])
+    }
+
+    fn intersect(self, other: Self) -> Self {
+        let [left, bottom, right, top] = self.0;
+        let [x0, y0, x1, y1] = other.0;
+        Self([left.max(x0), bottom.max(y0), right.min(x1), top.min(y1)])
+    }
+
+    fn contains(self, other: Self) -> bool {
+        let [left, bottom, right, top] = self.0;
+        let [x0, y0, x1, y1] = other.0;
+        left <= x0 && bottom <= y0 && right >= x1 && top >= y1
+    }
+
+    fn expanded(self, margin: f64) -> Option<Self> {
+        let [left, bottom, right, top] = self.0;
+        let edges = [
+            (left - margin).next_down(),
+            (bottom - margin).next_down(),
+            (right + margin).next_up(),
+            (top + margin).next_up(),
+        ];
+        edges
+            .iter()
+            .all(|edge| edge.is_finite())
+            .then_some(Self(edges))
+    }
+
+    fn is_empty(self) -> bool {
+        let [left, bottom, right, top] = self.0;
+        left >= right || bottom >= top
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct PaintMatrix([f64; 6]);
+
+impl PaintMatrix {
+    fn is_axis_aligned(self) -> bool {
+        let [a, b, c, d, ..] = self.0;
+        (b == 0. && c == 0.) || (a == 0. && d == 0.)
+    }
+
+    fn supports_image_rect(self) -> bool {
+        let [a, b, c, d, ..] = self.0;
+        a > 0. && d > 0. && b == 0. && c == 0.
+    }
+
+    fn multiply(self, other: Self) -> Option<Self> {
+        let [a, b, c, d, e, f] = self.0;
+        let [g, h, i, j, k, l] = other.0;
+        let values = [
+            a * g + c * h,
+            b * g + d * h,
+            a * i + c * j,
+            b * i + d * j,
+            a * k + c * l + e,
+            b * k + d * l + f,
+        ];
+        values
+            .iter()
+            .all(|value| value.is_finite())
+            .then_some(Self(values))
+    }
+
+    fn pdf_numbers<const N: usize>(value: &PdfValue) -> Option<[f64; N]> {
+        let values: &[PdfValue; N] = value.as_array()?.try_into().ok()?;
+        let mut numbers = [0.; N];
+        for (number, value) in numbers.iter_mut().zip(values) {
+            *number = value.as_precise_number()?;
+        }
+        Some(numbers)
+    }
+
+    fn bounds(self, [x, y, right, top]: [f64; 4]) -> Option<PaintBounds> {
+        let [a, b, c, d, e, f] = self.0;
+        let point = |x, y| [a * x + c * y + e, b * x + d * y + f];
+        let corners = [
+            point(x, y),
+            point(right, y),
+            point(x, top),
+            point(right, top),
+        ];
+        if !corners.iter().flatten().all(|value| value.is_finite()) {
+            return None;
+        }
+        let [[x0, y0], [x1, y1], [x2, y2], [x3, y3]] = corners;
+        Some(PaintBounds([
+            x0.min(x1).min(x2).min(x3),
+            y0.min(y1).min(y2).min(y3),
+            x0.max(x1).max(x2).max(x3),
+            y0.max(y1).max(y2).max(y3),
+        ]))
+    }
+}
+
 #[derive(Debug, Clone)]
 struct GraphicsState {
     ctm: Matrix,
+    paint_ctm: Option<PaintMatrix>,
+    paint_clip: PaintBounds,
+    path_paint_bounds: Option<PaintBounds>,
     text_matrix: Matrix,
     line_matrix: Matrix,
     font: Option<FontMap>,
@@ -305,13 +591,26 @@ struct GraphicsState {
     in_text: bool,
     path: Vec<RawPathCommand>,
     current_point: Option<(LayoutUnit, LayoutUnit)>,
-    pending_clip: Option<(Vec<RawPathCommand>, bool, PdfSourceProvenance)>,
+    subpath_start: Option<(LayoutUnit, LayoutUnit)>,
+    clip: SceneClip,
+    line_width: Option<f64>,
+    miter_limit: Option<f64>,
+    path_ctm_changed: bool,
+    pending_clip: Option<(
+        Vec<RawPathCommand>,
+        bool,
+        PdfSourceProvenance,
+        Option<PaintBounds>,
+    )>,
 }
 
-impl Default for GraphicsState {
-    fn default() -> Self {
+impl GraphicsState {
+    fn new(bounds: LayoutRect, paint_clip: PaintBounds) -> Self {
         Self {
             ctm: Matrix::IDENTITY,
+            paint_ctm: Some(PaintMatrix([1., 0., 0., 1., 0., 0.])),
+            paint_clip,
+            path_paint_bounds: None,
             text_matrix: Matrix::IDENTITY,
             line_matrix: Matrix::IDENTITY,
             font: None,
@@ -325,15 +624,34 @@ impl Default for GraphicsState {
             in_text: false,
             path: Vec::new(),
             current_point: None,
+            subpath_start: None,
+            clip: SceneClip {
+                bounds,
+                rectangular: true,
+            },
+            line_width: Some(1.),
+            miter_limit: Some(10.),
+            path_ctm_changed: false,
             pending_clip: None,
         }
+    }
+
+    fn extend_path_paint_bounds(&mut self, edges: [f64; 4]) {
+        let bounds = self.paint_ctm.and_then(|matrix| matrix.bounds(edges));
+        self.path_paint_bounds = if self.path.is_empty() {
+            bounds
+        } else {
+            self.path_paint_bounds
+                .zip(bounds)
+                .map(|(path, next)| path.union(next))
+        };
     }
 }
 
 #[derive(Debug, Clone)]
 enum RawPathCommand {
-    MoveTo(LayoutUnit, LayoutUnit),
-    LineTo(LayoutUnit, LayoutUnit),
+    MoveTo(LayoutUnit, LayoutUnit, [SceneDecimal; 2]),
+    LineTo(LayoutUnit, LayoutUnit, [SceneDecimal; 2]),
     CurveTo(
         LayoutUnit,
         LayoutUnit,
@@ -341,13 +659,14 @@ enum RawPathCommand {
         LayoutUnit,
         LayoutUnit,
         LayoutUnit,
+        [[SceneDecimal; 2]; 3],
     ),
     Close,
 }
 
 #[derive(Debug, Clone)]
 struct FontMap {
-    name: String,
+    name: Option<String>,
     to_unicode: BTreeMap<Vec<u8>, String>,
     simple_encoding: bool,
     widths: BTreeMap<u8, LayoutUnit>,
@@ -355,13 +674,53 @@ struct FontMap {
 }
 
 #[derive(Debug, Clone)]
-enum ContentToken {
-    Number(LayoutUnit),
+pub(super) enum ContentToken {
+    Number((LayoutUnit, SceneDecimal)),
     Integer(i64),
     Name(String),
     String(Vec<u8>),
     Array(Vec<ContentToken>),
     Word(String),
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(super) enum SceneDecimal {
+    Exact { coefficient: i64, scale: u32 },
+    Approximate(f64),
+}
+
+impl SceneDecimal {
+    fn value(self) -> f64 {
+        match self {
+            Self::Exact { coefficient, scale } => coefficient as f64 / 10_i128.pow(scale) as f64,
+            Self::Approximate(value) => value,
+        }
+    }
+
+    fn sum(self, other: Self) -> Self {
+        if let (
+            Self::Exact {
+                coefficient: left,
+                scale: left_scale,
+            },
+            Self::Exact {
+                coefficient: right,
+                scale: right_scale,
+            },
+        ) = (self, other)
+        {
+            let scale = left_scale.max(right_scale);
+            let left = i128::from(left).checked_mul(10_i128.pow(scale - left_scale));
+            let right = i128::from(right).checked_mul(10_i128.pow(scale - right_scale));
+            if let Some(sum) = left.zip(right).and_then(|(a, b)| a.checked_add(b)) {
+                return i64::try_from(sum).map_or_else(
+                    |_| Self::Approximate(sum as f64 / 10_i128.pow(scale) as f64),
+                    |coefficient| Self::Exact { coefficient, scale },
+                );
+            }
+        }
+        Self::Approximate(self.value() + other.value())
+    }
 }
 
 #[derive(Debug)]
@@ -370,13 +729,23 @@ struct SceneBuilder<'a> {
     limits: &'a PdfReaderLimits,
     page_index: u32,
     page: &'a PdfPageRecord,
+    field_counts: &'a BTreeMap<PdfObjectRef, usize>,
+    link_work: usize,
+    widget_work: usize,
     elements: Vec<PdfSceneElement>,
+    emit_elements: bool,
     report: PdfReadReport,
-    fonts: BTreeMap<String, FontMap>,
+    fonts: BTreeMap<(PdfObjectRef, String), FontMap>,
     page_refs: BTreeMap<PdfObjectRef, u32>,
     state: GraphicsState,
     state_stack: Vec<GraphicsState>,
-    form_depth: usize,
+    invocation_path: Vec<u32>,
+}
+
+#[derive(Default)]
+struct ContentStreamEnd {
+    pending_operands: bool,
+    open_comment: bool,
 }
 
 impl<'a> SceneBuilder<'a> {
@@ -385,13 +754,18 @@ impl<'a> SceneBuilder<'a> {
         pages: &'a [PdfPageRecord],
         page_index: u32,
         page: &'a PdfPageRecord,
+        field_counts: &'a BTreeMap<PdfObjectRef, usize>,
     ) -> Self {
         Self {
             reader,
             limits: reader.limits(),
             page_index,
             page,
+            field_counts,
+            link_work: reader.limits().max_content_tokens,
+            widget_work: reader.limits().max_content_tokens,
             elements: Vec::new(),
+            emit_elements: true,
             report: PdfReadReport::default(),
             fonts: BTreeMap::new(),
             page_refs: pages
@@ -403,33 +777,80 @@ impl<'a> SceneBuilder<'a> {
                         .map(|index| (page.object_ref, index))
                 })
                 .collect(),
-            state: GraphicsState::default(),
+            state: GraphicsState::new(page.media_box, PaintBounds(page.media_edges)),
             state_stack: Vec::new(),
-            form_depth: 0,
+            invocation_path: Vec::new(),
         }
     }
 
     fn run(mut self) -> Result<PdfScenePage, PdfReadError> {
+        if let Some(crop_box) = self.page.crop_box {
+            self.state.clip = self.state.clip.intersect(crop_box, true)?;
+        }
+        if let Some(crop_edges) = self.page.crop_edges {
+            self.state.paint_clip = self.state.paint_clip.intersect(PaintBounds(crop_edges));
+        }
         self.inspect_annotations()?;
-        for content_ref in &self.page.contents {
+        let mut previous = None::<(PdfObjectRef, u8, bool)>;
+        let mut unverified_boundary = None;
+        for (index, content_ref) in self.page.contents.iter().enumerate() {
+            self.invocation_path =
+                vec![u32::try_from(index).map_err(|_| PdfReadError::NumericLimit)?];
             match self.reader.object(*content_ref) {
                 Ok(PdfValue::Stream(stream)) => {
-                    self.interpret_stream(&stream, *content_ref, 0)?;
+                    let Some(&last_byte) = stream.data.last() else {
+                        continue;
+                    };
+                    let uncertain = previous
+                        .filter(|(_, byte, _)| !separated_content_streams(&[*byte], &stream.data));
+                    if let Some((previous_ref, _, open_comment)) = uncertain {
+                        if open_comment {
+                            self.report_partial(previous_ref);
+                            break;
+                        }
+                        // @contract: Independent stream previews across unverified boundaries are partial.
+                        unverified_boundary.get_or_insert(previous_ref);
+                    }
+                    let end = self.interpret_stream(
+                        &stream,
+                        *content_ref,
+                        0,
+                        self.page.resources.as_ref(),
+                        index + 1 < self.page.contents.len(),
+                    );
+                    let end = match (end, uncertain) {
+                        (Err(ContentParseError::OperatorSyntax), Some((previous_ref, _, _))) => {
+                            self.report_partial(previous_ref);
+                            break;
+                        }
+                        (result, _) => result.map_err(PdfReadError::from)?,
+                    };
+                    if end.pending_operands && index + 1 < self.page.contents.len() {
+                        // @contract: An operator's operand span refers to its own stream.
+                        self.report_partial(*content_ref);
+                        break;
+                    }
+                    previous = Some((*content_ref, last_byte, end.open_comment));
                 }
-                Ok(_) => self.report.push(PdfReadDiagnostic::warning(
-                    PdfReadDiagnosticCode::PartialPage,
-                    Some(self.page_index),
-                    Some(content_ref.object_number),
-                )),
+                Ok(_) => {
+                    self.report_partial(*content_ref);
+                    break;
+                }
                 Err(PdfReadError::FilterUnsupported) => {
                     self.report.push(PdfReadDiagnostic::blocked(
                         PdfReadDiagnosticCode::UnsupportedFilter,
                         Some(self.page_index),
                         Some(content_ref.object_number),
-                    ))
+                    ));
+                    break;
                 }
                 Err(error) => return Err(error),
             }
+        }
+        if !self.report.partial
+            && let Some(object_ref) = unverified_boundary
+        {
+            self.report_partial(object_ref);
         }
         let partial = self.report.partial;
         Ok(PdfScenePage {
@@ -447,56 +868,91 @@ impl<'a> SceneBuilder<'a> {
         stream: &PdfStream,
         object_ref: PdfObjectRef,
         depth: usize,
-    ) -> Result<(), PdfReadError> {
+        resources: Option<&PdfValue>,
+        has_next_page_stream: bool,
+    ) -> Result<ContentStreamEnd, ContentParseError> {
         if depth > self.limits.max_form_depth {
             self.report.push(PdfReadDiagnostic::blocked(
                 PdfReadDiagnosticCode::FormDepthLimit,
                 Some(self.page_index),
                 Some(object_ref.object_number),
             ));
-            return Ok(());
+            return Ok(ContentStreamEnd::default());
         }
-        let mut cursor = ContentCursor::new(&stream.data, self.limits.clone());
+        let mut cursor = ContentCursor::for_scene(&stream.data, self.limits.clone());
         let mut operands = Vec::new();
-        while let Some((token, offset)) = cursor.next()? {
+        let mut operand_span = None::<[u32; 2]>;
+        loop {
+            let (token, offset) = match cursor.next_token() {
+                Err(ContentParseError::TruncatedOperand) if has_next_page_stream => {
+                    return Ok(ContentStreamEnd {
+                        pending_operands: true,
+                        open_comment: cursor.open_comment,
+                    });
+                }
+                result => match result? {
+                    Some(token) => token,
+                    None => break,
+                },
+            };
             match token {
                 ContentToken::Word(operator) => {
-                    self.dispatch_operator(
-                        &operator, &operands, object_ref, stream, offset, depth,
-                    )?;
+                    let stream_offset = stream
+                        .source_offset
+                        .checked_add(offset)
+                        .ok_or(PdfReadError::NumericLimit)?;
+                    let stream_end = stream
+                        .source_offset
+                        .checked_add(cursor.position())
+                        .ok_or(PdfReadError::NumericLimit)?;
+                    let provenance = PdfSourceProvenance {
+                        object_ref,
+                        stream_offset: u32::try_from(stream_offset)
+                            .map_err(|_| PdfReadError::NumericLimit)?,
+                        operator: Some(operator.clone()),
+                        stream_end: Some(
+                            u32::try_from(stream_end).map_err(|_| PdfReadError::NumericLimit)?,
+                        ),
+                        operand_span: operand_span.take(),
+                        invocation_path: self.invocation_path.clone(),
+                    };
+                    if operator == "Do" {
+                        self.paint_xobject(&operands, object_ref, provenance, depth, resources)?;
+                    } else {
+                        self.dispatch_operator(&operator, &operands, provenance, resources)
+                            .map_err(|error| match error {
+                                PdfReadError::Syntax => ContentParseError::OperatorSyntax,
+                                error => error.into(),
+                            })?;
+                    }
                     operands.clear();
                 }
                 other => {
+                    let start = u32::try_from(offset).map_err(|_| PdfReadError::NumericLimit)?;
+                    let end =
+                        u32::try_from(cursor.position()).map_err(|_| PdfReadError::NumericLimit)?;
+                    operand_span.get_or_insert([start, end])[1] = end;
                     operands.push(other);
                     if operands.len() > self.limits.max_array_items {
-                        return Err(PdfReadError::TokenLimit);
+                        return Err(PdfReadError::TokenLimit.into());
                     }
                 }
             }
         }
-        Ok(())
+        Ok(ContentStreamEnd {
+            pending_operands: !operands.is_empty(),
+            open_comment: cursor.open_comment,
+        })
     }
 
     fn dispatch_operator(
         &mut self,
         operator: &str,
         operands: &[ContentToken],
-        object_ref: PdfObjectRef,
-        stream: &PdfStream,
-        offset: usize,
-        depth: usize,
+        provenance: PdfSourceProvenance,
+        resources: Option<&PdfValue>,
     ) -> Result<(), PdfReadError> {
-        let provenance = PdfSourceProvenance {
-            object_ref,
-            stream_offset: u32::try_from(
-                stream
-                    .source_offset
-                    .checked_add(offset)
-                    .ok_or(PdfReadError::NumericLimit)?,
-            )
-            .map_err(|_| PdfReadError::NumericLimit)?,
-            operator: Some(operator.to_owned()),
-        };
+        let object_ref = provenance.object_ref;
         match operator {
             "q" => self.state_stack.push(self.state.clone()),
             "Q" => {
@@ -504,68 +960,145 @@ impl<'a> SceneBuilder<'a> {
             }
             "cm" => {
                 if let Some(matrix) = six_numbers(operands) {
-                    self.state.ctm = self.state.ctm.multiply(matrix)?;
+                    let ctm = self.state.ctm.multiply(matrix)?;
+                    let paint_ctm = self.state.paint_ctm.and_then(|outer| {
+                        outer.multiply(PaintMatrix(std::array::from_fn(|i| {
+                            operands[operands.len() - 6 + i].precise_number()
+                        })))
+                    });
+                    self.state.path_ctm_changed |= !self.state.path.is_empty()
+                        && (self.state.ctm != ctm || self.state.paint_ctm != paint_ctm);
+                    self.state.ctm = ctm;
+                    self.state.paint_ctm = paint_ctm;
                 } else {
                     return Err(PdfReadError::Syntax);
                 }
             }
             "m" => {
                 let (x, y) = two_numbers(operands)?;
-                self.state.path.push(RawPathCommand::MoveTo(x, y));
+                let point =
+                    std::array::from_fn(|i| operands[operands.len() - 2 + i].scene_decimal());
+                let [px, py] = point.map(SceneDecimal::value);
+                self.state.extend_path_paint_bounds([px, py, px, py]);
+                self.state.path.push(RawPathCommand::MoveTo(x, y, point));
                 self.state.current_point = Some((x, y));
+                self.state.subpath_start = self.state.current_point;
             }
             "l" => {
                 let (x, y) = two_numbers(operands)?;
-                self.state.path.push(RawPathCommand::LineTo(x, y));
+                let point =
+                    std::array::from_fn(|i| operands[operands.len() - 2 + i].scene_decimal());
+                let [px, py] = point.map(SceneDecimal::value);
+                self.state.extend_path_paint_bounds([px, py, px, py]);
+                self.state.path.push(RawPathCommand::LineTo(x, y, point));
                 self.state.current_point = Some((x, y));
             }
             "c" => {
                 let values = six_number_values(operands)?;
+                let points: [[SceneDecimal; 2]; 3] = std::array::from_fn(|i| {
+                    let pair = operands.len() - 6 + 2 * i;
+                    [
+                        operands[pair].scene_decimal(),
+                        operands[pair + 1].scene_decimal(),
+                    ]
+                });
+                for point in points {
+                    let [x, y] = point.map(SceneDecimal::value);
+                    self.state.extend_path_paint_bounds([x, y, x, y]);
+                }
                 self.state.path.push(RawPathCommand::CurveTo(
-                    values[0], values[1], values[2], values[3], values[4], values[5],
+                    values[0], values[1], values[2], values[3], values[4], values[5], points,
                 ));
                 self.state.current_point = Some((values[4], values[5]));
             }
             "v" => {
                 let values = four_number_values(operands)?;
+                let points: [[SceneDecimal; 2]; 2] = std::array::from_fn(|i| {
+                    let pair = operands.len() - 4 + 2 * i;
+                    [
+                        operands[pair].scene_decimal(),
+                        operands[pair + 1].scene_decimal(),
+                    ]
+                });
+                for point in points {
+                    let [x, y] = point.map(SceneDecimal::value);
+                    self.state.extend_path_paint_bounds([x, y, x, y]);
+                }
                 let (x0, y0) = self.state.current_point.ok_or(PdfReadError::Syntax)?;
                 self.state.path.push(RawPathCommand::CurveTo(
-                    x0, y0, values[0], values[1], values[2], values[3],
+                    x0,
+                    y0,
+                    values[0],
+                    values[1],
+                    values[2],
+                    values[3],
+                    [points[0], points[0], points[1]],
                 ));
                 self.state.current_point = Some((values[2], values[3]));
             }
             "y" => {
                 let values = four_number_values(operands)?;
+                let points: [[SceneDecimal; 2]; 2] = std::array::from_fn(|i| {
+                    let pair = operands.len() - 4 + 2 * i;
+                    [
+                        operands[pair].scene_decimal(),
+                        operands[pair + 1].scene_decimal(),
+                    ]
+                });
+                for point in points {
+                    let [x, y] = point.map(SceneDecimal::value);
+                    self.state.extend_path_paint_bounds([x, y, x, y]);
+                }
                 self.state.path.push(RawPathCommand::CurveTo(
-                    values[0], values[1], values[2], values[3], values[2], values[3],
+                    values[0],
+                    values[1],
+                    values[2],
+                    values[3],
+                    values[2],
+                    values[3],
+                    [points[0], points[1], points[1]],
                 ));
                 self.state.current_point = Some((values[2], values[3]));
             }
             "re" => {
                 let values = four_number_values(operands)?;
+                let [x, y, width, height] =
+                    std::array::from_fn(|i| operands[operands.len() - 4 + i].scene_decimal());
+                let [px, py, right, top] = [x, y, x.sum(width), y.sum(height)];
+                self.state
+                    .extend_path_paint_bounds([px, py, right, top].map(SceneDecimal::value));
                 let (x, y, width, height) = (values[0], values[1], values[2], values[3]);
-                self.state.path.push(RawPathCommand::MoveTo(x, y));
+                let x1 = x.checked_add(width)?;
+                let y1 = y.checked_add(height)?;
+                self.state.path.push(RawPathCommand::MoveTo(x, y, [px, py]));
                 self.state
                     .path
-                    .push(RawPathCommand::LineTo(x.checked_add(width)?, y));
-                self.state.path.push(RawPathCommand::LineTo(
-                    x.checked_add(width)?,
-                    y.checked_add(height)?,
-                ));
+                    .push(RawPathCommand::LineTo(x1, y, [right, py]));
                 self.state
                     .path
-                    .push(RawPathCommand::LineTo(x, y.checked_add(height)?));
+                    .push(RawPathCommand::LineTo(x1, y1, [right, top]));
+                self.state
+                    .path
+                    .push(RawPathCommand::LineTo(x, y1, [px, top]));
                 self.state.path.push(RawPathCommand::Close);
                 self.state.current_point = Some((x, y));
+                self.state.subpath_start = self.state.current_point;
             }
-            "h" => self.state.path.push(RawPathCommand::Close),
+            "h" => {
+                self.state.path.push(RawPathCommand::Close);
+                self.state.current_point = self.state.subpath_start;
+            }
             "W" | "W*" => {
                 if !self.state.path.is_empty() {
-                    self.state.pending_clip =
-                        Some((self.state.path.clone(), operator == "W*", provenance));
+                    self.state.pending_clip = Some((
+                        self.state.path.clone(),
+                        operator == "W*",
+                        provenance,
+                        self.state.path_paint_bounds,
+                    ));
                 }
             }
-            "S" | "s" | "f" | "F" | "f*" | "B" | "b" | "B*" | "n" => {
+            "S" | "s" | "f" | "F" | "f*" | "B" | "B*" | "b" | "b*" | "n" => {
                 self.finish_path(operator, provenance)?;
             }
             "BT" => {
@@ -574,7 +1107,7 @@ impl<'a> SceneBuilder<'a> {
                 self.state.line_matrix = Matrix::IDENTITY;
             }
             "ET" => self.state.in_text = false,
-            "Tf" => self.set_font(operands)?,
+            "Tf" => self.set_font(operands, resources)?,
             "Tm" => {
                 self.state.text_matrix = six_numbers(operands).ok_or(PdfReadError::Syntax)?;
                 self.state.line_matrix = self.state.text_matrix;
@@ -595,24 +1128,7 @@ impl<'a> SceneBuilder<'a> {
                 self.state.line_matrix = self.state.line_matrix.multiply(translation)?;
                 self.state.text_matrix = self.state.line_matrix;
             }
-            "T*" => {
-                let translation = Matrix {
-                    a: Matrix::IDENTITY.a,
-                    b: LayoutUnit::from_raw(0),
-                    c: LayoutUnit::from_raw(0),
-                    d: Matrix::IDENTITY.d,
-                    e: LayoutUnit::from_raw(0),
-                    f: LayoutUnit::from_raw(
-                        self.state
-                            .leading
-                            .raw()
-                            .checked_neg()
-                            .ok_or(PdfReadError::NumericLimit)?,
-                    ),
-                };
-                self.state.line_matrix = self.state.line_matrix.multiply(translation)?;
-                self.state.text_matrix = self.state.line_matrix;
-            }
+            "T*" => self.advance_line()?,
             "TL" => self.state.leading = one_number(operands)?,
             "Tc" => self.state.char_spacing = one_number(operands)?,
             "Tw" => self.state.word_spacing = one_number(operands)?,
@@ -623,7 +1139,7 @@ impl<'a> SceneBuilder<'a> {
             "Ts" => self.state.rise = one_number(operands)?,
             "Tj" | "'" | "\"" => {
                 if operator == "'" {
-                    self.dispatch_operator("T*", &[], object_ref, stream, offset, depth)?;
+                    self.advance_line()?;
                 }
                 if let Some(ContentToken::String(bytes)) = operands.last() {
                     self.show_text(bytes, provenance)?;
@@ -649,7 +1165,12 @@ impl<'a> SceneBuilder<'a> {
                     }
                 }
             }
-            "Do" => self.paint_xobject(operands, object_ref, provenance, depth)?,
+            "w" => self.state.line_width = precise_operand(operands),
+            "M" => self.state.miter_limit = precise_operand(operands),
+            "gs" => {
+                self.state.line_width = None;
+                self.state.miter_limit = None;
+            }
             "BI" | "ID" | "EI" => self.report.push(
                 PdfReadDiagnostic::blocked(
                     PdfReadDiagnosticCode::UnsupportedOperator,
@@ -671,42 +1192,214 @@ impl<'a> SceneBuilder<'a> {
         Ok(())
     }
 
+    fn advance_line(&mut self) -> Result<(), PdfReadError> {
+        let translation = Matrix {
+            a: Matrix::IDENTITY.a,
+            b: LayoutUnit::from_raw(0),
+            c: LayoutUnit::from_raw(0),
+            d: Matrix::IDENTITY.d,
+            e: LayoutUnit::from_raw(0),
+            f: LayoutUnit::from_raw(
+                self.state
+                    .leading
+                    .raw()
+                    .checked_neg()
+                    .ok_or(PdfReadError::NumericLimit)?,
+            ),
+        };
+        self.state.line_matrix = self.state.line_matrix.multiply(translation)?;
+        self.state.text_matrix = self.state.line_matrix;
+        Ok(())
+    }
+
     fn finish_path(
         &mut self,
         operator: &str,
         provenance: PdfSourceProvenance,
     ) -> Result<(), PdfReadError> {
-        if let Some((commands, even_odd, clip_provenance)) = self.state.pending_clip.take() {
-            let commands = transform_path(&commands, self.state.ctm)?;
-            let rect = path_bounds(&commands)?;
-            self.push_element(PdfSceneElement::Clip {
-                value: PdfClipElement {
-                    commands,
-                    even_odd,
-                    rect,
-                    provenance: clip_provenance,
-                },
-            })?;
+        let pending_clip = self.state.pending_clip.take();
+        let paint_bounds = self.state.path_paint_bounds.take();
+        let path_ctm_changed = std::mem::take(&mut self.state.path_ctm_changed);
+        self.state.current_point = None;
+        self.state.subpath_start = None;
+
+        if path_ctm_changed {
+            if pending_clip.is_some() {
+                self.state.clip.rectangular = false;
+            }
+            if pending_clip.is_some() || (!self.state.path.is_empty() && operator != "n") {
+                self.report_partial(provenance.object_ref);
+            }
+            self.state.path.clear();
+            return Ok(());
         }
+
         if !self.state.path.is_empty() && operator != "n" {
-            let commands = transform_path(&self.state.path, self.state.ctm)?;
+            let mut commands = transform_path(&self.state.path, self.state.ctm)?;
+            if matches!(operator, "s" | "b" | "b*")
+                && !matches!(commands.last(), Some(PdfPathCommand::ClosePath))
+            {
+                commands.push(PdfPathCommand::ClosePath);
+            }
             let rect = path_bounds(&commands)?;
-            self.push_element(PdfSceneElement::Path {
-                value: PdfPathElement {
-                    commands,
-                    rect,
-                    stroke: matches!(operator, "S" | "s" | "B" | "b" | "B*"),
-                    fill: matches!(operator, "f" | "F" | "f*" | "B" | "b" | "B*"),
-                    provenance,
-                },
-            })?;
+            let stroke = matches!(operator, "S" | "s" | "B" | "B*" | "b" | "b*");
+            let fill = !matches!(operator, "S" | "s");
+            let visible = if stroke {
+                if fill
+                    && self.state.clip.intersect(rect, true)?.is_empty()
+                    && self.paint_may_be_visible(paint_bounds)
+                {
+                    self.report_partial(provenance.object_ref);
+                }
+                self.stroke_visible(rect, paint_bounds, &provenance)?
+            } else {
+                self.bounded_paint_visible(rect, paint_bounds, &provenance)?
+            };
+            if visible {
+                // @contract: Only provenance records the fill rule for painted paths.
+                if (fill
+                    && lost_visible_fill_contour(
+                        &self.state.path,
+                        &commands,
+                        self.state.paint_ctm,
+                        self.state.paint_clip,
+                    ))
+                    || matches!(operator, "f*" | "B*" | "b*")
+                    || (stroke && contains_collapsed_stroke(&commands, &self.state.path))
+                {
+                    self.report_partial(provenance.object_ref);
+                }
+                self.push_element(PdfSceneElement::Path {
+                    value: PdfPathElement {
+                        commands,
+                        rect,
+                        stroke,
+                        fill,
+                        provenance,
+                    },
+                })?;
+            }
         }
         self.state.path.clear();
-        self.state.current_point = None;
+        if let Some((commands, even_odd, clip_provenance, paint_bounds)) = pending_clip {
+            if let Some(bounds) = paint_bounds {
+                self.state.paint_clip = self.state.paint_clip.intersect(bounds);
+            }
+            let rectangular = paint_bounds.is_some()
+                && self
+                    .state
+                    .paint_ctm
+                    .is_some_and(|matrix| is_precise_rectangular_path(&commands, matrix));
+            let commands = transform_path(&commands, self.state.ctm)?;
+            let rect = path_bounds(&commands)?;
+            self.state.clip = self
+                .state
+                .clip
+                .intersect(rect, rectangular && is_rectangular_path(&commands))?;
+            self.push_element(PdfSceneElement::Clip {
+                value: PdfClipElement {
+                    rect,
+                    even_odd,
+                    provenance: clip_provenance,
+                    commands,
+                },
+            })?;
+        }
         Ok(())
     }
 
-    fn set_font(&mut self, operands: &[ContentToken]) -> Result<(), PdfReadError> {
+    fn report_partial(&mut self, object_ref: PdfObjectRef) {
+        self.report.partial = true;
+        self.report.push(PdfReadDiagnostic::warning(
+            PdfReadDiagnosticCode::PartialPage,
+            Some(self.page_index),
+            Some(object_ref.object_number),
+        ));
+    }
+
+    fn stroke_visible(
+        &mut self,
+        rect: LayoutRect,
+        paint_bounds: Option<PaintBounds>,
+        provenance: &PdfSourceProvenance,
+    ) -> Result<bool, PdfReadError> {
+        let clip = self.state.clip;
+        let stroke_bounds = paint_bounds.and_then(|bounds| self.stroke_bounds(bounds));
+        if clip.is_empty() {
+            if self.paint_may_be_visible(stroke_bounds) {
+                self.report_partial(provenance.object_ref);
+            }
+            return Ok(false);
+        }
+        // @contract: Stroke paint can extend beyond the scene's centerline bounds.
+        if !clip.rectangular
+            || !clip.contains(rect)?
+            || !stroke_bounds.is_some_and(|bounds| self.state.paint_clip.contains(bounds))
+        {
+            self.report_partial(provenance.object_ref);
+        }
+        Ok(true)
+    }
+
+    fn stroke_bounds(&self, bounds: PaintBounds) -> Option<PaintBounds> {
+        let width = self.state.line_width?;
+        let miter = self.state.miter_limit?;
+        if width <= 0. || miter < 1. {
+            return None;
+        }
+        let PaintMatrix([a, b, c, d, ..]) = self.state.paint_ctm?;
+        let scale = (a.abs() + c.abs()).max(b.abs() + d.abs());
+        // @invariant: The margin covers miter joins and projecting square caps.
+        bounds.expanded(width * 0.5 * miter.max(2.) * scale)
+    }
+
+    fn paint_may_be_visible(&self, paint_bounds: Option<PaintBounds>) -> bool {
+        let clip = self.state.paint_clip;
+        !clip.is_empty() && paint_bounds.is_none_or(|bounds| !clip.intersect(bounds).is_empty())
+    }
+
+    fn bounded_paint_visible(
+        &mut self,
+        rect: LayoutRect,
+        paint_bounds: Option<PaintBounds>,
+        provenance: &PdfSourceProvenance,
+    ) -> Result<bool, PdfReadError> {
+        let intersection = self.state.clip.intersect(rect, true)?;
+        if intersection.is_empty() {
+            if self.paint_may_be_visible(paint_bounds) {
+                self.report_partial(provenance.object_ref);
+            }
+            return Ok(false);
+        }
+        if !intersection.rectangular
+            || intersection.bounds != rect
+            || !paint_bounds.is_some_and(|bounds| self.state.paint_clip.contains(bounds))
+        {
+            self.report_partial(provenance.object_ref);
+        }
+        Ok(true)
+    }
+
+    fn resource_category<'r>(
+        &self,
+        resources: Option<&'r PdfValue>,
+        category: &str,
+    ) -> Result<Cow<'r, PdfValue>, PdfReadError> {
+        let value = resources
+            .and_then(PdfValue::as_dictionary)
+            .and_then(|dictionary| dictionary.get(category))
+            .ok_or(PdfReadError::ReferenceInvalid)?;
+        match value {
+            PdfValue::Reference(reference) => self.reader.object(*reference).map(Cow::Owned),
+            _ => Ok(Cow::Borrowed(value)),
+        }
+    }
+
+    fn set_font(
+        &mut self,
+        operands: &[ContentToken],
+        resources: Option<&PdfValue>,
+    ) -> Result<(), PdfReadError> {
         let Some(ContentToken::Name(name)) = operands.first() else {
             return Err(PdfReadError::Syntax);
         };
@@ -714,11 +1407,18 @@ impl<'a> SceneBuilder<'a> {
             .get(1)
             .and_then(ContentToken::number)
             .ok_or(PdfReadError::Syntax)?;
-        let font = if let Some(font) = self.fonts.get(name) {
+        let font_ref = self
+            .resource_category(resources, "Font")?
+            .as_dictionary()
+            .and_then(|fonts| fonts.get(name))
+            .and_then(PdfValue::as_reference)
+            .ok_or(PdfReadError::ReferenceInvalid)?;
+        let key = (font_ref, name.clone());
+        let font = if let Some(font) = self.fonts.get(&key) {
             font.clone()
         } else {
-            let font = self.load_font(name)?;
-            self.fonts.insert(name.clone(), font.clone());
+            let font = self.load_font(font_ref, name)?;
+            self.fonts.insert(key, font.clone());
             font
         };
         self.state.font_name = Some(name.clone());
@@ -727,30 +1427,14 @@ impl<'a> SceneBuilder<'a> {
         Ok(())
     }
 
-    fn load_font(&self, name: &str) -> Result<FontMap, PdfReadError> {
-        let resources = self
-            .page
-            .resources
-            .as_ref()
-            .ok_or(PdfReadError::ReferenceInvalid)?
-            .as_dictionary()
-            .ok_or(PdfReadError::ReferenceInvalid)?;
-        let fonts = resources
-            .get("Font")
-            .ok_or(PdfReadError::ReferenceInvalid)?
-            .as_dictionary()
-            .ok_or(PdfReadError::ReferenceInvalid)?;
-        let font_value = fonts.get(name).ok_or(PdfReadError::ReferenceInvalid)?;
-        let font_ref = font_value
-            .as_reference()
-            .ok_or(PdfReadError::ReferenceInvalid)?;
+    fn load_font(&self, font_ref: PdfObjectRef, name: &str) -> Result<FontMap, PdfReadError> {
         let font = self.reader.object(font_ref)?;
         let dictionary = font.as_dictionary().ok_or(PdfReadError::ReferenceInvalid)?;
         let base_name = dictionary
             .get("BaseFont")
             .and_then(PdfValue::as_name)
-            .unwrap_or(name)
-            .to_owned();
+            .or_else(|| scene_name_label(name))
+            .map(str::to_owned);
         let mut to_unicode = BTreeMap::new();
         if let Some(to_unicode_value) = dictionary.get("ToUnicode") {
             let to_unicode_ref = to_unicode_value
@@ -865,16 +1549,26 @@ impl<'a> SceneBuilder<'a> {
                     }
                 })?;
             let advance = mul(advance, self.state.horizontal_scale)?;
-            let (x, y) = self
-                .state
-                .ctm
-                .multiply(self.state.text_matrix)?
-                .point(LayoutUnit::from_raw(0), self.state.rise)?;
-            let rect = LayoutRect {
-                x,
-                y: y.checked_sub(self.state.font_size)?,
-                width: advance,
-                height: self.state.font_size,
+            let transform = self.state.ctm.multiply(self.state.text_matrix)?;
+            let zero = LayoutUnit::from_raw(0);
+            let rect = if self.invocation_path.len() > 1 {
+                transformed_rect(
+                    transform,
+                    LayoutRect {
+                        x: zero,
+                        y: self.state.rise.checked_sub(self.state.font_size)?,
+                        width: advance,
+                        height: self.state.font_size,
+                    },
+                )?
+            } else {
+                let (x, y) = transform.point(zero, self.state.rise)?;
+                LayoutRect {
+                    x,
+                    y: y.checked_sub(self.state.font_size)?,
+                    width: advance,
+                    height: self.state.font_size,
+                }
             };
             glyphs.push(PdfGlyph {
                 code: u32::from(code),
@@ -888,14 +1582,21 @@ impl<'a> SceneBuilder<'a> {
                 return Err(PdfReadError::TokenLimit);
             }
         }
-        if let Some(first) = glyphs.first() {
+        if !glyphs.is_empty() {
+            if self.state.clip.is_empty() {
+                if !self.state.paint_clip.is_empty() {
+                    self.report_partial(provenance.object_ref);
+                }
+                return Ok(());
+            }
             let rect = union_rect(glyphs.iter().map(|glyph| glyph.rect))?;
-            let _ = first;
+            // @contract: Advance rectangles do not bound painted glyphs.
+            self.report_partial(provenance.object_ref);
             self.push_element(PdfSceneElement::Text {
                 value: PdfTextElement {
                     text,
                     rect,
-                    font_name: Some(font.name),
+                    font_name: font.name,
                     mapping,
                     glyphs,
                     provenance,
@@ -916,32 +1617,27 @@ impl<'a> SceneBuilder<'a> {
         object_ref: PdfObjectRef,
         provenance: PdfSourceProvenance,
         depth: usize,
-    ) -> Result<(), PdfReadError> {
+        resources: Option<&PdfValue>,
+    ) -> Result<(), ContentParseError> {
         let Some(ContentToken::Name(name)) = operands.last() else {
-            return Err(PdfReadError::Syntax);
+            return Err(ContentParseError::OperatorSyntax);
         };
-        let resources = self
-            .page
-            .resources
-            .as_ref()
-            .and_then(PdfValue::as_dictionary)
-            .ok_or(PdfReadError::ReferenceInvalid)?;
-        let xobjects = resources
-            .get("XObject")
-            .and_then(PdfValue::as_dictionary)
-            .ok_or(PdfReadError::ReferenceInvalid)?;
-        let xobject_ref = xobjects
-            .get(name)
+        let xobject_ref = self
+            .resource_category(resources, "XObject")?
+            .as_dictionary()
+            .and_then(|xobjects| xobjects.get(name))
             .and_then(PdfValue::as_reference)
             .ok_or(PdfReadError::ReferenceInvalid)?;
         let xobject = self.reader.object(xobject_ref)?;
         let stream = match xobject {
             PdfValue::Stream(stream) => stream,
-            _ => return Err(PdfReadError::ReferenceInvalid),
+            _ => return Err(PdfReadError::ReferenceInvalid.into()),
         };
         let dictionary = &stream.dict;
         match dictionary.get("Subtype").and_then(PdfValue::as_name) {
-            Some("Image") => self.paint_image(&stream, xobject_ref, provenance),
+            Some("Image") => self
+                .paint_image(&stream, xobject_ref, provenance)
+                .map_err(ContentParseError::from),
             Some("Form") => {
                 if depth + 1 > self.limits.max_form_depth {
                     self.report.push(PdfReadDiagnostic::blocked(
@@ -951,20 +1647,74 @@ impl<'a> SceneBuilder<'a> {
                     ));
                     return Ok(());
                 }
-                let form_bounds = LayoutRect {
-                    x: LayoutUnit::from_raw(0),
-                    y: LayoutUnit::from_raw(0),
-                    width: dictionary
-                        .get("BBox")
-                        .and_then(|value| parse_bbox(value).ok())
-                        .map(|rect| rect.width)
-                        .unwrap_or(LayoutUnit::from_raw(0)),
-                    height: dictionary
-                        .get("BBox")
-                        .and_then(|value| parse_bbox(value).ok())
-                        .map(|rect| rect.height)
-                        .unwrap_or(LayoutUnit::from_raw(0)),
+                let local_resources;
+                let effective_resources = match dictionary.get("Resources") {
+                    Some(PdfValue::Reference(reference)) => {
+                        local_resources = self.reader.object(*reference)?;
+                        match &local_resources {
+                            PdfValue::Null => resources,
+                            value => Some(value),
+                        }
+                    }
+                    None | Some(PdfValue::Null) => resources,
+                    Some(value) => Some(value),
                 };
+                let mut form_paint_ctm = self.state.paint_ctm;
+                let form_ctm = match dictionary.get("Matrix") {
+                    None | Some(PdfValue::Null) => self.state.ctm,
+                    Some(value) => {
+                        let resolved;
+                        let value = if let PdfValue::Reference(reference) = value {
+                            resolved = self.reader.object(*reference)?;
+                            &resolved
+                        } else {
+                            value
+                        };
+                        match value {
+                            PdfValue::Null => self.state.ctm,
+                            value => {
+                                let Ok(matrix) = Matrix::from_pdf_array(value) else {
+                                    self.report_partial(xobject_ref);
+                                    return Ok(());
+                                };
+                                form_paint_ctm = form_paint_ctm.and_then(|outer| {
+                                    outer.multiply(PaintMatrix(PaintMatrix::pdf_numbers(value)?))
+                                });
+                                self.state.ctm.multiply(matrix)?
+                            }
+                        }
+                    }
+                };
+                let local_bbox = dictionary
+                    .get("BBox")
+                    .map(|value| self.reader.resolve(value, depth))
+                    .transpose()?;
+                let precise_bbox = local_bbox.as_ref().and_then(|value| {
+                    let [x, y, right, top] = PaintMatrix::pdf_numbers(value)?;
+                    (x < right && y < top).then_some([x, y, right, top])
+                });
+                let form_paint_bounds =
+                    form_paint_ctm.and_then(|matrix| matrix.bounds(precise_bbox?));
+                let form_paint_clip = form_paint_bounds.map_or(self.state.paint_clip, |bounds| {
+                    self.state.paint_clip.intersect(bounds)
+                });
+                let Some(bbox) = local_bbox
+                    .as_ref()
+                    .and_then(|value| parse_bbox(value).ok())
+                    .filter(|bbox| {
+                        precise_bbox.is_some() || (bbox.width.raw() > 0 && bbox.height.raw() > 0)
+                    })
+                else {
+                    self.report_partial(xobject_ref);
+                    return Ok(());
+                };
+                let form_bounds = transformed_rect(form_ctm, bbox)?;
+                let zero = LayoutUnit::from_raw(0);
+                let rectangular = ((form_ctm.b == zero && form_ctm.c == zero)
+                    || (form_ctm.a == zero && form_ctm.d == zero))
+                    && form_paint_bounds.is_some()
+                    && form_paint_ctm.is_some_and(PaintMatrix::is_axis_aligned);
+                let clip = self.state.clip.intersect(form_bounds, rectangular)?;
                 self.push_element(PdfSceneElement::Annotation {
                     value: PdfAnnotationElement {
                         subtype: Some("FormXObject".to_owned()),
@@ -976,9 +1726,39 @@ impl<'a> SceneBuilder<'a> {
                         },
                     },
                 })?;
-                self.form_depth += 1;
-                self.interpret_stream(&stream, xobject_ref, depth + 1)?;
-                self.form_depth = self.form_depth.saturating_sub(1);
+                if clip.is_empty() && form_paint_clip.is_empty() {
+                    return Ok(());
+                }
+                let caller_emit_elements = self.emit_elements;
+                self.emit_elements &= !clip.is_empty();
+                let caller_state = self.state.clone();
+                let caller_stack = std::mem::take(&mut self.state_stack);
+                self.state.ctm = form_ctm;
+                self.state.paint_ctm = form_paint_ctm;
+                self.state.paint_clip = form_paint_clip;
+                self.state.path_paint_bounds = None;
+                self.state.clip = clip;
+                self.state.path.clear();
+                self.state.current_point = None;
+                self.state.subpath_start = None;
+                self.state.pending_clip = None;
+                self.state.path_ctm_changed = false;
+                self.invocation_path.push(provenance.stream_offset);
+                let result = self.interpret_stream(
+                    &stream,
+                    xobject_ref,
+                    depth + 1,
+                    effective_resources,
+                    false,
+                );
+                self.invocation_path.pop();
+                self.emit_elements = caller_emit_elements;
+                if !self.state_stack.is_empty() {
+                    self.report_partial(xobject_ref);
+                }
+                self.state = caller_state;
+                self.state_stack = caller_stack;
+                result.map_err(PdfReadError::from)?;
                 Ok(())
             }
             _ => {
@@ -1023,15 +1803,15 @@ impl<'a> SceneBuilder<'a> {
         let filter = stream
             .dict
             .get("Filter")
-            .and_then(PdfValue::as_name)
+            .and_then(single_filter)
             .unwrap_or("Identity")
             .to_owned();
-        let media_type = if filter == "DCTDecode" || filter == "DCT" {
-            "image/jpeg"
+        let (media_type, data) = if filter == "DCTDecode" || filter == "DCT" {
+            ("image/jpeg", &stream.encoded)
         } else {
-            "application/octet-stream"
+            ("application/octet-stream", &stream.data)
         };
-        if stream.data.len() > self.limits.max_stream_bytes / 2 {
+        if data.len() > self.limits.max_stream_bytes / 2 {
             self.report.push(PdfReadDiagnostic::blocked(
                 PdfReadDiagnosticCode::ImageLimit,
                 Some(self.page_index),
@@ -1039,25 +1819,45 @@ impl<'a> SceneBuilder<'a> {
             ));
             return Ok(());
         }
-        let matrix = self.state.ctm;
-        let (x, y) = matrix.point(LayoutUnit::from_raw(0), LayoutUnit::from_raw(0))?;
-        let (x1, y1) = matrix.point(
-            LayoutUnit::from_raw(i64::from(width)),
-            LayoutUnit::from_raw(i64::from(height)),
+        let zero = LayoutUnit::from_raw(0);
+        let one = LayoutUnit::from_raw(LayoutUnit::UNITS_PER_POINT);
+        let rect = transformed_rect(
+            self.state.ctm,
+            LayoutRect {
+                x: zero,
+                y: zero,
+                width: one,
+                height: one,
+            },
         )?;
-        let rect = LayoutRect {
-            x,
-            y,
-            width: x1.checked_sub(x)?,
-            height: y1.checked_sub(y)?,
-        };
+        let paint_bounds = self
+            .state
+            .paint_ctm
+            .and_then(|matrix| matrix.bounds([0., 0., 1., 1.]));
+        if !self.bounded_paint_visible(rect, paint_bounds, &provenance)? {
+            return Ok(());
+        }
+        let Matrix { a, b, c, d, .. } = self.state.ctm;
+        // @contract: An image rectangle carries only positive axis-aligned placement.
+        if a <= zero
+            || d <= zero
+            || b != zero
+            || c != zero
+            || !self
+                .state
+                .paint_ctm
+                .is_some_and(PaintMatrix::supports_image_rect)
+        {
+            self.report_partial(provenance.object_ref);
+            return Ok(());
+        }
         self.push_element(PdfSceneElement::Image {
             value: PdfImageElement {
                 width,
                 height,
                 media_type: media_type.to_owned(),
                 filter,
-                data_hex: hex_encode(&stream.data),
+                data_hex: hex_encode(data),
                 rect,
                 provenance: PdfSourceProvenance {
                     object_ref,
@@ -1094,29 +1894,40 @@ impl<'a> SceneBuilder<'a> {
                 )
                 .map_err(|_| PdfReadError::NumericLimit)?,
                 operator: None,
+                stream_end: None,
+                operand_span: None,
+                invocation_path: Vec::new(),
             };
             if subtype.as_deref() == Some("Link") {
-                if let Some(action) = dictionary.get("A").and_then(PdfValue::as_dictionary) {
-                    let action_type = action.get("S").and_then(PdfValue::as_name).unwrap_or("");
-                    if action_type != "GoTo" {
-                        self.report.push(PdfReadDiagnostic::blocked(
-                            PdfReadDiagnosticCode::ActiveContent,
-                            Some(self.page_index),
-                            Some(annotation_ref.object_number),
-                        ));
-                    }
+                let action = dictionary.get("A").and_then(PdfValue::as_dictionary);
+                let goto = action
+                    .filter(|action| action.get("S").and_then(PdfValue::as_name) == Some("GoTo"));
+                if action.is_some() && goto.is_none() {
+                    self.report.push(PdfReadDiagnostic::blocked(
+                        PdfReadDiagnosticCode::ActiveContent,
+                        Some(self.page_index),
+                        Some(annotation_ref.object_number),
+                    ));
                 }
                 let destination = dictionary
                     .get("Dest")
-                    .or_else(|| {
-                        dictionary
-                            .get("A")
-                            .and_then(PdfValue::as_dictionary)
-                            .and_then(|value| value.get("D"))
+                    .or_else(|| goto.and_then(|action| action.get("D")))
+                    .and_then(|destination| {
+                        resolve_annotation_value(
+                            destination,
+                            self.limits.max_nesting,
+                            &mut self.link_work,
+                            &mut |reference| {
+                                self.reader
+                                    .non_stream_object(reference)
+                                    .ok()
+                                    .map(Cow::Owned)
+                            },
+                        )
                     })
+                    .as_deref()
                     .and_then(PdfValue::as_array)
-                    .and_then(|value| value.first())
-                    .and_then(PdfValue::as_reference)
+                    .and_then(explicit_destination_target)
                     .and_then(|reference| self.page_refs.get(&reference).copied());
                 self.push_element(PdfSceneElement::Link {
                     value: PdfLinkElement {
@@ -1127,15 +1938,61 @@ impl<'a> SceneBuilder<'a> {
                     },
                 })?;
             } else if subtype.as_deref() == Some("Widget") {
-                let field_type = dictionary
-                    .get("FT")
-                    .and_then(PdfValue::as_name)
-                    .map(str::to_owned);
-                let name = string_value(dictionary.get("T"));
-                let value = string_value(dictionary.get("V"));
+                let owner = self.widget_field_owner(*annotation_ref, dictionary);
+                let field = owner.as_ref().unwrap_or(dictionary);
+                let field_type = field.get("FT").and_then(PdfValue::as_name);
+                let limit = self.limits.max_string_bytes;
+                let mut available = limit.saturating_mul(3);
+                let parent = dictionary
+                    .get("Parent")
+                    .and_then(PdfValue::as_reference)
+                    .filter(|parent| self.field_counts.get(parent) == Some(&1));
+                let name = map_widget_label(
+                    *annotation_ref,
+                    dictionary.get("T"),
+                    parent,
+                    WidgetLabelLimits {
+                        max_nesting: self.limits.max_nesting,
+                        scratch_bytes: self
+                            .limits
+                            .max_array_items
+                            .saturating_mul(WIDGET_LABEL_ENTRY_BYTES),
+                    },
+                    &mut self.widget_work,
+                    |reference| {
+                        if reference == *annotation_ref {
+                            Some(Cow::Borrowed(&value))
+                        } else {
+                            let object = self.reader.non_stream_object(reference).ok()?;
+                            if Some(reference) == parent
+                                && object.as_dictionary()?.contains_key("Parent")
+                            {
+                                return None;
+                            }
+                            Some(Cow::Owned(object))
+                        }
+                    },
+                    |bytes| decode_pdf_text_string(bytes, limit, &mut available),
+                )
+                .transpose()?
+                .flatten()
+                .filter(|name| !name.is_empty() && !name.chars().any(char::is_control));
+                let saved = field.get("V");
+                let value = if field_type == Some("Btn")
+                    && field
+                        .get("Ff")
+                        .is_none_or(|flags| matches!(flags.as_integer(), Some(0..=7)))
+                {
+                    saved.and_then(PdfValue::as_name).map(str::to_owned)
+                } else if let Some(bytes) = saved.and_then(PdfValue::as_bytes) {
+                    let mut available = limit.saturating_mul(3);
+                    decode_pdf_text_string(bytes, limit, &mut available)?
+                } else {
+                    None
+                };
                 self.push_element(PdfSceneElement::Form {
                     value: PdfFormElement {
-                        field_type,
+                        field_type: field_type.map(str::to_owned),
                         name,
                         value,
                         rect,
@@ -1174,7 +2031,70 @@ impl<'a> SceneBuilder<'a> {
         Ok(())
     }
 
+    fn widget_field_owner(
+        &mut self,
+        widget: PdfObjectRef,
+        dictionary: &BTreeMap<String, PdfValue>,
+    ) -> Option<BTreeMap<String, PdfValue>> {
+        let parent = dictionary.get("Parent")?;
+        let parent_ref = parent.as_reference()?;
+        if parent_ref == widget
+            || self.field_counts.get(&parent_ref) != Some(&1)
+            || ["FT", "V", "Kids"]
+                .iter()
+                .any(|key| dictionary.contains_key(*key))
+        {
+            return None;
+        }
+        if let Some(label) = dictionary.get("T") {
+            let label = resolve_annotation_value(
+                label,
+                self.limits.max_nesting,
+                &mut self.widget_work,
+                &mut |reference| {
+                    self.reader
+                        .non_stream_object(reference)
+                        .ok()
+                        .map(Cow::Owned)
+                },
+            )?;
+            if !matches!(*label, PdfValue::Null) {
+                return None;
+            }
+        }
+        let PdfValue::Dictionary(field) = self.reader.resolve(parent, 0).ok()? else {
+            return None;
+        };
+        if field.contains_key("Parent")
+            || !matches!(
+                field.get("FT").and_then(PdfValue::as_name),
+                Some("Tx" | "Btn")
+            )
+        {
+            return None;
+        }
+        let children = resolve_annotation_value(
+            field.get("Kids")?,
+            self.limits.max_nesting,
+            &mut self.widget_work,
+            &mut |reference| {
+                self.reader
+                    .non_stream_object(reference)
+                    .ok()
+                    .map(Cow::Owned)
+            },
+        )?;
+        if !matches!(children.as_array(), Some([PdfValue::Reference(child)]) if *child == widget) {
+            return None;
+        }
+        drop(children);
+        Some(field)
+    }
+
     fn push_element(&mut self, element: PdfSceneElement) -> Result<(), PdfReadError> {
+        if !self.emit_elements {
+            return Ok(());
+        }
         if self.elements.len() >= self.limits.max_scene_elements {
             self.report.push(PdfReadDiagnostic::blocked(
                 PdfReadDiagnosticCode::SceneLimit,
@@ -1186,6 +2106,25 @@ impl<'a> SceneBuilder<'a> {
         self.elements.push(element);
         Ok(())
     }
+}
+
+fn explicit_destination_target(destination: &[PdfValue]) -> Option<PdfObjectRef> {
+    let mode = destination.get(1)?.as_name()?;
+    let length = match mode {
+        "Fit" | "FitB" => 2,
+        "FitH" | "FitV" | "FitBH" | "FitBV" => 3,
+        "XYZ" => 5,
+        "FitR" => 6,
+        _ => return None,
+    };
+    if destination.len() != length
+        || !destination[2..].iter().all(|value| {
+            value.as_number().is_some() || (mode != "FitR" && matches!(value, PdfValue::Null))
+        })
+    {
+        return None;
+    }
+    destination.first()?.as_reference()
 }
 
 /// Reads a bounded page window and calculates a stable scene hash.
@@ -1205,6 +2144,7 @@ pub fn read_pdf_scene(
         .ok_or(PdfReadError::PageCountLimit)?
         .min(pages.len());
     let mut report = reader.preflight_report();
+    let mut field_counts = BTreeMap::new();
     if let Ok(catalog) = reader.object(reader.root_for_scene())
         && let Some(dictionary) = catalog.as_dictionary()
     {
@@ -1214,11 +2154,20 @@ pub fn read_pdf_scene(
             Some(reader.root_for_scene().object_number),
             &mut report,
         );
+        if let Some(form) = dictionary.get("AcroForm")
+            && let Ok(PdfValue::Dictionary(form)) = reader.resolve(form, 1)
+            && let Some(fields) = form.get("Fields")
+            && let Ok(PdfValue::Array(fields)) = reader.resolve(fields, 2)
+        {
+            for field in fields.iter().filter_map(PdfValue::as_reference) {
+                *field_counts.entry(field).or_insert(0) += 1;
+            }
+        }
     }
     let mut scene_pages = Vec::with_capacity(end.saturating_sub(first));
     for (index, page) in pages.iter().enumerate().take(end).skip(first) {
         let page_index = u32::try_from(index).map_err(|_| PdfReadError::PageCountLimit)?;
-        match SceneBuilder::new(reader, &pages, page_index, page).run() {
+        match SceneBuilder::new(reader, &pages, page_index, page, &field_counts).run() {
             Ok(page) => {
                 report.extend(&page.report);
                 scene_pages.push(page);
@@ -1250,13 +2199,10 @@ pub fn read_pdf_scene(
 fn is_known_noop(operator: &str) -> bool {
     matches!(
         operator,
-        "w" | "J"
-            | "j"
-            | "M"
+        "J" | "j"
             | "d"
             | "ri"
             | "i"
-            | "gs"
             | "CS"
             | "cs"
             | "SC"
@@ -1277,9 +2223,24 @@ fn is_known_noop(operator: &str) -> bool {
 }
 
 impl ContentToken {
+    fn precise_number(&self) -> f64 {
+        self.scene_decimal().value()
+    }
+
+    fn scene_decimal(&self) -> SceneDecimal {
+        match self {
+            Self::Number((_, value)) => *value,
+            Self::Integer(value) => SceneDecimal::Exact {
+                coefficient: *value,
+                scale: 0,
+            },
+            _ => unreachable!("validated numeric operand"),
+        }
+    }
+
     fn number(&self) -> Option<LayoutUnit> {
         match self {
-            Self::Number(value) => Some(*value),
+            Self::Number((value, _)) => Some(*value),
             Self::Integer(value) => value
                 .checked_mul(LayoutUnit::UNITS_PER_POINT)
                 .map(LayoutUnit::from_raw),
@@ -1291,7 +2252,7 @@ impl ContentToken {
 fn font_width(value: &PdfValue) -> Option<LayoutUnit> {
     match value {
         PdfValue::Integer(value) => Some(LayoutUnit::from_raw(*value)),
-        PdfValue::Real(value) => Some(*value),
+        PdfValue::Real((value, _)) => Some(*value),
         _ => None,
     }
 }
@@ -1301,6 +2262,12 @@ fn one_number(values: &[ContentToken]) -> Result<LayoutUnit, PdfReadError> {
         .last()
         .and_then(ContentToken::number)
         .ok_or(PdfReadError::Syntax)
+}
+
+fn precise_operand(values: &[ContentToken]) -> Option<f64> {
+    let value = values.last()?;
+    value.number()?;
+    Some(value.precise_number())
 }
 
 fn two_numbers(values: &[ContentToken]) -> Result<(LayoutUnit, LayoutUnit), PdfReadError> {
@@ -1363,15 +2330,15 @@ fn transform_path(
     commands
         .iter()
         .map(|command| match command {
-            RawPathCommand::MoveTo(x, y) => {
+            RawPathCommand::MoveTo(x, y, _) => {
                 let (x, y) = matrix.point(*x, *y)?;
                 Ok(PdfPathCommand::MoveTo { x, y })
             }
-            RawPathCommand::LineTo(x, y) => {
+            RawPathCommand::LineTo(x, y, _) => {
                 let (x, y) = matrix.point(*x, *y)?;
                 Ok(PdfPathCommand::LineTo { x, y })
             }
-            RawPathCommand::CurveTo(x1, y1, x2, y2, x3, y3) => {
+            RawPathCommand::CurveTo(x1, y1, x2, y2, x3, y3, _) => {
                 let (x1, y1) = matrix.point(*x1, *y1)?;
                 let (x2, y2) = matrix.point(*x2, *y2)?;
                 let (x3, y3) = matrix.point(*x3, *y3)?;
@@ -1387,6 +2354,207 @@ fn transform_path(
             RawPathCommand::Close => Ok(PdfPathCommand::ClosePath),
         })
         .collect()
+}
+
+fn has_noncollinear_points<T: Copy>(
+    mut points: impl Iterator<Item = [T; 2]>,
+    same_point: impl Fn([T; 2], [T; 2]) -> bool,
+    is_collinear: impl Fn([T; 2], [T; 2], [T; 2]) -> bool,
+) -> bool {
+    let Some(first) = points.next() else {
+        return false;
+    };
+    let Some(second) = points.find(|&point| !same_point(point, first)) else {
+        return false;
+    };
+    points.any(|point| {
+        !same_point(point, first)
+            && !same_point(point, second)
+            && !is_collinear(first, second, point)
+    })
+}
+
+fn align_decimal_axis<const N: usize>(axis: [SceneDecimal; N]) -> Option<[i128; N]> {
+    let scale = axis
+        .iter()
+        .filter_map(|value| match value {
+            SceneDecimal::Exact { scale, .. } => Some(*scale),
+            SceneDecimal::Approximate(_) => None,
+        })
+        .max()?;
+    let mut aligned = [0; N];
+    for (target, value) in aligned.iter_mut().zip(axis) {
+        let SceneDecimal::Exact {
+            coefficient,
+            scale: source_scale,
+        } = value
+        else {
+            return None;
+        };
+        *target =
+            i128::from(coefficient).checked_mul(10_i128.checked_pow(scale - source_scale)?)?;
+    }
+    Some(aligned)
+}
+
+fn same_decimal_point([x, y]: [SceneDecimal; 2], [a, b]: [SceneDecimal; 2]) -> bool {
+    [[x, a], [y, b]]
+        .into_iter()
+        .all(|axis| align_decimal_axis(axis).is_some_and(|[first, second]| first == second))
+}
+
+fn decimal_points_collinear(
+    [x, y]: [SceneDecimal; 2],
+    [a, b]: [SceneDecimal; 2],
+    [c, d]: [SceneDecimal; 2],
+) -> Option<bool> {
+    let [x, a, c] = align_decimal_axis([x, a, c])?;
+    let [y, b, d] = align_decimal_axis([y, b, d])?;
+    Some(
+        a.checked_sub(x)?.checked_mul(d.checked_sub(y)?)?
+            == b.checked_sub(y)?.checked_mul(c.checked_sub(x)?)?,
+    )
+}
+
+fn lost_visible_fill_contour(
+    source: &[RawPathCommand],
+    commands: &[PdfPathCommand],
+    matrix: Option<PaintMatrix>,
+    clip: PaintBounds,
+) -> bool {
+    if clip.is_empty() {
+        return false;
+    }
+    let mut start = 0;
+    let mut origin = None;
+    while start < source.len() {
+        let explicit = matches!(source[start], RawPathCommand::MoveTo(..));
+        if explicit {
+            origin = Some(start);
+        }
+        let implicit_origin = origin.filter(|_| !explicit);
+        let end = source[start..]
+            .iter()
+            .enumerate()
+            .find_map(|(offset, command)| match command {
+                RawPathCommand::MoveTo(..) if offset != 0 => Some(start + offset),
+                RawPathCommand::Close => Some(start + offset + 1),
+                _ => None,
+            })
+            .unwrap_or(source.len());
+        let indices = implicit_origin.into_iter().chain(start..end);
+        let emitted = indices.clone().flat_map(|index| {
+            let raw = |x: LayoutUnit, y: LayoutUnit| [i128::from(x.raw()), i128::from(y.raw())];
+            match commands[index] {
+                PdfPathCommand::MoveTo { x, y } | PdfPathCommand::LineTo { x, y } => {
+                    [Some(raw(x, y)), None, None]
+                }
+                PdfPathCommand::CurveTo {
+                    x1,
+                    y1,
+                    x2,
+                    y2,
+                    x3,
+                    y3,
+                } => [Some(raw(x1, y1)), Some(raw(x2, y2)), Some(raw(x3, y3))],
+                PdfPathCommand::ClosePath => [None; 3],
+            }
+            .into_iter()
+            .flatten()
+        });
+        let precise = indices
+            .flat_map(|index| match &source[index] {
+                RawPathCommand::MoveTo(_, _, point) | RawPathCommand::LineTo(_, _, point) => {
+                    std::slice::from_ref(point)
+                }
+                RawPathCommand::CurveTo(_, _, _, _, _, _, points) => points,
+                RawPathCommand::Close => &[],
+            })
+            .copied();
+        start = end;
+        let product =
+            |a: i128, b: i128| (a.signum() * b.signum(), a.unsigned_abs() * b.unsigned_abs());
+        if has_noncollinear_points(
+            emitted,
+            |a, b| a == b,
+            |[x, y], [a, b], [c, d]| product(a - x, d - y) == product(b - y, c - x),
+        ) || !has_noncollinear_points(precise.clone(), same_decimal_point, |a, b, c| {
+            decimal_points_collinear(a, b, c) == Some(true)
+        }) {
+            continue;
+        }
+        let bounds = precise
+            .map(|point| point.map(SceneDecimal::value))
+            .map(|[x, y]| PaintBounds([x, y, x, y]))
+            .reduce(PaintBounds::union);
+        if matrix
+            .and_then(|matrix| matrix.bounds(bounds?.0))
+            // @invariant: A rounded point or line bound cannot by itself prove clipping.
+            .and_then(|bounds| {
+                if bounds.is_empty() {
+                    bounds.expanded(0.)
+                } else {
+                    Some(bounds)
+                }
+            })
+            .is_none_or(|bounds| !clip.intersect(bounds).is_empty())
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn contains_collapsed_stroke(commands: &[PdfPathCommand], source: &[RawPathCommand]) -> bool {
+    let mut current = (None, None);
+    let mut start = current;
+    for (index, command) in commands.iter().enumerate() {
+        let precise = match source.get(index) {
+            Some(RawPathCommand::MoveTo(_, _, point) | RawPathCommand::LineTo(_, _, point)) => {
+                Some(point.map(SceneDecimal::value))
+            }
+            Some(RawPathCommand::CurveTo(_, _, _, _, _, _, points)) => {
+                Some(points[2].map(SceneDecimal::value))
+            }
+            _ => None,
+        };
+        match *command {
+            PdfPathCommand::MoveTo { x, y } => {
+                start = (Some((x, y)), precise);
+                current = start;
+            }
+            PdfPathCommand::LineTo { x, y } => {
+                let next = Some((x, y));
+                if current.0 == next {
+                    return true;
+                }
+                current = (next, precise);
+            }
+            PdfPathCommand::CurveTo {
+                x1,
+                y1,
+                x2,
+                y2,
+                x3,
+                y3,
+            } => {
+                let next = Some((x3, y3));
+                if current.0 == next && (x1, y1) == (x3, y3) && (x2, y2) == (x3, y3) {
+                    return true;
+                }
+                current = (next, precise);
+            }
+            PdfPathCommand::ClosePath => {
+                if current.0 == start.0
+                    && matches!((current.1, start.1), (Some(end), Some(first)) if end != first)
+                {
+                    return true;
+                }
+                current = start;
+            }
+        }
+    }
+    false
 }
 
 fn path_bounds(commands: &[PdfPathCommand]) -> Result<LayoutRect, PdfReadError> {
@@ -1478,6 +2646,86 @@ fn union_rect(rects: impl Iterator<Item = LayoutRect>) -> Result<LayoutRect, Pdf
     })
 }
 
+fn transformed_rect(matrix: Matrix, rect: LayoutRect) -> Result<LayoutRect, PdfReadError> {
+    let right = rect.x.checked_add(rect.width)?;
+    let top = rect.y.checked_add(rect.height)?;
+    let (x0, y0) = matrix.point(rect.x, rect.y)?;
+    let (x1, y1) = matrix.point(right, rect.y)?;
+    let (x2, y2) = matrix.point(rect.x, top)?;
+    let (x3, y3) = matrix.point(right, top)?;
+    let x = x0.min(x1).min(x2).min(x3);
+    let y = y0.min(y1).min(y2).min(y3);
+    Ok(LayoutRect {
+        x,
+        y,
+        width: x0.max(x1).max(x2).max(x3).checked_sub(x)?,
+        height: y0.max(y1).max(y2).max(y3).checked_sub(y)?,
+    })
+}
+
+fn is_rectangular_path(commands: &[PdfPathCommand]) -> bool {
+    let commands = match commands {
+        [commands @ .., PdfPathCommand::ClosePath] => commands,
+        _ => commands,
+    };
+    let [
+        PdfPathCommand::MoveTo { x: x0, y: y0 },
+        PdfPathCommand::LineTo { x: x1, y: y1 },
+        PdfPathCommand::LineTo { x: x2, y: y2 },
+        PdfPathCommand::LineTo { x: x3, y: y3 },
+        closing @ ..,
+    ] = commands
+    else {
+        return false;
+    };
+    if !closing.is_empty()
+        && !matches!(closing, [PdfPathCommand::LineTo { x, y }] if x == x0 && y == y0)
+    {
+        return false;
+    }
+    (x0 == x3 && x1 == x2 && y0 == y1 && y2 == y3) || (x0 == x1 && x2 == x3 && y0 == y3 && y1 == y2)
+}
+
+fn is_precise_rectangular_path(commands: &[RawPathCommand], matrix: PaintMatrix) -> bool {
+    let commands = match commands {
+        [commands @ .., RawPathCommand::Close] => commands,
+        _ => commands,
+    };
+    let [
+        RawPathCommand::MoveTo(_, _, p0),
+        RawPathCommand::LineTo(_, _, p1),
+        RawPathCommand::LineTo(_, _, p2),
+        RawPathCommand::LineTo(_, _, p3),
+        closing @ ..,
+    ] = commands
+    else {
+        return false;
+    };
+    if !closing.is_empty()
+        && !matches!(closing, [RawPathCommand::LineTo(_, _, point)] if point.map(SceneDecimal::value) == p0.map(SceneDecimal::value))
+    {
+        return false;
+    }
+    let PaintMatrix([a, b, c, d, ..]) = matrix;
+    // @invariant: Translation cannot round skew out of edge vectors.
+    let edge = |[x0, y0]: [f64; 2], [x1, y1]: [f64; 2]| {
+        let dx = x1 - x0;
+        let dy = y1 - y0;
+        [a * dx + c * dy, b * dx + d * dy]
+    };
+    let edges = [
+        edge(p0.map(SceneDecimal::value), p1.map(SceneDecimal::value)),
+        edge(p1.map(SceneDecimal::value), p2.map(SceneDecimal::value)),
+        edge(p2.map(SceneDecimal::value), p3.map(SceneDecimal::value)),
+        edge(p3.map(SceneDecimal::value), p0.map(SceneDecimal::value)),
+    ];
+    let horizontal = |[x, y]: [f64; 2]| x.is_finite() && x != 0. && y == 0.;
+    let vertical = |[x, y]: [f64; 2]| x == 0. && y.is_finite() && y != 0.;
+    let [first, second, third, fourth] = edges;
+    (horizontal(first) && vertical(second) && horizontal(third) && vertical(fourth))
+        || (vertical(first) && horizontal(second) && vertical(third) && horizontal(fourth))
+}
+
 fn parse_bbox(value: &PdfValue) -> Result<LayoutRect, PdfReadError> {
     let values = value.as_array().ok_or(PdfReadError::NumericLimit)?;
     if values.len() != 4 {
@@ -1493,12 +2741,6 @@ fn parse_bbox(value: &PdfValue) -> Result<LayoutRect, PdfReadError> {
         width: x1.checked_sub(x)?,
         height: y1.checked_sub(y)?,
     })
-}
-
-fn string_value(value: Option<&PdfValue>) -> Option<String> {
-    value
-        .and_then(PdfValue::as_bytes)
-        .and_then(|value| String::from_utf8(value.to_vec()).ok())
 }
 
 fn next_code(bytes: &[u8], index: usize, mapping: &BTreeMap<Vec<u8>, String>) -> (Vec<u8>, u8) {
@@ -1601,7 +2843,10 @@ fn parse_hex_token(token: &str) -> Result<Vec<u8>, PdfReadError> {
 }
 
 fn parse_utf16_hex(token: &str) -> Result<String, PdfReadError> {
-    let bytes = parse_hex_token(token)?;
+    decode_utf16_be(&parse_hex_token(token)?)
+}
+
+fn decode_utf16_be(bytes: &[u8]) -> Result<String, PdfReadError> {
     if bytes.len() % 2 != 0 {
         return Err(PdfReadError::Syntax);
     }
@@ -1639,42 +2884,98 @@ fn hex_encode(bytes: &[u8]) -> String {
     output
 }
 
-struct ContentCursor<'a> {
+pub(super) fn separated_content_streams(previous: &[u8], next: &[u8]) -> bool {
+    previous.is_empty()
+        || matches!(previous.last(), Some(b'\n' | b'\r'))
+        || matches!(next.first(), Some(b'\n' | b'\r'))
+}
+
+enum ContentParseError {
+    Read(PdfReadError),
+    OperatorSyntax,
+    TruncatedOperand,
+}
+
+impl From<PdfReadError> for ContentParseError {
+    fn from(error: PdfReadError) -> Self {
+        Self::Read(error)
+    }
+}
+
+impl From<ContentParseError> for PdfReadError {
+    fn from(error: ContentParseError) -> Self {
+        match error {
+            ContentParseError::Read(error) => error,
+            ContentParseError::OperatorSyntax | ContentParseError::TruncatedOperand => Self::Syntax,
+        }
+    }
+}
+
+pub(super) struct ContentCursor<'a> {
     bytes: &'a [u8],
     position: usize,
     limits: PdfReaderLimits,
     tokens: usize,
+    array_depth: usize,
+    decode_names: bool,
+    open_comment: bool,
 }
 
 impl<'a> ContentCursor<'a> {
-    fn new(bytes: &'a [u8], limits: PdfReaderLimits) -> Self {
+    pub(super) fn new(bytes: &'a [u8], limits: PdfReaderLimits) -> Self {
         Self {
             bytes,
             position: 0,
             limits,
             tokens: 0,
+            array_depth: 0,
+            decode_names: false,
+            open_comment: false,
         }
     }
 
-    fn next(&mut self) -> Result<Option<(ContentToken, usize)>, PdfReadError> {
+    fn for_scene(bytes: &'a [u8], limits: PdfReaderLimits) -> Self {
+        Self {
+            decode_names: true,
+            ..Self::new(bytes, limits)
+        }
+    }
+
+    pub(super) fn position(&self) -> usize {
+        self.position
+    }
+
+    pub(super) fn next(&mut self) -> Result<Option<(ContentToken, usize)>, PdfReadError> {
+        self.next_token().map_err(PdfReadError::from)
+    }
+
+    fn next_token(&mut self) -> Result<Option<(ContentToken, usize)>, ContentParseError> {
         self.skip_space();
         if self.position >= self.bytes.len() {
             return Ok(None);
         }
         self.tokens = self.tokens.checked_add(1).ok_or(PdfReadError::TokenLimit)?;
         if self.tokens > self.limits.max_content_tokens {
-            return Err(PdfReadError::TokenLimit);
+            return Err(PdfReadError::TokenLimit.into());
         }
         let offset = self.position;
         let token = match self.bytes[self.position] {
             b'(' => ContentToken::String(self.literal_string()?),
             b'<' => {
                 if self.bytes.get(self.position + 1) == Some(&b'<') {
-                    return Err(PdfReadError::Syntax);
+                    return Err(PdfReadError::Syntax.into());
                 }
                 ContentToken::String(self.hex_string()?)
             }
-            b'[' => self.array()?,
+            b'[' => {
+                if self.array_depth >= self.limits.max_nesting {
+                    return Err(PdfReadError::TokenLimit.into());
+                }
+                self.array_depth += 1;
+                let result = self.array();
+                self.array_depth -= 1;
+                result?
+            }
             b'/' => ContentToken::Name(self.name()?),
             _ => {
                 let word = self.word();
@@ -1702,7 +3003,7 @@ impl<'a> ContentCursor<'a> {
             while self
                 .bytes
                 .get(self.position)
-                .is_some_and(|byte| byte.is_ascii_whitespace())
+                .is_some_and(|byte| is_content_whitespace(*byte))
             {
                 self.position += 1;
             }
@@ -1714,6 +3015,7 @@ impl<'a> ContentCursor<'a> {
             {
                 self.position += 1;
             }
+            self.open_comment = self.position == self.bytes.len();
         }
     }
 
@@ -1727,6 +3029,9 @@ impl<'a> ContentCursor<'a> {
 
     fn name(&mut self) -> Result<String, PdfReadError> {
         self.position += 1;
+        if self.decode_names {
+            return read_scene_name(self.bytes, &mut self.position);
+        }
         let start = self.position;
         while self.position < self.bytes.len() && !is_content_delimiter(self.bytes[self.position]) {
             self.position += 1;
@@ -1735,7 +3040,7 @@ impl<'a> ContentCursor<'a> {
             .map_err(|_| PdfReadError::Syntax)
     }
 
-    fn literal_string(&mut self) -> Result<Vec<u8>, PdfReadError> {
+    fn literal_string(&mut self) -> Result<Vec<u8>, ContentParseError> {
         self.position += 1;
         let mut output = Vec::new();
         let mut nesting = 1_usize;
@@ -1759,7 +3064,7 @@ impl<'a> ContentCursor<'a> {
                         .bytes
                         .get(self.position)
                         .copied()
-                        .ok_or(PdfReadError::Syntax)?;
+                        .ok_or(ContentParseError::TruncatedOperand)?;
                     self.position += 1;
                     match escaped {
                         b'n' => output.push(b'\n'),
@@ -1783,60 +3088,76 @@ impl<'a> ContentCursor<'a> {
                                     break;
                                 }
                                 self.position += 1;
-                                value = value * 8 + next - b'0';
+                                value = value.wrapping_mul(8).wrapping_add(next - b'0');
                             }
                             output.push(value);
                         }
                         other => output.push(other),
                     }
                 }
+                b'\r' => {
+                    if self.bytes.get(self.position) == Some(&b'\n') {
+                        self.position += 1;
+                    }
+                    output.push(b'\n');
+                }
                 other => output.push(other),
             }
             if output.len() > self.limits.max_string_bytes {
-                return Err(PdfReadError::StreamLimit);
+                return Err(PdfReadError::StreamLimit.into());
             }
         }
-        Err(PdfReadError::Syntax)
+        Err(ContentParseError::TruncatedOperand)
     }
 
-    fn hex_string(&mut self) -> Result<Vec<u8>, PdfReadError> {
+    fn hex_string(&mut self) -> Result<Vec<u8>, ContentParseError> {
         let start = self.position;
         self.position += 1;
-        while self.position < self.bytes.len() && self.bytes[self.position] != b'>' {
+        while let Some(&byte) = self.bytes.get(self.position) {
             self.position += 1;
+            if byte == b'>' {
+                let token = std::str::from_utf8(&self.bytes[start..self.position])
+                    .map_err(|_| PdfReadError::Syntax)?;
+                return Ok(parse_hex_token(token)?);
+            }
+            if !byte.is_ascii_hexdigit() {
+                return Err(PdfReadError::Syntax.into());
+            }
         }
-        if self.position >= self.bytes.len() {
-            return Err(PdfReadError::Syntax);
-        }
-        self.position += 1;
-        let token = std::str::from_utf8(&self.bytes[start..self.position])
-            .map_err(|_| PdfReadError::Syntax)?;
-        parse_hex_token(token)
+        Err(ContentParseError::TruncatedOperand)
     }
 
-    fn array(&mut self) -> Result<ContentToken, PdfReadError> {
+    fn array(&mut self) -> Result<ContentToken, ContentParseError> {
         self.position += 1;
         let mut values = Vec::new();
         loop {
             self.skip_space();
-            if self.bytes.get(self.position) == Some(&b']') {
-                self.position += 1;
-                return Ok(ContentToken::Array(values));
+            match self.bytes.get(self.position) {
+                Some(b']') => {
+                    self.position += 1;
+                    return Ok(ContentToken::Array(values));
+                }
+                None => return Err(ContentParseError::TruncatedOperand),
+                _ if values.len() >= self.limits.max_array_items => {
+                    return Err(PdfReadError::TokenLimit.into());
+                }
+                _ => {}
             }
-            if values.len() >= self.limits.max_array_items {
-                return Err(PdfReadError::TokenLimit);
-            }
-            let Some((value, _)) = self.next()? else {
-                return Err(PdfReadError::Syntax);
-            };
+            let (value, _) = self
+                .next_token()?
+                .ok_or(ContentParseError::TruncatedOperand)?;
             values.push(value);
         }
     }
 }
 
 fn is_content_delimiter(byte: u8) -> bool {
-    byte.is_ascii_whitespace()
+    is_content_whitespace(byte)
         || matches!(byte, b'(' | b')' | b'<' | b'>' | b'[' | b']' | b'/' | b'%')
+}
+
+fn is_content_whitespace(byte: u8) -> bool {
+    matches!(byte, 0 | b'\t' | b'\n' | 12 | b'\r' | b' ')
 }
 
 fn hex_nibble(byte: u8) -> Option<u8> {
@@ -1870,7 +3191,7 @@ fn parse_signed_i64(bytes: &[u8]) -> Result<i64, PdfReadError> {
     i64::try_from(value).map_err(|_| PdfReadError::NumericLimit)
 }
 
-fn parse_decimal(bytes: &[u8]) -> Result<LayoutUnit, PdfReadError> {
+fn parse_decimal(bytes: &[u8]) -> Result<(LayoutUnit, SceneDecimal), PdfReadError> {
     if bytes.is_empty() || bytes.len() > 32 {
         return Err(PdfReadError::NumericLimit);
     }
@@ -1930,7 +3251,84 @@ fn parse_decimal(bytes: &[u8]) -> Result<LayoutUnit, PdfReadError> {
     let rounded = (numerator.unsigned_abs() + denominator as u128 / 2) / denominator as u128;
     let rounded = i128::try_from(rounded).map_err(|_| PdfReadError::NumericLimit)?;
     let value = if negative { -rounded } else { rounded };
-    i64::try_from(value)
-        .map(LayoutUnit::from_raw)
-        .map_err(|_| PdfReadError::NumericLimit)
+    let rounded = i64::try_from(value).map_err(|_| PdfReadError::NumericLimit)?;
+    let mut scale = denominator.ilog10();
+    let mut coefficient = numerator / i128::from(LayoutUnit::UNITS_PER_POINT);
+    if negative {
+        coefficient = -coefficient;
+    }
+    while scale > 0 && coefficient % 10 == 0 {
+        scale -= 1;
+        coefficient /= 10;
+    }
+    let precise = match i64::try_from(coefficient) {
+        Ok(coefficient) => SceneDecimal::Exact { coefficient, scale },
+        Err(_) => SceneDecimal::Approximate(coefficient as f64 / 10_i128.pow(scale) as f64),
+    };
+    Ok((LayoutUnit::from_raw(rounded), precise))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        LayoutUnit, PaintBounds, PaintMatrix, RawPathCommand, SceneDecimal,
+        lost_visible_fill_contour, separated_content_streams, transform_path,
+    };
+
+    #[test]
+    fn precise_clip_can_exclude_only_the_collapsed_contour() {
+        let point = |x, y| {
+            [
+                SceneDecimal::Exact {
+                    coefficient: x,
+                    scale: 3,
+                },
+                SceneDecimal::Exact {
+                    coefficient: y,
+                    scale: 3,
+                },
+            ]
+        };
+        let fixed = |v: i64| LayoutUnit::from_raw(v * 64);
+        let source = [
+            RawPathCommand::MoveTo(fixed(10), fixed(10), point(10000, 10000)),
+            RawPathCommand::LineTo(fixed(30), fixed(10), point(30000, 10000)),
+            RawPathCommand::LineTo(fixed(30), fixed(30), point(30000, 30000)),
+            RawPathCommand::Close,
+            RawPathCommand::MoveTo(fixed(50), fixed(20), point(50000, 20000)),
+            RawPathCommand::LineTo(fixed(50), fixed(25), point(50004, 25000)),
+            RawPathCommand::LineTo(fixed(50), fixed(30), point(50000, 30000)),
+        ];
+        let commands = transform_path(&source, super::Matrix::IDENTITY).unwrap();
+        let matrix = Some(PaintMatrix([1., 0., 0., 1., 0., 0.]));
+        assert!(lost_visible_fill_contour(
+            &source,
+            &commands,
+            matrix,
+            PaintBounds([0., 0., 60., 40.])
+        ));
+        assert!(!lost_visible_fill_contour(
+            &source,
+            &commands,
+            matrix,
+            PaintBounds([0., 0., 40., 40.])
+        ));
+    }
+
+    #[test]
+    fn page_stream_boundary_proof_accepts_line_endings_on_either_side() {
+        assert!(separated_content_streams(b"0 g\r", b"10 10 5 5 re f"));
+        assert!(separated_content_streams(b"0 g", b"\n10 10 5 5 re f"));
+        assert!(separated_content_streams(b"", b"0 g"));
+    }
+
+    #[test]
+    fn page_stream_boundary_proof_requires_a_line_ending_after_nonempty_content() {
+        assert!(!separated_content_streams(b"0 g", b"10 10 5 5 re f"));
+        assert!(!separated_content_streams(
+            b"0 g % note",
+            b" 10 10 5 5 re f"
+        ));
+        assert!(!separated_content_streams(b"0 g", b""));
+    }
 }

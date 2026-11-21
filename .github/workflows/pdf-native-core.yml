@@ -1,0 +1,27 @@
+name: PDF native core
+
+on:
+  pull_request:
+    branches:
+      - feat/FLOWPDF-09-controlled-native-pdf-editing
+  push:
+    branches:
+      - feat/FLOWPDF-09-controlled-native-pdf-editing
+
+permissions:
+  contents: read
+
+jobs:
+  pdf-native-core:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Native PDF library tests
+        run: cargo test --locked -p flow-core --lib pdf::native -- --nocapture
+      - name: PDF reader, scene, and COS regressions
+        run: cargo test --locked -p flow-core --test pdf_reader --test pdf_scene --test pdf_cos -- --nocapture
+      - name: Serialized PDF native edit tests
+        run: cargo test --locked -p flow-wasm --test pdf_native_edit

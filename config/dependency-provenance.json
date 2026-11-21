@@ -14,6 +14,10 @@
       "version": "0.2.108",
       "repository": "https://github.com/wasm-bindgen/wasm-bindgen",
       "kind": "tool",
+      "linuxRelease": {
+        "assetSha256": "d15d7e476feec78d0ec9edc27b8f77279ec7a3e6227756e7036e5cd2066800f4",
+        "binarySha256": "cc1c66ada99eb67a0d1518f1af95f47b870cbad9461de4db4a6ccc5e4aa2b2cc"
+      },
       "binarySha256": {
         "aarch64-apple-darwin": "a82196546fb05070608b5dc59997d38ebe0a01cc55ba25f1911a2bf44e597307"
       }
