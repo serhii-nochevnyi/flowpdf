@@ -273,6 +273,7 @@ test('verified replies with mismatched request identity stop external comparison
     ['command', 'epoch', { epoch: Array(16).fill(2) }],
     ['command', 'native origin', { originHash: Array(32).fill(2) }],
     ['command', 'revision', { revision: 1 }],
+    ['close', 'source', { originStoreHash: otherSource }],
     ['close', 'revision', { revision: 0 }],
   ]
   for (const [step, field, { operation: replyOperation, requestId, originStoreHash, outputHex: openHex, ...bindingChange },
@@ -296,9 +297,12 @@ test('verified replies with mismatched request identity stop external comparison
         const snapshot = { ...base, binding: { ...replyBinding, revision: replyBinding.revision + 1 }, outputHex }
         return { status: 'applied', binding: replyBinding, snapshot }
       }),
-      native_pdf_close: nativeResponder(({ binding }) => {
+      native_pdf_close: nativeResponder((request) => {
+        const { binding } = request
         assert.equal(binding.revision, step === 'close' ? 1 : 0, label)
-        return { status: 'closed', binding: step === 'close' ? { ...binding, ...bindingChange } : binding }
+        if (step !== 'close') return { status: 'closed' }
+        return { status: 'closed', originStoreHash: originStoreHash ?? request.originStoreHash,
+          binding: { ...binding, ...bindingChange } }
       }),
       verify_native_pdf_response: (response) => {
         verified.push(JSON.parse(response).operation)
