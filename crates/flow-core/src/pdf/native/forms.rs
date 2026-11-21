@@ -1,7 +1,8 @@
-use std::fmt::Write;
 use std::{
     borrow::Cow,
     collections::{BTreeMap, BTreeSet},
+    fmt::Write as _,
+    io::Write as _,
 };
 
 use serde::{Deserialize, Deserializer, Serialize};
@@ -192,10 +193,11 @@ fn numbers<const N: usize>(values: [i64; N]) -> Value {
 }
 
 fn dictionary<const N: usize>(entries: [(&str, Value); N]) -> Dict {
-    entries
-        .into_iter()
-        .map(|(key, value)| (key.into(), value))
-        .collect()
+    let mut values = Dict::new();
+    for (key, value) in entries {
+        values.insert(key.into(), value);
+    }
+    values
 }
 
 fn decode_saved_text(value: &Value, remaining: &mut usize) -> Result<String, NativeSessionError> {
@@ -265,26 +267,46 @@ impl Font {
         })
     }
 
-    fn operand(&self, value: &str, [width, height]: [i64; 2]) -> FieldResult<String> {
+    fn operand(
+        &self,
+        value: &str,
+        [width, height]: [i64; 2],
+        remaining: &mut usize,
+    ) -> Result<String, NativeSessionError> {
         if !valid_text(value) {
-            return Err(Glyph);
+            return Err(Glyph.into());
         }
-        match self {
-            Self::Embedded(_, font) => font.operand(value, width, height),
+        let hex = match self {
+            Self::Embedded(_, font) => {
+                let count = value.chars().count();
+                if count != 0 {
+                    // @invariant: Account for both buffers during growth.
+                    let codes = count.next_power_of_two().max(4) * size_of::<u16>();
+                    let encoded = (count * 4).next_power_of_two().max(8);
+                    let mut scratch = *remaining;
+                    spend(&mut scratch, 2 * (codes + encoded))?;
+                }
+                font.operand(value, width, height)?
+            }
             Self::Simple => {
                 if !value.bytes().all(|b| (32..=126).contains(&b)) {
-                    return Err(Glyph);
+                    return Err(Glyph.into());
                 }
                 if height < 14 || (value.len() as i64) * 11 + 4 > width {
-                    return Err(Geometry);
+                    return Err(Geometry.into());
                 }
+                spend(remaining, value.len() * 2)?;
                 let mut hex = String::new();
+                hex.try_reserve_exact(value.len() * 2)
+                    .map_err(|_| NativeSessionError::Budget)?;
                 for byte in value.bytes() {
                     write!(hex, "{byte:02X}").map_err(|_| Appearance)?;
                 }
-                Ok(hex)
+                return Ok(hex);
             }
-        }
+        };
+        spend(remaining, hex.capacity())?;
+        Ok(hex)
     }
 }
 
@@ -343,13 +365,16 @@ fn load_form(
             trailer_refs,
         });
     };
-    let (owner, fields) = pages::form_fields(graph).map_err(|_| Reference)?;
-    if fields.len() > MAX_FIELDS
-        || owner != catalog
-            && !graph
-                .reverse
-                .get(&owner)
-                .is_some_and(|owners| owners.len() == 1 && owners.contains(&catalog))
+    let (owner, fields) =
+        pages::form_fields(graph, work, remaining).map_err(|error| match error {
+            NativeEditError::Budget => NativeSessionError::Budget,
+            _ => Reference.into(),
+        })?;
+    if owner != catalog
+        && !graph
+            .reverse
+            .get(&owner)
+            .is_some_and(|owners| owners.len() == 1 && owners.contains(&catalog))
     {
         return Err(Reference.into());
     }
@@ -394,7 +419,6 @@ fn load_form(
             return Err(Profile.into());
         }
     }
-    spend(remaining, fields.capacity() * std::mem::size_of::<Ref>())?;
     let before_names = *remaining;
     let names =
         field_name_inventory(graph, &fields, work, remaining).map_err(|error| match error {
@@ -469,6 +493,14 @@ impl Form {
         *form_bytes -= bytes;
     }
 
+    fn release_field_inventory(&mut self, graph: &mut NativePdfGraph, form_bytes: &mut usize) {
+        let fields = std::mem::take(&mut self.fields);
+        let bytes = fields.capacity() * size_of::<Ref>();
+        drop(fields);
+        graph.release_page_retained(bytes);
+        *form_bytes -= bytes;
+    }
+
     fn text_font(&self) -> FieldResult<&Font> {
         self.font
             .as_ref()
@@ -495,10 +527,9 @@ enum FieldValue {
 }
 
 impl FieldValue {
-    fn retained_text_bytes(&self) -> usize {
+    fn retained_value_bytes(&self) -> usize {
         match self {
-            Self::Text(text) => text.capacity(),
-            _ => 0,
+            Self::Text(text) | Self::Checkbox { on: text, .. } => text.capacity(),
         }
     }
 
@@ -537,61 +568,73 @@ fn appearance_dictionary([width, height]: [i64; 2], length: usize, font: Option<
     ])
 }
 
-fn appearance_stream(dimensions: [i64; 2], data: Vec<u8>, font: Option<&Font>) -> PdfStream {
-    PdfStream {
-        dict: appearance_dictionary(dimensions, data.len(), font.map(Font::resource)),
-        encoded: data.clone(),
-        data,
-        source_offset: 0,
+// @invariant: Reserve one B-tree node per appearance dictionary plus keys and names.
+const APPEARANCE_DICT_NODE_BYTES: usize = 128 + 12 * size_of::<(String, Value)>();
+const APPEARANCE_DICT_BYTES: usize = APPEARANCE_DICT_NODE_BYTES + 64 + 4 * size_of::<Value>();
+const APPEARANCE_FONT_BYTES: usize = 2 * APPEARANCE_DICT_NODE_BYTES + 64;
+const APPEARANCE_SIMPLE_FONT_BYTES: usize = APPEARANCE_DICT_NODE_BYTES + 64;
+const APPEARANCE_STREAM_OBJECT_BYTES: usize = 128 + 12 * size_of::<(Ref, Value)>();
+const REPLACEMENT_STREAM_OVERHEAD: usize = 1024;
+const NORMAL_APPEARANCE_BYTES: usize = APPEARANCE_DICT_NODE_BYTES + "AP".len() + "N".len();
+const TEXT_APPEARANCE_SUFFIX: &[u8] = b"> Tj ET\nQ\n";
+
+fn text_appearance_dictionary_bytes(embedded: bool) -> usize {
+    APPEARANCE_DICT_BYTES
+        + APPEARANCE_FONT_BYTES
+        + if embedded {
+            0
+        } else {
+            APPEARANCE_SIMPLE_FONT_BYTES
+        }
+}
+
+enum AppearanceKind<'a> {
+    Text(&'a str),
+    Checkbox(bool),
+}
+
+struct AppearanceContent<'a> {
+    prefix: [u8; 128],
+    prefix_len: usize,
+    kind: AppearanceKind<'a>,
+}
+
+impl<'a> AppearanceContent<'a> {
+    fn new([w, h]: [i64; 2], kind: AppearanceKind<'a>) -> FieldResult<Self> {
+        let mut prefix = [0; 128];
+        let mut out = &mut prefix[..];
+        let [right, top] = [w - 2, h - 2];
+        writeln!(out, "q 1 g 0 0 {w} {h} re f 0 G 1 w 1 1 {right} {top} re S")
+            .map_err(|_| Appearance)?;
+        match kind {
+            AppearanceKind::Text(_) => write!(out, "BT /{FONT} 10 Tf 0 g 2 4 Td <"),
+            AppearanceKind::Checkbox(false) => writeln!(out, "Q"),
+            AppearanceKind::Checkbox(true) => {
+                writeln!(out, "2 w 2 2 m {right} {top} l 2 {top} m {right} 2 l S\nQ")
+            }
+        }
+        .map_err(|_| Appearance)?;
+        let prefix_len = 128 - out.len();
+        Ok(Self {
+            prefix,
+            prefix_len,
+            kind,
+        })
     }
-}
 
-const TEXT_APPEARANCE_SUFFIX: &str = "> Tj ET\nQ\n";
+    fn prefix(&self) -> &[u8] {
+        &self.prefix[..self.prefix_len]
+    }
 
-fn appearance_background([w, h]: [i64; 2]) -> String {
-    format!(
-        "q 1 g 0 0 {w} {h} re f 0 G 1 w 1 1 {} {} re S\n",
-        w - 2,
-        h - 2
-    )
-}
-
-fn text_appearance_prefix(size: [i64; 2]) -> String {
-    let background = appearance_background(size);
-    format!("{background}BT /{FONT} 10 Tf 0 g 2 4 Td <")
-}
-
-fn appearances(
-    form: &Form,
-    size: [i64; 2],
-    value: &FieldValue,
-) -> FieldResult<Vec<(Option<&'static str>, PdfStream)>> {
-    match value {
-        FieldValue::Text(text) => {
-            let font = form.text_font()?;
-            let hex = font.operand(text, size)?;
-            let prefix = text_appearance_prefix(size);
-            let data = format!("{prefix}{hex}{TEXT_APPEARANCE_SUFFIX}").into_bytes();
-            Ok(vec![(None, appearance_stream(size, data, Some(font)))])
+    fn chunks(&self) -> [&[u8]; 3] {
+        match self.kind {
+            AppearanceKind::Text(hex) => [self.prefix(), hex.as_bytes(), TEXT_APPEARANCE_SUFFIX],
+            AppearanceKind::Checkbox(_) => [self.prefix(), &[], &[]],
         }
-        FieldValue::Checkbox { .. } => {
-            let [w, h] = size;
-            let background = appearance_background(size);
-            let mark = format!(
-                "{background}2 w 2 2 m {} {} l 2 {} m {} 2 l S\nQ\n",
-                w - 2,
-                h - 2,
-                h - 2,
-                w - 2
-            );
-            Ok(vec![
-                (
-                    Some("Off"),
-                    appearance_stream(size, format!("{background}Q\n").into_bytes(), None),
-                ),
-                (None, appearance_stream(size, mark.into_bytes(), None)),
-            ])
-        }
+    }
+
+    fn len(&self) -> usize {
+        self.chunks().iter().map(|chunk| chunk.len()).sum()
     }
 }
 
@@ -613,9 +656,14 @@ fn same_appearance_dictionary(a: &Dict, b: &Dict) -> bool {
             .all(|(key, value)| a.get(key).is_some_and(|entry| same(entry, value)))
 }
 
-fn stream_matches(graph: &NativePdfGraph, actual: &Value, expected: &PdfStream) -> bool {
-    matches!(actual.as_reference().and_then(|reference| graph.objects.get(&reference)),
-        Some(Value::Stream(actual)) if actual.data == expected.data && same_appearance_dictionary(&actual.dict, &expected.dict))
+fn appearance_at<'a>(graph: &'a NativePdfGraph, actual: &Value) -> FieldResult<&'a PdfStream> {
+    match actual
+        .as_reference()
+        .and_then(|reference| graph.objects.get(&reference))
+    {
+        Some(Value::Stream(stream)) => Ok(stream),
+        _ => Err(Appearance),
+    }
 }
 
 struct Admitted {
@@ -737,23 +785,20 @@ fn recognize_appearance(
             {
                 return Err(Appearance.into());
             }
-            let Some(Value::Stream(stream)) = ap
-                .as_reference()
-                .and_then(|reference| graph.objects.get(&reference))
-            else {
-                return Err(Appearance.into());
-            };
+            let stream = appearance_at(graph, ap)?;
             let mut available = *remaining;
             spend(&mut available, field_name.capacity())?;
             let text = decode_saved_text(fields.get("V").ok_or(Profile)?, &mut available)?;
             let reference = form_font_reference(graph, form)?;
-            let prefix = text_appearance_prefix(size);
+            let prefix = AppearanceContent::new(size, AppearanceKind::Text(""))?;
+            let dictionary_bytes = text_appearance_dictionary_bytes(reference.is_some());
+            spend(&mut available, dictionary_bytes)?;
             let expected =
                 appearance_dictionary(size, stream.data.len(), Some(font_resource(reference)));
             let hex = stream
                 .data
-                .strip_prefix(prefix.as_bytes())
-                .and_then(|data| data.strip_suffix(TEXT_APPEARANCE_SUFFIX.as_bytes()));
+                .strip_prefix(prefix.prefix())
+                .and_then(|data| data.strip_suffix(TEXT_APPEARANCE_SUFFIX));
             let scalars = text.chars().count();
             if !same_appearance_dictionary(&stream.dict, &expected)
                 || !hex.is_some_and(|hex| {
@@ -766,18 +811,26 @@ fn recognize_appearance(
                 return Err(Appearance.into());
             }
             drop(expected);
-            drop(prefix);
+            available += dictionary_bytes;
+            let before_default = available;
             let default = fields
                 .get("DV")
                 .map(|value| decode_saved_text(value, &mut available))
                 .transpose()?;
+            let default_bytes = before_default - available;
             if form.font.is_none() {
                 let before = available;
                 admit_form_font(graph, form, reference, &mut available)?;
                 spend(remaining, before - available)?;
             }
             if let Some(default) = default {
-                form.text_font()?.operand(&default, size)?;
+                let mut scratch = available;
+                form.text_font()?.operand(&default, size, &mut scratch)?;
+            }
+            available += default_bytes;
+            let expected_hex = form.text_font()?.operand(&text, size, &mut available)?;
+            if hex != Some(expected_hex.as_bytes()) {
+                return Err(Appearance.into());
             }
             FieldValue::Text(text)
         }
@@ -800,6 +853,21 @@ fn recognize_appearance(
             {
                 return Err(Appearance.into());
             }
+            let mut available = *remaining;
+            spend(&mut available, field_name.capacity())?;
+            spend(&mut available, APPEARANCE_DICT_BYTES)?;
+            for (state, marked) in [("Off", false), (on.as_str(), true)] {
+                let stream = appearance_at(graph, states.get(state).ok_or(Appearance)?)?;
+                let content = AppearanceContent::new(size, AppearanceKind::Checkbox(marked))?;
+                let expected = appearance_dictionary(size, content.prefix().len(), None);
+                if stream.data != content.prefix()
+                    || !same_appearance_dictionary(&stream.dict, &expected)
+                {
+                    return Err(Appearance.into());
+                }
+            }
+            available += APPEARANCE_DICT_BYTES;
+            spend(&mut available, on.len())?;
             FieldValue::Checkbox {
                 checked: state == on,
                 on: on.clone(),
@@ -807,18 +875,6 @@ fn recognize_appearance(
         }
         _ => return Err(Profile.into()),
     };
-    for (state, stream) in appearances(form, size, &value)? {
-        let actual = match &value {
-            FieldValue::Text(_) => ap,
-            FieldValue::Checkbox { on, .. } => ap
-                .as_dictionary()
-                .and_then(|states| states.get(state.unwrap_or(on)))
-                .ok_or(Appearance)?,
-        };
-        if !stream_matches(graph, actual, &stream) {
-            return Err(Appearance.into());
-        }
-    }
     Ok(Admitted {
         field,
         name: field_name,
@@ -1014,7 +1070,7 @@ impl ExpectedField {
     pub(super) fn retained_text_bytes(&self) -> usize {
         self.value
             .as_ref()
-            .map_or(0, FieldValue::retained_text_bytes)
+            .map_or(0, FieldValue::retained_value_bytes)
     }
 
     pub(super) fn verify(&self, fields: &[NativeFieldView]) -> Result<(), NativeSessionError> {
@@ -1175,6 +1231,51 @@ fn ensure_default_font(
     Ok(())
 }
 
+fn reserve_appearance(
+    graph: &mut NativePdfGraph,
+    stream_length: usize,
+    stream_count: usize,
+    other_bytes: usize,
+) -> Result<(), NativeEditError> {
+    // @invariant: The replacement stream meter already charges for one object.
+    let object_bytes = stream_count * APPEARANCE_STREAM_OBJECT_BYTES;
+    let other_bytes = other_bytes + object_bytes.saturating_sub(REPLACEMENT_STREAM_OVERHEAD);
+    graph.charge_page_retained(other_bytes)?;
+    if let Err(error) = graph.reserve_replacement_stream(stream_length) {
+        graph.release_page_retained(other_bytes);
+        return Err(error);
+    }
+    Ok(())
+}
+
+fn allocate_appearance(
+    graph: &mut NativePdfGraph,
+    size: [i64; 2],
+    content: &AppearanceContent<'_>,
+    font: Option<&Font>,
+) -> Result<Value, NativeSessionError> {
+    let length = content.len();
+    let mut data = Vec::new();
+    data.try_reserve_exact(length)
+        .map_err(|_| NativeEditError::Budget)?;
+    for chunk in content.chunks() {
+        data.extend_from_slice(chunk);
+    }
+    let mut encoded = Vec::new();
+    encoded
+        .try_reserve_exact(length)
+        .map_err(|_| NativeEditError::Budget)?;
+    encoded.extend_from_slice(&data);
+    let stream = PdfStream {
+        dict: appearance_dictionary(size, length, font.map(Font::resource)),
+        data,
+        encoded,
+        source_offset: 0,
+    };
+    let reference = pages::allocate_value(graph, Value::Stream(stream))?;
+    Ok(Value::Reference(reference))
+}
+
 fn apply_appearance(
     graph: &mut NativePdfGraph,
     widget: Ref,
@@ -1185,18 +1286,42 @@ fn apply_appearance(
     value: &FieldValue,
     initialize: bool,
 ) -> Result<(), NativeSessionError> {
-    let mut states = Dict::new();
-    let mut normal = None;
-    for (state, stream) in appearances(form, size, value)? {
-        graph.reserve_replacement_stream(stream.data.len())?;
-        let reference = Value::Reference(pages::allocate_value(graph, Value::Stream(stream))?);
-        match value {
-            FieldValue::Text(_) => normal = Some(reference),
-            FieldValue::Checkbox { on, .. } => {
-                states.insert(state.unwrap_or(on).into(), reference);
-            }
+    let normal = match value {
+        FieldValue::Text(text) => {
+            let font = form.text_font()?;
+            let mut remaining = graph.remaining_retained();
+            let hex = font.operand(text, size, &mut remaining)?;
+            let content = AppearanceContent::new(size, AppearanceKind::Text(&hex))?;
+            let dictionary_bytes =
+                text_appearance_dictionary_bytes(matches!(font, Font::Embedded(..)));
+            // @invariant: The normal dictionary can reuse the hex operand's allowance after it drops.
+            let scratch_bytes = hex.capacity().saturating_sub(NORMAL_APPEARANCE_BYTES);
+            reserve_appearance(
+                graph,
+                content.len(),
+                1,
+                dictionary_bytes + NORMAL_APPEARANCE_BYTES + scratch_bytes,
+            )?;
+            let normal = allocate_appearance(graph, size, &content, Some(font));
+            drop(hex);
+            graph.release_page_retained(scratch_bytes);
+            normal?
         }
-    }
+        FieldValue::Checkbox { on, .. } => {
+            let off = AppearanceContent::new(size, AppearanceKind::Checkbox(false))?;
+            let checked = AppearanceContent::new(size, AppearanceKind::Checkbox(true))?;
+            let state_bytes = APPEARANCE_DICT_NODE_BYTES + "Off".len() + on.len();
+            reserve_appearance(
+                graph,
+                off.len() + checked.len(),
+                2,
+                2 * APPEARANCE_DICT_BYTES + state_bytes + NORMAL_APPEARANCE_BYTES,
+            )?;
+            let off = allocate_appearance(graph, size, &off, None)?;
+            let checked = allocate_appearance(graph, size, &checked, None)?;
+            Value::Dictionary(dictionary([("Off", off), (on.as_str(), checked)]))
+        }
+    };
     let field_data = dict_mut(graph, field)?;
     field_data.insert("V".into(), value.pdf_value());
     if initialize {
@@ -1204,13 +1329,7 @@ fn apply_appearance(
     }
     let data = dict_mut(graph, widget)?;
     data.insert("Rect".into(), numbers(bounds));
-    data.insert(
-        "AP".into(),
-        Value::Dictionary(dictionary([(
-            "N",
-            normal.unwrap_or(Value::Dictionary(states)),
-        )])),
-    );
+    data.insert("AP".into(), Value::Dictionary(dictionary([("N", normal)])));
     if let Some(state) = value.state() {
         data.insert("AS".into(), name(state));
     }
@@ -1250,23 +1369,18 @@ fn owned_field_text(
     Ok(FieldValue::Text(text))
 }
 
-fn replace_fields(
+fn install_field_inventory(
     graph: &mut NativePdfGraph,
-    owner: Ref,
-    fields: Vec<Ref>,
-    adding: bool,
-) -> Result<(), NativeEditError> {
-    let indirect = pages::form_dict(graph, owner)?
-        .get("Fields")
-        .and_then(Value::as_reference)
-        .is_some();
-    let slots = if indirect {
-        fields.len()
-    } else {
-        usize::from(adding)
-    };
-    graph.charge_page_retained(slots * std::mem::size_of::<Value>())?;
-    pages::replace_form_fields(graph, owner, fields)
+    form: &mut Form,
+    form_bytes: &mut usize,
+) -> Result<(), NativeSessionError> {
+    let owner = form.owner.ok_or(Reference)?;
+    let fields = std::mem::take(&mut form.fields);
+    let bytes = fields.capacity() * size_of::<Ref>();
+    let result = pages::replace_form_fields(graph, owner, fields);
+    graph.release_page_retained(bytes);
+    *form_bytes -= bytes;
+    result.map_err(Into::into)
 }
 
 fn stage_form(
@@ -1307,6 +1421,9 @@ fn stage_form(
             graph.remaining_retained(),
         )?;
         form.release_name_inventory(graph, form_bytes);
+        if !matches!(command, RemoveField { .. }) {
+            form.release_field_inventory(graph, form_bytes);
+        }
         let available = graph.remaining_retained();
         let mut remaining = available;
         let admitted = recognize_appearance(
@@ -1318,8 +1435,8 @@ fn stage_form(
             &mut remaining,
         )?;
         let bytes = available - remaining;
-        let text_bytes = admitted.value.retained_text_bytes();
-        graph.charge_page_retained(bytes + admitted.name.capacity() + text_bytes)?;
+        let value_bytes = admitted.value.retained_value_bytes();
+        graph.charge_page_retained(bytes + admitted.name.capacity() + value_bytes)?;
         *form_bytes += bytes;
         graph.charge_page_work(budget - work)?;
         graph.reserve_page_copy(admitted.field)?;
@@ -1329,10 +1446,10 @@ fn stage_form(
         let (page, bounds, value) = match (command, admitted.value) {
             (RemoveField { .. }, previous) => {
                 drop(previous);
-                graph.release_page_retained(text_bytes);
+                graph.release_page_retained(value_bytes);
                 replace_annots(graph, &form, old_page.object, view.object, false)?;
                 form.fields.retain(|&entry| entry != admitted.field);
-                replace_fields(graph, form.owner.ok_or(Reference)?, form.fields, false)?;
+                install_field_inventory(graph, &mut form, form_bytes)?;
                 graph.refresh_page_graph(&BTreeSet::from([admitted.field, view.object]))?;
                 return Ok(ExpectedField {
                     read_only_name_count: read_only_name_count(current, &admitted.name),
@@ -1344,7 +1461,7 @@ fn stage_form(
             }
             (SetFieldText { value, .. }, FieldValue::Text(previous)) => {
                 drop(previous);
-                graph.release_page_retained(text_bytes);
+                graph.release_page_retained(value_bytes);
                 (view.page, admitted.rect, owned_field_text(graph, value)?)
             }
             (SetFieldChecked { checked, .. }, FieldValue::Checkbox { on, .. }) => (
@@ -1363,7 +1480,7 @@ fn stage_form(
                 {
                     let mut available = graph.remaining_retained();
                     let default = decode_saved_text(default, &mut available)?;
-                    form.text_font()?.operand(&default, size)?;
+                    form.text_font()?.operand(&default, size, &mut available)?;
                 }
                 if *page != view.page {
                     replace_annots(graph, &form, old_page.object, view.object, false)?;
@@ -1404,10 +1521,13 @@ fn stage_form(
         form.release_name_inventory(graph, form_bytes);
         let value = match command {
             AddTextField { value, .. } => owned_field_text(graph, value)?,
-            AddCheckboxField { checked, .. } => FieldValue::Checkbox {
-                checked: *checked,
-                on: "Yes".into(),
-            },
+            AddCheckboxField { checked, .. } => {
+                graph.charge_page_retained("Yes".len())?;
+                FieldValue::Checkbox {
+                    checked: *checked,
+                    on: "Yes".into(),
+                }
+            }
             _ => return Err(Reference.into()),
         };
         if value.kind() == NativeFieldKind::Text {
@@ -1420,18 +1540,7 @@ fn stage_form(
             *form_bytes += bytes;
         }
         graph.charge_page_retained(field_name.len() * 2)?;
-        let mut fields = std::mem::take(&mut form.fields);
-        if fields.len() == fields.capacity() {
-            let ref_bytes = std::mem::size_of::<Ref>();
-            let old_bytes = fields.capacity() * ref_bytes;
-            let new_bytes = (fields.len() + 1) * ref_bytes;
-            graph.charge_page_retained(new_bytes)?;
-            fields
-                .try_reserve_exact(1)
-                .map_err(|_| NativeSessionError::Budget)?;
-            graph.release_page_retained(old_bytes);
-            *form_bytes += new_bytes - old_bytes;
-        }
+        *form_bytes += pages::reserve_form_field_slot(graph, &mut form.fields)?;
         let owner = install_form(graph, &form)?;
         form.owner = Some(owner);
         let ft = match value.kind() {
@@ -1447,8 +1556,8 @@ fn stage_form(
             ("T", Value::String(field_name.as_bytes().to_vec())),
         ]);
         let widget = pages::allocate(graph, widget)?;
-        fields.push(widget);
-        replace_fields(graph, owner, fields, true)?;
+        form.fields.push(widget);
+        install_field_inventory(graph, &mut form, form_bytes)?;
         replace_annots(graph, &form, destination.object, widget, true)?;
         (widget, widget, page, field_name.clone(), rect, value)
     };
@@ -1505,6 +1614,182 @@ mod tests {
     }
 
     #[test]
+    fn field_reference_inventory_reserves_capacity_and_preserves_the_count_limit() {
+        let source = redaction_fixture("");
+        let mut graph = NativePdfGraph::open(&source, NativeEditLimits::default()).unwrap();
+        let fields: Vec<_> = (0..=MAX_FIELDS)
+            .map(|i| {
+                pages::allocate(
+                    &mut graph,
+                    dictionary([
+                        ("FT", name("Tx")),
+                        ("T", Value::String(format!("item_{i}").into_bytes())),
+                    ]),
+                )
+                .unwrap()
+            })
+            .collect();
+        let catalog = pages::catalog(&graph).unwrap();
+        dict_mut(&mut graph, catalog).unwrap().insert(
+            "AcroForm".into(),
+            Value::Dictionary(dictionary([(
+                "Fields",
+                refs(fields[..MAX_FIELDS].iter().copied()),
+            )])),
+        );
+        let needed = MAX_FIELDS * size_of::<Ref>();
+        for short_by in [1, 0] {
+            let mut remaining = needed - short_by;
+            let result = pages::form_fields(&graph, &mut graph.remaining_work(), &mut remaining);
+            if short_by == 0 {
+                let (owner, inventory) = result.unwrap();
+                assert_eq!(owner, catalog);
+                assert_eq!(inventory, fields[..MAX_FIELDS]);
+                assert_eq!(remaining, 0);
+            } else {
+                assert_eq!(result, Err(NativeEditError::Budget));
+                assert_eq!(remaining, needed - short_by);
+            }
+        }
+        pages::replace_form_fields(&mut graph, catalog, fields).unwrap();
+        let mut remaining = usize::MAX;
+        assert_eq!(
+            pages::form_fields(&graph, &mut graph.remaining_work(), &mut remaining),
+            Err(NativeEditError::Unsupported)
+        );
+        assert_eq!(remaining, usize::MAX);
+    }
+
+    #[test]
+    fn text_appearance_reserves_its_peak_and_releases_the_hex_buffer() {
+        let source = redaction_fixture("");
+        let form = Form {
+            owner: None,
+            fields: Vec::new(),
+            names: BTreeMap::new(),
+            name_inventory_bytes: 0,
+            font: Some(Ok(Font::Simple)),
+            trailer_refs: BTreeSet::new(),
+        };
+        let text = "Approved for delivery. ".repeat(44);
+        let hex_bytes = text.len() * 2;
+        let length =
+            b"q 1 g 0 0 12000 30 re f 0 G 1 w 1 1 11998 28 re S\nBT /FlowField 10 Tf 0 g 2 4 Td <"
+                .len()
+                + hex_bytes
+                + TEXT_APPEARANCE_SUFFIX.len();
+        let stream_bytes = text_appearance_dictionary_bytes(false)
+            + APPEARANCE_STREAM_OBJECT_BYTES.max(REPLACEMENT_STREAM_OVERHEAD)
+            + 2 * length;
+        assert!(hex_bytes > NORMAL_APPEARANCE_BYTES);
+        let value = FieldValue::Text(text);
+        for short_by in [1, 0] {
+            let mut graph = NativePdfGraph::open(&source, NativeEditLimits::default()).unwrap();
+            let widget = pages::allocate(&mut graph, dictionary([("FT", name("Tx"))])).unwrap();
+            let objects = graph.objects.len();
+            let remaining = stream_bytes + hex_bytes - short_by;
+            graph
+                .charge_page_retained(graph.remaining_retained() - remaining)
+                .unwrap();
+            let result = apply_appearance(
+                &mut graph,
+                widget,
+                widget,
+                &form,
+                [0, 0, 12000, 30],
+                [12000, 30],
+                &value,
+                false,
+            );
+            if short_by == 0 {
+                result.unwrap();
+                let normal = &dict(&graph, widget).unwrap()["AP"].as_dictionary().unwrap()["N"];
+                let stream = appearance_at(&graph, normal).unwrap();
+                assert_eq!(stream.data.capacity(), length);
+                assert_eq!(stream.encoded.capacity(), length);
+                assert_eq!(
+                    graph.remaining_retained(),
+                    hex_bytes - NORMAL_APPEARANCE_BYTES
+                );
+            } else {
+                assert_eq!(result, Err(NativeSessionError::Budget));
+                assert_eq!(graph.objects.len(), objects);
+                assert_eq!(graph.remaining_retained(), remaining);
+            }
+        }
+    }
+
+    #[test]
+    fn checkbox_reserves_both_appearances_before_allocating_either() {
+        let source = redaction_fixture("");
+        let form = Form {
+            owner: None,
+            fields: Vec::new(),
+            names: BTreeMap::new(),
+            name_inventory_bytes: 0,
+            font: None,
+            trailer_refs: BTreeSet::new(),
+        };
+        let state_lengths = [
+            b"q 1 g 0 0 20 20 re f 0 G 1 w 1 1 18 18 re S\nQ\n".len(),
+            b"q 1 g 0 0 20 20 re f 0 G 1 w 1 1 18 18 re S\n2 w 2 2 m 18 18 l 2 18 m 18 2 l S\nQ\n"
+                .len(),
+        ];
+        let decoded_bytes = state_lengths.iter().sum::<usize>();
+        let needed = 2 * APPEARANCE_DICT_BYTES
+            + (2 * APPEARANCE_STREAM_OBJECT_BYTES).max(REPLACEMENT_STREAM_OVERHEAD)
+            + 2 * decoded_bytes
+            + APPEARANCE_DICT_NODE_BYTES
+            + "Off".len()
+            + "Yes".len()
+            + NORMAL_APPEARANCE_BYTES;
+        let value = FieldValue::Checkbox {
+            checked: true,
+            on: "Yes".into(),
+        };
+        for short_by in [1, 0] {
+            let mut graph = NativePdfGraph::open(&source, NativeEditLimits::default()).unwrap();
+            let widget = pages::allocate(&mut graph, dictionary([("FT", name("Btn"))])).unwrap();
+            let objects = graph.objects.len();
+            let decoded = graph.remaining_decoded();
+            let remaining = needed - short_by;
+            graph
+                .charge_page_retained(graph.remaining_retained() - remaining)
+                .unwrap();
+            let result = apply_appearance(
+                &mut graph,
+                widget,
+                widget,
+                &form,
+                [10, 10, 30, 30],
+                [20, 20],
+                &value,
+                false,
+            );
+            let widget_data = dict(&graph, widget).unwrap();
+            if short_by == 0 {
+                result.unwrap();
+                let normal = widget_data["AP"].as_dictionary().unwrap()["N"]
+                    .as_dictionary()
+                    .unwrap();
+                for (state, length) in ["Off", "Yes"].into_iter().zip(state_lengths) {
+                    let stream = appearance_at(&graph, &normal[state]).unwrap();
+                    assert_eq!(stream.data.capacity(), length);
+                    assert_eq!(stream.encoded.capacity(), length);
+                }
+                assert_eq!(graph.remaining_retained(), 0);
+                assert_eq!(graph.remaining_decoded(), decoded - decoded_bytes);
+            } else {
+                assert_eq!(result, Err(NativeSessionError::Budget));
+                assert!(!widget_data.contains_key("AP"));
+                assert_eq!(graph.objects.len(), objects);
+                assert_eq!(graph.remaining_retained(), remaining);
+                assert_eq!(graph.remaining_decoded(), decoded);
+            }
+        }
+    }
+
+    #[test]
     fn indirect_fields_reserve_the_new_array_while_the_old_array_is_live() {
         let source = redaction_fixture("");
         for short_by in [1, 0] {
@@ -1527,7 +1812,7 @@ mod tests {
             graph
                 .charge_page_retained(graph.remaining_retained() - needed + short_by)
                 .unwrap();
-            let result = replace_fields(&mut graph, owner, vec![old_field, new_field], true);
+            let result = pages::replace_form_fields(&mut graph, owner, vec![old_field, new_field]);
             if short_by == 0 {
                 result.unwrap();
                 let fields = pages::form_dict(&graph, owner).unwrap()["Fields"]
@@ -1538,6 +1823,7 @@ mod tests {
                 assert_eq!(graph.remaining_retained(), 0);
             } else {
                 assert_eq!(result, Err(NativeEditError::Budget));
+                assert_eq!(graph.remaining_retained(), needed - 1);
                 assert_eq!(
                     pages::form_dict(&graph, owner).unwrap()["Fields"].as_reference(),
                     Some(old_array)
