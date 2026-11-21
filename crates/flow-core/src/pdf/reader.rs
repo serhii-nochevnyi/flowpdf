@@ -480,17 +480,25 @@ pub(super) fn resolve_annotation_value<'value, 'object: 'value>(
     value.as_reference().is_none().then_some(value)
 }
 
+// @invariant: Allow for a new B-tree node and its slots before insertion.
+pub(super) const WIDGET_LABEL_ENTRY_BYTES: usize = 128 + 12 * size_of::<PdfObjectRef>();
+
+pub(super) struct WidgetLabelLimits {
+    pub max_nesting: usize,
+    pub scratch_bytes: usize,
+}
+
 pub(super) fn map_widget_label<'a, T>(
     widget: PdfObjectRef,
     label: Option<&'a PdfValue>,
     parent: Option<PdfObjectRef>,
-    max_nesting: usize,
+    limits: WidgetLabelLimits,
     work: &mut usize,
     mut object: impl FnMut(PdfObjectRef) -> Option<Cow<'a, PdfValue>>,
-    read: impl FnOnce(&[u8]) -> T,
-) -> Option<T> {
+    read: impl FnOnce(&[u8]) -> Result<T, PdfReadError>,
+) -> Option<Result<T, PdfReadError>> {
     if let Some(label) = label {
-        let label = resolve_annotation_value(label, max_nesting, work, &mut object)?;
+        let label = resolve_annotation_value(label, limits.max_nesting, work, &mut object)?;
         if !matches!(*label, PdfValue::Null) {
             return label.as_bytes().map(read);
         }
@@ -499,15 +507,22 @@ pub(super) fn map_widget_label<'a, T>(
     *work = work.checked_sub(1)?;
     let field = object(parent)?;
     let field = field.as_dictionary()?;
-    let children = resolve_annotation_value(field.get("Kids")?, max_nesting, work, &mut object)?;
+    let children =
+        resolve_annotation_value(field.get("Kids")?, limits.max_nesting, work, &mut object)?;
     let children = children.as_array()?;
     *work = work.checked_sub(children.len())?;
+    let mut scratch = limits.scratch_bytes;
     let mut seen = BTreeSet::new();
     for child in children {
         let child = child.as_reference()?;
-        if child == parent || !seen.insert(child) {
+        if child == parent || seen.contains(&child) {
             return None;
         }
+        let Some(remaining) = scratch.checked_sub(WIDGET_LABEL_ENTRY_BYTES) else {
+            return Some(Err(PdfReadError::StreamLimit));
+        };
+        scratch = remaining;
+        seen.insert(child);
         let entry = object(child)?;
         let entry = entry.as_dictionary()?;
         if entry.get("Subtype").and_then(PdfValue::as_name) != Some("Widget")
@@ -521,7 +536,7 @@ pub(super) fn map_widget_label<'a, T>(
         if child != widget
             && let Some(label) = entry.get("T")
             && !matches!(
-                resolve_annotation_value(label, max_nesting, work, &mut object).as_deref(),
+                resolve_annotation_value(label, limits.max_nesting, work, &mut object).as_deref(),
                 Some(PdfValue::Null)
             )
         {
@@ -531,7 +546,8 @@ pub(super) fn map_widget_label<'a, T>(
     if !seen.contains(&widget) {
         return None;
     }
-    resolve_annotation_value(field.get("T")?, max_nesting, work, &mut object)?
+    drop(seen);
+    resolve_annotation_value(field.get("T")?, limits.max_nesting, work, &mut object)?
         .as_bytes()
         .map(read)
 }

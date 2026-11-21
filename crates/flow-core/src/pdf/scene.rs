@@ -12,9 +12,9 @@ use crate::layout::{LayoutRect, LayoutUnit};
 
 use super::reader::{
     PdfObjectRef, PdfPageRecord, PdfReadDiagnostic, PdfReadDiagnosticCode, PdfReadError,
-    PdfReadReport, PdfReader, PdfReaderLimits, PdfStream, PdfValue, decode_pdf_text_string,
-    map_widget_label, read_scene_name, report_active_content, resolve_annotation_value,
-    scene_name_label, single_filter,
+    PdfReadReport, PdfReader, PdfReaderLimits, PdfStream, PdfValue, WIDGET_LABEL_ENTRY_BYTES,
+    WidgetLabelLimits, decode_pdf_text_string, map_widget_label, read_scene_name,
+    report_active_content, resolve_annotation_value, scene_name_label, single_filter,
 };
 
 use super::native::{NativeNoteId, NativePageGeometry, NativePageId, NativeTextPage};
@@ -1951,7 +1951,13 @@ impl<'a> SceneBuilder<'a> {
                     *annotation_ref,
                     dictionary.get("T"),
                     parent,
-                    self.limits.max_nesting,
+                    WidgetLabelLimits {
+                        max_nesting: self.limits.max_nesting,
+                        scratch_bytes: self
+                            .limits
+                            .max_array_items
+                            .saturating_mul(WIDGET_LABEL_ENTRY_BYTES),
+                    },
                     &mut self.widget_work,
                     |reference| {
                         if reference == *annotation_ref {
