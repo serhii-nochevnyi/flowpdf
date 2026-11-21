@@ -1078,6 +1078,7 @@ enum DictionaryRole {
     Resources,
     Appearance,
     Names,
+    CheckboxState,
 }
 
 impl DictionaryRole {
@@ -1151,6 +1152,7 @@ fn inspect(
             )?;
             // @contract: Admission preserves encoded content without interpreting operators.
         }
+        PdfValue::Name(_) if role == DictionaryRole::CheckboxState => {}
         PdfValue::Name(name)
             if matches!(
                 name.as_str(),
@@ -1191,6 +1193,60 @@ fn inspect(
         _ => {}
     }
     Ok(())
+}
+
+fn passive_checkbox_state(dict: &BTreeMap<String, PdfValue>, key: &str, value: &PdfValue) -> bool {
+    let Some(state) = value
+        .as_name()
+        .filter(|state| super::forms::valid_name(state))
+    else {
+        return false;
+    };
+    let field_type = dict.get("FT").and_then(PdfValue::as_name);
+    let checkbox = field_type == Some("Btn")
+        && !dict.contains_key("Parent")
+        && dict
+            .get("Ff")
+            .is_none_or(|flags| matches!(flags.as_integer(), Some(0 | 2)));
+    let widget = dict.get("Subtype").and_then(PdfValue::as_name) == Some("Widget")
+        && dict
+            .get("Type")
+            .is_none_or(|value| value.as_name() == Some("Annot"));
+    let mapped_state = || {
+        dict.get("AP")
+            .and_then(PdfValue::as_dictionary)
+            .filter(|ap| ap.len() == 1)
+            .and_then(|ap| ap.get("N"))
+            .and_then(PdfValue::as_dictionary)
+            .filter(|states| {
+                states.len() == 2 && states.values().all(|value| value.as_reference().is_some())
+            })
+            .and_then(super::forms::checkbox_on_state)
+            .is_some_and(|on| state == "Off" || state == on)
+    };
+    match key {
+        "V" | "DV" if checkbox && widget => !dict.contains_key("Kids") && mapped_state(),
+        "V" | "DV" if checkbox && !dict.contains_key("Type") && !dict.contains_key("Subtype") => {
+            match dict.get("Kids") {
+                Some(PdfValue::Reference(_)) => true,
+                Some(PdfValue::Array(children)) => {
+                    matches!(children.as_slice(), [PdfValue::Reference(_)])
+                }
+                _ => false,
+            }
+        }
+        "AS" if widget => {
+            let split = dict
+                .get("Parent")
+                .and_then(PdfValue::as_reference)
+                .is_some()
+                && ["FT", "V", "DV", "Kids"]
+                    .iter()
+                    .all(|key| !dict.contains_key(*key));
+            ((checkbox && !dict.contains_key("Kids")) || split) && mapped_state()
+        }
+        _ => false,
+    }
 }
 
 fn inspect_dict(
@@ -1250,7 +1306,16 @@ fn inspect_dict(
         {
             return Err(NativeEditError::Unsupported);
         }
-        inspect(value, role.child(key), depth + 1, limits, work, visit)?;
+        // @security: Only direct checkbox state names use the passive role.
+        let child_role = if role == DictionaryRole::Object
+            && matches!(key.as_str(), "V" | "DV" | "AS")
+            && passive_checkbox_state(dict, key, value)
+        {
+            DictionaryRole::CheckboxState
+        } else {
+            role.child(key)
+        };
+        inspect(value, child_role, depth + 1, limits, work, visit)?;
     }
     Ok(())
 }
@@ -1258,6 +1323,44 @@ fn inspect_dict(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn passive_checkbox_values_do_not_change_action_or_signature_admission() {
+        let limits = NativeEditLimits::default();
+        let child = PdfObjectRef {
+            object_number: 7,
+            generation: 0,
+        };
+        let field = BTreeMap::from([
+            ("FT".into(), PdfValue::Name("Btn".into())),
+            (
+                "Kids".into(),
+                PdfValue::Array(vec![PdfValue::Reference(child)]),
+            ),
+            ("V".into(), PdfValue::Name("Launch".into())),
+        ]);
+        let inspect_field = |field: &BTreeMap<String, PdfValue>| {
+            let mut work = limits.max_work;
+            inspect_dict(
+                field,
+                DictionaryRole::Object,
+                0,
+                &limits,
+                &mut work,
+                &mut |_| Ok(()),
+            )
+        };
+        assert_eq!(inspect_field(&field), Ok(()));
+        for (key, value) in [
+            ("A", PdfValue::Null),
+            ("FT", PdfValue::Name("Sig".into())),
+            ("Unrelated", PdfValue::Name("Launch".into())),
+        ] {
+            let mut field = field.clone();
+            field.insert(key.into(), value);
+            assert_eq!(inspect_field(&field), Err(NativeEditError::Unsupported));
+        }
+    }
 
     #[test]
     fn action_keys_are_refused_outside_name_maps() {

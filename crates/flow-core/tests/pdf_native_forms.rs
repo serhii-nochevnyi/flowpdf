@@ -76,6 +76,24 @@ fn imported_field(
     extra_form_entries: &str,
     extra_owner_entries: &str,
 ) -> Vec<u8> {
+    build_pdf(&imported_field_objects(
+        geometry,
+        extra_page_entries,
+        state,
+        kind,
+        extra_form_entries,
+        extra_owner_entries,
+    ))
+}
+
+fn imported_field_objects(
+    geometry: &str,
+    extra_page_entries: &str,
+    state: &str,
+    kind: &str,
+    extra_form_entries: &str,
+    extra_owner_entries: &str,
+) -> Vec<Vec<u8>> {
     let mut objects: Vec<Vec<u8>> = [
         "<< /Type /Catalog /Pages 2 0 R /AcroForm 5 0 R >>",
         "<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 /MediaBox [0 0 300 500] >>",
@@ -94,7 +112,7 @@ fn imported_field(
         form,
         b"q 1 g 0 0 20 20 re f 0 G 1 w 1 1 18 18 re S\n2 w 2 2 m 18 18 l 2 18 m 18 2 l S\nQ\n",
     ));
-    build_pdf(&objects)
+    objects
 }
 
 #[test]
@@ -134,6 +152,64 @@ fn imported_checkbox_uses_parent_value_and_keeps_its_on_state_and_default() {
     assert!(pdf.snapshot().fields.is_empty());
     assert!(!String::from_utf8_lossy(pdf.output_bytes()).contains("/Subtype /Widget"));
     assert_eq!(pdf.origin_bytes(), original);
+}
+
+#[test]
+fn passive_checkbox_state_names_survive_reopen_and_note_rewrite() {
+    for (on, split) in [("Launch", true), ("Sig", false)] {
+        let mut objects = imported_field_objects("[10 10 30 30]", "", "Off", "Btn", "", "");
+        let field = format!("/FT /Btn /T (agreement) /V /Off /DV /{on}");
+        let owner = if split {
+            objects[5] = format!("<< {field} /Kids [7 0 R] >>").into_bytes();
+            "/Parent 6 0 R".to_owned()
+        } else {
+            objects[4] = b"<< /Fields [7 0 R] >>".to_vec();
+            field
+        };
+        objects[6] = format!(
+            "<< /Type /Annot /Subtype /Widget /P 3 0 R {owner} /Rect [10 10 30 30] /AP << /N << /Off 8 0 R /{on} 9 0 R >> >> /AS /Off >>"
+        ).into_bytes();
+        let source = build_pdf(&objects);
+        let mut pdf = session(&source);
+        assert_eq!(pdf.snapshot().fields[0].checked, Some(false));
+        assert_saved_value(&source, "agreement", "Btn", "Off");
+
+        for (checked, request, state) in [(true, 1, on), (false, 3, "Off")] {
+            let snapshot = pdf.snapshot();
+            pdf.apply_field(
+                snapshot.binding,
+                request,
+                &NativeFieldCommand::SetFieldChecked {
+                    field: snapshot.fields[0].id,
+                    checked,
+                },
+            )
+            .unwrap();
+            let saved = pdf.output_bytes();
+            let serialized = String::from_utf8_lossy(saved);
+            assert!(serialized.contains(&format!("/AS /{state}")));
+            assert!(serialized.contains(&format!("/DV /{on}")));
+            assert_eq!(session(saved).snapshot().fields[0].checked, Some(checked));
+            assert_saved_value(saved, "agreement", "Btn", state);
+            if checked {
+                let snapshot = pdf.snapshot();
+                pdf.apply(
+                    snapshot.binding,
+                    request + 1,
+                    &NativeNoteCommand::Add {
+                        page: snapshot.scene.pages[0].id,
+                        rect: [50, 50, 90, 75],
+                        contents: "Reviewed checkbox".into(),
+                    },
+                )
+                .unwrap();
+                let saved = pdf.output_bytes();
+                assert_eq!(session(saved).snapshot().fields[0].checked, Some(true));
+                assert_saved_value(saved, "agreement", "Btn", on);
+            }
+        }
+        assert_eq!(pdf.origin_bytes(), source);
+    }
 }
 
 #[test]
@@ -314,6 +390,53 @@ fn native_and_public_widget_labels_require_consistent_split_field_children() {
         assert_eq!(second.field_type.as_deref(), second_type);
         assert_eq!(second.value.as_deref(), second_value);
     }
+}
+
+#[test]
+fn public_split_widget_labels_share_the_ownership_work_allowance() {
+    let count = 10;
+    let widgets: String = (7..7 + count)
+        .map(|index| format!("{index} 0 R "))
+        .collect();
+    let mut objects = vec![
+        b"<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [4 0 R] >> >>".to_vec(),
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
+        format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 500] /Annots [{widgets}] >>")
+            .into_bytes(),
+        b"<< /FT /Tx /T 6 0 R /V (saved) /Kids 5 0 R >>".to_vec(),
+        format!("[{widgets}]").into_bytes(),
+        b"(recipient)".to_vec(),
+    ];
+    for row in 0..count {
+        let y = 10 + row * 22;
+        objects.push(
+            format!(
+                "<< /Type /Annot /Subtype /Widget /P 3 0 R /Parent 4 0 R /Rect [10 {y} 30 {}] >>",
+                y + 20
+            )
+            .into_bytes(),
+        );
+    }
+    let bytes = build_pdf(&objects);
+    let scene = |max_content_tokens| {
+        let reader = open_pdf(
+            &bytes,
+            PdfReaderLimits {
+                max_content_tokens,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        read_pdf_scene(&reader, &PdfSceneRequest::default())
+    };
+    let fit = count * (count + 5);
+    let exact = scene(fit).unwrap();
+    assert_eq!(exact.pages[0].elements.len(), count);
+    assert!(exact.pages[0].elements.iter().all(|element| {
+        matches!(element, PdfSceneElement::Form { value } if
+            value.name.as_deref() == Some("recipient") && value.value.is_none())
+    }));
+    assert_eq!(scene(fit - 1), Err(PdfReadError::TokenLimit));
 }
 
 #[test]

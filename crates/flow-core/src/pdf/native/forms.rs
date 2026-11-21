@@ -9,7 +9,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 
 use super::super::{
     reader::{
-        PdfObjectRef as Ref, PdfStream, PdfValue as Value, WidgetLabelLimits,
+        PdfObjectRef as Ref, PdfReadError, PdfStream, PdfValue as Value, WidgetLabelLimits,
         decode_pdf_text_string, map_widget_label,
     },
     scene::{NativePdfAnnotation, NativePdfNotePage, NativeReadOnlyAnnotation},
@@ -147,12 +147,22 @@ fn bounded_text<'de, D: Deserializer<'de>>(d: D) -> Result<String, D::Error> {
     bounded_string::<D, MAX_TEXT>(d)
 }
 
-fn valid_name(name: &str) -> bool {
+pub(super) fn valid_name(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= MAX_NAME
         && name
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+}
+
+pub(super) fn checkbox_on_state(states: &Dict) -> Option<&str> {
+    if states.len() != 2 || !states.contains_key("Off") {
+        return None;
+    }
+    states
+        .keys()
+        .map(String::as_str)
+        .find(|&state| state != "Off" && valid_name(state))
 }
 
 fn valid_text(value: &str) -> bool {
@@ -356,6 +366,13 @@ fn singular(refs: &[Ref], target: Ref) -> bool {
         == 1
 }
 
+fn metered_refusal(error: NativeEditError, refusal: NativeFieldRefusal) -> NativeSessionError {
+    match error {
+        NativeEditError::Budget => NativeSessionError::Budget,
+        _ => refusal.into(),
+    }
+}
+
 fn load_form(
     graph: &NativePdfGraph,
     work: &mut usize,
@@ -413,7 +430,9 @@ fn load_form(
         };
         match (
             key,
-            graph.resolve_metered(value, work).map_err(|_| Profile)?,
+            graph
+                .resolve_metered(value, work)
+                .map_err(|error| metered_refusal(error, Profile))?,
         ) {
             (_, Value::Null)
             | ("SigFlags", Value::Integer(0))
@@ -424,12 +443,12 @@ fn load_form(
     }
     for &field in &fields {
         let values = dict(graph, field).map_err(|_| Reference)?;
-        if values.get("FT").is_some_and(|value| {
-            graph
-                .resolve_metered(value, &mut graph.remaining_work())
-                .is_ok_and(|value| value.as_name() == Some("Sig"))
-        }) {
-            return Err(Profile.into());
+        if let Some(value) = values.get("FT") {
+            match graph.resolve_metered(value, work) {
+                Ok(value) if value.as_name() == Some("Sig") => return Err(Profile.into()),
+                Err(NativeEditError::Budget) => return Err(NativeSessionError::Budget),
+                _ => {}
+            }
         }
     }
     let before_names = *remaining;
@@ -707,7 +726,15 @@ fn recognize_identity(
     {
         return Err(Profile.into());
     }
-    if pages::annotation_membership(graph, page.object, widget, false).map_err(|_| Reference)?
+    let owner = form.owner.ok_or(Reference)?;
+    let fields_slot = pages::form_dict(graph, owner)
+        .map_err(|_| Reference)?
+        .get("Fields")
+        .ok_or(Reference)?;
+    // @invariant: The caller charges the array walk, and an indirect field array costs one lookup.
+    spend(work, usize::from(fields_slot.as_reference().is_some()))?;
+    if pages::annotation_membership(graph, page.object, widget, false)
+        .map_err(|error| metered_refusal(error, Reference))?
         != Some(field)
     {
         return Err(Reference.into());
@@ -841,15 +868,8 @@ fn recognize_appearance(
             FieldValue::Text(text)
         }
         Some("Btn") => {
-            let states = ap
-                .as_dictionary()
-                .filter(|states| states.len() == 2 && states.contains_key("Off"))
-                .ok_or(Appearance)?;
-            let on = states
-                .keys()
-                .find(|key| key.as_str() != "Off")
-                .filter(|key| valid_name(key))
-                .ok_or(Appearance)?;
+            let states = ap.as_dictionary().ok_or(Appearance)?;
+            let on = checkbox_on_state(states).ok_or(Appearance)?;
             let state = fields.get("V").and_then(Value::as_name).ok_or(Profile)?;
             if !states.contains_key(state)
                 || widget_data.get("AS").and_then(Value::as_name) != Some(state)
@@ -862,7 +882,7 @@ fn recognize_appearance(
             let mut available = *remaining;
             spend(&mut available, field_name.capacity())?;
             spend(&mut available, APPEARANCE_DICT_BYTES)?;
-            for (state, marked) in [("Off", false), (on.as_str(), true)] {
+            for (state, marked) in [("Off", false), (on, true)] {
                 let stream = appearance_at(graph, states.get(state).ok_or(Appearance)?)?;
                 let content = AppearanceContent::new(size, AppearanceKind::Checkbox(marked))?;
                 let expected = appearance_dictionary(size, content.prefix().len(), None);
@@ -876,7 +896,7 @@ fn recognize_appearance(
             spend(&mut available, on.len())?;
             FieldValue::Checkbox {
                 checked: state == on,
-                on: on.clone(),
+                on: on.to_owned(),
             }
         }
         _ => return Err(Profile.into()),
@@ -1042,11 +1062,15 @@ pub(super) fn project(
                     scratch_bytes: *remaining,
                 },
                 &mut work,
-                |reference| graph.objects.get(&reference).map(Cow::Borrowed),
+                |reference| Ok(graph.objects.get(&reference).map(Cow::Borrowed)),
                 |bytes| decode_pdf_text_string(bytes, MAX_NAME, &mut available),
             )
-            .transpose()
-            .map_err(|_| NativeEditError::Budget)?
+            .map_err(|error| match error {
+                PdfReadError::TokenLimit
+                | PdfReadError::NestingLimit
+                | PdfReadError::StreamLimit => NativeSessionError::Budget,
+                _ => Reference.into(),
+            })?
             .flatten()
             .filter(|name| !name.is_empty() && !name.chars().any(char::is_control));
             if view.name.is_some() {
@@ -1457,9 +1481,9 @@ fn stage_form(
         .transpose()?;
     let (field, widget, page, name, bounds, value) = if let Some(view) = target {
         let old_page = page_at(view.page)?;
-        graph.charge_page_work(old_page.annotations.len() + form.fields.len())?;
         let mut work = graph.remaining_work();
         let budget = work;
+        spend(&mut work, old_page.annotations.len() + form.fields.len())?;
         let identity = recognize_identity(
             graph,
             &form,
@@ -1700,19 +1724,16 @@ mod tests {
                     scratch_bytes: scratch,
                 },
                 &mut work,
-                |reference| graph.objects.get(&reference).map(Cow::Borrowed),
+                |reference| Ok(graph.objects.get(&reference).map(Cow::Borrowed)),
                 |bytes| decode_pdf_text_string(bytes, MAX_NAME, &mut available),
             );
             match (scratch, initial_work) {
                 (_, 4) => {
-                    assert!(result.is_none());
+                    assert_eq!(result, Err(PdfReadError::TokenLimit));
                     assert_eq!(available, scratch);
                 }
                 (scratch, _) if scratch < peak => {
-                    assert!(matches!(
-                        result,
-                        Some(Err(super::super::super::reader::PdfReadError::StreamLimit))
-                    ));
+                    assert!(matches!(result, Err(PdfReadError::StreamLimit)));
                     assert_eq!(available, scratch);
                 }
                 _ => {
@@ -1725,13 +1746,14 @@ mod tests {
         }
 
         let mut inventory_remaining = graph.remaining_retained();
-        load_form(
-            &graph,
-            &mut graph.remaining_work(),
-            &mut inventory_remaining,
-        )
-        .unwrap();
+        let initial_work = graph.remaining_work();
+        let mut work = initial_work;
+        let form = load_form(&graph, &mut work, &mut inventory_remaining).unwrap();
         let inventory_bytes = graph.remaining_retained() - inventory_remaining;
+        let work_per_widget = 1 + form.fields.len() + page.annotations.len() + 5;
+        let needed_work = initial_work - work + 2 * work_per_widget;
+        drop(form);
+        graph.charge_page_work(initial_work - needed_work).unwrap();
         let view_bytes = 4 * size_of::<NativeFieldView>();
         let label_bytes = 3 * label.len();
         let allowance = inventory_bytes + view_bytes + label_bytes + peak;
@@ -1748,10 +1770,92 @@ mod tests {
 
         remaining = allowance - 1;
         assert_eq!(
-            project(&graph, &[page], binding, &mut remaining),
+            project(&graph, std::slice::from_ref(&page), binding, &mut remaining),
             Err(NativeSessionError::Budget)
         );
         assert_eq!(remaining, peak - 1);
+        graph.charge_page_work(1).unwrap();
+        remaining = allowance;
+        assert_eq!(
+            project(&graph, &[page], binding, &mut remaining),
+            Err(NativeSessionError::Budget)
+        );
+    }
+
+    #[test]
+    fn indirect_field_types_spend_the_callers_inventory_and_staging_work() {
+        let source = redaction_fixture("");
+        let limits = NativeEditLimits::default();
+        let session = NativePdfSession::open_scoped(&source, limits, [7; 16]).unwrap();
+        let mut graph = NativePdfGraph::open(&source, limits).unwrap();
+        let field_type = pages::allocate_value(&mut graph, name("Tx")).unwrap();
+        let fields: Vec<_> = ["recipient", "company"]
+            .into_iter()
+            .map(|label| {
+                pages::allocate(
+                    &mut graph,
+                    dictionary([
+                        ("FT", Value::Reference(field_type)),
+                        ("T", Value::String(label.as_bytes().to_vec())),
+                    ]),
+                )
+                .unwrap()
+            })
+            .collect();
+        let catalog = pages::catalog(&graph).unwrap();
+        dict_mut(&mut graph, catalog).unwrap().insert(
+            "AcroForm".into(),
+            Value::Dictionary(dictionary([("Fields", refs(fields.iter().copied()))])),
+        );
+        graph.refresh_page_graph(&BTreeSet::new()).unwrap();
+
+        let initial_work = graph.remaining_work();
+        let mut work = initial_work;
+        let memory = graph.remaining_retained();
+        let mut remaining = memory;
+        let indirect = load_form(&graph, &mut work, &mut remaining).unwrap();
+        assert_eq!(indirect.fields, fields);
+        let needed = initial_work - work;
+        for field in &fields {
+            dict_mut(&mut graph, *field)
+                .unwrap()
+                .insert("FT".into(), name("Tx"));
+        }
+        work = initial_work;
+        remaining = memory;
+        load_form(&graph, &mut work, &mut remaining).unwrap();
+        assert_eq!(needed, initial_work - work + fields.len());
+        for field in &fields {
+            dict_mut(&mut graph, *field)
+                .unwrap()
+                .insert("FT".into(), Value::Reference(field_type));
+        }
+
+        work = needed;
+        remaining = memory;
+        load_form(&graph, &mut work, &mut remaining).unwrap();
+        assert_eq!(work, 0);
+        graph.charge_page_work(initial_work - needed + 1).unwrap();
+        let command = NativeFieldCommand::AddCheckboxField {
+            page: 0,
+            rect: [20, 20, 40, 40],
+            name: "confirmed".into(),
+            checked: false,
+        };
+        work = graph.remaining_work();
+        remaining = memory;
+        assert!(matches!(
+            load_form(&graph, &mut work, &mut remaining),
+            Err(NativeSessionError::Budget)
+        ));
+        let object_count = graph.objects.len();
+        assert!(matches!(
+            stage(&mut graph, &session.snapshot().scene.pages, &[], &command),
+            Err(NativeSessionError::Budget)
+        ));
+        assert_eq!(graph.objects.len(), object_count);
+        assert_eq!(graph.remaining_work(), needed - 1);
+        assert_eq!(graph.remaining_retained(), memory);
     }
 
     #[test]
