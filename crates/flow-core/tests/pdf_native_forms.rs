@@ -135,6 +135,49 @@ fn imported_checkbox_uses_parent_value_and_keeps_its_on_state_and_default() {
 }
 
 #[test]
+fn duplicate_page_keeps_indirect_form_fields_independently_editable() {
+    let form = "/Type /XObject /Subtype /Form /BBox [0 0 20 20] /Resources <<>>";
+    let source = build_pdf(&[
+        b"<< /Type /Catalog /Pages 2 0 R /AcroForm 4 0 R >>".to_vec(),
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 300 500] >>".to_vec(),
+        b"<< /Type /Page /Parent 2 0 R /Annots [6 0 R] >>".to_vec(),
+        b"<< /Fields 5 0 R >>".to_vec(),
+        b"[6 0 R]".to_vec(),
+        b"<< /Type /Annot /Subtype /Widget /P 3 0 R /Rect [10 10 30 30] /FT /Btn /T (agreement) /V /Off /AS /Off /AP << /N << /Off 7 0 R /Yes 8 0 R >> >> >>".to_vec(),
+        stream(form, b"q 1 g 0 0 20 20 re f 0 G 1 w 1 1 18 18 re S\nQ\n"),
+        stream(form, b"q 1 g 0 0 20 20 re f 0 G 1 w 1 1 18 18 re S\n2 w 2 2 m 18 18 l 2 18 m 18 2 l S\nQ\n"),
+    ]);
+    let mut pdf = session(&source);
+    let initial = pdf.snapshot();
+    let target = flow_core::pdf::native::NativePageTarget {
+        page: 0,
+        stable_id: initial.page_state.order[0],
+    };
+    pdf.apply_page(
+        initial.binding,
+        1,
+        &NativePageCommand::DuplicatePage { target },
+    )
+    .unwrap();
+    let fields = &pdf.snapshot().fields;
+    assert_eq!(fields.len(), 2);
+    assert!(fields.iter().all(|field| field.can_edit_appearance));
+    assert_eq!(fields[0].name.as_deref(), Some("agreement"));
+    assert_ne!(fields[1].name, fields[0].name);
+    assert_eq!(fields[1].page, 1);
+    let copied = fields[1].id;
+    apply(
+        &mut pdf,
+        json!({"kind":"setFieldChecked","field":copied,"checked":true}),
+    )
+    .unwrap();
+    let reopened = session(pdf.output_bytes());
+    assert_eq!(reopened.snapshot().fields[0].checked, Some(false));
+    assert_eq!(reopened.snapshot().fields[1].checked, Some(true));
+    assert_eq!(pdf.origin_bytes(), source);
+}
+
+#[test]
 fn checkbox_toggle_and_create_accept_inactive_acroform_settings() {
     for settings in [
         "",
@@ -945,7 +988,7 @@ fn unsupported_embedded_font_keeps_the_appearance_refusal() {
 }
 
 #[test]
-fn ordinary_text_field_addition_refuses_atomically_under_a_constrained_allowance() {
+fn ordinary_field_additions_respect_the_live_retained_allowance() {
     let source = imported_checkbox("[10 10 30 30]", "", "Off");
     let open = |max_retained_bytes| {
         NativePdfSession::open_scoped(
@@ -958,66 +1001,88 @@ fn ordinary_text_field_addition_refuses_atomically_under_a_constrained_allowance
         )
         .unwrap()
     };
-    let value = "Approved for delivery";
-    let command = NativeFieldCommand::AddTextField {
-        page: 0,
-        rect: [40, 40, 290, 65],
-        name: "decision".into(),
-        value: value.into(),
-    };
-    let mut constrained = open(64 * 1024);
-    let accepted = constrained.snapshot().clone();
-    assert_eq!(
-        constrained.apply_field(accepted.binding, 1, &command),
-        Err(NativeSessionError::Budget)
-    );
-    assert_eq!(constrained.snapshot().binding, accepted.binding);
-    assert_eq!(constrained.snapshot().output_hash, accepted.output_hash);
-    assert_eq!(
-        constrained.snapshot().scene.scene_hash,
-        accepted.scene.scene_hash
-    );
-    assert_eq!(
-        constrained.snapshot().consumed_request,
-        accepted.consumed_request
-    );
-    assert_eq!(constrained.snapshot().fields, accepted.fields);
-    assert_eq!(
-        constrained.lookup(accepted.binding, 1),
-        Ok(NativeRequestLookup::Unseen)
-    );
-    assert_eq!(constrained.output_bytes(), source);
-    assert_eq!(constrained.origin_bytes(), source);
+    let text = "Approved for delivery";
+    let commands = [
+        (
+            NativeFieldCommand::AddTextField {
+                page: 0,
+                rect: [40, 40, 290, 65],
+                name: "decision".into(),
+                value: text.into(),
+            },
+            "decision",
+            "Tx",
+            text,
+            "Approved for pickup",
+        ),
+        (
+            NativeFieldCommand::AddCheckboxField {
+                page: 0,
+                rect: [40, 40, 60, 60],
+                name: "approval".into(),
+                checked: true,
+            },
+            "approval",
+            "Btn",
+            "Yes",
+            "Off",
+        ),
+    ];
+    for (command, name, kind, value, updated) in commands {
+        let mut constrained = open(64 * 1024);
+        let accepted = constrained.snapshot().clone();
+        assert_eq!(
+            constrained.apply_field(accepted.binding, 1, &command),
+            Err(NativeSessionError::Budget)
+        );
+        assert_eq!(constrained.snapshot().binding, accepted.binding);
+        assert_eq!(constrained.snapshot().output_hash, accepted.output_hash);
+        assert_eq!(
+            constrained.snapshot().scene.scene_hash,
+            accepted.scene.scene_hash
+        );
+        assert_eq!(
+            constrained.snapshot().consumed_request,
+            accepted.consumed_request
+        );
+        assert_eq!(constrained.snapshot().fields, accepted.fields);
+        assert_eq!(
+            constrained.lookup(accepted.binding, 1),
+            Ok(NativeRequestLookup::Unseen)
+        );
+        assert_eq!(constrained.output_bytes(), source);
+        assert_eq!(constrained.origin_bytes(), source);
 
-    let mut fitting = open(192 * 1024);
-    let receipt = fitting
-        .apply_field(fitting.snapshot().binding, 1, &command)
-        .unwrap();
-    assert_eq!(receipt.binding.revision, 1);
-    assert_saved_value(fitting.output_bytes(), "decision", "Tx", value);
-    assert_eq!(fitting.origin_bytes(), source);
+        let mut fitting = open(192 * 1024);
+        let receipt = fitting
+            .apply_field(fitting.snapshot().binding, 1, &command)
+            .unwrap();
+        assert_eq!(receipt.binding.revision, 1);
+        assert_saved_value(fitting.output_bytes(), name, kind, value);
+        assert_eq!(fitting.origin_bytes(), source);
 
-    let updated = "Approved for pickup";
-    let field = fitting
-        .snapshot()
-        .fields
-        .iter()
-        .find(|field| field.name.as_deref() == Some("decision"))
-        .unwrap()
-        .id;
-    let receipt = fitting
-        .apply_field(
-            receipt.binding,
-            2,
-            &NativeFieldCommand::SetFieldText {
+        let field = fitting
+            .snapshot()
+            .fields
+            .iter()
+            .find(|field| field.name.as_deref() == Some(name))
+            .unwrap()
+            .id;
+        let update = match command {
+            NativeFieldCommand::AddTextField { .. } => NativeFieldCommand::SetFieldText {
                 field,
                 value: updated.into(),
             },
-        )
-        .unwrap();
-    assert_eq!(receipt.binding.revision, 2);
-    assert_saved_value(fitting.output_bytes(), "decision", "Tx", updated);
-    assert_eq!(fitting.origin_bytes(), source);
+            _ => NativeFieldCommand::SetFieldChecked {
+                field,
+                checked: false,
+            },
+        };
+        let receipt = fitting.apply_field(receipt.binding, 2, &update).unwrap();
+        assert_eq!(receipt.binding.revision, 2);
+        assert_saved_value(fitting.output_bytes(), name, kind, updated);
+        assert_eq!(fitting.origin_bytes(), source);
+    }
 }
 
 #[test]
