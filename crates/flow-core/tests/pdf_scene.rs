@@ -911,7 +911,7 @@ fn unfinished_text_array_across_page_streams_preserves_committed_paint() {
             && value.provenance.operator.as_deref() == Some("TJ")
             && value.provenance.invocation_path == [0]
     ));
-    // Glyph advance rectangles do not bound the painted glyphs.
+    // @invariant: Glyph advance rectangles do not bound the painted glyphs.
     assert!(page.partial && scene.report.partial);
     assert!(matches!(
         page.report.diagnostics.as_slice(),
