@@ -156,11 +156,18 @@ fn imported_checkbox_uses_parent_value_and_keeps_its_on_state_and_default() {
 
 #[test]
 fn passive_checkbox_state_names_survive_reopen_and_note_rewrite() {
-    for (on, split) in [("Launch", true), ("Sig", false)] {
+    for (on, kids) in [
+        ("Launch", Some("[7 0 R]")),
+        ("Launch", Some("10 0 R")),
+        ("Sig", None),
+    ] {
         let mut objects = imported_field_objects("[10 10 30 30]", "", "Off", "Btn", "", "");
         let field = format!("/FT /Btn /T (agreement) /V /Off /DV /{on}");
-        let owner = if split {
-            objects[5] = format!("<< {field} /Kids [7 0 R] >>").into_bytes();
+        let owner = if let Some(kids) = kids {
+            if kids == "10 0 R" {
+                objects.push(b"[7 0 R]".to_vec());
+            }
+            objects[5] = format!("<< {field} /Kids {kids} >>").into_bytes();
             "/Parent 6 0 R".to_owned()
         } else {
             objects[4] = b"<< /Fields [7 0 R] >>".to_vec();
@@ -209,6 +216,42 @@ fn passive_checkbox_state_names_survive_reopen_and_note_rewrite() {
             }
         }
         assert_eq!(pdf.origin_bytes(), source);
+    }
+}
+
+#[test]
+fn passive_checkbox_exception_requires_reciprocal_mapped_state() {
+    for (owner_type, kids, field_value, appearance_state) in [
+        ("Btn", "[7 0 R 11 0 R]", "Launch", "Off"),
+        ("Btn", "[7 0 R]", "Launch", "Off"),
+        ("Tx", "[7 0 R]", "Off", "Launch"),
+    ] {
+        let mut objects = imported_field_objects("[10 10 30 30]", "", "Off", "Btn", "", "");
+        objects[5] = format!(
+            "<< /FT /{owner_type} /T (agreement) /Kids 10 0 R /V /{field_value} /DV /Off >>"
+        )
+        .into_bytes();
+        let on = if field_value == "Off" || kids.contains("11") {
+            "Launch"
+        } else {
+            "Agreed"
+        };
+        objects[6] = format!(
+            "<< /Type /Annot /Subtype /Widget /P 3 0 R /Parent 6 0 R /Rect [10 10 30 30] /AP << /N << /Off 8 0 R /{on} 9 0 R >> >> /AS /{appearance_state} >>"
+        )
+        .into_bytes();
+        objects.push(kids.as_bytes().to_vec());
+        if kids.contains("11") {
+            objects.push(objects[6].clone());
+        }
+        assert!(matches!(
+            NativePdfSession::open_scoped(
+                &build_pdf(&objects),
+                NativeEditLimits::default(),
+                [7; 16]
+            ),
+            Err(NativeSessionError::Graph(NativeEditError::Unsupported))
+        ));
     }
 }
 

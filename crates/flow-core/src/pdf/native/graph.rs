@@ -278,6 +278,7 @@ impl NativePdfGraph {
                 },
             )?;
         }
+        validate_split_checkbox_states(&objects, &mut work)?;
         drop(queue);
         drop(queued);
         drop(queue_charge);
@@ -1153,40 +1154,7 @@ fn inspect(
             // @contract: Admission preserves encoded content without interpreting operators.
         }
         PdfValue::Name(_) if role == DictionaryRole::CheckboxState => {}
-        PdfValue::Name(name)
-            if matches!(
-                name.as_str(),
-                "Sig"
-                    | "DocTimeStamp"
-                    | "XRef"
-                    | "ObjStm"
-                    | "Action"
-                    | "GoTo"
-                    | "Named"
-                    | "Hide"
-                    | "ResetForm"
-                    | "SetOCGState"
-                    | "Trans"
-                    | "GoTo3DView"
-                    | "Thread"
-                    | "JavaScript"
-                    | "Launch"
-                    | "URI"
-                    | "GoToR"
-                    | "GoToE"
-                    | "SubmitForm"
-                    | "ImportData"
-                    | "Rendition"
-                    | "RichMedia"
-                    | "Movie"
-                    | "Sound"
-                    | "Screen"
-                    | "3D"
-                    | "FileAttachment"
-                    | "Filespec"
-                    | "EmbeddedFile"
-            ) =>
-        {
+        PdfValue::Name(name) if restricted_name(name) => {
             return Err(NativeEditError::Unsupported);
         }
         PdfValue::Real(_) => return Err(NativeEditError::Unsupported),
@@ -1195,58 +1163,174 @@ fn inspect(
     Ok(())
 }
 
-fn passive_checkbox_state(dict: &BTreeMap<String, PdfValue>, key: &str, value: &PdfValue) -> bool {
-    let Some(state) = value
-        .as_name()
-        .filter(|state| super::forms::valid_name(state))
-    else {
-        return false;
-    };
-    let field_type = dict.get("FT").and_then(PdfValue::as_name);
-    let checkbox = field_type == Some("Btn")
+fn restricted_name(name: &str) -> bool {
+    matches!(
+        name,
+        "Sig"
+            | "DocTimeStamp"
+            | "XRef"
+            | "ObjStm"
+            | "Action"
+            | "GoTo"
+            | "Named"
+            | "Hide"
+            | "ResetForm"
+            | "SetOCGState"
+            | "Trans"
+            | "GoTo3DView"
+            | "Thread"
+            | "JavaScript"
+            | "Launch"
+            | "URI"
+            | "GoToR"
+            | "GoToE"
+            | "SubmitForm"
+            | "ImportData"
+            | "Rendition"
+            | "RichMedia"
+            | "Movie"
+            | "Sound"
+            | "Screen"
+            | "3D"
+            | "FileAttachment"
+            | "Filespec"
+            | "EmbeddedFile"
+    )
+}
+
+fn checkbox_owner(dict: &BTreeMap<String, PdfValue>) -> bool {
+    dict.get("FT").and_then(PdfValue::as_name) == Some("Btn")
         && !dict.contains_key("Parent")
         && dict
             .get("Ff")
-            .is_none_or(|flags| matches!(flags.as_integer(), Some(0 | 2)));
-    let widget = dict.get("Subtype").and_then(PdfValue::as_name) == Some("Widget")
+            .is_none_or(|flags| matches!(flags.as_integer(), Some(0 | 2)))
+}
+
+fn checkbox_widget(dict: &BTreeMap<String, PdfValue>) -> bool {
+    dict.get("Subtype").and_then(PdfValue::as_name) == Some("Widget")
         && dict
             .get("Type")
-            .is_none_or(|value| value.as_name() == Some("Annot"));
-    let mapped_state = || {
-        dict.get("AP")
-            .and_then(PdfValue::as_dictionary)
-            .filter(|ap| ap.len() == 1)
-            .and_then(|ap| ap.get("N"))
-            .and_then(PdfValue::as_dictionary)
-            .filter(|states| {
-                states.len() == 2 && states.values().all(|value| value.as_reference().is_some())
-            })
-            .and_then(super::forms::checkbox_on_state)
-            .is_some_and(|on| state == "Off" || state == on)
+            .is_none_or(|value| value.as_name() == Some("Annot"))
+}
+
+fn checkbox_state_mapped(dict: &BTreeMap<String, PdfValue>, state: &str) -> bool {
+    dict.get("AP")
+        .and_then(PdfValue::as_dictionary)
+        .filter(|ap| ap.len() == 1)
+        .and_then(|ap| ap.get("N"))
+        .and_then(PdfValue::as_dictionary)
+        .and_then(|states| {
+            let on = super::forms::checkbox_on_state(states)?;
+            let off_form = states.get("Off")?.as_reference()?;
+            let on_form = states.get(on)?.as_reference()?;
+            (off_form != on_form).then_some(on)
+        })
+        .is_some_and(|on| state == "Off" || state == on)
+}
+
+fn split_checkbox_owner(dict: &BTreeMap<String, PdfValue>) -> bool {
+    checkbox_owner(dict) && !dict.contains_key("Type") && !dict.contains_key("Subtype")
+}
+
+fn split_checkbox_parent(dict: &BTreeMap<String, PdfValue>) -> Option<PdfObjectRef> {
+    if checkbox_widget(dict)
+        && ["FT", "V", "DV", "Kids"]
+            .iter()
+            .all(|key| !dict.contains_key(*key))
+    {
+        return dict.get("Parent").and_then(PdfValue::as_reference);
+    }
+    None
+}
+
+fn provisional_checkbox_state(
+    dict: &BTreeMap<String, PdfValue>,
+    key: &str,
+    value: &PdfValue,
+) -> bool {
+    let Some(state) = value.as_name().filter(|name| restricted_name(name)) else {
+        return false;
     };
+    let combined = checkbox_owner(dict) && checkbox_widget(dict) && !dict.contains_key("Kids");
     match key {
-        "V" | "DV" if checkbox && widget => !dict.contains_key("Kids") && mapped_state(),
-        "V" | "DV" if checkbox && !dict.contains_key("Type") && !dict.contains_key("Subtype") => {
-            match dict.get("Kids") {
-                Some(PdfValue::Reference(_)) => true,
-                Some(PdfValue::Array(children)) => {
-                    matches!(children.as_slice(), [PdfValue::Reference(_)])
-                }
-                _ => false,
-            }
+        "V" | "DV" => {
+            (combined && checkbox_state_mapped(dict, state))
+                || (split_checkbox_owner(dict) && dict.contains_key("Kids"))
         }
-        "AS" if widget => {
-            let split = dict
-                .get("Parent")
-                .and_then(PdfValue::as_reference)
-                .is_some()
-                && ["FT", "V", "DV", "Kids"]
-                    .iter()
-                    .all(|key| !dict.contains_key(*key));
-            ((checkbox && !dict.contains_key("Kids")) || split) && mapped_state()
+        "AS" => {
+            (combined || split_checkbox_parent(dict).is_some())
+                && checkbox_state_mapped(dict, state)
         }
         _ => false,
     }
+}
+
+fn split_checkbox_child(
+    objects: &BTreeMap<PdfObjectRef, PdfValue>,
+    owner: &BTreeMap<String, PdfValue>,
+) -> Option<PdfObjectRef> {
+    let kids = owner.get("Kids")?;
+    let children = match kids.as_reference() {
+        Some(reference) => objects.get(&reference)?,
+        None => kids,
+    };
+    let [child] = children.as_array()? else {
+        return None;
+    };
+    child.as_reference()
+}
+
+fn validate_split_checkbox_states(
+    objects: &BTreeMap<PdfObjectRef, PdfValue>,
+    work: &mut usize,
+) -> Result<(), NativeEditError> {
+    for (&reference, value) in objects {
+        let Some(dict) = value.as_dictionary() else {
+            continue;
+        };
+        if split_checkbox_owner(dict) {
+            for key in ["V", "DV"] {
+                let Some(state) = dict
+                    .get(key)
+                    .and_then(PdfValue::as_name)
+                    .filter(|name| restricted_name(name))
+                else {
+                    continue;
+                };
+                spend(work, 1)?;
+                let Some(widget) = split_checkbox_child(objects, dict)
+                    .and_then(|child| objects.get(&child))
+                    .and_then(PdfValue::as_dictionary)
+                else {
+                    return Err(NativeEditError::Unsupported);
+                };
+                if split_checkbox_parent(widget) != Some(reference)
+                    || !checkbox_state_mapped(widget, state)
+                {
+                    return Err(NativeEditError::Unsupported);
+                }
+            }
+        } else if let Some(parent) = split_checkbox_parent(dict) {
+            let Some(state) = dict
+                .get("AS")
+                .and_then(PdfValue::as_name)
+                .filter(|name| restricted_name(name))
+            else {
+                continue;
+            };
+            spend(work, 1)?;
+            let Some(owner) = objects.get(&parent).and_then(PdfValue::as_dictionary) else {
+                return Err(NativeEditError::Unsupported);
+            };
+            if !split_checkbox_owner(owner)
+                || split_checkbox_child(objects, owner) != Some(reference)
+                || !checkbox_state_mapped(dict, state)
+            {
+                return Err(NativeEditError::Unsupported);
+            }
+        }
+    }
+    Ok(())
 }
 
 fn inspect_dict(
@@ -1306,10 +1390,10 @@ fn inspect_dict(
         {
             return Err(NativeEditError::Unsupported);
         }
-        // @security: Only direct checkbox state names use the passive role.
+        // @security: Split checkbox state names require reciprocal ownership after graph discovery.
         let child_role = if role == DictionaryRole::Object
-            && matches!(key.as_str(), "V" | "DV" | "AS")
-            && passive_checkbox_state(dict, key, value)
+            && depth == 0
+            && provisional_checkbox_state(dict, key, value)
         {
             DictionaryRole::CheckboxState
         } else {
