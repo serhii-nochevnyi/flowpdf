@@ -2056,6 +2056,42 @@ fn embedded_text_pdf(artwork: &[u8], page_size: &str) -> Vec<u8> {
 }
 
 #[test]
+fn accepted_preview_declines_a_collapsed_contour_in_fine_text() {
+    for (size, available) in [("0.003", false), ("0.004", true)] {
+        let content = format!("BT /F1 {size} Tf 2.03 2.03 Td (A) Tj ET");
+        let source = embedded_text_pdf(content.as_bytes(), "12 12");
+        let opened = call(native_pdf_open, open_request(&source));
+        assert_eq!(opened["status"], "opened", "{opened}");
+        let base = &opened["snapshot"];
+        let reply = call(
+            native_pdf_preview,
+            preview_request(2, base, base["pageState"]["order"][0].clone()),
+        );
+        if available {
+            assert_eq!(reply["status"], "preview", "{reply}");
+            assert_eq!(reply["preview"]["outputHash"], base["outputHash"]);
+            assert!(
+                reply["preview"]["rgbHex"]
+                    .as_str()
+                    .unwrap()
+                    .as_bytes()
+                    .chunks_exact(6)
+                    .any(|pixel| pixel != b"ffffff")
+            );
+        } else {
+            assert_eq!(reply["status"], "failed", "{reply}");
+            assert_eq!(reply["code"], "FLOW_PDF_NATIVE_TARGET_UNAVAILABLE");
+            assert!(reply["snapshot"].is_null());
+            assert!(reply.get("preview").is_none());
+        }
+        assert_eq!(
+            call(native_pdf_close, bound("close", 3, base))["status"],
+            "closed"
+        );
+    }
+}
+
+#[test]
 fn accepted_preview_preserves_fine_text_and_declines_ambiguous_paint() {
     let artwork = "BT /F1 4 Tf 2 6 Td (AAA) Tj ET\nBT /F1 0.2 Tf 2.03 2.03 Td (A) Tj ET";
     for (extra, available) in [("", true), ("\n0 0 1 rg 2.04 2.04 0.09 0.09 re f", false)] {

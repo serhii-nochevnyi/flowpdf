@@ -1950,11 +1950,12 @@ impl<'a> SceneBuilder<'a> {
                             &mut self.link_work,
                             &mut |reference| {
                                 self.reader
-                                    .non_stream_object(reference)
-                                    .ok()
-                                    .map(Cow::Owned)
+                                    .label_object(reference)
+                                    .map(|v| v.map(Cow::Owned))
                             },
                         )
+                        .ok()
+                        .flatten()
                     })
                     .as_deref()
                     .and_then(PdfValue::as_array)
@@ -1969,7 +1970,7 @@ impl<'a> SceneBuilder<'a> {
                     },
                 })?;
             } else if subtype.as_deref() == Some("Widget") {
-                let owner = self.widget_field_owner(*annotation_ref, dictionary);
+                let owner = self.widget_field_owner(*annotation_ref, dictionary)?;
                 let field = owner.as_ref().unwrap_or(dictionary);
                 let field_type = field.get("FT").and_then(PdfValue::as_name);
                 let limit = self.limits.max_string_bytes;
@@ -1992,20 +1993,23 @@ impl<'a> SceneBuilder<'a> {
                     &mut self.widget_work,
                     |reference| {
                         if reference == *annotation_ref {
-                            Some(Cow::Borrowed(&value))
+                            Ok(Some(Cow::Borrowed(&value)))
                         } else {
-                            let object = self.reader.non_stream_object(reference).ok()?;
+                            let Some(object) = self.reader.label_object(reference)? else {
+                                return Ok(None);
+                            };
                             if Some(reference) == parent
-                                && object.as_dictionary()?.contains_key("Parent")
+                                && !object
+                                    .as_dictionary()
+                                    .is_some_and(|dict| !dict.contains_key("Parent"))
                             {
-                                return None;
+                                return Ok(None);
                             }
-                            Some(Cow::Owned(object))
+                            Ok(Some(Cow::Owned(object)))
                         }
                     },
                     |bytes| decode_pdf_text_string(bytes, limit, &mut available),
-                )
-                .transpose()?
+                )?
                 .flatten()
                 .filter(|name| !name.is_empty() && !name.chars().any(char::is_control));
                 let saved = field.get("V");
@@ -2066,16 +2070,17 @@ impl<'a> SceneBuilder<'a> {
         &mut self,
         widget: PdfObjectRef,
         dictionary: &BTreeMap<String, PdfValue>,
-    ) -> Option<BTreeMap<String, PdfValue>> {
-        let parent = dictionary.get("Parent")?;
-        let parent_ref = parent.as_reference()?;
+    ) -> Result<Option<BTreeMap<String, PdfValue>>, PdfReadError> {
+        let Some(parent_ref) = dictionary.get("Parent").and_then(PdfValue::as_reference) else {
+            return Ok(None);
+        };
         if parent_ref == widget
             || self.field_counts.get(&parent_ref) != Some(&1)
             || ["FT", "V", "Kids"]
                 .iter()
                 .any(|key| dictionary.contains_key(*key))
         {
-            return None;
+            return Ok(None);
         }
         if let Some(label) = dictionary.get("T") {
             let label = resolve_annotation_value(
@@ -2084,17 +2089,20 @@ impl<'a> SceneBuilder<'a> {
                 &mut self.widget_work,
                 &mut |reference| {
                     self.reader
-                        .non_stream_object(reference)
-                        .ok()
-                        .map(Cow::Owned)
+                        .label_object(reference)
+                        .map(|v| v.map(Cow::Owned))
                 },
             )?;
-            if !matches!(*label, PdfValue::Null) {
-                return None;
+            if !matches!(label.as_deref(), Some(PdfValue::Null)) {
+                return Ok(None);
             }
         }
-        let PdfValue::Dictionary(field) = self.reader.resolve(parent, 0).ok()? else {
-            return None;
+        self.widget_work = self
+            .widget_work
+            .checked_sub(1)
+            .ok_or(PdfReadError::TokenLimit)?;
+        let Some(PdfValue::Dictionary(field)) = self.reader.label_object(parent_ref)? else {
+            return Ok(None);
         };
         if field.contains_key("Parent")
             || !matches!(
@@ -2102,24 +2110,31 @@ impl<'a> SceneBuilder<'a> {
                 Some("Tx" | "Btn")
             )
         {
-            return None;
+            return Ok(None);
         }
+        let Some(kids) = field.get("Kids") else {
+            return Ok(None);
+        };
         let children = resolve_annotation_value(
-            field.get("Kids")?,
+            kids,
             self.limits.max_nesting,
             &mut self.widget_work,
             &mut |reference| {
                 self.reader
-                    .non_stream_object(reference)
-                    .ok()
-                    .map(Cow::Owned)
+                    .label_object(reference)
+                    .map(|v| v.map(Cow::Owned))
             },
         )?;
-        if !matches!(children.as_array(), Some([PdfValue::Reference(child)]) if *child == widget) {
-            return None;
+        if !matches!(children.as_deref().and_then(PdfValue::as_array), Some([PdfValue::Reference(child)]) if *child == widget)
+        {
+            return Ok(None);
         }
         drop(children);
-        Some(field)
+        self.widget_work = self
+            .widget_work
+            .checked_sub(1)
+            .ok_or(PdfReadError::TokenLimit)?;
+        Ok(Some(field))
     }
 
     fn push_element(&mut self, element: PdfSceneElement) -> Result<(), PdfReadError> {
