@@ -135,6 +135,49 @@ fn imported_checkbox_uses_parent_value_and_keeps_its_on_state_and_default() {
 }
 
 #[test]
+fn duplicate_page_keeps_indirect_form_fields_independently_editable() {
+    let form = "/Type /XObject /Subtype /Form /BBox [0 0 20 20] /Resources <<>>";
+    let source = build_pdf(&[
+        b"<< /Type /Catalog /Pages 2 0 R /AcroForm 4 0 R >>".to_vec(),
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 300 500] >>".to_vec(),
+        b"<< /Type /Page /Parent 2 0 R /Annots [6 0 R] >>".to_vec(),
+        b"<< /Fields 5 0 R >>".to_vec(),
+        b"[6 0 R]".to_vec(),
+        b"<< /Type /Annot /Subtype /Widget /P 3 0 R /Rect [10 10 30 30] /FT /Btn /T (agreement) /V /Off /AS /Off /AP << /N << /Off 7 0 R /Yes 8 0 R >> >> >>".to_vec(),
+        stream(form, b"q 1 g 0 0 20 20 re f 0 G 1 w 1 1 18 18 re S\nQ\n"),
+        stream(form, b"q 1 g 0 0 20 20 re f 0 G 1 w 1 1 18 18 re S\n2 w 2 2 m 18 18 l 2 18 m 18 2 l S\nQ\n"),
+    ]);
+    let mut pdf = session(&source);
+    let initial = pdf.snapshot();
+    let target = flow_core::pdf::native::NativePageTarget {
+        page: 0,
+        stable_id: initial.page_state.order[0],
+    };
+    pdf.apply_page(
+        initial.binding,
+        1,
+        &NativePageCommand::DuplicatePage { target },
+    )
+    .unwrap();
+    let fields = &pdf.snapshot().fields;
+    assert_eq!(fields.len(), 2);
+    assert!(fields.iter().all(|field| field.can_edit_appearance));
+    assert_eq!(fields[0].name.as_deref(), Some("agreement"));
+    assert_ne!(fields[1].name, fields[0].name);
+    assert_eq!(fields[1].page, 1);
+    let copied = fields[1].id;
+    apply(
+        &mut pdf,
+        json!({"kind":"setFieldChecked","field":copied,"checked":true}),
+    )
+    .unwrap();
+    let reopened = session(pdf.output_bytes());
+    assert_eq!(reopened.snapshot().fields[0].checked, Some(false));
+    assert_eq!(reopened.snapshot().fields[1].checked, Some(true));
+    assert_eq!(pdf.origin_bytes(), source);
+}
+
+#[test]
 fn checkbox_toggle_and_create_accept_inactive_acroform_settings() {
     for settings in [
         "",

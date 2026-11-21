@@ -1369,35 +1369,15 @@ fn owned_field_text(
     Ok(FieldValue::Text(text))
 }
 
-fn replace_fields(
-    graph: &mut NativePdfGraph,
-    owner: Ref,
-    fields: Vec<Ref>,
-    adding: bool,
-) -> Result<(), NativeEditError> {
-    let indirect = pages::form_dict(graph, owner)?
-        .get("Fields")
-        .and_then(Value::as_reference)
-        .is_some();
-    let slots = if indirect {
-        fields.len()
-    } else {
-        usize::from(adding)
-    };
-    graph.charge_page_retained(slots * std::mem::size_of::<Value>())?;
-    pages::replace_form_fields(graph, owner, fields)
-}
-
 fn install_field_inventory(
     graph: &mut NativePdfGraph,
     form: &mut Form,
     form_bytes: &mut usize,
-    adding: bool,
 ) -> Result<(), NativeSessionError> {
     let owner = form.owner.ok_or(Reference)?;
     let fields = std::mem::take(&mut form.fields);
     let bytes = fields.capacity() * size_of::<Ref>();
-    let result = replace_fields(graph, owner, fields, adding);
+    let result = pages::replace_form_fields(graph, owner, fields);
     graph.release_page_retained(bytes);
     *form_bytes -= bytes;
     result.map_err(Into::into)
@@ -1469,7 +1449,7 @@ fn stage_form(
                 graph.release_page_retained(value_bytes);
                 replace_annots(graph, &form, old_page.object, view.object, false)?;
                 form.fields.retain(|&entry| entry != admitted.field);
-                install_field_inventory(graph, &mut form, form_bytes, false)?;
+                install_field_inventory(graph, &mut form, form_bytes)?;
                 graph.refresh_page_graph(&BTreeSet::from([admitted.field, view.object]))?;
                 return Ok(ExpectedField {
                     read_only_name_count: read_only_name_count(current, &admitted.name),
@@ -1577,7 +1557,7 @@ fn stage_form(
         ]);
         let widget = pages::allocate(graph, widget)?;
         form.fields.push(widget);
-        install_field_inventory(graph, &mut form, form_bytes, true)?;
+        install_field_inventory(graph, &mut form, form_bytes)?;
         replace_annots(graph, &form, destination.object, widget, true)?;
         (widget, widget, page, field_name.clone(), rect, value)
     };
@@ -1832,7 +1812,7 @@ mod tests {
             graph
                 .charge_page_retained(graph.remaining_retained() - needed + short_by)
                 .unwrap();
-            let result = replace_fields(&mut graph, owner, vec![old_field, new_field], true);
+            let result = pages::replace_form_fields(&mut graph, owner, vec![old_field, new_field]);
             if short_by == 0 {
                 result.unwrap();
                 let fields = pages::form_dict(&graph, owner).unwrap()["Fields"]
@@ -1843,6 +1823,7 @@ mod tests {
                 assert_eq!(graph.remaining_retained(), 0);
             } else {
                 assert_eq!(result, Err(NativeEditError::Budget));
+                assert_eq!(graph.remaining_retained(), needed - 1);
                 assert_eq!(
                     pages::form_dict(&graph, owner).unwrap()["Fields"].as_reference(),
                     Some(old_array)

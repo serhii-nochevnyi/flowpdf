@@ -726,17 +726,32 @@ pub(super) fn replace_form_fields(
     owner: Ref,
     fields: Vec<Ref>,
 ) -> Result<(), NativeEditError> {
-    graph.reserve_page_copy(owner)?;
+    let direct_slots = form_dict(graph, owner)?
+        .get("Fields")
+        .and_then(PdfValue::as_array)
+        .map_or(0, <[_]>::len);
+    let installed_bytes = fields
+        .len()
+        .saturating_sub(direct_slots)
+        .checked_mul(size_of::<PdfValue>())
+        .ok_or(Budget)?;
+    let available = graph.remaining_retained();
+    let work_budget = graph.remaining_work();
+    let mut remaining = available;
+    let mut work = work_budget;
+    graph.reserve_page_value(owner, &mut work, &mut remaining)?;
+    spend(&mut remaining, installed_bytes)?;
+    let retained = available - remaining;
+    graph.charge_page_work(work_budget - work)?;
+    graph.charge_page_retained(retained)?;
+    let mut values = Vec::new();
+    if values.try_reserve_exact(fields.len()).is_err() {
+        graph.release_page_retained(retained);
+        return Err(Budget);
+    }
+    values.extend(fields.into_iter().map(PdfValue::Reference));
     let direct = owner == catalog(graph)?;
-    set_form_fields(dict_mut(graph, owner)?, direct, fields)
-}
-
-fn set_form_fields(
-    values: &mut Dict,
-    direct: bool,
-    fields: Vec<Ref>,
-) -> Result<(), NativeEditError> {
-    mutable_form(values, direct)?.insert("Fields".into(), refs(fields));
+    mutable_form(dict_mut(graph, owner)?, direct)?.insert("Fields".into(), PdfValue::Array(values));
     Ok(())
 }
 
