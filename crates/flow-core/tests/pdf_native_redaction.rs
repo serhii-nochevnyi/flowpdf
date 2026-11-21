@@ -330,6 +330,7 @@ fn removed_redaction_mark_replays_after_page_rotation() {
     let binding = session.snapshot().binding;
     let original = mark(&session, 0, [10_000, 10_000, 20_000, 20_000]);
     session.add_redaction_mark(binding, 1, original).unwrap();
+    assert!(session.redaction_admitted());
     let stable_id = session.snapshot().page_state.order[0];
     let rotate = NativePageCommand::RotatePage {
         target: NativePageTarget { page: 0, stable_id },
@@ -341,7 +342,12 @@ fn removed_redaction_mark_replays_after_page_rotation() {
     let current_geometry = session.redaction_mark_geometry(original.page_id).unwrap();
     assert_ne!(current_geometry, original.geometry);
     assert_eq!(session.redaction_marks(), &[original]);
+    assert_eq!(
+        session.check_redaction_admission(),
+        Err(NativeSessionError::RevisionMismatch)
+    );
     session.remove_redaction_mark(current, 3, original).unwrap();
+    assert!(session.redaction_admitted());
     let receipt = session.last_redaction_mark();
     session.remove_redaction_mark(current, 3, original).unwrap();
     assert_eq!(session.last_redaction_mark(), receipt);
@@ -581,8 +587,11 @@ fn cancellation_and_ordinary_edits_invalidate_candidate_and_stale_marks() {
     assert!(session.publish_redaction(base, 3).is_err());
     assert!(session.stage_redaction(receipt.binding, 5).is_err());
     assert_eq!(session.redaction_marks().len(), 1);
+    assert!(!session.redaction_admitted());
     assert_accepted(&session, &prior, 1, &source);
     session.clear_redaction_marks(receipt.binding, 6).unwrap();
+    assert!(session.redaction_admitted());
+    assert_accepted(&session, &prior, 1, &source);
     add(&mut session, 7, 0, [11_000, 11_000, 13_000, 13_000]);
     session.stage_redaction(receipt.binding, 8).unwrap();
     assert!(
