@@ -2438,8 +2438,7 @@ impl NativeRegistryEntry {
                 return Err(NATIVE_RECONCILE);
             }
             match mark_action {
-                NativeRedactionMarkAction::Add { page_id, rect }
-                | NativeRedactionMarkAction::Remove { page_id, rect } => {
+                NativeRedactionMarkAction::Add { page_id, rect } => {
                     let geometry = self
                         .session
                         .redaction_mark_geometry(page_id)
@@ -2449,15 +2448,21 @@ impl NativeRegistryEntry {
                         geometry,
                         rect,
                     };
-                    if matches!(mark_action, NativeRedactionMarkAction::Add { .. }) {
-                        self.session
-                            .add_redaction_mark(binding, request_id, mark)
-                            .map_err(map_error)?;
-                    } else {
-                        self.session
-                            .remove_redaction_mark(binding, request_id, mark)
-                            .map_err(map_error)?;
-                    }
+                    self.session
+                        .add_redaction_mark(binding, request_id, mark)
+                        .map_err(map_error)?;
+                }
+                NativeRedactionMarkAction::Remove { page_id, rect } => {
+                    let mark = self
+                        .session
+                        .redaction_marks()
+                        .iter()
+                        .find(|mark| mark.page_id == page_id && mark.rect == rect)
+                        .copied()
+                        .ok_or_else(|| map_error(NativeSessionError::InvalidRedactionMark))?;
+                    self.session
+                        .remove_redaction_mark(binding, request_id, mark)
+                        .map_err(map_error)?;
                 }
                 NativeRedactionMarkAction::Clear => self
                     .session
