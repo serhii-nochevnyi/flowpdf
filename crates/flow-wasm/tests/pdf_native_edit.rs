@@ -1272,7 +1272,13 @@ fn redaction_wire_releases_only_the_verified_exact_output() {
     let lane_end = ordinary.find(r#","code":"#).unwrap();
     let ordinary = rehash_with_replacement(&ordinary, &ordinary[lane_start..lane_end], "");
     assert!(!verify_native_pdf_worker_response(ordinary.clone()));
-    assert!(verify_native_pdf_response(ordinary));
+    assert!(verify_native_pdf_response(ordinary.clone()));
+    std::thread::spawn(move || {
+        assert!(verify_native_pdf_response(ordinary.clone()));
+        assert!(!verify_native_pdf_worker_response(ordinary));
+    })
+    .join()
+    .unwrap();
     assert_eq!(published["snapshot"]["binding"]["revision"], 1);
     assert_eq!(published["snapshot"]["consumedRequest"], 7);
     assert_eq!(published["snapshot"]["outputHash"], candidate["hash"]);

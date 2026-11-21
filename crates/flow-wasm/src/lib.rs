@@ -2698,7 +2698,6 @@ impl NativeRegistryEntry {
             }
             NativeRequestLookup::Unseen => current.output_hash,
             NativeRequestLookup::Accepted(_) => {
-                // @contract: Snapshot history also records redaction publications.
                 self.session
                     .ordinary_command_receipt(binding, request_id)
                     .map_err(|error| error.code())?

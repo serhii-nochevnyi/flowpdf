@@ -923,7 +923,6 @@ impl NativePdfSession {
         Ok(record)
     }
 
-    /// Returns a retained ordinary edit receipt for the submitted base binding and request.
     pub fn ordinary_command_receipt(
         &self,
         binding: NativeBinding,
@@ -1209,7 +1208,10 @@ impl NativePdfSession {
             if binding.revision != record.base_revision {
                 return Err(NativeSessionError::RevisionMismatch);
             }
-            if command_digest(command).map(Some) != Ok(record.digest) {
+            let Some(digest) = record.digest else {
+                return Err(NativeSessionError::RequestConflict);
+            };
+            if command_digest(command) != Ok(digest) {
                 return Err(NativeSessionError::RequestConflict);
             }
             return Ok(record.receipt);
