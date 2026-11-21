@@ -1354,27 +1354,46 @@ fn published_redaction_preserves_strokes_inside_a_fractional_form_clip() {
 #[test]
 fn reference_redaction_pdf_keeps_its_supported_cid_mapping() {
     let source = include_bytes!("../../../fixtures/pdf-native/redaction.pdf");
-    let mut session = open(source);
+    let mut session = NativePdfSession::open_scoped(
+        source,
+        NativeEditLimits {
+            max_retained_bytes: 8 * 1024 * 1024
+                - (flow_core::NATIVE_REQUEST_HISTORY * std::mem::size_of::<(u64, [u8; 32])>()
+                    + 1024),
+            max_source_bytes: 8 * 1024 * 1024,
+            max_output_bytes: 8 * 1024 * 1024,
+            ..NativeEditLimits::default()
+        },
+        [5; 16],
+    )
+    .unwrap();
     assert!(session.redaction_admitted());
     let binding = session.snapshot().binding;
     let page_id = session.snapshot().page_state.order[0];
     let geometry = session.redaction_mark_geometry(page_id).unwrap();
-    let rect = [12_000, 70_000, 40_000, 92_000];
-    session
-        .add_redaction_mark(
-            binding,
-            1,
-            NativeRedactionMark {
-                page_id,
-                geometry,
-                rect,
-            },
-        )
-        .unwrap();
-    session.stage_redaction(binding, 2).unwrap();
-    let evidence = session.verify_redaction(binding, 2).unwrap();
+    let marks = [
+        [12_000, 70_000, 40_000, 92_000],
+        [16_000, 44_000, 28_000, 56_000],
+        [51_000, 46_000, 52_000, 47_000],
+        [96_000, 68_000, 112_000, 84_000],
+    ];
+    for (index, rect) in marks.into_iter().enumerate() {
+        session
+            .add_redaction_mark(
+                binding,
+                index as u64 + 1,
+                NativeRedactionMark {
+                    page_id,
+                    geometry,
+                    rect,
+                },
+            )
+            .unwrap();
+    }
+    session.stage_redaction(binding, 5).unwrap();
+    let evidence = session.verify_redaction(binding, 5).unwrap();
     assert!(evidence.checks_passed(), "{evidence:?}");
-    session.publish_redaction(binding, 2).unwrap();
+    session.publish_redaction(binding, 5).unwrap();
     assert_eq!(session.origin_bytes(), source);
     assert_ne!(session.output_bytes(), source);
 }

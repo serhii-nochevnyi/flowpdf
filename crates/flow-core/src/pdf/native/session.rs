@@ -697,7 +697,9 @@ impl NativePdfSession {
         let bytes = rewrite_with_workspace(&staged, staged.remaining_retained() + output_budget)?;
 
         let mut reopen_limits = staged.limits;
-        reopen_limits.max_retained_bytes = staged.remaining_retained();
+        reopen_limits.max_retained_bytes = (staged.remaining_retained() + output_budget)
+            .checked_sub(bytes.capacity())
+            .ok_or(NativeSessionError::Budget)?;
         reopen_limits.max_total_decoded_bytes = staged.remaining_decoded();
         if reopen_limits.max_retained_bytes == 0 || reopen_limits.max_total_decoded_bytes == 0 {
             return Err(NativeSessionError::Budget);
