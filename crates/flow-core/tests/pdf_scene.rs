@@ -159,6 +159,57 @@ fn single_content_stream_reads_at_low_nesting_limit() {
 }
 
 #[test]
+fn page_and_form_text_report_only_potential_paint_in_a_collapsed_clip() {
+    for (additional_clip, partial) in [("", true), ("80 20 10 12 re W n", false)] {
+        let text =
+            format!("22.125 20 0.004 12 re W n {additional_clip} BT /F1 10 Tf 20 20 Td (A) Tj ET");
+        let page_content = format!("q {text} Q /Form1 Do");
+        let bytes = pdf(vec![
+            (1, b"<< /Type /Catalog /Pages 2 0 R >>".to_vec()),
+            (2, b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec()),
+            (3, b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Resources << /Font << /F1 6 0 R >> /XObject << /Form1 5 0 R >> >> /Contents 4 0 R >>".to_vec()),
+            stream(4, "", page_content.as_bytes()),
+            stream(5, "/Type /XObject /Subtype /Form /BBox [0 0 100 100]", text.as_bytes()),
+            (6, b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /MissingWidth 500 /ToUnicode 7 0 R >>".to_vec()),
+            stream(7, "", b"begincmap
+1 beginbfchar
+<41> <0041>
+endbfchar
+endcmap
+"),
+        ]);
+        let reader = open_pdf(&bytes, Default::default()).unwrap();
+        let scene = read_pdf_scene(&reader, &PdfSceneRequest::default()).unwrap();
+        let page = &scene.pages[0];
+        let collapsed_clips = page.elements.iter().filter(|element| {
+            matches!(element, PdfSceneElement::Clip { value } if value.rect.width.raw() == 0)
+        });
+        assert_eq!(collapsed_clips.count(), 2);
+        assert!(
+            !page
+                .elements
+                .iter()
+                .any(|element| matches!(element, PdfSceneElement::Text { .. }))
+        );
+        assert_eq!(page.partial, partial);
+        assert_eq!(scene.report.partial, partial);
+        let diagnostic_objects: Vec<_> = page
+            .report
+            .diagnostics
+            .iter()
+            .map(|diagnostic| {
+                assert_eq!(diagnostic.code, PdfReadDiagnosticCode::PartialPage);
+                diagnostic.object_number.unwrap()
+            })
+            .collect();
+        assert_eq!(
+            diagnostic_objects.as_slice(),
+            if partial { &[4, 5][..] } else { &[] }
+        );
+    }
+}
+
+#[test]
 fn form_text_at_lower_clip_edge_is_retained_as_partial() {
     let bytes = pdf(vec![
         (1, b"<< /Type /Catalog /Pages 2 0 R >>".to_vec()),
