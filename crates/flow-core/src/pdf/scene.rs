@@ -657,6 +657,7 @@ enum RawPathCommand {
         LayoutUnit,
         LayoutUnit,
         LayoutUnit,
+        [f64; 2],
     ),
     Close,
 }
@@ -969,8 +970,10 @@ impl<'a> SceneBuilder<'a> {
                     let [x, y] = [point[0].precise_number(), point[1].precise_number()];
                     self.state.extend_path_paint_bounds([x, y, x, y]);
                 }
+                let end =
+                    std::array::from_fn(|i| operands[operands.len() - 2 + i].precise_number());
                 self.state.path.push(RawPathCommand::CurveTo(
-                    values[0], values[1], values[2], values[3], values[4], values[5],
+                    values[0], values[1], values[2], values[3], values[4], values[5], end,
                 ));
                 self.state.current_point = Some((values[4], values[5]));
             }
@@ -981,8 +984,10 @@ impl<'a> SceneBuilder<'a> {
                     self.state.extend_path_paint_bounds([x, y, x, y]);
                 }
                 let (x0, y0) = self.state.current_point.ok_or(PdfReadError::Syntax)?;
+                let end =
+                    std::array::from_fn(|i| operands[operands.len() - 2 + i].precise_number());
                 self.state.path.push(RawPathCommand::CurveTo(
-                    x0, y0, values[0], values[1], values[2], values[3],
+                    x0, y0, values[0], values[1], values[2], values[3], end,
                 ));
                 self.state.current_point = Some((values[2], values[3]));
             }
@@ -992,8 +997,10 @@ impl<'a> SceneBuilder<'a> {
                     let [x, y] = [point[0].precise_number(), point[1].precise_number()];
                     self.state.extend_path_paint_bounds([x, y, x, y]);
                 }
+                let end =
+                    std::array::from_fn(|i| operands[operands.len() - 2 + i].precise_number());
                 self.state.path.push(RawPathCommand::CurveTo(
-                    values[0], values[1], values[2], values[3], values[2], values[3],
+                    values[0], values[1], values[2], values[3], values[2], values[3], end,
                 ));
                 self.state.current_point = Some((values[2], values[3]));
             }
@@ -1189,7 +1196,9 @@ impl<'a> SceneBuilder<'a> {
             };
             if visible {
                 // @contract: Only provenance records the fill rule for painted paths.
-                if matches!(operator, "f*" | "B*" | "b*") {
+                if matches!(operator, "f*" | "B*" | "b*")
+                    || (stroke && contains_collapsed_stroke(&commands, &self.state.path))
+                {
                     self.report_partial(provenance.object_ref);
                 }
                 self.push_element(PdfSceneElement::Path {
@@ -2246,7 +2255,7 @@ fn transform_path(
                 let (x, y) = matrix.point(*x, *y)?;
                 Ok(PdfPathCommand::LineTo { x, y })
             }
-            RawPathCommand::CurveTo(x1, y1, x2, y2, x3, y3) => {
+            RawPathCommand::CurveTo(x1, y1, x2, y2, x3, y3, _) => {
                 let (x1, y1) = matrix.point(*x1, *y1)?;
                 let (x2, y2) = matrix.point(*x2, *y2)?;
                 let (x3, y3) = matrix.point(*x3, *y3)?;
@@ -2262,6 +2271,57 @@ fn transform_path(
             RawPathCommand::Close => Ok(PdfPathCommand::ClosePath),
         })
         .collect()
+}
+
+fn contains_collapsed_stroke(commands: &[PdfPathCommand], source: &[RawPathCommand]) -> bool {
+    let mut current = (None, None);
+    let mut start = current;
+    for (index, command) in commands.iter().enumerate() {
+        let precise = match source.get(index) {
+            Some(
+                RawPathCommand::MoveTo(_, _, point)
+                | RawPathCommand::LineTo(_, _, point)
+                | RawPathCommand::CurveTo(_, _, _, _, _, _, point),
+            ) => Some(*point),
+            _ => None,
+        };
+        match *command {
+            PdfPathCommand::MoveTo { x, y } => {
+                start = (Some((x, y)), precise);
+                current = start;
+            }
+            PdfPathCommand::LineTo { x, y } => {
+                let next = Some((x, y));
+                if current.0 == next {
+                    return true;
+                }
+                current = (next, precise);
+            }
+            PdfPathCommand::CurveTo {
+                x1,
+                y1,
+                x2,
+                y2,
+                x3,
+                y3,
+            } => {
+                let next = Some((x3, y3));
+                if current.0 == next && (x1, y1) == (x3, y3) && (x2, y2) == (x3, y3) {
+                    return true;
+                }
+                current = (next, precise);
+            }
+            PdfPathCommand::ClosePath => {
+                if current.0 == start.0
+                    && matches!((current.1, start.1), (Some(end), Some(first)) if end != first)
+                {
+                    return true;
+                }
+                current = start;
+            }
+        }
+    }
+    false
 }
 
 fn path_bounds(commands: &[PdfPathCommand]) -> Result<LayoutRect, PdfReadError> {

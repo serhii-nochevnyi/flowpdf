@@ -1,6 +1,6 @@
 use flow_core::pdf::{
-    PdfReadDiagnosticCode, PdfReadError, PdfReaderLimits, PdfSceneElement, PdfSceneRequest,
-    PdfTextMapping, open_pdf, read_pdf_scene,
+    PdfPathCommand, PdfReadDiagnosticCode, PdfReadError, PdfReaderLimits, PdfSceneElement,
+    PdfSceneRequest, PdfTextMapping, open_pdf, read_pdf_scene,
 };
 
 fn stream(id: u32, dictionary: &str, data: &[u8]) -> (u32, Vec<u8>) {
@@ -474,6 +474,64 @@ fn stroke_readback_proves_containment_against_the_active_clip() {
                 PdfReadDiagnosticCode::PartialPage
             );
             assert_eq!(page.report.diagnostics[0].object_number, Some(4));
+        }
+    }
+}
+
+#[test]
+fn stroke_readback_reports_collapsed_fixed_point_segments() {
+    for (path, partial, has_extent) in [
+        ("50 50 m 50.004 50 l", true, false),
+        ("50 50 m 50.004 50.004 50.004 50 50.004 50 c", true, false),
+        ("50 50 m 55 50 l 55.004 50 l", true, true),
+        ("50 50 m 51 50 l", false, true),
+        ("50 50 m 50 51 l", false, true),
+    ] {
+        let scene = read_content_scene(&format!("1 w {path} S"));
+        let page = &scene.pages[0];
+        let [PdfSceneElement::Path { value }] = page.elements.as_slice() else {
+            panic!("missing stroke for {path}");
+        };
+        assert!(value.stroke && !value.fill);
+        assert_eq!(
+            value.rect.width.raw() > 0 || value.rect.height.raw() > 0,
+            has_extent
+        );
+        assert_eq!(page.partial, partial, "{path}");
+        assert_eq!(scene.report.partial, partial, "{path}");
+        assert_eq!(page.report.diagnostics.len(), usize::from(partial));
+        if partial {
+            let diagnostic = &page.report.diagnostics[0];
+            assert_eq!(diagnostic.code, PdfReadDiagnosticCode::PartialPage);
+            assert_eq!(diagnostic.object_number, Some(4));
+        }
+    }
+}
+
+#[test]
+fn stroke_readback_reports_collapsed_closing_segments() {
+    for (closing, partial) in [
+        ("50.004 50 l h S", true),
+        ("50.004 50 l s", true),
+        ("70 50 60 50 50.004 50 c h S", true),
+        ("50 50.004 l h S", false),
+        ("50 50.004 l s", false),
+    ] {
+        let scene = read_content_scene(&format!(
+            "1 w 50 50.004 m 50 80 l 80 80 l 80 50 l {closing}"
+        ));
+        let page = &scene.pages[0];
+        let [PdfSceneElement::Path { value }] = page.elements.as_slice() else {
+            panic!("missing stroke for {closing}");
+        };
+        assert!(value.stroke && !value.fill);
+        assert_eq!(value.commands.last(), Some(&PdfPathCommand::ClosePath));
+        assert_eq!(page.partial, partial, "{closing}");
+        assert_eq!(scene.report.partial, partial, "{closing}");
+        let diagnostics = &page.report.diagnostics;
+        assert_eq!(diagnostics.len(), usize::from(partial), "{closing}");
+        if partial {
+            assert_eq!(diagnostics[0].code, PdfReadDiagnosticCode::PartialPage);
         }
     }
 }
