@@ -1020,17 +1020,58 @@ fn unique_field_name(field: Ref, used: &BTreeMap<String, Ref>) -> Result<String,
     Err(Budget)
 }
 
+fn indirect_array_slot_bytes(slot: &PdfValue, count: usize) -> Result<usize, NativeEditError> {
+    // @invariant: The owner copy covers direct slots. Indirect slots are charged to their original array.
+    if slot.as_reference().is_some() {
+        count.checked_mul(size_of::<PdfValue>()).ok_or(Budget)
+    } else {
+        Ok(0)
+    }
+}
+
 fn copy_annotations(
     graph: &mut NativePdfGraph,
     source: Ref,
     page: Ref,
-) -> Result<Vec<Ref>, NativeEditError> {
+) -> Result<Vec<PdfValue>, NativeSessionError> {
+    let Some(slot) = dict(graph, source)?.get("Annots") else {
+        return Ok(Vec::new());
+    };
+    let budget = graph.remaining_work();
+    let mut work = budget;
+    let values = reference_array(graph, slot, &mut work)?;
+    let count = values.len();
+    spend(&mut work, count.checked_mul(count).ok_or(Budget)?)?;
+    let scratch_bytes = count.checked_mul(size_of::<Ref>()).ok_or(Budget)?;
+    let installed_bytes = indirect_array_slot_bytes(slot, count)?;
+    let mut remaining = graph.remaining_retained();
+    spend(&mut remaining, scratch_bytes)?;
+    spend(&mut remaining, installed_bytes)?;
+    let mut original = Vec::new();
+    original.try_reserve_exact(count).map_err(|_| Budget)?;
+    for value in values {
+        original.push(value.as_reference().ok_or(Unsupported)?);
+    }
+    graph.charge_page_work(budget - work)?;
+    graph.charge_page_retained(installed_bytes)?;
+    with_page_scratch(graph, scratch_bytes, move |graph| {
+        Ok(copy_annotation_objects(graph, source, page, original)?)
+    })
+}
+
+fn copy_annotation_objects(
+    graph: &mut NativePdfGraph,
+    source: Ref,
+    page: Ref,
+    original: Vec<Ref>,
+) -> Result<Vec<PdfValue>, NativeEditError> {
     let mut copies = Vec::new();
-    let original = annotations(graph, source)?;
-    graph.charge_page_work(original.len().saturating_mul(original.len()))?;
+    copies
+        .try_reserve_exact(original.len())
+        .map_err(|_| Budget)?;
     let mut fields_update = None;
     let mut inventory_charge = 0;
-    for annot in original {
+    for annot in original.iter().copied() {
         let field = annotation_ownership(graph, source, annot)?;
         graph.reserve_page_copy(annot)?;
         let mut copy = dict(graph, annot)?.clone();
@@ -1066,20 +1107,27 @@ fn copy_annotations(
                 (widget, widget)
             } else {
                 graph.reserve_page_copy(field)?;
+                let children = dict(graph, field)?.get("Kids").ok_or(Malformed)?;
+                let installed_bytes = indirect_array_slot_bytes(children, 1)?;
+                graph.charge_page_retained(installed_bytes)?;
                 let mut field_copy = dict(graph, field)?.clone();
                 field_copy.remove("TM");
+                field_copy.remove("Kids");
                 field_copy.insert("T".into(), label);
                 let field_copy = allocate(graph, field_copy)?;
                 copy.insert("Parent".into(), PdfValue::Reference(field_copy));
                 let widget = allocate(graph, copy)?;
-                dict_mut(graph, field_copy)?.insert("Kids".into(), refs([widget]));
+                let mut children = Vec::new();
+                children.try_reserve_exact(1).map_err(|_| Budget)?;
+                children.push(PdfValue::Reference(widget));
+                dict_mut(graph, field_copy)?.insert("Kids".into(), PdfValue::Array(children));
                 (widget, field_copy)
             };
             fields.push(copied_field);
             names.insert(name, copied_field);
-            copies.push(widget);
+            copies.push(PdfValue::Reference(widget));
         } else {
-            copies.push(allocate(graph, copy)?);
+            copies.push(PdfValue::Reference(allocate(graph, copy)?));
         }
     }
     if let Some((form, fields, names)) = fields_update {
@@ -1646,7 +1694,7 @@ fn stage_with_order(
                     let new = allocate(graph, copy)?;
                     let annots = copy_annotations(graph, page, new)?;
                     if !annots.is_empty() {
-                        dict_mut(graph, new)?.insert("Annots".into(), refs(annots));
+                        dict_mut(graph, new)?.insert("Annots".into(), PdfValue::Array(annots));
                     }
                     new
                 } else {
@@ -2022,6 +2070,78 @@ mod tests {
                 );
             } else {
                 assert_eq!(result, Err(NativeSessionError::Budget));
+            }
+        }
+    }
+
+    #[test]
+    fn annotation_copy_reserves_source_scratch_and_indirect_installed_slots() {
+        let source = redaction_fixture("");
+        for indirect in [false, true] {
+            for short_by in [0, 1] {
+                let mut graph = NativePdfGraph::open(&source, NativeEditLimits::default()).unwrap();
+                let page = graph.pages[0];
+                let note = allocate(
+                    &mut graph,
+                    Dict::from([
+                        ("Type".into(), PdfValue::Name("Annot".into())),
+                        ("Subtype".into(), PdfValue::Name("Text".into())),
+                        ("P".into(), PdfValue::Reference(page)),
+                        (
+                            "Rect".into(),
+                            PdfValue::Array([10, 10, 20, 20].map(PdfValue::Integer).to_vec()),
+                        ),
+                        ("Contents".into(), PdfValue::String(b"Note".to_vec())),
+                    ]),
+                )
+                .unwrap();
+                let installed = refs([note]);
+                let installed = if indirect {
+                    PdfValue::Reference(allocate_value(&mut graph, installed).unwrap())
+                } else {
+                    installed
+                };
+                dict_mut(&mut graph, page)
+                    .unwrap()
+                    .insert("Annots".into(), installed.clone());
+                graph.refresh_page_graph(&BTreeSet::new()).unwrap();
+                graph.reserve_page_copy(page).unwrap();
+                let mut copy = dict(&graph, page).unwrap().clone();
+                copy.remove("Annots");
+                let duplicate = allocate(&mut graph, copy).unwrap();
+
+                let available = graph.remaining_retained();
+                let mut remaining = available;
+                graph
+                    .reserve_page_value(note, &mut graph.remaining_work(), &mut remaining)
+                    .unwrap();
+                let owner_bytes = available - remaining;
+                let scratch_bytes = size_of::<Ref>();
+                let installed_bytes = usize::from(indirect) * size_of::<PdfValue>();
+                graph
+                    .charge_page_retained(
+                        available - owner_bytes - scratch_bytes - installed_bytes + short_by,
+                    )
+                    .unwrap();
+
+                let result = copy_annotations(&mut graph, page, duplicate);
+                if short_by == 0 {
+                    let values = result.unwrap();
+                    assert_eq!(values.len(), 1);
+                    let copied = values[0].as_reference().unwrap();
+                    assert_ne!(copied, note);
+                    assert_eq!(reference(dict(&graph, copied).unwrap(), "P"), Ok(duplicate));
+                    assert_eq!(graph.remaining_retained(), scratch_bytes);
+                } else {
+                    assert!(matches!(result, Err(NativeSessionError::Budget)));
+                    assert!(!dict(&graph, duplicate).unwrap().contains_key("Annots"));
+                }
+                let annots = &dict(&graph, page).unwrap()["Annots"];
+                assert_eq!(annots.as_reference(), installed.as_reference());
+                let values = graph
+                    .resolve_metered(annots, &mut graph.remaining_work())
+                    .unwrap();
+                assert_eq!(values.as_array().unwrap()[0].as_reference(), Some(note));
             }
         }
     }
