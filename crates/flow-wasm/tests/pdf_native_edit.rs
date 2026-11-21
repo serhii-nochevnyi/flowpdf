@@ -487,7 +487,11 @@ fn page_preview_binds_the_rotated_crop_and_current_accepted_revision() {
             json!([2500, 4000, 14500, 12000]),
         ),
         ("rotation", raster["rotation"].clone(), json!(270)),
-        ("outputHash", current["outputHash"].clone(), json!(vec![0; 32])),
+        (
+            "outputHash",
+            current["outputHash"].clone(),
+            json!(vec![0; 32]),
+        ),
         (
             "originStoreHash",
             current["originStoreHash"].clone(),
@@ -992,6 +996,7 @@ fn redaction_wire_uses_the_accepted_revision_after_an_ordinary_edit() {
     });
     let applied = native_pdf_command(command.to_string());
     assert!(verify_native_pdf_worker_response(applied.clone()));
+    assert_eq!(native_pdf_command(command.to_string()), applied);
     let reply: Value = serde_json::from_str(&applied).unwrap();
     assert_eq!(reply["status"], "applied", "{reply}");
     let accepted = &reply["snapshot"];
@@ -1248,12 +1253,41 @@ fn redaction_wire_releases_only_the_verified_exact_output() {
     let blocked = call(native_pdf_command, edit.clone());
     assert_eq!(blocked["code"], "FLOW_PDF_NATIVE_REDACTION_BUSY");
     status_only(&blocked);
-    let published = call(native_pdf_redaction, publish.clone());
+    let published_wire = native_pdf_redaction(publish.to_string());
+    assert!(verify_native_pdf_worker_response(published_wire.clone()));
+    let published: Value = serde_json::from_str(&published_wire).unwrap();
     assert_eq!(published["status"], "published", "{published}");
+
+    let ordinary = rehash_with_replacement(
+        &published_wire,
+        r#""operation":"redaction""#,
+        r#""operation":"command""#,
+    );
+    let ordinary = rehash_with_replacement(
+        &ordinary,
+        r#""status":"published""#,
+        r#""status":"applied""#,
+    );
+    let lane_start = ordinary.find(r#","redaction":"#).unwrap();
+    let lane_end = ordinary.find(r#","code":"#).unwrap();
+    let ordinary = rehash_with_replacement(&ordinary, &ordinary[lane_start..lane_end], "");
+    assert!(!verify_native_pdf_worker_response(ordinary.clone()));
+    assert!(verify_native_pdf_response(ordinary.clone()));
+    std::thread::spawn(move || {
+        assert!(verify_native_pdf_response(ordinary.clone()));
+        assert!(!verify_native_pdf_worker_response(ordinary));
+    })
+    .join()
+    .unwrap();
     assert_eq!(published["snapshot"]["binding"]["revision"], 1);
     assert_eq!(published["snapshot"]["consumedRequest"], 7);
     assert_eq!(published["snapshot"]["outputHash"], candidate["hash"]);
     assert_ne!(published["snapshot"]["outputHex"], base["outputHex"]);
+    let mut reused_publication = edit.clone();
+    reused_publication["requestId"] = json!(7);
+    let refused = call(native_pdf_command, reused_publication);
+    assert_eq!(refused["code"], "FLOW_PDF_NATIVE_RECONCILIATION_REQUIRED");
+    status_only(&refused);
     let status_wire = native_pdf_redaction(lookup(candidate.clone()).to_string());
     assert!(verify_native_pdf_worker_response(status_wire.clone()));
     let published_status: Value = serde_json::from_str(&status_wire).unwrap();
@@ -1279,6 +1313,9 @@ fn redaction_wire_releases_only_the_verified_exact_output() {
     let advanced = call(native_pdf_command, edit);
     assert_eq!(advanced["status"], "applied", "{advanced}");
     assert_eq!(advanced["snapshot"]["binding"]["revision"], 2);
+    let reconciled = call(native_pdf_snapshot, bound("snapshot", 7, base));
+    assert_eq!(reconciled["status"], "accepted");
+    assert_eq!(reconciled["snapshot"], advanced["snapshot"]);
     assert!(!verify_native_pdf_worker_response(status_wire.clone()));
     assert!(verify_native_pdf_response(status_wire));
     let refused = call(native_pdf_redaction, publish);
