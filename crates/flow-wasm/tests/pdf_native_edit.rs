@@ -1,11 +1,13 @@
 use std::fmt::Write as _;
 
-#[cfg(not(target_arch = "wasm32"))]
-use flow_wasm::native_pdf_open_with_result_limit;
 use flow_wasm::{
     native_pdf_close, native_pdf_command, native_pdf_open, native_pdf_preview,
     native_pdf_redaction, native_pdf_snapshot, verify_native_pdf_response,
     verify_native_pdf_worker_response,
+};
+#[cfg(not(target_arch = "wasm32"))]
+use flow_wasm::{
+    native_pdf_open_with_result_limit, verify_native_pdf_response_with_retained_limit,
 };
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -114,15 +116,90 @@ fn open_verifies_source_bytes_and_returns_verifiable_reader_refusals() {
     );
 }
 
-#[test]
-fn verifies_original_storage_digest_and_stable_note_identity() {
-    let source = fixture_pdf(&[
+fn two_note_pdf() -> String {
+    fixture_pdf(&[
         "<< /Type /Catalog /Pages 2 0 R >>",
         "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
         "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 400] /Annots [4 0 R 5 0 R] >>",
         "<< /Type /Annot /Subtype /Text /P 3 0 R /Contents (First) /Rect [1 2 3 4] >>",
         "<< /Type /Annot /Subtype /Text /P 3 0 R /Contents (Second) /Rect [5 6 7 8] >>",
-    ]);
+    ])
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn detached_wire_notes_fit_the_core_projection_allowance() {
+    use flow_core::{NativeEditLimits, NativePdfAnnotation, NativePdfSession};
+
+    let source = two_note_pdf();
+    let bytes = source.as_bytes();
+    let opened = native_pdf_open(open_request(bytes).to_string());
+    assert!(verify_native_pdf_worker_response(opened.clone()));
+    let reply: Value = serde_json::from_str(&opened).unwrap();
+    assert_eq!(reply["status"], "opened");
+    let wire = &reply["snapshot"];
+
+    let limits = NativeEditLimits::default();
+    let session = NativePdfSession::open_scoped(bytes, limits, [1; 16]).unwrap();
+    let snapshot = session.snapshot();
+    let notes: Vec<_> = snapshot.scene.pages[0]
+        .annotations
+        .iter()
+        .map(|annotation| {
+            let NativePdfAnnotation::PlainNote(note) = annotation else {
+                panic!("expected a plain note");
+            };
+            let id = serde_json::to_value(note.id).unwrap().as_u64().unwrap();
+            (0, note.object, id)
+        })
+        .collect();
+    assert_eq!(notes.len(), 2);
+    let binding = serde_json::from_value(wire["binding"].clone()).unwrap();
+    let redaction_admitted = wire["redactionAdmission"] == "supported";
+    let verify_core = |max_retained_bytes| {
+        NativePdfSession::verify_page_and_field_projection_with_objects(
+            bytes,
+            NativeEditLimits {
+                max_retained_bytes,
+                ..limits
+            },
+            binding,
+            snapshot.scene.scene_hash,
+            Some(&snapshot.scene.object_pages),
+            &snapshot.page_state,
+            &snapshot.fields,
+            &notes,
+            redaction_admitted,
+            None,
+        ) == Ok(true)
+    };
+    let mut low = bytes.len();
+    let mut high = 64 * 1024;
+    assert!(verify_core(high));
+    while low + 1 < high {
+        let mid = (low + high) / 2;
+        if verify_core(mid) {
+            high = mid;
+        } else {
+            low = mid;
+        }
+    }
+
+    std::thread::spawn(move || {
+        assert!(verify_native_pdf_response_with_retained_limit(
+            &opened, high
+        ));
+        assert!(!verify_native_pdf_response_with_retained_limit(
+            &opened, low
+        ));
+    })
+    .join()
+    .unwrap();
+}
+
+#[test]
+fn verifies_original_storage_digest_and_stable_note_identity() {
+    let source = two_note_pdf();
     let request = open_request(source.as_bytes());
     let opened = native_pdf_open(request.to_string());
     assert!(verify_native_pdf_worker_response(opened.clone()));
@@ -1065,6 +1142,7 @@ fn redaction_wire_selectively_removes_stored_marks_after_page_rotation() {
     let opened = call(native_pdf_open, open_request(source.as_bytes()));
     assert_eq!(opened["status"], "opened", "{opened}");
     let base = &opened["snapshot"];
+    assert_eq!(base["redactionAdmission"], "supported");
     let page_id = &base["pageState"]["order"][0];
     let first = [12000, 12000, 13000, 13000];
     let second = [42000, 42000, 43000, 43000];
@@ -1086,6 +1164,7 @@ fn redaction_wire_selectively_removes_stored_marks_after_page_rotation() {
     let accepted = &rotated["snapshot"];
     assert_eq!(accepted["scene"]["pages"][0]["geometry"]["rotation"], 90);
     assert_eq!(accepted["pageState"]["order"][0], *page_id);
+    assert_eq!(accepted["redactionAdmission"], "unavailable");
 
     let remove = redaction_request(5, accepted, mark("removeMark", first));
     let removed = call(native_pdf_redaction, remove.clone());
@@ -1107,6 +1186,11 @@ fn redaction_wire_selectively_removes_stored_marks_after_page_rotation() {
         redaction_request(6, accepted, mark("removeMark", second)),
     );
     assert_eq!(remaining["redaction"]["markCount"], 0, "{remaining}");
+    let readback = call(native_pdf_snapshot, bound("snapshot", 6, accepted));
+    assert_eq!(readback["status"], "unseen", "{readback}");
+    let mut restored = accepted.clone();
+    restored["redactionAdmission"] = json!("supported");
+    assert_eq!(readback["snapshot"], restored);
 }
 
 #[test]

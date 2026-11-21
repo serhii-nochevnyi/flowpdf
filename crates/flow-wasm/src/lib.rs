@@ -2980,6 +2980,7 @@ impl NativeVerifiedScene {
 fn verify_native_snapshot(
     response: &NativeResponse<NativeVerifiedScene>,
     require_live_session: bool,
+    limits: NativeEditLimits,
 ) -> Option<()> {
     let snapshot = response.snapshot.as_ref()?;
     let binding = response.binding?;
@@ -3025,21 +3026,16 @@ fn verify_native_snapshot(
         return None;
     }
     snapshot.scene.verify()?;
-    let claimed_notes: Vec<_> = snapshot
-        .scene
-        .pages
-        .iter()
-        .flat_map(|page| {
-            page.annotations
-                .iter()
-                .filter_map(move |annotation| match annotation {
-                    NativeVerifiedAnnotation::PlainNote { object, id, .. } => {
-                        Some((page.id, *object, *id))
-                    }
-                    _ => None,
-                })
-        })
-        .collect();
+    let claimed_notes = snapshot.scene.pages.iter().flat_map(|page| {
+        page.annotations
+            .iter()
+            .filter_map(move |annotation| match annotation {
+                NativeVerifiedAnnotation::PlainNote { object, id, .. } => {
+                    Some((page.id, *object, *id))
+                }
+                _ => None,
+            })
+    });
     NATIVE_REGISTRY.with(|registry| {
         let registry = registry.borrow();
         let entry = registry
@@ -3078,15 +3074,15 @@ fn verify_native_snapshot(
             }
         }
         // @contract: Wire imports already fit the redaction origin ceiling.
-        NativePdfSession::verify_page_and_field_projection_with_objects(
+        NativePdfSession::verify_page_and_field_projection_with_note_identities(
             &bytes,
-            native_edit_limits(),
+            limits,
             snapshot.binding,
             snapshot.scene.scene_hash,
             Some(&snapshot.scene.object_pages),
             &snapshot.page_state,
             &snapshot.fields,
-            &claimed_notes,
+            claimed_notes,
             matches!(
                 snapshot.redaction_admission,
                 NativeRedactionAdmission::Supported
@@ -3116,6 +3112,7 @@ fn verify_native_live_redaction(response: &NativeResponse<NativeVerifiedScene>) 
 fn verify_native_redaction_response(
     response: &NativeResponse<NativeVerifiedScene>,
     require_live_session: bool,
+    limits: NativeEditLimits,
 ) -> Option<()> {
     use NativeRedactionActionKind::*;
     use NativeWireVerificationStatus::{Passed, Pending};
@@ -3170,7 +3167,7 @@ fn verify_native_redaction_response(
                 .copied()
                 .filter(|id| candidate.affected_pages.contains(id))
                 .eq(candidate.affected_pages.iter().copied())
-            && verify_native_snapshot(response, require_live_session).is_some())
+            && verify_native_snapshot(response, require_live_session, limits).is_some())
         .then_some(());
     }
     if response.snapshot.is_some() {
@@ -3192,15 +3189,27 @@ fn verify_native_redaction_response(
 
 #[wasm_bindgen]
 pub fn verify_native_pdf_response(response_json: String) -> bool {
-    verify_native_pdf_response_inner(&response_json, false)
+    verify_native_pdf_response_inner(&response_json, false, native_edit_limits())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[doc(hidden)]
+pub fn verify_native_pdf_response_with_retained_limit(response_json: &str, limit: usize) -> bool {
+    let mut limits = native_edit_limits();
+    limits.max_retained_bytes = limits.max_retained_bytes.min(limit);
+    verify_native_pdf_response_inner(response_json, false, limits)
 }
 
 #[wasm_bindgen]
 pub fn verify_native_pdf_worker_response(response_json: String) -> bool {
-    verify_native_pdf_response_inner(&response_json, true)
+    verify_native_pdf_response_inner(&response_json, true, native_edit_limits())
 }
 
-fn verify_native_pdf_response_inner(response_json: &str, require_live_session: bool) -> bool {
+fn verify_native_pdf_response_inner(
+    response_json: &str,
+    require_live_session: bool,
+    limits: NativeEditLimits,
+) -> bool {
     if response_json.len() > NATIVE_PDF_RESULT {
         return false;
     }
@@ -3341,7 +3350,7 @@ fn verify_native_pdf_response_inner(response_json: &str, require_live_session: b
                     })
         }
         (NativeOperation::Redaction, NativeStatus::Redaction | NativeStatus::Published) => {
-            verify_native_redaction_response(&response, require_live_session).is_some()
+            verify_native_redaction_response(&response, require_live_session, limits).is_some()
                 && (!require_live_session || verify_native_live_redaction(&response).is_some())
         }
         (NativeOperation::Preview, NativeStatus::Preview) => {
@@ -3365,7 +3374,7 @@ fn verify_native_pdf_response_inner(response_json: &str, require_live_session: b
         _ => {
             response.request_id > 0
                 && response.code.is_none()
-                && verify_native_snapshot(&response, require_live_session).is_some()
+                && verify_native_snapshot(&response, require_live_session, limits).is_some()
         }
     };
     valid && native_result_hash(&response).is_ok_and(|actual| actual == supplied)

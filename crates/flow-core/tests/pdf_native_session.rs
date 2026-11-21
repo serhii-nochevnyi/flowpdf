@@ -492,6 +492,80 @@ fn pdf_with_objects(objects: &[&str]) -> String {
 }
 
 #[test]
+fn detached_projections_exhaust_the_shared_identity_allowance() {
+    let source = pdf_with_objects(&[
+        "<< /Type /Catalog /Pages 2 0 R >>",
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 400] >>",
+    ]);
+    let bytes = source.as_bytes();
+    let limits = NativeEditLimits::default();
+    let session = NativePdfSession::open_scoped(bytes, limits, [1; 16]).unwrap();
+    let snapshot = session.snapshot();
+    let scene = &snapshot.scene;
+    let combined = |limits, scene_hash| {
+        NativePdfSession::verify_page_and_field_projection_with_objects(
+            bytes,
+            limits,
+            snapshot.binding,
+            scene_hash,
+            Some(&scene.object_pages),
+            &snapshot.page_state,
+            &snapshot.fields,
+            &[],
+            false,
+            None,
+        )
+    };
+    let verify = |limits| {
+        [
+            combined(limits, scene.scene_hash),
+            NativePdfSession::verify_page_projection(
+                bytes,
+                limits,
+                snapshot.binding,
+                scene.scene_hash,
+                &snapshot.page_state,
+            ),
+            NativePdfSession::verify_edit_projection(
+                bytes,
+                limits,
+                snapshot.binding,
+                &scene.text_pages,
+                &scene.object_pages,
+            ),
+            NativePdfSession::verify_text_projection(
+                bytes,
+                limits,
+                snapshot.binding,
+                &scene.text_pages,
+            ),
+        ]
+    };
+    assert_eq!(verify(limits), [Ok(true), Ok(true), Ok(true), Ok(true)]);
+
+    let constrained = |max_retained_bytes| NativeEditLimits {
+        max_retained_bytes,
+        ..limits
+    };
+    let wrong_hash = [!scene.scene_hash[0]; 32];
+    let mut low = bytes.len();
+    let mut high = 64 * 1024;
+    assert_eq!(combined(constrained(high), wrong_hash), Ok(false));
+    while low + 1 < high {
+        let mid = (low + high) / 2;
+        if combined(constrained(mid), wrong_hash).is_ok() {
+            high = mid;
+        } else {
+            low = mid;
+        }
+    }
+    for result in verify(constrained(low)) {
+        assert_eq!(result, Err(NativeSessionError::Budget));
+    }
+}
+
+#[test]
 fn public_scene_preserves_indirect_arrays_after_note_edit() {
     use flow_core::pdf::{PdfSceneElement, PdfSceneRequest, open_pdf, read_pdf_scene};
 

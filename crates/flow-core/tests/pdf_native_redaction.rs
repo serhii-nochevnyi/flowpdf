@@ -330,6 +330,7 @@ fn removed_redaction_mark_replays_after_page_rotation() {
     let binding = session.snapshot().binding;
     let original = mark(&session, 0, [10_000, 10_000, 20_000, 20_000]);
     session.add_redaction_mark(binding, 1, original).unwrap();
+    assert!(session.redaction_admitted());
     let stable_id = session.snapshot().page_state.order[0];
     let rotate = NativePageCommand::RotatePage {
         target: NativePageTarget { page: 0, stable_id },
@@ -341,7 +342,12 @@ fn removed_redaction_mark_replays_after_page_rotation() {
     let current_geometry = session.redaction_mark_geometry(original.page_id).unwrap();
     assert_ne!(current_geometry, original.geometry);
     assert_eq!(session.redaction_marks(), &[original]);
+    assert_eq!(
+        session.check_redaction_admission(),
+        Err(NativeSessionError::RevisionMismatch)
+    );
     session.remove_redaction_mark(current, 3, original).unwrap();
+    assert!(session.redaction_admitted());
     let receipt = session.last_redaction_mark();
     session.remove_redaction_mark(current, 3, original).unwrap();
     assert_eq!(session.last_redaction_mark(), receipt);
@@ -581,8 +587,11 @@ fn cancellation_and_ordinary_edits_invalidate_candidate_and_stale_marks() {
     assert!(session.publish_redaction(base, 3).is_err());
     assert!(session.stage_redaction(receipt.binding, 5).is_err());
     assert_eq!(session.redaction_marks().len(), 1);
+    assert!(!session.redaction_admitted());
     assert_accepted(&session, &prior, 1, &source);
     session.clear_redaction_marks(receipt.binding, 6).unwrap();
+    assert!(session.redaction_admitted());
+    assert_accepted(&session, &prior, 1, &source);
     add(&mut session, 7, 0, [11_000, 11_000, 13_000, 13_000]);
     session.stage_redaction(receipt.binding, 8).unwrap();
     assert!(
@@ -1345,27 +1354,46 @@ fn published_redaction_preserves_strokes_inside_a_fractional_form_clip() {
 #[test]
 fn reference_redaction_pdf_keeps_its_supported_cid_mapping() {
     let source = include_bytes!("../../../fixtures/pdf-native/redaction.pdf");
-    let mut session = open(source);
+    let mut session = NativePdfSession::open_scoped(
+        source,
+        NativeEditLimits {
+            max_retained_bytes: 8 * 1024 * 1024
+                - (flow_core::NATIVE_REQUEST_HISTORY * std::mem::size_of::<(u64, [u8; 32])>()
+                    + 1024),
+            max_source_bytes: 8 * 1024 * 1024,
+            max_output_bytes: 8 * 1024 * 1024,
+            ..NativeEditLimits::default()
+        },
+        [5; 16],
+    )
+    .unwrap();
     assert!(session.redaction_admitted());
     let binding = session.snapshot().binding;
     let page_id = session.snapshot().page_state.order[0];
     let geometry = session.redaction_mark_geometry(page_id).unwrap();
-    let rect = [12_000, 70_000, 40_000, 92_000];
-    session
-        .add_redaction_mark(
-            binding,
-            1,
-            NativeRedactionMark {
-                page_id,
-                geometry,
-                rect,
-            },
-        )
-        .unwrap();
-    session.stage_redaction(binding, 2).unwrap();
-    let evidence = session.verify_redaction(binding, 2).unwrap();
+    let marks = [
+        [12_000, 70_000, 40_000, 92_000],
+        [16_000, 44_000, 28_000, 56_000],
+        [51_000, 46_000, 52_000, 47_000],
+        [96_000, 68_000, 112_000, 84_000],
+    ];
+    for (index, rect) in marks.into_iter().enumerate() {
+        session
+            .add_redaction_mark(
+                binding,
+                index as u64 + 1,
+                NativeRedactionMark {
+                    page_id,
+                    geometry,
+                    rect,
+                },
+            )
+            .unwrap();
+    }
+    session.stage_redaction(binding, 5).unwrap();
+    let evidence = session.verify_redaction(binding, 5).unwrap();
     assert!(evidence.checks_passed(), "{evidence:?}");
-    session.publish_redaction(binding, 2).unwrap();
+    session.publish_redaction(binding, 5).unwrap();
     assert_eq!(session.origin_bytes(), source);
     assert_ne!(session.output_bytes(), source);
 }
