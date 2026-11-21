@@ -1605,6 +1605,48 @@ fn duplicate_with_indirect_widget_arrays_refuses_atomically_one_byte_below_fit()
 }
 
 #[test]
+fn duplicate_with_widget_uses_cumulative_work() {
+    let bytes = split_text_widget_pdf("7 0 R", "8 0 R");
+    let open = |max_work| {
+        NativePdfSession::open_scoped(
+            &bytes,
+            NativeEditLimits {
+                max_work,
+                ..NativeEditLimits::default()
+            },
+            [6; 16],
+        )
+    };
+    let duplicate = |session: &mut NativePdfSession| {
+        let command = command("duplicatePage", 0, session.snapshot());
+        session.apply_page(session.snapshot().binding, 1, &command)
+    };
+    let work_fit = 1191;
+    let mut constrained = open(work_fit - 1).unwrap();
+    let before = constrained.snapshot().clone();
+    assert_eq!(duplicate(&mut constrained), Err(NativeSessionError::Budget));
+    assert_eq!(constrained.output_bytes(), bytes);
+    let after = constrained.snapshot();
+    assert_eq!(after.binding, before.binding);
+    assert_eq!(after.output_hash, before.output_hash);
+    assert_eq!(after.page_state, before.page_state);
+    assert_eq!(after.fields, before.fields);
+    assert_eq!(after.consumed_request, before.consumed_request);
+    assert_eq!(
+        constrained.lookup(before.binding, 1),
+        Ok(NativeRequestLookup::Unseen)
+    );
+
+    let mut exact = open(work_fit).unwrap();
+    duplicate(&mut exact).unwrap();
+    let [original, copy] = exact.snapshot().fields.as_slice() else {
+        panic!("expected two independent fields");
+    };
+    assert_ne!(original.object, copy.object);
+    assert_ne!(original.page, copy.page);
+}
+
+#[test]
 fn duplicate_skips_copy_names_reserved_by_read_only_fields() {
     let bytes = build_pdf(&[
         (0, "<< /Type /Catalog /Pages 2 0 R /AcroForm 6 0 R >>"),

@@ -847,14 +847,6 @@ fn widget_field(graph: &NativePdfGraph, annot: Ref) -> Result<Ref, NativeEditErr
     Ok(field)
 }
 
-pub(super) fn annotation_ownership(
-    graph: &NativePdfGraph,
-    page: Ref,
-    annot: Ref,
-) -> Result<Option<Ref>, NativeEditError> {
-    annotation_membership(graph, page, annot, true)
-}
-
 fn annotation_profile(
     graph: &NativePdfGraph,
     page: Ref,
@@ -1075,7 +1067,10 @@ fn copy_annotation_objects(
     let mut fields_update = None;
     let mut inventory_charge = 0;
     for annot in original.iter().copied() {
-        let field = annotation_ownership(graph, source, annot)?;
+        let budget = graph.remaining_work();
+        let mut work = budget;
+        let field = annotation_membership_metered(graph, source, annot, true, &mut work)?;
+        graph.charge_page_work(budget - work)?;
         graph.reserve_page_copy(annot)?;
         let mut copy = dict(graph, annot)?.clone();
         copy.insert("P".into(), PdfValue::Reference(page));
@@ -2073,6 +2068,59 @@ mod tests {
                 assert_eq!(graph.remaining_retained(), peak + order_bytes);
             } else {
                 assert_eq!(result, Err(NativeSessionError::Budget));
+            }
+        }
+    }
+
+    #[test]
+    fn widget_copy_debits_the_ownership_walk() {
+        let source = redaction_fixture("");
+        let open = || {
+            let mut graph = NativePdfGraph::open(&source, NativeEditLimits::default()).unwrap();
+            let page = graph.pages[0];
+            let widget = allocate(
+                &mut graph,
+                Dict::from([
+                    ("Type".into(), PdfValue::Name("Annot".into())),
+                    ("Subtype".into(), PdfValue::Name("Widget".into())),
+                    ("P".into(), PdfValue::Reference(page)),
+                    ("FT".into(), PdfValue::Name("Tx".into())),
+                    ("T".into(), PdfValue::String(b"Customer".to_vec())),
+                    (
+                        "Rect".into(),
+                        PdfValue::Array([10, 10, 20, 20].map(PdfValue::Integer).to_vec()),
+                    ),
+                ]),
+            )
+            .unwrap();
+            let root = catalog(&graph).unwrap();
+            dict_mut(&mut graph, root).unwrap().insert(
+                "AcroForm".into(),
+                PdfValue::Dictionary(Dict::from([("Fields".into(), refs([widget]))])),
+            );
+            dict_mut(&mut graph, page)
+                .unwrap()
+                .insert("Annots".into(), refs([widget]));
+            graph.refresh_page_graph(&BTreeSet::new()).unwrap();
+            graph.reserve_page_copy(page).unwrap();
+            let mut copy = dict(&graph, page).unwrap().clone();
+            copy.remove("Annots");
+            let target = allocate(&mut graph, copy).unwrap();
+            (graph, page, target)
+        };
+        let (mut graph, page, target) = open();
+        let work = graph.remaining_work();
+        assert_eq!(copy_annotations(&mut graph, page, target).unwrap().len(), 1);
+        let spent = 30;
+        assert_eq!(work - graph.remaining_work(), spent);
+        for short in [0, 1] {
+            let (mut graph, page, target) = open();
+            graph.charge_page_work(work - spent + short).unwrap();
+            let result = copy_annotations(&mut graph, page, target);
+            if short == 0 {
+                assert_eq!(result.unwrap().len(), 1);
+            } else {
+                assert!(matches!(result, Err(NativeSessionError::Budget)));
             }
         }
     }
