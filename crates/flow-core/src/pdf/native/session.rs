@@ -397,20 +397,23 @@ impl NativePdfSession {
             &mut remaining,
             self.candidate.as_ref().map_or(0, Candidate::retained),
         )?;
-        spend(
-            &mut remaining,
-            (self
-                .redaction_marks
-                .capacity()
-                .max(self.redaction_marks.len() + 1))
-                * std::mem::size_of::<NativeRedactionMark>(),
-        )?;
+        let mark_bytes = self.mark_bytes();
+        let new_capacity = self.redaction_marks.len() + 1;
+        let peak_mark_bytes = if new_capacity > self.redaction_marks.capacity() {
+            new_capacity
+                .checked_mul(std::mem::size_of::<NativeRedactionMark>())
+                .and_then(|new_bytes| mark_bytes.checked_add(new_bytes))
+                .ok_or(NativeSessionError::Budget)?
+        } else {
+            mark_bytes
+        };
+        spend(&mut remaining, peak_mark_bytes)?;
         self.redaction_marks
             .try_reserve_exact(1)
             .map_err(|_| NativeSessionError::Budget)?;
-        self.candidate = None;
         self.redaction_marks.push(mark);
         self.redaction_marks_binding = Some(binding);
+        self.candidate = None;
         self.redaction_admission.take();
         Ok(())
     }
@@ -1755,6 +1758,49 @@ mod tests {
             reopen_rewrite(&staged, &exact, output_budget, limits, &ids).unwrap();
         assert_eq!(reopened.original_bytes(), exact.as_slice());
         assert_eq!(remapped.len(), ids.len());
+    }
+
+    #[test]
+    fn redaction_mark_growth_charges_both_buffers_and_the_live_candidate() {
+        let source = super::super::tests::redaction_fixture("10 10 10 10 re f 40 40 10 10 re f");
+        let mut session =
+            NativePdfSession::open_scoped(&source, NativeEditLimits::default(), [1; 16]).unwrap();
+        let binding = session.snapshot.binding;
+        let page_id = session.snapshot.page_state.order[0];
+        let first = NativeRedactionMark {
+            page_id,
+            geometry: session.redaction_mark_geometry(page_id).unwrap(),
+            rect: [12_000, 12_000, 13_000, 13_000],
+        };
+        let second = NativeRedactionMark {
+            rect: [42_000, 42_000, 43_000, 43_000],
+            ..first
+        };
+        session.add_redaction_mark(binding, first).unwrap();
+        assert_eq!(session.redaction_marks.capacity(), 1);
+        let staged = session.stage_redaction(binding, 1).unwrap();
+        assert_eq!(session.check_redaction_admission(), Ok(()));
+        let peak = session.candidate.as_ref().unwrap().retained()
+            + 3 * std::mem::size_of::<NativeRedactionMark>();
+        session.remaining_retained = peak - 1;
+
+        session.add_redaction_mark(binding, first).unwrap();
+        assert_eq!(
+            session.add_redaction_mark(binding, second),
+            Err(NativeSessionError::Budget)
+        );
+        assert_eq!(session.snapshot.binding, binding);
+        assert_eq!(session.snapshot.output_hash, binding.origin_hash);
+        assert_eq!(session.output_bytes(), source);
+        assert_eq!(session.redaction_marks(), &[first]);
+        assert_eq!(session.redaction_marks_binding(), Some(binding));
+        assert_eq!(session.redaction_marks.capacity(), 1);
+        assert_eq!(session.stage_redaction(binding, 1), Ok(staged));
+
+        session.remaining_retained = peak;
+        session.add_redaction_mark(binding, second).unwrap();
+        assert_eq!(session.redaction_marks(), &[first, second]);
+        assert!(session.redaction_candidate_status().is_none());
     }
 
     #[test]
