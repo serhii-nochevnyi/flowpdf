@@ -514,6 +514,11 @@ impl<'a> Reservation<'a> {
         std::mem::take(&mut self.bytes)
     }
 
+    pub fn absorb(&mut self, other: Self) {
+        assert!(std::ptr::eq(self.workspace, other.workspace));
+        self.bytes += other.into_charge();
+    }
+
     pub fn workspace(&self) -> &'a Workspace {
         self.workspace
     }
