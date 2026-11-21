@@ -1629,13 +1629,25 @@ enum PreviewPaint<'a> {
 }
 
 impl RasterOutline<'_> {
-    fn covers_pixel(self, rect: Rect, work: &mut usize) -> VerifyResult<bool> {
+    fn covers_pixel(
+        self,
+        rect: Rect,
+        center_clipped: bool,
+        work: &mut usize,
+    ) -> VerifyResult<bool> {
         let stencil = self.stencil;
         if !contains(stencil.bounds, rect) {
             return Ok(false);
         }
         spend(work, stencil.edges + 1)?;
-        let rect = stencil.expand(rect.map(|coordinate| coordinate * stencil.scale));
+        let rect @ [l, b, r, t] = rect.map(|coordinate| coordinate * stencil.scale);
+        if center_clipped {
+            spend(work, stencil.edges + 1)?;
+            if !stencil.hits_scaled([l + r, b + t], 2, self.fill_rule.unwrap_or(false)) {
+                return Ok(false);
+            }
+        }
+        let rect = stencil.expand(rect);
         Ok(!stencil
             .segments()
             .any(|(a, b)| crosses_interior(a, b, rect)))
@@ -1906,10 +1918,6 @@ impl Grid {
         work: &mut usize,
         mut value: impl FnMut(Point) -> Option<Pixel>,
     ) -> VerifyResult<bool> {
-        let outline = match paint {
-            PreviewPaint::Outline(outline) => Some(outline),
-            _ => None,
-        };
         let [l, b, r, t] = bounds;
         let [x, y] = self.rotate([l, b]);
         let [u, v] = self.rotate([r, t]);
@@ -1937,7 +1945,8 @@ impl Grid {
                 let point @ [x, y] = self.unrotate(logical);
                 let index = (row - raster.first_row) * self.width + col;
                 let pixel = &mut raster.pixels[index];
-                let color = (inside(bounds, point) && inside(self.geometry.crop_box, point))
+                let center_clipped = !inside(self.geometry.crop_box, point);
+                let color = (!center_clipped && inside(bounds, point))
                     .then(|| value(point))
                     .flatten();
                 let Some(coverage) = raster.coverage.get_mut(index) else {
@@ -1955,11 +1964,23 @@ impl Grid {
                     r.min(x + half),
                     t.min(y + half),
                 ];
-                if let Some(outline) = outline {
-                    if color.is_none() && !outline.intersects_pixel(rect, work, raster.workspace)? {
+                if let PreviewPaint::Outline(outline) = paint {
+                    if (color.is_some() || center_clipped)
+                        && outline.covers_pixel(rect, center_clipped, work)?
+                    {
+                        *pixel = outline.ink;
+                        *coverage = PreviewCoverage::Clear;
+                    } else if color.is_some()
+                        || outline.intersects_pixel(rect, work, raster.workspace)?
+                    {
+                        coverage.paint_partial(pixel, color, Some(outline.ink));
+                    } else {
                         continue;
                     }
-                } else if !intersects(bounds, rect) {
+                    has_preview_coverage = true;
+                    continue;
+                }
+                if !intersects(bounds, rect) {
                     continue;
                 }
                 has_preview_coverage = true;
@@ -1978,21 +1999,7 @@ impl Grid {
                 }
                 if let PreviewPaint::Note(interior) = paint {
                     coverage.paint_note(pixel, bounds, interior, rect);
-                    continue;
                 }
-                if let Some(color) = color {
-                    let full = if let Some(outline) = outline {
-                        outline.covers_pixel(rect, work)?
-                    } else {
-                        contains(bounds, rect)
-                    };
-                    if full {
-                        *pixel = color;
-                        *coverage = PreviewCoverage::Clear;
-                        continue;
-                    }
-                }
-                coverage.paint_partial(pixel, color, outline.map(|outline| outline.ink));
             }
         }
         Ok(has_preview_coverage)
