@@ -1,11 +1,12 @@
 use flow_core::layout::LayoutUnit;
 use flow_core::pdf::native::{
-    NativeEditLimits, NativeNoteCommand, NativeObjectCommand, NativeObjectRefusal,
-    NativePdfSession, NativeRedactionMark, NativeRequestLookup, NativeSessionError,
+    NativeEditLimits, NativeNoteCommand, NativeObjectCommand, NativeObjectPage,
+    NativeObjectRefusal, NativePdfSession, NativeRedactionMark, NativeRequestLookup,
+    NativeSessionError,
 };
 use flow_core::pdf::{
-    PdfPathCommand, PdfReadDiagnosticCode, PdfReaderLimits, PdfSceneElement, PdfSceneRequest,
-    open_pdf, read_pdf_scene,
+    NativePdfAnnotation, PdfPathCommand, PdfReadDiagnosticCode, PdfReaderLimits, PdfSceneElement,
+    PdfSceneRequest, open_pdf, read_pdf_scene,
 };
 use image::ImageDecoder;
 use serde_json::{Value, json};
@@ -609,6 +610,89 @@ fn object_scan_workspace_refusal_keeps_vector_page_open_for_notes() {
     assert_eq!(session.snapshot().scene.pages[0].annotations.len(), 1);
     assert!(!session.snapshot().scene.object_pages[0].can_add);
     assert_eq!(session.origin_bytes(), source);
+}
+
+#[test]
+fn note_edit_keeps_conservative_object_availability_in_detached_verification() {
+    use std::io::Write;
+
+    let mut content = Vec::new();
+    for x in 0..96 {
+        writeln!(&mut content, "0 1 0 rg {x} 20 4 4 re f").unwrap();
+    }
+    let source = fixture(&content, false, "", &[]);
+    let limits = NativeEditLimits {
+        max_retained_bytes: 96 * 1024,
+        ..NativeEditLimits::default()
+    };
+    let mut session = NativePdfSession::open_scoped(&source, limits, [7; 16]).unwrap();
+    let binding = session.snapshot().binding;
+    let page = session.snapshot().scene.pages[0].id;
+    let receipt = session
+        .apply(
+            binding,
+            1,
+            &NativeNoteCommand::Add {
+                page,
+                rect: [60, 60, 80, 80],
+                contents: "Chart note".into(),
+            },
+        )
+        .unwrap();
+    assert_eq!(receipt.binding.revision, 1);
+    let snapshot = session.snapshot();
+    assert_eq!(snapshot.consumed_request, receipt.request_id);
+    assert_eq!(snapshot.output_hash, receipt.output_hash);
+    assert_eq!(snapshot.scene.scene_hash, receipt.scene_hash);
+    assert_eq!(
+        session.lookup(binding, receipt.request_id),
+        Ok(NativeRequestLookup::Accepted(receipt))
+    );
+    let rows = &snapshot.scene.object_pages;
+    assert!(!rows[0].can_add && rows[0].objects.is_empty() && rows[0].refusal.is_none());
+    let reopened = open(session.output_bytes());
+    let fresh = &reopened.snapshot().scene.object_pages[0];
+    assert!(fresh.can_add);
+    assert_eq!(fresh.objects.len(), 96);
+    assert_ne!(
+        reopened.snapshot().scene.scene_hash,
+        snapshot.scene.scene_hash
+    );
+    let [NativePdfAnnotation::PlainNote(note)] = snapshot.scene.pages[0].annotations.as_slice()
+    else {
+        panic!("expected the saved chart note")
+    };
+    assert_eq!(note.contents, "Chart note");
+    assert_eq!(note.id, receipt.note);
+    let notes = [(0, note.object, json!(note.id).as_u64().unwrap())];
+    let verify = |claimed: &[NativeObjectPage], hash, live| {
+        NativePdfSession::verify_page_and_field_projection_with_objects(
+            session.output_bytes(),
+            NativeEditLimits::default(),
+            receipt.binding,
+            hash,
+            Some(claimed),
+            &snapshot.page_state,
+            &snapshot.fields,
+            &notes,
+            session.redaction_admitted(),
+            live,
+        )
+        .unwrap()
+    };
+    assert!(verify(rows, snapshot.scene.scene_hash, Some(&session)));
+    assert!(verify(rows, snapshot.scene.scene_hash, None));
+    let mut altered = rows.clone();
+    altered[0].can_add = true;
+    assert!(!verify(&altered, snapshot.scene.scene_hash, None));
+    assert!(!verify(&altered, snapshot.scene.scene_hash, Some(&session)));
+    altered[0].can_add = false;
+    altered[0].refusal = Some(NativeObjectRefusal::Profile);
+    assert!(!verify(&altered, snapshot.scene.scene_hash, None));
+    altered[0].refusal = None;
+    altered[0].objects.push(fresh.objects[0].clone());
+    assert!(!verify(&altered, snapshot.scene.scene_hash, None));
+    assert!(!verify(rows, [0; 32], None));
 }
 
 #[test]

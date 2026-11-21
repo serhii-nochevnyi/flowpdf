@@ -3050,11 +3050,12 @@ fn verify_native_snapshot(
             return None;
         }
         // @contract: Wire imports already fit the redaction origin ceiling.
-        NativePdfSession::verify_page_and_field_projection(
+        NativePdfSession::verify_page_and_field_projection_with_objects(
             &bytes,
             native_edit_limits(),
             snapshot.binding,
             snapshot.scene.scene_hash,
+            Some(&snapshot.scene.object_pages),
             &snapshot.page_state,
             &snapshot.fields,
             &claimed_notes,

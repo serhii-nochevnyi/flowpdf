@@ -268,6 +268,111 @@ fn preview_request(request_id: u64, snapshot: &Value, page_id: Value) -> Value {
 }
 
 #[test]
+fn detached_snapshot_verification_keeps_conservative_object_availability() {
+    let height = 780;
+    let mut paint = String::from("q 100 0 0 100 0 0 cm /Image Do Q\n");
+    for tile in 0..96 {
+        let x = (tile % 12) * 20;
+        let y = (tile / 12) * 20 + 110;
+        for point in 0..32 {
+            let angle = f64::from(point) * std::f64::consts::TAU / 32.0;
+            let px = f64::from(x + 10) + 8.0 * angle.cos();
+            let py = f64::from(y + 10) + 8.0 * angle.sin();
+            writeln!(
+                paint,
+                "{px:.24} {py:.24} {}",
+                if point == 0 { "m" } else { "l" }
+            )
+            .unwrap();
+        }
+        paint.push_str("h f\n");
+    }
+    let pixels: Vec<u8> = (0..height)
+        .flat_map(|row| (0..640).map(move |column| ((row + column) / 5 % 256) as u8))
+        .collect();
+    let mut image = format!("<< /Type /XObject /Subtype /Image /Width 640 /Height {height} /ColorSpace /DeviceGray /BitsPerComponent 8 /Length {} >>\nstream\n", pixels.len()).into_bytes();
+    image.extend_from_slice(&pixels);
+    image.extend_from_slice(b"\nendstream");
+    let content = format!("<< /Length {} >>\nstream\n{paint}\nendstream", paint.len());
+    let bytes = fixture_pdf_bytes(&[
+        b"<< /Type /Catalog /Pages 2 0 R >>".as_slice(),
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 300 300] >>",
+        b"<< /Type /Page /Parent 2 0 R /Contents 4 0 R /Resources << /XObject << /Image 5 0 R >> >> >>",
+        content.as_bytes(), &image,
+    ]);
+    let opened = call(native_pdf_open, open_request(&bytes));
+    assert_eq!(opened["status"], "opened");
+    let base = &opened["snapshot"];
+    assert_eq!(
+        base["scene"]["objectPages"][0]["objects"]
+            .as_array()
+            .unwrap()
+            .len(),
+        97
+    );
+    let mut request = bound("command", 2, base);
+    request["command"] =
+        json!({"kind":"add","page":0,"rect":[12,12,40,32],"contents":"Chart note"});
+    request["outputHash"] = base["outputHash"].clone();
+    let applied = native_pdf_command(request.to_string());
+    assert!(verify_native_pdf_worker_response(applied.clone()));
+    let reply: Value = serde_json::from_str(&applied).unwrap();
+    assert_eq!(reply["status"], "applied", "{}", reply["code"]);
+    assert_eq!(reply["binding"], base["binding"]);
+    assert_eq!(reply["requestId"], request["requestId"]);
+    let accepted = &reply["snapshot"];
+    assert_eq!(accepted["binding"]["revision"], 1);
+    assert_eq!(accepted["consumedRequest"], request["requestId"]);
+    assert_eq!(
+        accepted["scene"]["pages"][0]["annotations"][0]["contents"],
+        "Chart note"
+    );
+    assert_eq!(
+        accepted["scene"]["objectPages"],
+        json!([
+            {"page": 0, "canAdd": false, "objects": [], "refusal": null}
+        ])
+    );
+    assert_ne!(accepted["outputHex"], base["outputHex"]);
+    assert_eq!(native_pdf_command(request.to_string()), applied);
+    let readback = native_pdf_snapshot(bound("snapshot", 2, base).to_string());
+    assert!(verify_native_pdf_worker_response(readback.clone()));
+    let snapshot_reply: Value = serde_json::from_str(&readback).unwrap();
+    assert_eq!(snapshot_reply["status"], "accepted");
+    assert_eq!(snapshot_reply["binding"], base["binding"]);
+    assert_eq!(snapshot_reply["requestId"], request["requestId"]);
+    assert_eq!(&snapshot_reply["snapshot"], accepted);
+
+    let wrong_request =
+        rehash_with_replacement(&readback, r#""requestId":2,"#, r#""requestId":3,"#);
+    assert!(!verify_native_pdf_worker_response(wrong_request.clone()));
+    let output_hex = accepted["outputHex"].as_str().unwrap();
+    let output: Vec<_> = (0..output_hex.len())
+        .step_by(2)
+        .map(|offset| u8::from_str_radix(&output_hex[offset..offset + 2], 16).unwrap())
+        .collect();
+    std::thread::spawn(move || {
+        for response in [applied, readback] {
+            assert!(verify_native_pdf_response(response.clone()));
+            assert!(!verify_native_pdf_worker_response(response));
+        }
+        assert!(!verify_native_pdf_response(wrong_request));
+
+        let reopened = call(native_pdf_open, open_request(&output));
+        assert_eq!(reopened["status"], "opened", "{}", reopened["code"]);
+        assert_eq!(
+            reopened["snapshot"]["scene"]["objectPages"][0]["objects"]
+                .as_array()
+                .unwrap()
+                .len(),
+            97
+        );
+    })
+    .join()
+    .unwrap();
+}
+
+#[test]
 fn letter_page_preview_uses_default_worker_budget() {
     let opened = call(native_pdf_open, open_request(pdf(612).as_bytes()));
     let base = &opened["snapshot"];
