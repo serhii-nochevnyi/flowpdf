@@ -122,6 +122,12 @@ struct Content<'a> {
     copy_on_write: bool,
 }
 
+struct RecognizedPage<'a, 'w> {
+    content: Content<'a>,
+    islands: Vec<Island>,
+    text_memory: Reservation<'w>,
+}
+
 fn value<'a>(graph: &'a NativePdfGraph, mut value: &'a PdfValue) -> Option<&'a PdfValue> {
     for _ in 0..=graph.limits.max_nesting {
         match value {
@@ -1284,7 +1290,7 @@ impl<'a, 'w> Recognition<'a, 'w> {
         output_hash: [u8; 32],
         binding: NativeBinding,
         memory: &mut Reservation<'_>,
-    ) -> RecognitionResult<Option<(Content<'a>, Vec<Island>)>> {
+    ) -> RecognitionResult<Option<RecognizedPage<'a, 'w>>> {
         use NativeTextRefusal::Layout;
         let Some(content) = content(self.graph, page)? else {
             return Ok(None);
@@ -1302,12 +1308,13 @@ impl<'a, 'w> Recognition<'a, 'w> {
             .ok_or(Layout)?
             .bounds()
             .map(|point| point * SCALE);
+        let mut text_memory = self.workspace.scope();
         let mut islands = Vec::<Island>::new();
         for show in shows {
             let font = self.font(content.resources, &show.font)?;
             let codes = font.decode(&show.codes)?;
             let max_text = (show.codes.len() / font.code_width * 4).min(NATIVE_MAX_TEXT_BYTES);
-            memory.grow(max_text).map_err(|_| Budget)?;
+            text_memory.grow(max_text).map_err(|_| Budget)?;
             let mut text = String::with_capacity(max_text);
             let metrics = font.measure(&show, codes, |scalar| text.push(scalar))?;
             let bounds = metrics.wire_bounds()?;
@@ -1355,7 +1362,11 @@ impl<'a, 'w> Recognition<'a, 'w> {
                 )
                 .map_err(|_| Budget)?;
         }
-        Ok(Some((content, islands)))
+        Ok(Some(RecognizedPage {
+            content,
+            islands,
+            text_memory,
+        }))
     }
 }
 
@@ -1373,23 +1384,23 @@ pub(super) fn project(
     for page in pages {
         let mut memory = workspace.scope();
         let (islands, refusal) = match recognition.page(page, output_hash, binding, &mut memory) {
-            Ok(Some((_, islands))) => {
-                projected
-                    .grow(
-                        islands
-                            .iter()
-                            .map(|island| 128 + island.view.text.capacity())
-                            .sum(),
-                    )
-                    .map_err(|_| Budget)?;
-                let mut views = Vec::with_capacity(islands.len());
-                views.extend(islands.into_iter().map(|island| island.view));
+            Ok(Some(page)) => {
+                let count = page.islands.len();
+                let view_bytes = count
+                    .checked_mul(size_of::<NativeTextIsland>())
+                    .ok_or(Budget)?;
+                projected.grow(view_bytes).map_err(|_| Budget)?;
+                let mut views = Vec::new();
+                views.try_reserve_exact(count).map_err(|_| Budget)?;
+                projected.absorb(page.text_memory);
+                views.extend(page.islands.into_iter().map(|island| island.view));
                 (views, None)
             }
             Ok(None) => continue,
             Err(NativeSessionError::Text(error)) => (Vec::new(), Some(error)),
             Err(error) => return Err(error),
         };
+        drop(memory);
         projected
             .push(
                 &mut result,
@@ -1433,10 +1444,12 @@ pub(super) fn stage<'a>(
     let (index, span, size, original_reference, copy_on_write, original_bounds, operand) = {
         let mut memory = workspace.scope();
         let mut recognition = Recognition::new(graph, workspace);
-        let (content, islands) = recognition
+        let recognized = recognition
             .page(page, output_hash, binding, &mut memory)?
             .ok_or(TargetUnavailable)?;
-        let (index, island) = islands
+        let content = &recognized.content;
+        let (index, island) = recognized
+            .islands
             .iter()
             .enumerate()
             .find(|(_, island)| island.view.id == *id)
@@ -1565,6 +1578,109 @@ pub(super) fn verify(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn projection_transfers_text_charges_at_exact_fit() {
+        let bytes = text_projection_fixture();
+        let graph =
+            NativePdfGraph::open(&bytes, super::super::NativeEditLimits::default()).unwrap();
+        let ample = graph.remaining_retained();
+        let mut notes_remaining = ample;
+        let pages =
+            super::super::notes::project(&graph, &BTreeMap::new(), &mut notes_remaining).unwrap();
+        let hash = *blake3::hash(&bytes).as_bytes();
+        let binding = NativeBinding {
+            epoch: [7; 16],
+            session_id: 1,
+            origin_hash: hash,
+            revision: 0,
+        };
+        let view_bytes = 4 * size_of::<NativeTextIsland>();
+        let fit = {
+            let workspace = Workspace::new(ample);
+            let mut recognition = Recognition::new(&graph, &workspace);
+            let mut scratch = workspace.scope();
+            let _recognized = recognition
+                .page(&pages[0], hash, binding, &mut scratch)
+                .unwrap()
+                .unwrap();
+            ample - workspace.remaining() + view_bytes
+        };
+        let mut retained = fit;
+        let result = project(&graph, &pages, hash, binding, &mut retained).unwrap();
+        let [page] = result.as_slice() else {
+            panic!("expected one projected page");
+        };
+        assert_eq!(page.refusal, None);
+        assert_eq!(page.islands.len(), 4);
+        assert!(page.islands.iter().all(|island| island.text == "AAAA"));
+        let string_bytes: usize = page
+            .islands
+            .iter()
+            .map(|island| island.text.capacity())
+            .sum();
+        assert_eq!(
+            fit - retained,
+            result.capacity() * size_of::<NativeTextPage>() + view_bytes + string_bytes
+        );
+
+        let mut short = fit - 1;
+        assert_eq!(
+            project(&graph, &pages, hash, binding, &mut short),
+            Err(Budget)
+        );
+        assert_eq!(short, fit - 1);
+    }
+
+    fn text_projection_fixture() -> Vec<u8> {
+        use std::io::Write;
+
+        let stream = |entries: &str, data: &[u8]| {
+            let mut object =
+                format!("<< /Length {} {entries} >>\nstream\n", data.len()).into_bytes();
+            object.extend_from_slice(data);
+            object.extend_from_slice(b"\nendstream");
+            object
+        };
+        let font = include_bytes!("../../../data/NotoSans-Regular.ttf");
+        let content = (1..=4)
+            .map(|line| format!("BT /F1 12 Tf 20 {} Td (AAAA) Tj ET\n", line * 20))
+            .collect::<String>();
+        let objects = [
+            b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+            b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>".to_vec(),
+            stream("", content.as_bytes()),
+            b"<< /Type /Font /Subtype /TrueType /BaseFont /NotoSans-Regular /Encoding /WinAnsiEncoding /FirstChar 65 /LastChar 65 /Widths [639] /FontDescriptor 6 0 R /ToUnicode 7 0 R >>".to_vec(),
+            b"<< /Type /FontDescriptor /FontName /NotoSans-Regular /Flags 32 /FontFile2 8 0 R >>".to_vec(),
+            stream("", b"/CIDInit /ProcSet findresource begin 12 dict begin begincmap\n/CMapType 2 def\n/CMapName /Example def\n1 begincodespacerange\n<00> <FF>\nendcodespacerange\n1 beginbfchar\n<41> <0041>\nendbfchar\nendcmap CMapName currentdict /CMap defineresource pop\nend end"),
+            stream(&format!("/Length1 {}", font.len()), font),
+        ];
+        let mut pdf = b"%PDF-1.7\n".to_vec();
+        let offsets = objects
+            .iter()
+            .enumerate()
+            .map(|(index, object)| {
+                let offset = pdf.len();
+                writeln!(pdf, "{} 0 obj", index + 1).unwrap();
+                pdf.extend_from_slice(object);
+                pdf.extend_from_slice(b"\nendobj\n");
+                offset
+            })
+            .collect::<Vec<_>>();
+        let xref = pdf.len();
+        let size = offsets.len() + 1;
+        write!(pdf, "xref\n0 {size}\n0000000000 65535 f \n").unwrap();
+        for offset in offsets {
+            writeln!(pdf, "{offset:010} 00000 n ").unwrap();
+        }
+        write!(
+            pdf,
+            "trailer\n<< /Size {size} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n"
+        )
+        .unwrap();
+        pdf
+    }
 
     #[test]
     fn cmap_ranges_and_comments_preserve_exact_code_boundaries() {
