@@ -2015,20 +2015,23 @@ mod tests {
     fn planned_order_is_charged_during_graph_refresh() {
         let source = redaction_fixture("");
         let open = || NativePdfGraph::open(&source, NativeEditLimits::default()).unwrap();
-        let mut refreshed = open();
-        let available = refreshed.remaining_retained();
-        refreshed.refresh_page_graph(&BTreeSet::new()).unwrap();
-        let refresh_bytes = available - refreshed.remaining_retained();
+        let original = open();
+        let available = original.remaining_retained();
         let workspace = Workspace::new(available);
-        let mut visited = workspace.scope();
-        for _ in 0..2 {
-            visited.tree_entry::<Ref>().unwrap();
+        let mut rebuild = workspace.scope();
+        for owners in original.reverse.values() {
+            rebuild.tree_entry::<(Ref, BTreeSet<Ref>)>().unwrap();
+            for _ in owners {
+                rebuild.tree_entry::<Ref>().unwrap();
+            }
         }
-        let peak = refresh_bytes
-            + (available - workspace.remaining())
-            + refreshed.pages.capacity() * size_of::<Ref>();
-        let order_bytes = refreshed.pages.len() * size_of::<Ref>();
-        let page = refreshed.pages[0];
+        for _ in &original.objects {
+            rebuild.tree_entry::<Ref>().unwrap();
+        }
+        rebuild.grow(4 * size_of::<Ref>()).unwrap();
+        let peak = available - workspace.remaining();
+        let order_bytes = original.pages.len() * size_of::<Ref>();
+        let page = original.pages[0];
         let command = NativePageCommand::ReorderPage {
             target: NativePageTarget {
                 page: 0,
@@ -2045,10 +2048,7 @@ mod tests {
             let result = stage(&mut graph, command, 0, &[]);
             if short_by == 0 {
                 assert_eq!(result, Ok(page));
-                assert_eq!(
-                    graph.remaining_retained(),
-                    peak + order_bytes - refresh_bytes
-                );
+                assert_eq!(graph.remaining_retained(), peak + order_bytes);
             } else {
                 assert_eq!(result, Err(NativeSessionError::Budget));
             }

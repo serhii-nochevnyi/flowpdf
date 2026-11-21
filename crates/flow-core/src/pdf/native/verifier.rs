@@ -492,6 +492,10 @@ impl Workspace {
         Ok(reservation)
     }
 
+    pub fn credit(&self, bytes: usize) {
+        self.0.set(self.remaining() + bytes);
+    }
+
     pub fn scope(&self) -> Reservation<'_> {
         Reservation {
             workspace: self,
@@ -506,6 +510,10 @@ pub(super) struct Reservation<'a> {
 }
 
 impl<'a> Reservation<'a> {
+    pub fn into_charge(mut self) -> usize {
+        std::mem::take(&mut self.bytes)
+    }
+
     pub fn workspace(&self) -> &'a Workspace {
         self.workspace
     }

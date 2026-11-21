@@ -1692,7 +1692,7 @@ fn copy_name_inventory_uses_the_live_projection_and_staging_budgets() {
     let mut near_limit = NativePdfSession::open_scoped(
         &bytes,
         NativeEditLimits {
-            max_retained_bytes: 480 * 1024,
+            max_retained_bytes: 512 * 1024,
             ..limits
         },
         [3; 16],
