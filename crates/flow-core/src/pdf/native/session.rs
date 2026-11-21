@@ -1002,8 +1002,6 @@ impl NativePdfSession {
         )
     }
 
-    /// Accepts a workspace omission only when verifying a detached, post-edit scene.
-    /// Passing no object rows requires the exact projected scene hash.
     pub fn verify_page_and_field_projection_with_objects(
         bytes: &[u8],
         limits: NativeEditLimits,
