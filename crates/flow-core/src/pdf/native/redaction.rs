@@ -2270,6 +2270,7 @@ mod tests {
         session
             .add_redaction_mark(
                 binding,
+                1,
                 NativeRedactionMark {
                     page_id,
                     geometry: session.redaction_mark_geometry(page_id).unwrap(),
@@ -2277,10 +2278,10 @@ mod tests {
                 },
             )
             .unwrap();
-        session.stage_redaction(binding, 1).unwrap();
-        let evidence = session.verify_redaction(binding, 1).unwrap();
+        session.stage_redaction(binding, 2).unwrap();
+        let evidence = session.verify_redaction(binding, 2).unwrap();
         assert!(evidence.checks_passed(), "{evidence:?}");
-        let receipt = session.publish_redaction(binding, 1).unwrap();
+        let receipt = session.publish_redaction(binding, 2).unwrap();
         assert_eq!(receipt.binding.revision, 1);
         assert_eq!(session.origin_bytes(), source);
     }

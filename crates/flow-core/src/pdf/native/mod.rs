@@ -148,7 +148,8 @@ pub use objects::{
 pub use pages::{NativePageCommand, NativePageSide, NativePageState, NativePageTarget};
 pub use session::{
     NATIVE_MAX_NOTE_BYTES, NATIVE_REQUEST_HISTORY, NativeBinding, NativeEditReceipt,
-    NativePdfSession, NativeRequestLookup, NativeSessionError, NativeSnapshot,
+    NativePdfSession, NativeRedactionMarkAction, NativeRedactionMarkReceipt, NativeRequestLookup,
+    NativeSessionError, NativeSnapshot,
 };
 
 pub use text::{

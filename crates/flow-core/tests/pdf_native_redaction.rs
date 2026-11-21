@@ -83,9 +83,13 @@ fn mark(session: &NativePdfSession, page: usize, rect: [i64; 4]) -> NativeRedact
     }
 }
 
-fn add(session: &mut NativePdfSession, page: usize, rect: [i64; 4]) {
+fn add(session: &mut NativePdfSession, request_id: u64, page: usize, rect: [i64; 4]) {
     session
-        .add_redaction_mark(session.snapshot().binding, mark(session, page, rect))
+        .add_redaction_mark(
+            session.snapshot().binding,
+            request_id,
+            mark(session, page, rect),
+        )
         .unwrap();
 }
 
@@ -142,16 +146,16 @@ fn ordinary_rgb_scan_readback() {
     );
     let mut session = open(&source);
     let binding = session.snapshot().binding;
-    add(&mut session, 0, [14_000, 32_000, 15_000, 33_000]);
-    let NativeRedactionStage::Pending(candidate) = session.stage_redaction(binding, 1).unwrap()
+    add(&mut session, 1, 0, [14_000, 32_000, 15_000, 33_000]);
+    let NativeRedactionStage::Pending(candidate) = session.stage_redaction(binding, 2).unwrap()
     else {
         panic!("expected pending redaction");
     };
-    let evidence = session.verify_redaction(binding, 1).unwrap();
+    let evidence = session.verify_redaction(binding, 2).unwrap();
     assert!(evidence.checks_passed(), "{evidence:?}");
     assert_accepted(&session, &source, 0, &source);
 
-    let receipt = session.publish_redaction(binding, 1).unwrap();
+    let receipt = session.publish_redaction(binding, 2).unwrap();
     assert_eq!(receipt.output_hash, candidate.candidate_hash);
     assert_eq!(
         session.redacted_output_bytes(),
@@ -171,16 +175,16 @@ fn jpeg_filter_forms_publish_the_verified_scrubbed_samples() {
         let mut session = open(&source);
         let binding = session.snapshot().binding;
         assert!(session.redaction_admitted(), "{filter}");
-        add(&mut session, 0, [14_000, 32_000, 15_000, 33_000]);
-        let NativeRedactionStage::Pending(candidate) = session.stage_redaction(binding, 1).unwrap()
+        add(&mut session, 1, 0, [14_000, 32_000, 15_000, 33_000]);
+        let NativeRedactionStage::Pending(candidate) = session.stage_redaction(binding, 2).unwrap()
         else {
             panic!("expected pending redaction for {filter}");
         };
-        let evidence = session.verify_redaction(binding, 1).unwrap();
+        let evidence = session.verify_redaction(binding, 2).unwrap();
         assert!(evidence.checks_passed(), "{filter}: {evidence:?}");
         assert_accepted(&session, &source, 0, &source);
 
-        let receipt = session.publish_redaction(binding, 1).unwrap();
+        let receipt = session.publish_redaction(binding, 2).unwrap();
         let published = session.redacted_output_bytes().unwrap();
         assert_eq!(receipt.output_hash, candidate.candidate_hash);
         assert_eq!(published, session.output_bytes());
@@ -242,6 +246,84 @@ fn jpeg_filter_chains_and_jpeg_candidates_are_refused() {
 }
 
 #[test]
+fn mark_requests_order_mutations_without_consuming_document_receipts() {
+    let source = fixture();
+    let mut session = open(&source);
+    let base = session.snapshot().binding;
+    let first = mark(&session, 0, [11_000, 11_000, 13_000, 13_000]);
+    let other = mark(&session, 0, [14_000, 32_000, 15_000, 33_000]);
+    assert_eq!(
+        session.add_redaction_mark(base, 0, first),
+        Err(NativeSessionError::InvalidRequest)
+    );
+    session.add_redaction_mark(base, 2, first).unwrap();
+    session.add_redaction_mark(base, 2, first).unwrap();
+    for (id, mark) in [(1, first), (2, other)] {
+        assert_eq!(
+            session.add_redaction_mark(base, id, mark),
+            Err(NativeSessionError::InvalidRequest)
+        );
+    }
+    assert_eq!(session.lookup(base, 2), Ok(NativeRequestLookup::Unseen));
+    let before = session.last_redaction_mark().unwrap();
+    assert_eq!(before.request_id, 2);
+    assert_eq!(before.binding, base);
+    assert_eq!(before.accepted_hash, session.snapshot().output_hash);
+    assert_eq!(session.redaction_marks(), &[first]);
+    assert_eq!(
+        session.remove_redaction_mark(base, 3, other),
+        Err(NativeSessionError::InvalidRedactionMark)
+    );
+    assert_eq!(session.last_redaction_mark(), Some(before));
+    session.remove_redaction_mark(base, 3, first).unwrap();
+    session.remove_redaction_mark(base, 3, first).unwrap();
+    session.clear_redaction_marks(base, 4).unwrap();
+    session.clear_redaction_marks(base, 4).unwrap();
+    assert!(session.redaction_marks().is_empty());
+
+    session.add_redaction_mark(base, 5, first).unwrap();
+    assert_eq!(
+        session.stage_redaction(base, 5),
+        Err(NativeSessionError::InvalidRequest)
+    );
+    assert_eq!(
+        session.check_close(base, 5),
+        Err(NativeSessionError::InvalidRequest)
+    );
+    let candidate = session.stage_redaction(base, 6).unwrap();
+    session.add_redaction_mark(base, 5, first).unwrap();
+    assert_eq!(session.stage_redaction(base, 6), Ok(candidate));
+    session.cancel_redaction(base, 6).unwrap();
+    assert_eq!(
+        session.clear_redaction_marks(base, 6),
+        Err(NativeSessionError::ReconciliationRequired)
+    );
+    session.clear_redaction_marks(base, 7).unwrap();
+    assert_eq!(session.lookup(base, 7), Ok(NativeRequestLookup::Unseen));
+    assert_eq!(session.snapshot().consumed_request, 0);
+    assert_accepted(&session, &source, 0, &source);
+    let edit = NativeNoteCommand::Add {
+        page: session.snapshot().scene.pages[0].id,
+        rect: [70, 70, 75, 75],
+        contents: "Review note".into(),
+    };
+    assert_eq!(
+        session.apply(base, 7, &edit),
+        Err(NativeSessionError::ReconciliationRequired)
+    );
+    let receipt = session.apply(base, 8, &edit).unwrap();
+    assert_eq!(
+        session.clear_redaction_marks(base, 9),
+        Err(NativeSessionError::RevisionMismatch)
+    );
+    assert_eq!(
+        session.clear_redaction_marks(receipt.binding, 8),
+        Err(NativeSessionError::InvalidRequest)
+    );
+    assert_eq!(session.apply(base, 8, &edit), Ok(receipt));
+}
+
+#[test]
 fn marks_and_quarantine_keep_accepted_bytes_and_scene_until_exact_publication() {
     let source = fixture();
     let mut session = open(&source);
@@ -252,6 +334,7 @@ fn marks_and_quarantine_keep_accepted_bytes_and_scene_until_exact_publication() 
         session
             .add_redaction_mark(
                 base.binding,
+                1,
                 NativeRedactionMark {
                     geometry: NativeRedactionGeometry {
                         rotation: 90,
@@ -262,51 +345,53 @@ fn marks_and_quarantine_keep_accepted_bytes_and_scene_until_exact_publication() 
             )
             .is_err()
     );
-    session.add_redaction_mark(base.binding, first).unwrap();
-    session.remove_redaction_mark(base.binding, first).unwrap();
-    session.add_redaction_mark(base.binding, first).unwrap();
-    session.clear_redaction_marks(base.binding).unwrap();
+    session.add_redaction_mark(base.binding, 1, first).unwrap();
+    session
+        .remove_redaction_mark(base.binding, 2, first)
+        .unwrap();
+    session.add_redaction_mark(base.binding, 3, first).unwrap();
+    session.clear_redaction_marks(base.binding, 4).unwrap();
     assert!(session.redaction_marks().is_empty());
-    session.add_redaction_mark(base.binding, first).unwrap();
-    session.add_redaction_mark(base.binding, second).unwrap();
+    session.add_redaction_mark(base.binding, 5, first).unwrap();
+    session.add_redaction_mark(base.binding, 6, second).unwrap();
     assert_accepted(&session, &source, 0, &source);
 
-    let staged = session.stage_redaction(base.binding, 1).unwrap();
+    let staged = session.stage_redaction(base.binding, 8).unwrap();
     let NativeRedactionStage::Pending(identity) = staged else {
         panic!("expected pending status")
     };
     assert_eq!(
-        session.lookup(base.binding, 1),
+        session.lookup(base.binding, 8),
         Ok(NativeRequestLookup::ReconciliationRequired)
     );
-    session.add_redaction_mark(base.binding, first).unwrap();
-    assert_eq!(session.stage_redaction(base.binding, 1), Ok(staged));
+    session.add_redaction_mark(base.binding, 9, first).unwrap();
+    assert_eq!(session.stage_redaction(base.binding, 8), Ok(staged));
     assert_eq!(
         session.redaction_candidate_status().unwrap().status(),
         NativeVerificationStatus::Pending
     );
-    assert!(session.publish_redaction(base.binding, 1).is_err());
+    assert!(session.publish_redaction(base.binding, 8).is_err());
     assert_eq!(session.snapshot().scene.scene_hash, base.scene.scene_hash);
     assert_accepted(&session, &source, 0, &source);
     assert_eq!(session.redaction_marks(), &[first, second]);
 
-    let evidence = session.verify_redaction(base.binding, 1).unwrap();
+    let evidence = session.verify_redaction(base.binding, 8).unwrap();
     assert!(evidence.checks_passed(), "{evidence:?}");
     assert_eq!(
         evidence.identity().unwrap().candidate_hash(),
         identity.candidate_hash
     );
     assert_accepted(&session, &source, 0, &source);
-    let receipt = session.publish_redaction(base.binding, 1).unwrap();
+    let receipt = session.publish_redaction(base.binding, 8).unwrap();
     assert_eq!(receipt.output_hash, identity.candidate_hash);
     assert_eq!(receipt.binding.revision, 1);
-    assert_eq!(session.publish_redaction(base.binding, 1), Ok(receipt));
+    assert_eq!(session.publish_redaction(base.binding, 8), Ok(receipt));
     assert_eq!(
-        session.stage_redaction(base.binding, 1),
+        session.stage_redaction(base.binding, 8),
         Ok(NativeRedactionStage::Accepted(receipt))
     );
     assert_eq!(
-        session.lookup(base.binding, 1),
+        session.lookup(base.binding, 8),
         Ok(NativeRequestLookup::Accepted(receipt))
     );
     assert!(session.redaction_marks().is_empty());
@@ -342,7 +427,7 @@ fn marks_and_quarantine_keep_accepted_bytes_and_scene_until_exact_publication() 
     let next = session
         .apply(
             receipt.binding,
-            2,
+            10,
             &NativeNoteCommand::Add {
                 page: session.snapshot().scene.pages[0].id,
                 rect: [70, 70, 75, 75],
@@ -353,15 +438,15 @@ fn marks_and_quarantine_keep_accepted_bytes_and_scene_until_exact_publication() 
     let edited = session.output_bytes().to_vec();
     assert_ne!(next.output_hash, receipt.output_hash);
     assert_eq!(
-        session.publish_redaction(base.binding, 1),
+        session.publish_redaction(base.binding, 8),
         Err(NativeSessionError::RevisionMismatch)
     );
     assert_eq!(
-        session.stage_redaction(base.binding, 1),
+        session.stage_redaction(base.binding, 8),
         Err(NativeSessionError::RevisionMismatch)
     );
     assert_eq!(
-        session.lookup(base.binding, 1),
+        session.lookup(base.binding, 8),
         Ok(NativeRequestLookup::Accepted(receipt))
     );
     assert_accepted(&session, &edited, next.binding.revision, &source);
@@ -390,19 +475,19 @@ fn shared_image_requires_equal_scrubbing_for_every_use() {
         let mut session = open(&source);
         let binding = session.snapshot().binding;
         let rect = [14_000, 32_000, 15_000, 33_000];
-        add(&mut session, 0, rect);
-        assert!(session.stage_redaction(binding, 1).is_err());
+        add(&mut session, 1, 0, rect);
+        assert!(session.stage_redaction(binding, 4).is_err());
         assert_accepted(&session, &source, 0, &source);
         assert_eq!(session.redaction_marks().len(), 1);
-        add(&mut session, 1, rect);
-        session.stage_redaction(binding, 1).unwrap();
+        add(&mut session, 3, 1, rect);
+        session.stage_redaction(binding, 4).unwrap();
         assert!(
             session
-                .verify_redaction(binding, 1)
+                .verify_redaction(binding, 4)
                 .unwrap()
                 .checks_passed()
         );
-        session.publish_redaction(binding, 1).unwrap();
+        session.publish_redaction(binding, 4).unwrap();
         assert!(
             session
                 .output_bytes()
@@ -423,26 +508,26 @@ fn cancellation_and_ordinary_edits_invalidate_candidate_and_stale_marks() {
     let source = fixture();
     let mut session = open(&source);
     let base = session.snapshot().binding;
-    add(&mut session, 0, [11_000, 11_000, 13_000, 13_000]);
-    session.stage_redaction(base, 1).unwrap();
+    add(&mut session, 1, 0, [11_000, 11_000, 13_000, 13_000]);
+    session.stage_redaction(base, 2).unwrap();
     let other = open(&source);
     assert!(
         session
-            .verify_redaction(other.snapshot().binding, 1)
+            .verify_redaction(other.snapshot().binding, 2)
             .is_err()
     );
-    assert!(session.publish_redaction(base, 2).is_err());
+    assert!(session.publish_redaction(base, 3).is_err());
+    assert!(session.stage_redaction(base, 3).is_err());
+    session.cancel_redaction(base, 2).unwrap();
     assert!(session.stage_redaction(base, 2).is_err());
-    session.cancel_redaction(base, 1).unwrap();
-    assert!(session.stage_redaction(base, 1).is_err());
-    assert!(session.publish_redaction(base, 1).is_err());
+    assert!(session.publish_redaction(base, 2).is_err());
     assert_accepted(&session, &source, 0, &source);
-    session.stage_redaction(base, 2).unwrap();
-    assert!(session.verify_redaction(base, 2).unwrap().checks_passed());
+    session.stage_redaction(base, 3).unwrap();
+    assert!(session.verify_redaction(base, 3).unwrap().checks_passed());
     let receipt = session
         .apply(
             base,
-            3,
+            4,
             &NativeNoteCommand::Add {
                 page: session.snapshot().scene.pages[0].id,
                 rect: [70, 70, 75, 75],
@@ -452,20 +537,20 @@ fn cancellation_and_ordinary_edits_invalidate_candidate_and_stale_marks() {
         .unwrap();
     let prior = session.output_bytes().to_vec();
     assert!(session.redaction_candidate_status().is_none());
-    assert!(session.publish_redaction(base, 2).is_err());
-    assert!(session.stage_redaction(receipt.binding, 4).is_err());
+    assert!(session.publish_redaction(base, 3).is_err());
+    assert!(session.stage_redaction(receipt.binding, 5).is_err());
     assert_eq!(session.redaction_marks().len(), 1);
     assert_accepted(&session, &prior, 1, &source);
-    session.clear_redaction_marks(receipt.binding).unwrap();
-    add(&mut session, 0, [11_000, 11_000, 13_000, 13_000]);
-    session.stage_redaction(receipt.binding, 5).unwrap();
+    session.clear_redaction_marks(receipt.binding, 6).unwrap();
+    add(&mut session, 7, 0, [11_000, 11_000, 13_000, 13_000]);
+    session.stage_redaction(receipt.binding, 8).unwrap();
     assert!(
         session
-            .verify_redaction(receipt.binding, 5)
+            .verify_redaction(receipt.binding, 8)
             .unwrap()
             .checks_passed()
     );
-    session.publish_redaction(receipt.binding, 5).unwrap();
+    session.publish_redaction(receipt.binding, 8).unwrap();
     assert_eq!(session.origin_bytes(), source);
 }
 
@@ -486,7 +571,7 @@ fn valid_form_storage_is_outside_the_scrub_profile() {
     let mark = mark(&session, 0, [11_000, 11_000, 13_000, 13_000]);
     let refusal = Err(NativeSessionError::Graph(NativeEditError::Unsupported));
     assert_eq!(session.check_redaction_admission(), refusal);
-    assert_eq!(session.add_redaction_mark(binding, mark), refusal);
+    assert_eq!(session.add_redaction_mark(binding, 1, mark), refusal);
     assert_eq!(
         session.stage_redaction(binding, 1),
         Err(NativeSessionError::InvalidRedactionMark)
@@ -497,7 +582,7 @@ fn valid_form_storage_is_outside_the_scrub_profile() {
     assert!(session.redaction_marks().is_empty());
     assert!(session.redaction_marks_binding().is_none());
     assert!(session.redaction_candidate_status().is_none());
-    session.clear_redaction_marks(binding).unwrap();
+    session.clear_redaction_marks(binding, 1).unwrap();
 }
 
 fn raster_fixture(size: u32, paint: &str) -> Vec<u8> {
@@ -575,7 +660,7 @@ fn admission_tracks_the_workspace_left_by_the_live_session() {
     assert_eq!(verify_projection(&session, true, true), Ok(true));
     assert_eq!(verify_projection(&session, true, false), Ok(true));
 
-    session.add_redaction_mark(binding, mark).unwrap();
+    session.add_redaction_mark(binding, 1, mark).unwrap();
     assert_eq!(
         session.check_redaction_admission(),
         Err(NativeSessionError::Budget)
@@ -587,6 +672,7 @@ fn admission_tracks_the_workspace_left_by_the_live_session() {
     assert_eq!(
         session.add_redaction_mark(
             binding,
+            2,
             NativeRedactionMark {
                 rect: [42_000, 42_000, 43_000, 43_000],
                 ..mark
@@ -594,12 +680,12 @@ fn admission_tracks_the_workspace_left_by_the_live_session() {
         ),
         Err(NativeSessionError::Budget)
     );
-    session.add_redaction_mark(binding, mark).unwrap();
+    session.add_redaction_mark(binding, 2, mark).unwrap();
     assert_eq!(
-        session.stage_redaction(binding, 1),
+        session.stage_redaction(binding, 3),
         Err(NativeSessionError::Budget)
     );
-    assert_eq!(session.lookup(binding, 1), Ok(NativeRequestLookup::Unseen));
+    assert_eq!(session.lookup(binding, 3), Ok(NativeRequestLookup::Unseen));
     assert!(session.redaction_candidate_status().is_none());
     assert_eq!(session.redaction_marks(), &[mark]);
     assert_eq!(session.redaction_marks_binding(), Some(binding));
@@ -607,11 +693,11 @@ fn admission_tracks_the_workspace_left_by_the_live_session() {
     assert_eq!(session.snapshot().consumed_request, consumed_request);
     assert_accepted(&session, &source, 0, &source);
 
-    session.remove_redaction_mark(binding, mark).unwrap();
+    session.remove_redaction_mark(binding, 3, mark).unwrap();
     assert!(session.redaction_admitted());
-    session.add_redaction_mark(binding, mark).unwrap();
+    session.add_redaction_mark(binding, 4, mark).unwrap();
     assert!(!session.redaction_admitted());
-    session.clear_redaction_marks(binding).unwrap();
+    session.clear_redaction_marks(binding, 5).unwrap();
     assert!(session.redaction_admitted());
 }
 
@@ -635,7 +721,7 @@ fn origin_over_the_redaction_byte_ceiling_refuses_marks_and_staging() {
 
     assert!(!session.redaction_admitted());
     assert_eq!(
-        session.add_redaction_mark(binding, mark),
+        session.add_redaction_mark(binding, 1, mark),
         Err(NativeSessionError::Budget)
     );
     assert_eq!(
@@ -728,16 +814,16 @@ fn redaction_accepts_a_rewrite_larger_than_the_import_limit() {
         }
     }
 
-    add(&mut session, 0, [12_000, 12_000, 13_000, 13_000]);
-    let staged = session.stage_redaction(edited.binding, 2).unwrap();
-    assert_eq!(session.stage_redaction(edited.binding, 2), Ok(staged));
+    add(&mut session, 2, 0, [12_000, 12_000, 13_000, 13_000]);
+    let staged = session.stage_redaction(edited.binding, 3).unwrap();
+    assert_eq!(session.stage_redaction(edited.binding, 3), Ok(staged));
     assert_eq!(
-        session.stage_redaction(base, 2),
+        session.stage_redaction(base, 3),
         Err(NativeSessionError::RevisionMismatch)
     );
-    let evidence = session.verify_redaction(edited.binding, 2).unwrap();
+    let evidence = session.verify_redaction(edited.binding, 3).unwrap();
     assert!(evidence.checks_passed(), "{evidence:?}");
-    session.publish_redaction(edited.binding, 2).unwrap();
+    session.publish_redaction(edited.binding, 3).unwrap();
     assert_eq!(session.origin_bytes(), source);
 }
 
@@ -777,8 +863,8 @@ fn accepted_page_preview_refuses_a_constrained_session_without_mutation() {
         geometry: session.redaction_mark_geometry(page_id).unwrap(),
         rect: [12_000, 12_000, 13_000, 13_000],
     };
-    session.add_redaction_mark(binding, mark).unwrap();
-    let staged = session.stage_redaction(binding, 1).unwrap();
+    session.add_redaction_mark(binding, 1, mark).unwrap();
+    let staged = session.stage_redaction(binding, 2).unwrap();
 
     assert_eq!(
         session
@@ -791,7 +877,7 @@ fn accepted_page_preview_refuses_a_constrained_session_without_mutation() {
     assert_eq!(session.snapshot().scene.scene_hash, scene_hash);
     assert_eq!(session.redaction_marks(), &[mark]);
     assert_eq!(session.redaction_marks_binding(), Some(binding));
-    assert_eq!(session.stage_redaction(binding, 1), Ok(staged));
+    assert_eq!(session.stage_redaction(binding, 2), Ok(staged));
     assert_eq!(
         session.redaction_candidate_status().unwrap().status(),
         NativeVerificationStatus::Pending
@@ -820,7 +906,10 @@ fn page_geometry_errors_preserve_their_type_in_redaction_preflight() {
 
         assert_eq!(session.redaction_mark_geometry(mark.page_id), Ok(GEOMETRY));
         assert_eq!(session.check_redaction_admission(), refusal.clone());
-        assert_eq!(session.add_redaction_mark(binding, mark), refusal.clone());
+        assert_eq!(
+            session.add_redaction_mark(binding, 1, mark),
+            refusal.clone()
+        );
         assert_eq!(session.stage_redaction(binding, 1).map(|_| ()), refusal);
         assert_eq!(session.lookup(binding, 1), Ok(NativeRequestLookup::Unseen));
         assert!(session.redaction_marks().is_empty());
@@ -859,7 +948,7 @@ fn raster_budget_refuses_native_marks_and_staging_without_mutation() {
             rect: [12_000, 12_000, 13_000, 13_000],
         };
         assert_eq!(
-            session.add_redaction_mark(binding, mark),
+            session.add_redaction_mark(binding, page_count, mark),
             Err(NativeSessionError::Budget)
         );
         assert_eq!(
@@ -907,9 +996,9 @@ fn an_inconclusive_raster_check_preserves_the_previous_accepted_revision() {
         geometry: session.redaction_mark_geometry(page_id).unwrap(),
         rect: [12_000, 12_000, 13_000, 13_000],
     };
-    session.add_redaction_mark(prior.binding, mark).unwrap();
-    session.stage_redaction(prior.binding, 2).unwrap();
-    let evidence = session.verify_redaction(prior.binding, 2).unwrap();
+    session.add_redaction_mark(prior.binding, 2, mark).unwrap();
+    session.stage_redaction(prior.binding, 3).unwrap();
+    let evidence = session.verify_redaction(prior.binding, 3).unwrap();
     assert_eq!(
         evidence.structure().status(),
         NativeVerificationStatus::Passed
@@ -924,7 +1013,7 @@ fn an_inconclusive_raster_check_preserves_the_previous_accepted_revision() {
         NativeVerificationStatus::Inconclusive
     );
     assert_eq!(
-        session.publish_redaction(prior.binding, 2),
+        session.publish_redaction(prior.binding, 3),
         Err(NativeSessionError::RedactionUnverified)
     );
     assert_accepted(&session, &before, 1, &source);
@@ -948,9 +1037,9 @@ fn readback_budgets_both_rasters_and_preserves_partial_evidence() {
     .unwrap();
     let binding = session.snapshot().binding;
     let mark = mark(&session, 0, [12_000, 12_000, 13_000, 13_000]);
-    session.add_redaction_mark(binding, mark).unwrap();
+    session.add_redaction_mark(binding, 1, mark).unwrap();
 
-    for request in 1..=2 {
+    for request in 2..=3 {
         let staged = session.stage_redaction(binding, request).unwrap();
         let admission_before_verification = session.check_redaction_admission();
         assert_eq!(admission_before_verification, Ok(()));
@@ -997,7 +1086,7 @@ fn readback_budgets_both_rasters_and_preserves_partial_evidence() {
         assert!(session.redaction_candidate_status().is_none());
         assert_eq!(session.redaction_marks(), &[mark]);
     }
-    session.clear_redaction_marks(binding).unwrap();
+    session.clear_redaction_marks(binding, 4).unwrap();
     assert!(session.redaction_marks().is_empty());
     assert!(session.redaction_marks_binding().is_none());
     assert_eq!(session.check_redaction_admission(), Ok(()));
@@ -1026,6 +1115,7 @@ fn rotated_crop_marks_replace_only_positively_intersecting_raster_cells() {
     session
         .add_redaction_mark(
             binding,
+            1,
             NativeRedactionMark {
                 page_id,
                 geometry,
@@ -1033,10 +1123,10 @@ fn rotated_crop_marks_replace_only_positively_intersecting_raster_cells() {
             },
         )
         .unwrap();
-    session.stage_redaction(binding, 1).unwrap();
-    let evidence = session.verify_redaction(binding, 1).unwrap();
+    session.stage_redaction(binding, 2).unwrap();
+    let evidence = session.verify_redaction(binding, 2).unwrap();
     assert!(evidence.checks_passed(), "{evidence:?}");
-    session.publish_redaction(binding, 1).unwrap();
+    session.publish_redaction(binding, 2).unwrap();
     assert!(
         session
             .output_bytes()
@@ -1060,14 +1150,14 @@ fn shared_form_content_is_removed_from_every_retained_placement() {
     );
     let mut session = open(&source);
     let binding = session.snapshot().binding;
-    add(&mut session, 0, [14_000, 14_000, 15_000, 15_000]);
-    assert!(session.stage_redaction(binding, 1).is_err());
+    add(&mut session, 1, 0, [14_000, 14_000, 15_000, 15_000]);
+    assert!(session.stage_redaction(binding, 2).is_err());
     assert_accepted(&session, &source, 0, &source);
-    add(&mut session, 0, [57_000, 44_000, 58_000, 45_000]);
-    session.stage_redaction(binding, 2).unwrap();
-    let evidence = session.verify_redaction(binding, 2).unwrap();
+    add(&mut session, 3, 0, [57_000, 44_000, 58_000, 45_000]);
+    session.stage_redaction(binding, 4).unwrap();
+    let evidence = session.verify_redaction(binding, 4).unwrap();
     assert!(evidence.checks_passed(), "{evidence:?}");
-    session.publish_redaction(binding, 2).unwrap();
+    session.publish_redaction(binding, 4).unwrap();
     let removed = b"2 2 5 5 re";
     assert!(
         !session
@@ -1093,13 +1183,13 @@ fn output_budget_refusal_creates_no_candidate() {
     let consumed_request = session.snapshot().consumed_request;
     let mark = mark(&session, 0, [11_000, 11_000, 13_000, 13_000]);
     assert!(session.redaction_admitted());
-    session.add_redaction_mark(binding, mark).unwrap();
+    session.add_redaction_mark(binding, 1, mark).unwrap();
     for _ in 0..2 {
         assert_eq!(
-            session.stage_redaction(binding, 1),
+            session.stage_redaction(binding, 2),
             Err(NativeSessionError::Budget)
         );
-        assert_eq!(session.lookup(binding, 1), Ok(NativeRequestLookup::Unseen));
+        assert_eq!(session.lookup(binding, 2), Ok(NativeRequestLookup::Unseen));
     }
     assert_accepted(&session, &source, 0, &source);
     assert_eq!(session.snapshot().binding, binding);
@@ -1134,11 +1224,11 @@ fn redaction_keeps_disjoint_paint_inside_overlapping_path_bounds() {
     );
     let mut session = open(&source);
     let binding = session.snapshot().binding;
-    add(&mut session, 0, [19_000, 64_000, 23_000, 68_000]);
-    session.stage_redaction(binding, 1).unwrap();
-    let evidence = session.verify_redaction(binding, 1).unwrap();
+    add(&mut session, 1, 0, [19_000, 64_000, 23_000, 68_000]);
+    session.stage_redaction(binding, 2).unwrap();
+    let evidence = session.verify_redaction(binding, 2).unwrap();
     assert!(evidence.checks_passed(), "{evidence:?}");
-    session.publish_redaction(binding, 1).unwrap();
+    session.publish_redaction(binding, 2).unwrap();
 
     let reopened = open(session.output_bytes());
     let output = reopened.output_bytes();
@@ -1153,11 +1243,11 @@ fn redaction_keeps_disjoint_paint_inside_overlapping_path_bounds() {
 
     let mut crossing = open(&source);
     let binding = crossing.snapshot().binding;
-    add(&mut crossing, 0, [39_000, 39_000, 41_000, 41_000]);
-    crossing.stage_redaction(binding, 1).unwrap();
-    let evidence = crossing.verify_redaction(binding, 1).unwrap();
+    add(&mut crossing, 1, 0, [39_000, 39_000, 41_000, 41_000]);
+    crossing.stage_redaction(binding, 2).unwrap();
+    let evidence = crossing.verify_redaction(binding, 2).unwrap();
     assert!(evidence.checks_passed(), "{evidence:?}");
-    crossing.publish_redaction(binding, 1).unwrap();
+    crossing.publish_redaction(binding, 2).unwrap();
     let output = crossing.output_bytes();
     assert!(
         !output
@@ -1168,9 +1258,9 @@ fn redaction_keeps_disjoint_paint_inside_overlapping_path_bounds() {
 
     let mut grazing = open(&source);
     let binding = grazing.snapshot().binding;
-    add(&mut grazing, 0, [30_000, 31_001, 31_000, 32_000]);
+    add(&mut grazing, 1, 0, [30_000, 31_001, 31_000, 32_000]);
     assert_eq!(
-        grazing.stage_redaction(binding, 1).unwrap_err(),
+        grazing.stage_redaction(binding, 2).unwrap_err(),
         NativeSessionError::Graph(NativeEditError::Unsupported)
     );
     assert!(grazing.redaction_candidate_status().is_none());
@@ -1195,11 +1285,11 @@ fn published_redaction_preserves_strokes_inside_a_fractional_form_clip() {
     );
     let mut session = open(&source);
     let binding = session.snapshot().binding;
-    add(&mut session, 0, [11_000, 11_000, 12_000, 12_000]);
-    session.stage_redaction(binding, 1).unwrap();
-    let evidence = session.verify_redaction(binding, 1).unwrap();
+    add(&mut session, 1, 0, [11_000, 11_000, 12_000, 12_000]);
+    session.stage_redaction(binding, 2).unwrap();
+    let evidence = session.verify_redaction(binding, 2).unwrap();
     assert!(evidence.checks_passed(), "{evidence:?}");
-    let receipt = session.publish_redaction(binding, 1).unwrap();
+    let receipt = session.publish_redaction(binding, 2).unwrap();
     let output = session.redacted_output_bytes().unwrap();
 
     assert_eq!(receipt.output_hash, *blake3::hash(output).as_bytes());
@@ -1223,6 +1313,7 @@ fn reference_redaction_pdf_keeps_its_supported_cid_mapping() {
     session
         .add_redaction_mark(
             binding,
+            1,
             NativeRedactionMark {
                 page_id,
                 geometry,
@@ -1230,10 +1321,10 @@ fn reference_redaction_pdf_keeps_its_supported_cid_mapping() {
             },
         )
         .unwrap();
-    session.stage_redaction(binding, 1).unwrap();
-    let evidence = session.verify_redaction(binding, 1).unwrap();
+    session.stage_redaction(binding, 2).unwrap();
+    let evidence = session.verify_redaction(binding, 2).unwrap();
     assert!(evidence.checks_passed(), "{evidence:?}");
-    session.publish_redaction(binding, 1).unwrap();
+    session.publish_redaction(binding, 2).unwrap();
     assert_eq!(session.origin_bytes(), source);
     assert_ne!(session.output_bytes(), source);
 }

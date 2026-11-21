@@ -697,6 +697,7 @@ fn topmost_insertion_keeps_redaction_admission_after_translation_and_scale() {
     session
         .add_redaction_mark(
             binding,
+            2,
             NativeRedactionMark {
                 page_id,
                 geometry,
@@ -704,10 +705,10 @@ fn topmost_insertion_keeps_redaction_admission_after_translation_and_scale() {
             },
         )
         .unwrap();
-    session.stage_redaction(binding, 2).unwrap();
-    let evidence = session.verify_redaction(binding, 2).unwrap();
+    session.stage_redaction(binding, 3).unwrap();
+    let evidence = session.verify_redaction(binding, 3).unwrap();
     assert!(evidence.checks_passed(), "{evidence:?}");
-    session.publish_redaction(binding, 2).unwrap();
+    session.publish_redaction(binding, 3).unwrap();
     assert_eq!(session.origin_bytes(), source);
 }
 

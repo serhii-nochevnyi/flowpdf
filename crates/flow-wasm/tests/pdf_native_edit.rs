@@ -718,7 +718,9 @@ fn marked_snapshot_survives_live_redaction_budget_refusal() {
     let mut marks = 0;
     while session.redaction_admitted() {
         assert!(marks < 128);
-        session.add_redaction_mark(binding, mark(marks)).unwrap();
+        session
+            .add_redaction_mark(binding, marks as u64 + 2, mark(marks))
+            .unwrap();
         marks += 1;
     }
 
@@ -752,7 +754,7 @@ fn marked_snapshot_survives_live_redaction_budget_refusal() {
 
     let request_id = marks as u64 + 2;
     let error = session
-        .add_redaction_mark(binding, mark(marks))
+        .add_redaction_mark(binding, request_id, mark(marks))
         .unwrap_err();
     assert_eq!(error, NativeSessionError::Budget);
     assert_eq!(session.redaction_marks().len(), marks as usize);
@@ -788,7 +790,9 @@ fn marked_snapshot_survives_live_redaction_budget_refusal() {
         .join()
         .unwrap();
 
-    session.add_redaction_mark(binding, mark(0)).unwrap();
+    session
+        .add_redaction_mark(binding, request_id, mark(0))
+        .unwrap();
     let duplicate = call(native_pdf_redaction, mark_request("addMark", request_id, 0));
     assert_eq!(duplicate["status"], "redaction");
     assert_eq!(
@@ -797,7 +801,9 @@ fn marked_snapshot_survives_live_redaction_budget_refusal() {
     );
 
     for index in 0..marks {
-        session.remove_redaction_mark(binding, mark(index)).unwrap();
+        session
+            .remove_redaction_mark(binding, request_id + 1 + index as u64, mark(index))
+            .unwrap();
         let removed = call(
             native_pdf_redaction,
             mark_request("removeMark", request_id + 1 + index as u64, index),
@@ -890,17 +896,22 @@ fn redaction_wire_releases_only_the_verified_exact_output() {
             json!({"kind":"addMark","pageId":page,"rect":[12000,12000,13000,13000]}),
         )
     };
+    let remove = request(
+        3,
+        json!({"kind":"removeMark","pageId":page,"rect":[12000,12000,13000,13000]}),
+    );
+    let clear = request(5, json!({"kind":"clearMarks"}));
+    let first_mark = native_pdf_redaction(add(2).to_string());
+    assert!(verify_native_pdf_worker_response(first_mark.clone()));
+    let first_reply: Value = serde_json::from_str(&first_mark).unwrap();
+    assert_eq!(first_reply["redaction"]["markCount"], 1);
+    status_only(&first_reply);
     for (command, count) in [
-        (add(2), 1),
-        (
-            request(
-                3,
-                json!({"kind":"removeMark","pageId":page,"rect":[12000,12000,13000,13000]}),
-            ),
-            0,
-        ),
+        (remove.clone(), 0),
+        (remove, 0),
         (add(4), 1),
-        (request(5, json!({"kind":"clearMarks"})), 0),
+        (clear.clone(), 0),
+        (clear, 0),
         (add(6), 1),
         (add(6), 1),
     ] {
@@ -908,7 +919,29 @@ fn redaction_wire_releases_only_the_verified_exact_output() {
         assert_eq!(reply["redaction"]["markCount"], count, "{reply}");
         status_only(&reply);
     }
-    assert_eq!(call(native_pdf_redaction, add(4))["status"], "failed");
+    assert!(!verify_native_pdf_worker_response(first_mark));
+    let stale_mark = call(native_pdf_redaction, add(4));
+    assert_eq!(stale_mark["code"], "FLOW_PDF_NATIVE_REQUEST_INVALID");
+    let mark_readback = call(native_pdf_snapshot, bound("snapshot", 6, base));
+    assert_eq!(mark_readback["status"], "unseen");
+    for field in ["binding", "outputHash", "outputHex", "consumedRequest"] {
+        assert_eq!(mark_readback["snapshot"][field], base[field]);
+    }
+    let conflicting = call(
+        native_pdf_redaction,
+        request(6, json!({"kind":"clearMarks"})),
+    );
+    assert_eq!(conflicting["code"], "FLOW_PDF_NATIVE_REQUEST_INVALID");
+    let colliding_stage = call(native_pdf_redaction, request(6, json!({"kind":"stage"})));
+    assert_eq!(colliding_stage["code"], "FLOW_PDF_NATIVE_REQUEST_INVALID");
+    let mut edit = bound("command", 6, base);
+    edit["outputHash"] = base["outputHash"].clone();
+    edit["command"] = json!({"kind":"add","page":0,"rect":[1,2,3,4],"contents":"queued note"});
+    let colliding_edit = call(native_pdf_command, edit.clone());
+    assert_eq!(
+        colliding_edit["code"],
+        "FLOW_PDF_NATIVE_RECONCILIATION_REQUIRED"
+    );
     let stale_close = call(native_pdf_close, bound("close", 5, base));
     assert_eq!(stale_close["code"], "FLOW_PDF_NATIVE_REQUEST_INVALID");
     let lookup = |candidate| request(7, json!({"kind":"status","candidate":candidate}));
@@ -926,6 +959,14 @@ fn redaction_wire_releases_only_the_verified_exact_output() {
         "{pending}"
     );
     assert_eq!(pending["binding"]["revision"], 0);
+    assert_eq!(
+        call(native_pdf_redaction, add(6))["redaction"]["markCount"],
+        1
+    );
+    for id in [7, 8] {
+        let busy = call(native_pdf_redaction, add(id));
+        assert_eq!(busy["code"], "FLOW_PDF_NATIVE_REDACTION_BUSY");
+    }
     let busy_close = call(native_pdf_close, bound("close", 8, base));
     assert_eq!(busy_close["status"], "failed");
     status_only(&pending);
@@ -989,9 +1030,7 @@ fn redaction_wire_releases_only_the_verified_exact_output() {
         call(native_pdf_snapshot, bound("snapshot", 8, base))["snapshot"],
         *base
     );
-    let mut edit = bound("command", 8, base);
-    edit["outputHash"] = base["outputHash"].clone();
-    edit["command"] = json!({"kind":"add","page":0,"rect":[1,2,3,4],"contents":"queued note"});
+    edit["requestId"] = json!(8);
     let blocked = call(native_pdf_command, edit.clone());
     assert_eq!(blocked["code"], "FLOW_PDF_NATIVE_REDACTION_BUSY");
     status_only(&blocked);
