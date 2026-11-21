@@ -636,6 +636,65 @@ fn page_preview_refuses_unresolved_image_samples() {
 }
 
 #[test]
+fn page_preview_resolves_full_outline_coverage_at_fractional_crop_edges() {
+    for (rotation, x) in [(0, 2), (90, 1)] {
+        let image = format!("q 0.2 0 0 0.2 {x} 2 cm /Photo Do Q");
+        let opaque = format!("0 0 1 rg {x} 2 0.2 0.2 re f");
+        let partial = format!("0 0 1 rg {x} 2 0.15 0.2 re f");
+        for (background, repaint, expected) in [
+            ("", opaque.as_str(), Some("0000ff")),
+            ("", partial.as_str(), Some("8080ff")),
+            (image.as_str(), "", None),
+            (image.as_str(), partial.as_str(), None),
+            (image.as_str(), opaque.as_str(), Some("0000ff")),
+        ] {
+            let artwork = format!("{background}\n{repaint}");
+            let source = fixture_pdf(&[
+                "<< /Type /Catalog /Pages 2 0 R >>",
+                "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+                &format!(
+                    "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 4 4] /CropBox [1 1 2.2 2.2] /Rotate {rotation} /Contents 4 0 R /Resources << /XObject << /Photo 5 0 R >> >> >>"
+                ),
+                &format!(
+                    "<< /Length {} >>\nstream\n{artwork}\nendstream",
+                    artwork.len()
+                ),
+                "<< /Type /XObject /Subtype /Image /Width 2 /Height 1 /ColorSpace /DeviceRGB /BitsPerComponent 8 /Length 6 >>\nstream\nAzAzAz\nendstream",
+            ]);
+            let opened = call(native_pdf_open, open_request(source.as_bytes()));
+            assert_eq!(opened["status"], "opened", "{opened}");
+            let base = &opened["snapshot"];
+            let reply = call(
+                native_pdf_preview,
+                preview_request(2, base, base["pageState"]["order"][0].clone()),
+            );
+            if let Some(expected) = expected {
+                assert_eq!(reply["status"], "preview", "{rotation}: {artwork}\n{reply}");
+                let raster = &reply["preview"];
+                assert_eq!(raster["width"], 3);
+                assert_eq!(raster["height"], 3);
+                assert_eq!(
+                    raster["rgbHex"].as_str().unwrap(),
+                    format!("{}{expected}{}", "ffffff".repeat(2), "ffffff".repeat(6)),
+                    "{rotation}: {artwork}"
+                );
+            } else {
+                assert_eq!(
+                    reply["code"], "FLOW_PDF_NATIVE_TARGET_UNAVAILABLE",
+                    "{rotation}: {artwork}\n{reply}"
+                );
+                assert!(reply.get("preview").is_none());
+                status_only(&reply);
+            }
+            assert_eq!(
+                call(native_pdf_close, bound("close", 3, base))["status"],
+                "closed"
+            );
+        }
+    }
+}
+
+#[test]
 fn accepted_preview_renders_both_jpeg_filter_forms() {
     const JPEG_HEX: &str = concat!(
         "ffd8ffe000104a46494600010100000100010000ffdb00430001010101010101",

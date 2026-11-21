@@ -736,6 +736,12 @@ struct SceneBuilder<'a> {
     invocation_path: Vec<u32>,
 }
 
+#[derive(Default)]
+struct ContentStreamEnd {
+    pending_operands: bool,
+    open_comment: bool,
+}
+
 impl<'a> SceneBuilder<'a> {
     fn new(
         reader: &'a PdfReader,
@@ -779,37 +785,65 @@ impl<'a> SceneBuilder<'a> {
             self.state.paint_clip = self.state.paint_clip.intersect(PaintBounds(crop_edges));
         }
         self.inspect_annotations()?;
+        let mut previous = None::<(PdfObjectRef, u8, bool)>;
+        let mut unverified_boundary = None;
         for (index, content_ref) in self.page.contents.iter().enumerate() {
             self.invocation_path =
                 vec![u32::try_from(index).map_err(|_| PdfReadError::NumericLimit)?];
             match self.reader.object(*content_ref) {
                 Ok(PdfValue::Stream(stream)) => {
-                    let has_pending_operands = self.interpret_stream(
+                    let Some(&last_byte) = stream.data.last() else {
+                        continue;
+                    };
+                    let uncertain = previous
+                        .filter(|(_, byte, _)| !separated_content_streams(&[*byte], &stream.data));
+                    if let Some((previous_ref, _, open_comment)) = uncertain {
+                        if open_comment {
+                            self.report_partial(previous_ref);
+                            break;
+                        }
+                        // @contract: Independent stream previews across unverified boundaries are partial.
+                        unverified_boundary.get_or_insert(previous_ref);
+                    }
+                    let end = self.interpret_stream(
                         &stream,
                         *content_ref,
                         0,
                         self.page.resources.as_ref(),
-                    )?;
-                    if has_pending_operands && index + 1 < self.page.contents.len() {
+                    );
+                    let end = match (end, uncertain) {
+                        (Err(PdfReadError::Syntax), Some((previous_ref, _, _))) => {
+                            self.report_partial(previous_ref);
+                            break;
+                        }
+                        (result, _) => result?,
+                    };
+                    if end.pending_operands && index + 1 < self.page.contents.len() {
                         // @contract: An operator's operand span refers to its own stream.
                         self.report_partial(*content_ref);
                         break;
                     }
+                    previous = Some((*content_ref, last_byte, end.open_comment));
                 }
-                Ok(_) => self.report.push(PdfReadDiagnostic::warning(
-                    PdfReadDiagnosticCode::PartialPage,
-                    Some(self.page_index),
-                    Some(content_ref.object_number),
-                )),
+                Ok(_) => {
+                    self.report_partial(*content_ref);
+                    break;
+                }
                 Err(PdfReadError::FilterUnsupported) => {
                     self.report.push(PdfReadDiagnostic::blocked(
                         PdfReadDiagnosticCode::UnsupportedFilter,
                         Some(self.page_index),
                         Some(content_ref.object_number),
-                    ))
+                    ));
+                    break;
                 }
                 Err(error) => return Err(error),
             }
+        }
+        if !self.report.partial
+            && let Some(object_ref) = unverified_boundary
+        {
+            self.report_partial(object_ref);
         }
         let partial = self.report.partial;
         Ok(PdfScenePage {
@@ -828,14 +862,14 @@ impl<'a> SceneBuilder<'a> {
         object_ref: PdfObjectRef,
         depth: usize,
         resources: Option<&PdfValue>,
-    ) -> Result<bool, PdfReadError> {
+    ) -> Result<ContentStreamEnd, PdfReadError> {
         if depth > self.limits.max_form_depth {
             self.report.push(PdfReadDiagnostic::blocked(
                 PdfReadDiagnosticCode::FormDepthLimit,
                 Some(self.page_index),
                 Some(object_ref.object_number),
             ));
-            return Ok(false);
+            return Ok(ContentStreamEnd::default());
         }
         let mut cursor = ContentCursor::for_scene(&stream.data, self.limits.clone());
         let mut operands = Vec::new();
@@ -877,7 +911,10 @@ impl<'a> SceneBuilder<'a> {
                 }
             }
         }
-        Ok(!operands.is_empty())
+        Ok(ContentStreamEnd {
+            pending_operands: !operands.is_empty(),
+            open_comment: cursor.open_comment,
+        })
     }
 
     fn dispatch_operator(
@@ -2567,6 +2604,7 @@ pub(super) struct ContentCursor<'a> {
     tokens: usize,
     array_depth: usize,
     decode_names: bool,
+    open_comment: bool,
 }
 
 impl<'a> ContentCursor<'a> {
@@ -2578,6 +2616,7 @@ impl<'a> ContentCursor<'a> {
             tokens: 0,
             array_depth: 0,
             decode_names: false,
+            open_comment: false,
         }
     }
 
@@ -2658,6 +2697,7 @@ impl<'a> ContentCursor<'a> {
             {
                 self.position += 1;
             }
+            self.open_comment = self.position == self.bytes.len();
         }
     }
 

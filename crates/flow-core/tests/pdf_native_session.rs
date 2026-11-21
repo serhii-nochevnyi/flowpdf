@@ -629,6 +629,93 @@ fn public_scene_keeps_stream_provenance_and_reports_split_operands_after_note_re
 }
 
 #[test]
+fn public_scene_checks_stream_boundaries_after_note_rewrite() {
+    use flow_core::pdf::{
+        PdfReadDiagnosticCode, PdfSceneElement, PdfSceneRequest, open_pdf, read_pdf_scene,
+    };
+
+    let stream = |data: &str| format!("<< /Length {} >>\nstream\n{data}\nendstream", data.len());
+    for (first, second, partial, show_second) in [
+        (
+            "10 20 5 5 re f % Artwork",
+            "\n30 40 5 5 re f\n",
+            false,
+            true,
+        ),
+        ("10 20 5 5 re f % Artwork", " 30 40 5 5 re f\n", true, false),
+        ("10 20 5 5 re f ", "30 40 5 5 re f\n", true, true),
+        ("10 20 5 5 re f ", "re\n", true, false),
+    ] {
+        let source = pdf_with_objects(&[
+            "<< /Type /Catalog /Pages 2 0 R >>",
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Contents [4 0 R 5 0 R] >>",
+            &stream(first),
+            &stream(second),
+        ]);
+        let mut session =
+            NativePdfSession::open_scoped(source.as_bytes(), NativeEditLimits::default(), [1; 16])
+                .unwrap();
+        session
+            .apply(
+                session.snapshot().binding,
+                1,
+                &NativeNoteCommand::Add {
+                    page: session.snapshot().scene.pages[0].id,
+                    rect: [80, 80, 100, 100],
+                    contents: "Review artwork".into(),
+                },
+            )
+            .unwrap();
+
+        for (bytes, has_note) in [(source.as_bytes(), false), (session.output_bytes(), true)] {
+            let reader = open_pdf(bytes, Default::default()).unwrap();
+            let scene = read_pdf_scene(&reader, &PdfSceneRequest::default()).unwrap();
+            let page = &scene.pages[0];
+            assert_eq!(
+                page.elements.iter().any(|element| matches!(element,
+                    PdfSceneElement::Annotation { value } if value.subtype.as_deref() == Some("Text")
+                )),
+                has_note
+            );
+            let mut paths = page.elements.iter().filter_map(|element| match element {
+                PdfSceneElement::Path { value } => Some(value),
+                _ => None,
+            });
+            let first = paths.next().unwrap();
+            assert!(first.fill);
+            assert_eq!(first.rect.x.raw(), 10 * 64);
+            assert_eq!(first.provenance.invocation_path, [0]);
+
+            assert_eq!(page.partial, partial);
+            assert_eq!(scene.report.partial, partial);
+            let mut partial_diagnostics = page
+                .report
+                .diagnostics
+                .iter()
+                .filter(|diagnostic| diagnostic.code == PdfReadDiagnosticCode::PartialPage);
+            if partial {
+                let diagnostic = partial_diagnostics.next().unwrap();
+                assert_eq!(diagnostic.page_index, Some(0));
+                assert_eq!(
+                    diagnostic.object_number,
+                    Some(first.provenance.object_ref.object_number)
+                );
+            }
+            assert!(partial_diagnostics.next().is_none());
+            if show_second {
+                let second = paths.next().unwrap();
+                assert!(second.fill);
+                assert_eq!(second.rect.x.raw(), 30 * 64);
+                assert_ne!(second.provenance.object_ref, first.provenance.object_ref);
+                assert_eq!(second.provenance.invocation_path, [1]);
+            }
+            assert!(paths.next().is_none());
+        }
+    }
+}
+
+#[test]
 fn public_scene_preserves_distinct_resource_aliases_after_note_rewrite() {
     use flow_core::pdf::{PdfSceneElement, PdfSceneRequest, open_pdf, read_pdf_scene};
 
