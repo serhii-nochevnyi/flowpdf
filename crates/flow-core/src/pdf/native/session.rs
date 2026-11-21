@@ -208,6 +208,7 @@ pub struct NativeRedactionMarkReceipt {
     pub binding: NativeBinding,
     pub accepted_hash: [u8; 32],
     pub action: NativeRedactionMarkAction,
+    removed_geometry: Option<super::NativeRedactionGeometry>,
 }
 
 pub struct NativePdfSession {
@@ -407,13 +408,12 @@ impl NativePdfSession {
         if accepted_hash != self.snapshot.output_hash {
             return Err(NativeSessionError::BindingMismatch);
         }
-        let receipt = NativeRedactionMarkReceipt {
-            request_id,
-            binding,
-            accepted_hash,
-            action,
-        };
-        if self.last_redaction_mark == Some(receipt) {
+        if self.last_redaction_mark.is_some_and(|last| {
+            last.request_id == request_id
+                && last.binding == binding
+                && last.accepted_hash == accepted_hash
+                && last.action == action
+        }) {
             return Ok(true);
         }
         if request_id <= self.snapshot.consumed_request || self.mark_request_recorded(request_id) {
@@ -441,12 +441,14 @@ impl NativePdfSession {
         binding: NativeBinding,
         request_id: u64,
         action: NativeRedactionMarkAction,
+        removed_geometry: Option<super::NativeRedactionGeometry>,
     ) {
         self.last_redaction_mark = Some(NativeRedactionMarkReceipt {
             request_id,
             binding,
             accepted_hash: self.snapshot.output_hash,
             action,
+            removed_geometry,
         });
     }
 
@@ -477,7 +479,7 @@ impl NativePdfSession {
             return Ok(());
         }
         if self.redaction_marks.contains(&mark) {
-            self.record_redaction_mark(binding, request_id, action);
+            self.record_redaction_mark(binding, request_id, action, None);
             return Ok(());
         }
         self.check_redaction_admission()?;
@@ -506,7 +508,7 @@ impl NativePdfSession {
         self.redaction_marks.push(mark);
         self.redaction_marks_binding = Some(binding);
         self.candidate = None;
-        self.record_redaction_mark(binding, request_id, action);
+        self.record_redaction_mark(binding, request_id, action, None);
         self.redaction_admission.take();
         Ok(())
     }
@@ -522,7 +524,11 @@ impl NativePdfSession {
             rect: mark.rect,
         };
         if self.begin_redaction_mark(binding, request_id, action)? {
-            if self.redaction_mark_geometry(mark.page_id)? != mark.geometry {
+            if self
+                .last_redaction_mark
+                .and_then(|last| last.removed_geometry)
+                != Some(mark.geometry)
+            {
                 return Err(NativeSessionError::InvalidRedactionMark);
             }
             return Ok(());
@@ -537,7 +543,7 @@ impl NativePdfSession {
         if self.redaction_marks.is_empty() {
             self.reset_marks();
         }
-        self.record_redaction_mark(binding, request_id, action);
+        self.record_redaction_mark(binding, request_id, action, Some(mark.geometry));
         self.redaction_admission.take();
         Ok(())
     }
@@ -553,7 +559,7 @@ impl NativePdfSession {
         }
         self.candidate = None;
         self.reset_marks();
-        self.record_redaction_mark(binding, request_id, action);
+        self.record_redaction_mark(binding, request_id, action, None);
         self.redaction_admission.take();
         Ok(())
     }
