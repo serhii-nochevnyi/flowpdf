@@ -913,11 +913,15 @@ impl<'a> SceneBuilder<'a> {
                         operand_span: operand_span.take(),
                         invocation_path: self.invocation_path.clone(),
                     };
-                    self.dispatch_operator(&operator, &operands, provenance, depth, resources)
-                        .map_err(|error| match error {
-                            PdfReadError::Syntax => ContentParseError::OperatorSyntax,
-                            error => error.into(),
-                        })?;
+                    if operator == "Do" {
+                        self.paint_xobject(&operands, object_ref, provenance, depth, resources)?;
+                    } else {
+                        self.dispatch_operator(&operator, &operands, provenance, resources)
+                            .map_err(|error| match error {
+                                PdfReadError::Syntax => ContentParseError::OperatorSyntax,
+                                error => error.into(),
+                            })?;
+                    }
                     operands.clear();
                 }
                 other => {
@@ -943,7 +947,6 @@ impl<'a> SceneBuilder<'a> {
         operator: &str,
         operands: &[ContentToken],
         provenance: PdfSourceProvenance,
-        depth: usize,
         resources: Option<&PdfValue>,
     ) -> Result<(), PdfReadError> {
         let object_ref = provenance.object_ref;
@@ -1135,7 +1138,6 @@ impl<'a> SceneBuilder<'a> {
                 self.state.line_width = None;
                 self.state.miter_limit = None;
             }
-            "Do" => self.paint_xobject(operands, object_ref, provenance, depth, resources)?,
             "BI" | "ID" | "EI" => self.report.push(
                 PdfReadDiagnostic::blocked(
                     PdfReadDiagnosticCode::UnsupportedOperator,
@@ -1576,9 +1578,9 @@ impl<'a> SceneBuilder<'a> {
         provenance: PdfSourceProvenance,
         depth: usize,
         resources: Option<&PdfValue>,
-    ) -> Result<(), PdfReadError> {
+    ) -> Result<(), ContentParseError> {
         let Some(ContentToken::Name(name)) = operands.last() else {
-            return Err(PdfReadError::Syntax);
+            return Err(ContentParseError::OperatorSyntax);
         };
         let xobject_ref = self
             .resource_category(resources, "XObject")?
@@ -1589,11 +1591,13 @@ impl<'a> SceneBuilder<'a> {
         let xobject = self.reader.object(xobject_ref)?;
         let stream = match xobject {
             PdfValue::Stream(stream) => stream,
-            _ => return Err(PdfReadError::ReferenceInvalid),
+            _ => return Err(PdfReadError::ReferenceInvalid.into()),
         };
         let dictionary = &stream.dict;
         match dictionary.get("Subtype").and_then(PdfValue::as_name) {
-            Some("Image") => self.paint_image(&stream, xobject_ref, provenance),
+            Some("Image") => self
+                .paint_image(&stream, xobject_ref, provenance)
+                .map_err(ContentParseError::from),
             Some("Form") => {
                 if depth + 1 > self.limits.max_form_depth {
                     self.report.push(PdfReadDiagnostic::blocked(
@@ -1714,7 +1718,7 @@ impl<'a> SceneBuilder<'a> {
                 }
                 self.state = caller_state;
                 self.state_stack = caller_stack;
-                result?;
+                result.map_err(PdfReadError::from)?;
                 Ok(())
             }
             _ => {

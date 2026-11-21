@@ -159,6 +159,25 @@ fn single_content_stream_reads_at_low_nesting_limit() {
 }
 
 #[test]
+fn terminal_form_syntax_is_independent_of_a_page_stream_boundary() {
+    for form_content in [b"BT [(unfinished".as_slice(), b"BT [<61"] {
+        let bytes = pdf(vec![
+            (1, b"<< /Type /Catalog /Pages 2 0 R >>".to_vec()),
+            (2, b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec()),
+            (3, b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Resources << /XObject << /F 6 0 R >> >> /Contents [4 0 R 5 0 R] >>".to_vec()),
+            stream(4, "", b"10 20 5 5 re f"),
+            stream(5, "", b"/F Do"),
+            stream(6, "/Type /XObject /Subtype /Form /BBox [0 0 100 100]", form_content),
+        ]);
+        let reader = open_pdf(&bytes, Default::default()).unwrap();
+        assert!(matches!(
+            read_pdf_scene(&reader, &PdfSceneRequest::default()),
+            Err(PdfReadError::Syntax)
+        ));
+    }
+}
+
+#[test]
 fn page_and_form_text_report_only_potential_paint_in_a_collapsed_clip() {
     for (additional_clip, partial) in [("", true), ("80 20 10 12 re W n", false)] {
         let text =
