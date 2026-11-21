@@ -816,11 +816,11 @@ impl<'a> SceneBuilder<'a> {
                         index + 1 < self.page.contents.len(),
                     );
                     let end = match (end, uncertain) {
-                        (Err(PdfReadError::Syntax), Some((previous_ref, _, _))) => {
+                        (Err(ContentParseError::OperatorSyntax), Some((previous_ref, _, _))) => {
                             self.report_partial(previous_ref);
                             break;
                         }
-                        (result, _) => result?,
+                        (result, _) => result.map_err(PdfReadError::from)?,
                     };
                     if end.pending_operands && index + 1 < self.page.contents.len() {
                         // @contract: An operator's operand span refers to its own stream.
@@ -867,7 +867,7 @@ impl<'a> SceneBuilder<'a> {
         depth: usize,
         resources: Option<&PdfValue>,
         has_next_page_stream: bool,
-    ) -> Result<ContentStreamEnd, PdfReadError> {
+    ) -> Result<ContentStreamEnd, ContentParseError> {
         if depth > self.limits.max_form_depth {
             self.report.push(PdfReadDiagnostic::blocked(
                 PdfReadDiagnosticCode::FormDepthLimit,
@@ -880,9 +880,12 @@ impl<'a> SceneBuilder<'a> {
         let mut operands = Vec::new();
         let mut operand_span = None::<[u32; 2]>;
         loop {
-            let (token, offset) = match cursor.next() {
-                Err(PdfReadError::Syntax) if has_next_page_stream && cursor.unfinished_array => {
-                    break;
+            let (token, offset) = match cursor.next_token() {
+                Err(ContentParseError::TruncatedOperand) if has_next_page_stream => {
+                    return Ok(ContentStreamEnd {
+                        pending_operands: true,
+                        open_comment: cursor.open_comment,
+                    });
                 }
                 result => match result? {
                     Some(token) => token,
@@ -910,7 +913,11 @@ impl<'a> SceneBuilder<'a> {
                         operand_span: operand_span.take(),
                         invocation_path: self.invocation_path.clone(),
                     };
-                    self.dispatch_operator(&operator, &operands, provenance, depth, resources)?;
+                    self.dispatch_operator(&operator, &operands, provenance, depth, resources)
+                        .map_err(|error| match error {
+                            PdfReadError::Syntax => ContentParseError::OperatorSyntax,
+                            error => error.into(),
+                        })?;
                     operands.clear();
                 }
                 other => {
@@ -920,13 +927,13 @@ impl<'a> SceneBuilder<'a> {
                     operand_span.get_or_insert([start, end])[1] = end;
                     operands.push(other);
                     if operands.len() > self.limits.max_array_items {
-                        return Err(PdfReadError::TokenLimit);
+                        return Err(PdfReadError::TokenLimit.into());
                     }
                 }
             }
         }
         Ok(ContentStreamEnd {
-            pending_operands: cursor.unfinished_array || !operands.is_empty(),
+            pending_operands: !operands.is_empty(),
             open_comment: cursor.open_comment,
         })
     }
@@ -1707,7 +1714,8 @@ impl<'a> SceneBuilder<'a> {
                 }
                 self.state = caller_state;
                 self.state_stack = caller_stack;
-                result.map(|_| ())
+                result?;
+                Ok(())
             }
             _ => {
                 self.report.push(
@@ -2682,13 +2690,33 @@ pub(super) fn separated_content_streams(previous: &[u8], next: &[u8]) -> bool {
         || matches!(next.first(), Some(b'\n' | b'\r'))
 }
 
+enum ContentParseError {
+    Read(PdfReadError),
+    OperatorSyntax,
+    TruncatedOperand,
+}
+
+impl From<PdfReadError> for ContentParseError {
+    fn from(error: PdfReadError) -> Self {
+        Self::Read(error)
+    }
+}
+
+impl From<ContentParseError> for PdfReadError {
+    fn from(error: ContentParseError) -> Self {
+        match error {
+            ContentParseError::Read(error) => error,
+            ContentParseError::OperatorSyntax | ContentParseError::TruncatedOperand => Self::Syntax,
+        }
+    }
+}
+
 pub(super) struct ContentCursor<'a> {
     bytes: &'a [u8],
     position: usize,
     limits: PdfReaderLimits,
     tokens: usize,
     array_depth: usize,
-    unfinished_array: bool,
     decode_names: bool,
     open_comment: bool,
 }
@@ -2701,7 +2729,6 @@ impl<'a> ContentCursor<'a> {
             limits,
             tokens: 0,
             array_depth: 0,
-            unfinished_array: false,
             decode_names: false,
             open_comment: false,
         }
@@ -2719,26 +2746,30 @@ impl<'a> ContentCursor<'a> {
     }
 
     pub(super) fn next(&mut self) -> Result<Option<(ContentToken, usize)>, PdfReadError> {
+        self.next_token().map_err(PdfReadError::from)
+    }
+
+    fn next_token(&mut self) -> Result<Option<(ContentToken, usize)>, ContentParseError> {
         self.skip_space();
         if self.position >= self.bytes.len() {
             return Ok(None);
         }
         self.tokens = self.tokens.checked_add(1).ok_or(PdfReadError::TokenLimit)?;
         if self.tokens > self.limits.max_content_tokens {
-            return Err(PdfReadError::TokenLimit);
+            return Err(PdfReadError::TokenLimit.into());
         }
         let offset = self.position;
         let token = match self.bytes[self.position] {
             b'(' => ContentToken::String(self.literal_string()?),
             b'<' => {
                 if self.bytes.get(self.position + 1) == Some(&b'<') {
-                    return Err(PdfReadError::Syntax);
+                    return Err(PdfReadError::Syntax.into());
                 }
                 ContentToken::String(self.hex_string()?)
             }
             b'[' => {
                 if self.array_depth >= self.limits.max_nesting {
-                    return Err(PdfReadError::TokenLimit);
+                    return Err(PdfReadError::TokenLimit.into());
                 }
                 self.array_depth += 1;
                 let result = self.array();
@@ -2809,7 +2840,7 @@ impl<'a> ContentCursor<'a> {
             .map_err(|_| PdfReadError::Syntax)
     }
 
-    fn literal_string(&mut self) -> Result<Vec<u8>, PdfReadError> {
+    fn literal_string(&mut self) -> Result<Vec<u8>, ContentParseError> {
         self.position += 1;
         let mut output = Vec::new();
         let mut nesting = 1_usize;
@@ -2833,7 +2864,7 @@ impl<'a> ContentCursor<'a> {
                         .bytes
                         .get(self.position)
                         .copied()
-                        .ok_or(PdfReadError::Syntax)?;
+                        .ok_or(ContentParseError::TruncatedOperand)?;
                     self.position += 1;
                     match escaped {
                         b'n' => output.push(b'\n'),
@@ -2873,28 +2904,30 @@ impl<'a> ContentCursor<'a> {
                 other => output.push(other),
             }
             if output.len() > self.limits.max_string_bytes {
-                return Err(PdfReadError::StreamLimit);
+                return Err(PdfReadError::StreamLimit.into());
             }
         }
-        Err(PdfReadError::Syntax)
+        Err(ContentParseError::TruncatedOperand)
     }
 
-    fn hex_string(&mut self) -> Result<Vec<u8>, PdfReadError> {
+    fn hex_string(&mut self) -> Result<Vec<u8>, ContentParseError> {
         let start = self.position;
         self.position += 1;
-        while self.position < self.bytes.len() && self.bytes[self.position] != b'>' {
+        while let Some(&byte) = self.bytes.get(self.position) {
             self.position += 1;
+            if byte == b'>' {
+                let token = std::str::from_utf8(&self.bytes[start..self.position])
+                    .map_err(|_| PdfReadError::Syntax)?;
+                return Ok(parse_hex_token(token)?);
+            }
+            if !byte.is_ascii_hexdigit() {
+                return Err(PdfReadError::Syntax.into());
+            }
         }
-        if self.position >= self.bytes.len() {
-            return Err(PdfReadError::Syntax);
-        }
-        self.position += 1;
-        let token = std::str::from_utf8(&self.bytes[start..self.position])
-            .map_err(|_| PdfReadError::Syntax)?;
-        parse_hex_token(token)
+        Err(ContentParseError::TruncatedOperand)
     }
 
-    fn array(&mut self) -> Result<ContentToken, PdfReadError> {
+    fn array(&mut self) -> Result<ContentToken, ContentParseError> {
         self.position += 1;
         let mut values = Vec::new();
         loop {
@@ -2904,16 +2937,15 @@ impl<'a> ContentCursor<'a> {
                     self.position += 1;
                     return Ok(ContentToken::Array(values));
                 }
-                None => {
-                    self.unfinished_array = true;
-                    return Err(PdfReadError::Syntax);
-                }
+                None => return Err(ContentParseError::TruncatedOperand),
                 _ if values.len() >= self.limits.max_array_items => {
-                    return Err(PdfReadError::TokenLimit);
+                    return Err(PdfReadError::TokenLimit.into());
                 }
                 _ => {}
             }
-            let (value, _) = self.next()?.ok_or(PdfReadError::Syntax)?;
+            let (value, _) = self
+                .next_token()?
+                .ok_or(ContentParseError::TruncatedOperand)?;
             values.push(value);
         }
     }
