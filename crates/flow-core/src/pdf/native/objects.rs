@@ -629,11 +629,18 @@ impl Found {
         *id.finalize().as_bytes()
     }
 
-    fn supports(&self, operation: NativeObjectOperation) -> bool {
-        graphics_saves_fit(
-            self.leaf.graphics_depth,
-            operation.graphics_saves(self.signature.profile.kind()),
-        )
+    fn operation_inverse(&self, operation: NativeObjectOperation) -> Result<Option<Matrix>> {
+        let kind = self.signature.profile.kind();
+        if !graphics_saves_fit(self.leaf.graphics_depth, operation.graphics_saves(kind)) {
+            return Err(State.into());
+        }
+        match (operation, kind) {
+            (NativeObjectOperation::Move, _)
+            | (NativeObjectOperation::Replace, NativeObjectKind::Graphic) => {
+                self.matrix.inverse().map(Some)
+            }
+            _ => Ok(None),
+        }
     }
 
     fn view(&self, page: NativePageId, binding: NativeBinding, hash: [u8; 32]) -> NativeObjectView {
@@ -649,7 +656,7 @@ impl Found {
                 NativeObjectOperation::Remove,
             ]
             .into_iter()
-            .filter(|&operation| self.supports(operation))
+            .filter(|&operation| self.operation_inverse(operation).is_ok())
             .collect(),
         }
     }
@@ -1574,9 +1581,9 @@ pub(super) fn stage(
     };
     let before = scan(graph, page, &mut work, &workspace)?;
     let found = &before.found;
-    let index = command
+    let target = command
         .target()
-        .map(|(target, operation)| -> Result<usize> {
+        .map(|(target, operation)| -> Result<(usize, Option<Matrix>)> {
             let index = found
                 .iter()
                 .position(|item| item.id(page.id, binding, output) == target.id)
@@ -1592,12 +1599,10 @@ pub(super) fn stage(
             {
                 return Err(Profile.into());
             }
-            if !item.supports(operation) {
-                return Err(State.into());
-            }
-            Ok(index)
+            Ok((index, item.operation_inverse(operation)?))
         })
         .transpose()?;
+    let (index, inverse) = target.map_or((None, None), |(index, inverse)| (Some(index), inverse));
     let item = index.map(|i| &found[i]);
     let page_clip = page.geometry.ok_or(Geometry)?.bounds().map(|n| n as f64);
     let clip = item.map_or(page_clip, |item| item.clip);
@@ -1614,8 +1619,8 @@ pub(super) fn stage(
     let (mut replacement, expected) = match command {
         AddGraphic { graphic, .. } | ReplaceGraphic { graphic, .. } => {
             let (source, profile, rect) = graphic_source(graphic)?;
-            let source = if item.is_some() {
-                format!("q\n{}\n{source}\nQ", matrix.inverse()?.operator())
+            let source = if let Some(inverse) = inverse {
+                format!("q\n{}\n{source}\nQ", inverse.operator())
             } else {
                 format!("q\n{source}\nQ")
             };
@@ -1637,7 +1642,8 @@ pub(super) fn stage(
         MoveObject { transform, .. } => {
             let item = item.ok_or(TargetUnavailable)?;
             let transform = Matrix(*transform).checked()?;
-            let local = matrix.then(transform)?.then(matrix.inverse()?)?;
+            let moved = matrix.then(transform)?;
+            let local = moved.then(inverse.ok_or(Postcondition)?)?;
             let original = &stream(graph, item.leaf.stream)?.data[item.leaf.span.clone()];
             spend(&mut remaining, original.len() + 256)?;
             let mut source = format!("q\n{}\n", local.operator()).into_bytes();
@@ -1645,10 +1651,7 @@ pub(super) fn stage(
             source.extend_from_slice(b"\nQ");
             (
                 source,
-                Some((
-                    item.signature.profile,
-                    matrix.then(transform)?.rect(item.local_bounds),
-                )),
+                Some((item.signature.profile, moved.rect(item.local_bounds))),
             )
         }
         RemoveObject { .. } => (Vec::new(), None),

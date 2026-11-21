@@ -23,9 +23,20 @@ fn fixture_with_slots(
     extras: &[Vec<u8>],
     slots: &str,
 ) -> Vec<u8> {
+    fixture_with_media_box(contents, shared, resources, extras, slots, "0 0 200 200")
+}
+
+fn fixture_with_media_box(
+    contents: &[u8],
+    shared: bool,
+    resources: &str,
+    extras: &[Vec<u8>],
+    slots: &str,
+    media_box: &str,
+) -> Vec<u8> {
     let kids = if shared { "3 0 R 4 0 R" } else { "3 0 R" };
     let page = format!(
-        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Contents {slots} {resources} >>"
+        "<< /Type /Page /Parent 2 0 R /MediaBox [{media_box}] /Contents {slots} {resources} >>"
     );
     let mut objects = vec![
         b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
@@ -426,6 +437,82 @@ fn object_allowance_insertion_accounts_for_the_enclosing_graphics_save() {
             assert_eq!(session.output_bytes(), source);
         }
     }
+}
+
+#[test]
+fn inverse_limited_targets_keep_removal_and_in_place_image_replacement() {
+    let paint = b"10 10 10 10 re f
+q 0.001 0 0 1 1100 10 cm 0 0 10000 10 re f Q
+q 0.001 0 0 10 1120 10 cm /I Do Q";
+    let image = stream(
+        "/Type /XObject /Subtype /Image /ColorSpace /DeviceGray /Width 1 /Height 1 /BitsPerComponent 8",
+        &[7],
+    );
+    let source = fixture_with_media_box(
+        paint,
+        false,
+        "/Resources << /XObject << /I 6 0 R >> >>",
+        &[image],
+        "5 0 R",
+        "0 0 1600 200",
+    );
+    let mut session = open(&source);
+    let before = objects(&session, 0);
+    assert_eq!(
+        before[0]["operations"],
+        json!(["replace", "move", "remove"])
+    );
+    assert_eq!(before[1]["operations"], json!(["remove"]));
+    assert_eq!(before[2]["operations"], json!(["replace", "remove"]));
+
+    let binding = session.snapshot().binding;
+    let graphic = target(&session, 0, 1);
+    let image = target(&session, 0, 2);
+    for command in [
+        json!({"kind":"moveObject","target":graphic,"transform":[1,0,0,1,1,0]}),
+        json!({"kind":"moveObject","target":image,"transform":[1,0,0,1,1,0]}),
+        json!({"kind":"replaceGraphic","target":graphic,"graphic":{
+            "shape":"rectangle", "points":[[1100000,10000],[1110000,20000]],
+            "stroke":null, "fill":[255,0,0], "strokeWidth":0
+        }}),
+    ] {
+        assert_eq!(
+            apply(&mut session, command),
+            Err(NativeSessionError::Object(NativeObjectRefusal::Geometry))
+        );
+    }
+    assert_eq!(session.snapshot().binding, binding);
+    assert_eq!(session.lookup(binding, 1), Ok(NativeRequestLookup::Unseen));
+    assert_eq!(session.output_bytes(), source);
+
+    let asset = concat!(
+        "89504e470d0a1a0a0000000d4948445200000001000000010802000000907753de",
+        "0000000c49444154789c63f8cfc0000003010100c9fe92ef0000000049454e44ae426082"
+    );
+    apply(
+        &mut session,
+        json!({"kind":"replaceImage","target":image,"assetHex":asset}),
+    )
+    .unwrap();
+    let after = objects(&session, 0);
+    assert_eq!(after[2]["profile"], "rasterRgb8");
+    assert_eq!(after[2]["bounds"], before[2]["bounds"]);
+    assert_eq!(after[2]["operations"], before[2]["operations"]);
+
+    let graphic = target(&session, 0, 1);
+    apply(
+        &mut session,
+        json!({"kind":"removeObject","target":graphic}),
+    )
+    .unwrap();
+    let after = objects(&open(session.output_bytes()), 0);
+    assert_eq!(after.as_array().unwrap().len(), 2);
+    assert_eq!(after[0]["bounds"], before[0]["bounds"]);
+    assert_eq!(after[1]["bounds"], before[2]["bounds"]);
+    let image = target(&session, 0, 1);
+    apply(&mut session, json!({"kind":"removeObject","target":image})).unwrap();
+    assert_eq!(objects(&session, 0).as_array().unwrap().len(), 1);
+    assert_eq!(session.origin_bytes(), source);
 }
 
 #[test]
