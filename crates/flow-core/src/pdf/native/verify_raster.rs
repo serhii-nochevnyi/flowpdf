@@ -64,6 +64,7 @@ pub(super) fn accepted_page(
         return Err(Budget);
     }
     let mut interpreter = Interpreter::new(workspace);
+    interpreter.check_preview_contours = true;
     let mut draw = DrawBudget::new(workspace);
     let paints = interpreter.page(&document, &page, &mut draw)?;
     let _rgb = workspace.reserve(grid.width * grid.height * size_of::<Pixel>())?;
@@ -378,6 +379,7 @@ struct Interpreter<'a, 'w> {
     retained: Reservation<'w>,
     fonts: Fonts<'a>,
     parse_work: usize,
+    check_preview_contours: bool,
     assets: BTreeSet<PdfObjectRef>,
     stream_hashes: BTreeMap<PdfObjectRef, [u8; 32]>,
     image_hashes: BTreeSet<[u8; 32]>,
@@ -391,6 +393,7 @@ impl<'a, 'w> Interpreter<'a, 'w> {
             retained: workspace.scope(),
             fonts: Fonts::new(),
             parse_work: MAX_PARSE_WORK,
+            check_preview_contours: false,
             assets: BTreeSet::new(),
             stream_hashes: BTreeMap::new(),
             image_hashes: BTreeSet::new(),
@@ -540,6 +543,7 @@ impl<'a, 'w> Interpreter<'a, 'w> {
                                 &mut self.parse_work,
                                 memory,
                             );
+                            outline.preview_clip = self.check_preview_contours.then_some(clip);
                             font.face
                                 .outline_glyph(glyph.id, &mut outline)
                                 .ok_or(UnsupportedProfile)?;
@@ -1252,12 +1256,38 @@ fn transformed(matrix: Matrix, p: Point) -> VerifyResult<Point> {
         .ok_or(UnsupportedProfile)
 }
 
+#[derive(Default)]
+struct ContourShape {
+    origin: Option<Point>,
+    direction: Option<Point>,
+    bounds: Option<Rect>,
+    has_area: bool,
+}
+
+impl ContourShape {
+    fn add(&mut self, point @ [x, y]: Point) {
+        self.bounds = Some(match self.bounds {
+            Some([l, b, r, t]) => [l.min(x), b.min(y), r.max(x), t.max(y)],
+            None => [x, y, x, y],
+        });
+        let origin = *self.origin.get_or_insert(point);
+        let delta = sub(point, origin);
+        if let Some(direction) = self.direction {
+            self.has_area |= cross(direction, delta) != 0;
+        } else if delta != [0; 2] {
+            self.direction = Some(delta);
+        }
+    }
+}
+
 struct Outline<'a> {
     origin: Point,
     size: i64,
     units: i64,
     matrix: Matrix,
     current: Vec<Point>,
+    preview_clip: Option<Rect>,
+    source_contour: ContourShape,
     contours: Vec<Vec<Point>>,
     error: Option<super::verifier::NativeVerificationFailure>,
     work: &'a mut usize,
@@ -1279,6 +1309,8 @@ impl<'a> Outline<'a> {
             units: i64::from(units),
             matrix,
             current: Vec::new(),
+            preview_clip: None,
+            source_contour: ContourShape::default(),
             contours: Vec::new(),
             error: None,
             work,
@@ -1286,7 +1318,7 @@ impl<'a> Outline<'a> {
         }
     }
 
-    fn point(&self, x: f32, y: f32) -> VerifyResult<Point> {
+    fn point(&mut self, x: f32, y: f32) -> VerifyResult<Point> {
         let points = [x * 2.0, y * 2.0];
         if points
             .into_iter()
@@ -1294,10 +1326,50 @@ impl<'a> Outline<'a> {
         {
             return Err(UnsupportedProfile);
         }
-        let local = points.map(|coordinate| {
-            (coordinate as i64 * self.size + self.units).div_euclid(self.units * 2)
-        });
+        let source = points.map(|coordinate| coordinate as i64);
+        if self.preview_clip.is_some() {
+            spend(self.work, 1)?;
+            self.source_contour.add(source);
+        }
+        let local = source
+            .map(|coordinate| (coordinate * self.size + self.units).div_euclid(self.units * 2));
         transformed(self.matrix, add(self.origin, local))
+    }
+
+    fn check_contour(&mut self) -> VerifyResult<()> {
+        let Some(clip) = self.preview_clip else {
+            return Ok(());
+        };
+        let source = std::mem::take(&mut self.source_contour);
+        if !source.has_area {
+            return Ok(());
+        }
+        let [l, b, r, t] = source.bounds.ok_or(UnsupportedProfile)?;
+        let units = i128::from(self.units) * 2;
+        let scale = units * i128::from(POINT);
+        let position = |[x, y]: Point| {
+            let [x, y] = [x, y].map(i128::from);
+            let [ox, oy] = self.origin.map(i128::from);
+            let [a, b, c, d, e, f] = self.matrix.0.map(i128::from);
+            let x = ox * units + x * i128::from(self.size);
+            let y = oy * units + y * i128::from(self.size);
+            [a * x + c * y + e * scale, b * x + d * y + f * scale]
+        };
+        let [x, y] = position([l, b]);
+        let [u, v] = position([r, t]);
+        let [l, b, r, t] = clip.map(|value| i128::from(value) * scale);
+        if x.max(u) <= l || r <= x.min(u) || y.max(v) <= b || t <= y.min(v) {
+            return Ok(());
+        }
+        spend(self.work, self.current.len())?;
+        let mut emitted = ContourShape::default();
+        for &point in &self.current {
+            emitted.add(point);
+            if emitted.has_area {
+                return Ok(());
+            }
+        }
+        Err(UnsupportedProfile)
     }
 
     fn push(&mut self, point: Point) -> VerifyResult<()> {
@@ -1331,12 +1403,16 @@ impl OutlineBuilder for Outline<'_> {
             if !this.current.is_empty() {
                 return Err(UnsupportedProfile);
             }
-            this.push(this.point(x, y)?)
+            let point = this.point(x, y)?;
+            this.push(point)
         });
     }
 
     fn line_to(&mut self, x: f32, y: f32) {
-        self.record(|this| this.push(this.point(x, y)?));
+        self.record(|this| {
+            let point = this.point(x, y)?;
+            this.push(point)
+        });
     }
 
     fn quad_to(&mut self, x: f32, y: f32, x1: f32, y1: f32) {
@@ -1368,6 +1444,7 @@ impl OutlineBuilder for Outline<'_> {
             if this.current.is_empty() {
                 return Err(UnsupportedProfile);
             }
+            this.check_contour()?;
             spend(this.memory, std::mem::size_of::<Vec<Point>>())?;
             this.contours.push(std::mem::take(&mut this.current));
             Ok(())
