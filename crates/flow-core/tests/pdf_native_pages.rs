@@ -1,8 +1,8 @@
 use flow_core::pdf::native::{
-    NativeEditLimits, NativePageCommand, NativePageTarget, NativePdfSession, NativeRequestLookup,
-    NativeSessionError,
+    NativeEditError, NativeEditLimits, NativePageCommand, NativePageSide, NativePageTarget,
+    NativePdfSession, NativeRequestLookup, NativeSessionError,
 };
-use flow_core::pdf::{PdfSceneElement, PdfSceneRequest, open_pdf, read_pdf_scene};
+use flow_core::pdf::{PdfReadError, PdfSceneElement, PdfSceneRequest, open_pdf, read_pdf_scene};
 
 fn fixture() -> Vec<u8> {
     build_pdf(&[
@@ -1721,6 +1721,152 @@ fn owned_checkbox_copies_remain_independently_editable_after_page_deletion() {
     .unwrap();
     pdf.apply_field(pdf.snapshot().binding, 5, &toggle).unwrap();
     assert_eq!(pdf.snapshot().fields[0].checked, Some(false));
+}
+
+fn page_order_workspace_pdf(indirect: bool) -> Vec<u8> {
+    const PER_PARENT: usize = 16;
+    let first: String = (5..5 + PER_PARENT).map(|id| format!("{id} 0 R ")).collect();
+    let second: String = (5 + PER_PARENT..5 + 2 * PER_PARENT)
+        .map(|id| format!("{id} 0 R "))
+        .collect();
+    let child_arrays = [format!("[{first}]"), format!("[{second}]")];
+    let kids = if indirect {
+        [
+            format!("{} 0 R", 5 + 2 * PER_PARENT),
+            format!("{} 0 R", 6 + 2 * PER_PARENT),
+        ]
+    } else {
+        child_arrays.clone()
+    };
+    let mut objects = vec![
+        "<< /Type /Catalog /Pages 2 0 R >>".into(),
+        format!(
+            "<< /Type /Pages /Kids [3 0 R 4 0 R] /Count {} >>",
+            2 * PER_PARENT
+        ),
+        format!(
+            "<< /Type /Pages /Parent 2 0 R /Kids {} /Count {PER_PARENT} /MediaBox [0 0 300 500] >>",
+            kids[0]
+        ),
+        format!(
+            "<< /Type /Pages /Parent 2 0 R /Kids {} /Count {PER_PARENT} /MediaBox [0 0 400 600] /Rotate 90 >>",
+            kids[1]
+        ),
+    ];
+    objects.extend((0..PER_PARENT).map(|_| "<< /Type /Page /Parent 3 0 R >>".to_owned()));
+    objects.extend((0..PER_PARENT).map(|_| "<< /Type /Page /Parent 4 0 R >>".to_owned()));
+    if indirect {
+        objects.extend(child_arrays);
+    }
+    build_pdf(
+        &objects
+            .iter()
+            .map(|object| (0, object.as_str()))
+            .collect::<Vec<_>>(),
+    )
+}
+
+#[test]
+fn page_order_mutations_share_the_staged_allowance_for_direct_and_indirect_kids() {
+    const REORDER_ALLOWANCE: usize = 256 * 1024;
+    const OTHER_PAGE_EDIT_ALLOWANCE: usize = 192 * 1024;
+    for indirect in [false, true] {
+        let bytes = page_order_workspace_pdf(indirect);
+        let open = |limits| NativePdfSession::open_scoped(&bytes, limits, [3; 16]);
+        let limits_with = |max_retained_bytes| NativeEditLimits {
+            max_retained_bytes,
+            ..NativeEditLimits::default()
+        };
+        let original = open(NativeEditLimits::default()).unwrap();
+        let before = original.snapshot();
+        let target = NativePageTarget {
+            page: 0,
+            stable_id: before.page_state.order[0],
+        };
+        for (name, command) in [
+            (
+                "reorder",
+                NativePageCommand::ReorderPage {
+                    target,
+                    position: before.page_state.max_position,
+                },
+            ),
+            (
+                "insert",
+                NativePageCommand::InsertBlankPage {
+                    target,
+                    side: NativePageSide::After,
+                },
+            ),
+            ("duplicate", NativePageCommand::DuplicatePage { target }),
+            ("delete", NativePageCommand::DeletePage { target }),
+        ] {
+            let allowance = match command {
+                NativePageCommand::ReorderPage { .. } => REORDER_ALLOWANCE,
+                _ => OTHER_PAGE_EDIT_ALLOWANCE,
+            };
+            let mut constrained = open(limits_with(allowance)).unwrap();
+            let before = constrained.snapshot().clone();
+            let error = constrained
+                .apply_page(before.binding, 1, &command)
+                .unwrap_err();
+            assert!(
+                matches!(
+                    error,
+                    NativeSessionError::Budget
+                        | NativeSessionError::Graph(NativeEditError::Reader(
+                            PdfReadError::InputSizeLimit
+                        ))
+                ),
+                "{name}, indirect Kids: {indirect}, unexpected refusal: {error:?}"
+            );
+            assert_eq!(constrained.output_bytes(), bytes);
+            assert_eq!(constrained.snapshot().binding, before.binding);
+            assert_eq!(
+                constrained.snapshot().consumed_request,
+                before.consumed_request
+            );
+            assert_eq!(constrained.snapshot().page_state, before.page_state);
+            assert_eq!(
+                constrained.snapshot().scene.scene_hash,
+                before.scene.scene_hash
+            );
+            assert_eq!(
+                constrained.lookup(before.binding, 1),
+                Ok(NativeRequestLookup::Unseen)
+            );
+
+            let mut edited = open(NativeEditLimits::default()).unwrap();
+            let original = edited.snapshot().clone();
+            let receipt = edited.apply_page(original.binding, 1, &command).unwrap();
+            let actual = edited.snapshot();
+            let mut expected = original.page_state.order;
+            match command {
+                NativePageCommand::ReorderPage { .. } => {
+                    expected.rotate_left(1);
+                    let pages = &original.scene.pages;
+                    let mut geometry: Vec<_> = pages.iter().map(|page| page.geometry).collect();
+                    geometry.rotate_left(1);
+                    let actual_geometry = actual.scene.pages.iter().map(|page| page.geometry);
+                    assert!(actual_geometry.eq(geometry));
+                }
+                NativePageCommand::DeletePage { .. } => {
+                    expected.remove(0);
+                }
+                NativePageCommand::InsertBlankPage { .. }
+                | NativePageCommand::DuplicatePage { .. } => {
+                    expected.insert(1, receipt.selected_page.unwrap());
+                    assert_eq!(
+                        actual.scene.pages[1].geometry,
+                        original.scene.pages[0].geometry
+                    );
+                }
+                NativePageCommand::RotatePage { .. } => unreachable!(),
+            }
+            assert_eq!(actual.page_state.order, expected);
+            assert_eq!(edited.origin_bytes(), bytes);
+        }
+    }
 }
 
 #[test]

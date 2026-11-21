@@ -573,22 +573,54 @@ fn change_count(
     }
 }
 
-fn kids(graph: &NativePdfGraph, node: Ref) -> Result<Vec<Ref>, NativeEditError> {
-    array_refs(
-        graph,
-        dict(graph, node)?.get("Kids").ok_or(Malformed)?,
-        &mut graph.remaining_work(),
-    )
+fn with_page_scratch<T>(
+    graph: &mut NativePdfGraph,
+    bytes: usize,
+    edit: impl FnOnce(&mut NativePdfGraph) -> Result<T, NativeSessionError>,
+) -> Result<T, NativeSessionError> {
+    graph.charge_page_retained(bytes)?;
+    let result = edit(graph);
+    graph.release_page_retained(bytes);
+    result
 }
 
-fn replace_kids(
+fn edit_kids<T>(
     graph: &mut NativePdfGraph,
     node: Ref,
-    children: Vec<Ref>,
-) -> Result<(), NativeEditError> {
-    graph.reserve_page_copy(node)?;
-    dict_mut(graph, node)?.insert("Kids".into(), refs(children));
-    Ok(())
+    extra: usize,
+    edit: impl FnOnce(&mut NativePdfGraph, &mut Vec<Ref>) -> Result<T, NativeSessionError>,
+) -> Result<T, NativeSessionError> {
+    let budget = graph.remaining_work();
+    let mut work = budget;
+    let slot = dict(graph, node)?.get("Kids").ok_or(Malformed)?;
+    let indirect = slot.as_reference().is_some();
+    let source = reference_array(graph, slot, &mut work)?;
+    let count = source.len().checked_add(extra).ok_or(Budget)?;
+    let bytes = count.checked_mul(size_of::<Ref>()).ok_or(Budget)?;
+    let workspace = Workspace::new(graph.remaining_retained());
+    let scratch = workspace.reserve(bytes).map_err(|_| Budget)?;
+    let mut children = Vec::new();
+    children.try_reserve_exact(count).map_err(|_| Budget)?;
+    for value in source {
+        children.push(value.as_reference().ok_or(Unsupported)?);
+    }
+    graph.charge_page_work(budget - work)?;
+    with_page_scratch(graph, bytes, move |graph| {
+        drop(scratch);
+        let result = edit(graph, &mut children)?;
+        graph.reserve_page_copy(node)?;
+        // @invariant: The owner copy covers direct slots, and the graph still owns the old indirect array.
+        let new_slots = if indirect { children.len() } else { extra };
+        let installed = new_slots.checked_mul(size_of::<PdfValue>()).ok_or(Budget)?;
+        graph.charge_page_retained(installed)?;
+        let mut values = Vec::new();
+        values
+            .try_reserve_exact(children.len())
+            .map_err(|_| Budget)?;
+        values.extend(children.into_iter().map(PdfValue::Reference));
+        dict_mut(graph, node)?.insert("Kids".into(), PdfValue::Array(values));
+        Ok(result)
+    })
 }
 
 pub(super) fn annotations(graph: &NativePdfGraph, page: Ref) -> Result<Vec<Ref>, NativeEditError> {
@@ -1494,31 +1526,45 @@ fn deletion_preflight<'a>(
 
 fn page_tree_reorder(
     graph: &mut NativePdfGraph,
-    old: &[Ref],
     desired: &[Ref],
-) -> Result<(), NativeEditError> {
+) -> Result<(), NativeSessionError> {
+    let allowance = graph.remaining_retained();
+    let workspace = Workspace::new(allowance);
+    let mut map_bytes = workspace.scope();
     let mut changes = BTreeMap::<Ref, BTreeMap<Ref, Ref>>::new();
-    for (&before, &after) in old.iter().zip(desired) {
+    for (&before, &after) in graph.pages.iter().zip(desired) {
         if before != after {
             let parent = reference(dict(graph, before)?, "Parent")?;
-            if reference(dict(graph, after)?, "Parent")? != parent {
-                let attributes = effective_attributes(graph, after)?;
-                dict_mut(graph, after)?.extend(attributes);
-            }
-            changes.entry(parent).or_default().insert(before, after);
+            let replacements = scoped_entry(&mut changes, parent, &mut map_bytes)?;
+            map_bytes.tree_entry::<(Ref, Ref)>().map_err(|_| Budget)?;
+            replacements.insert(before, after);
         }
     }
-    for (parent, replacements) in changes {
-        let mut children = kids(graph, parent)?;
-        for child in &mut children {
-            if let Some(&replacement) = replacements.get(child) {
-                *child = replacement;
-                dict_mut(graph, replacement)?.insert("Parent".into(), PdfValue::Reference(parent));
+    with_page_scratch(graph, allowance - workspace.remaining(), move |graph| {
+        drop(map_bytes);
+        for (&parent, replacements) in &changes {
+            for &after in replacements.values() {
+                if reference(dict(graph, after)?, "Parent")? != parent {
+                    let attributes = effective_attributes(graph, after)?;
+                    dict_mut(graph, after)?.extend(attributes);
+                }
             }
         }
-        replace_kids(graph, parent, children)?;
-    }
-    Ok(())
+        for (&parent, replacements) in &changes {
+            edit_kids(graph, parent, 0, |graph, children| {
+                for child in children {
+                    if let Some(&replacement) = replacements.get(child) {
+                        *child = replacement;
+                        dict_mut(graph, replacement)?
+                            .insert("Parent".into(), PdfValue::Reference(parent));
+                    }
+                }
+                Ok(())
+            })?;
+        }
+        drop(changes);
+        Ok(())
+    })
 }
 
 pub(super) fn stage(
@@ -1538,7 +1584,32 @@ pub(super) fn stage(
     if matches!(command, DeletePage { .. }) {
         return stage_delete(graph, index, page, parent);
     }
-    let mut order = graph.pages.clone();
+    let growth = usize::from(matches!(
+        command,
+        InsertBlankPage { .. } | DuplicatePage { .. }
+    ));
+    let order_capacity = graph.pages.len().checked_add(growth).ok_or(Budget)?;
+    let order_bytes = order_capacity.checked_mul(size_of::<Ref>()).ok_or(Budget)?;
+    with_page_scratch(graph, order_bytes, |graph| {
+        let mut order = Vec::new();
+        order
+            .try_reserve_exact(order_capacity)
+            .map_err(|_| Budget)?;
+        order.extend_from_slice(&graph.pages);
+        stage_with_order(graph, command, index, projected, parent, &mut order)
+    })
+}
+
+fn stage_with_order(
+    graph: &mut NativePdfGraph,
+    command: NativePageCommand,
+    index: usize,
+    projected: &[NativePdfNotePage],
+    parent: Ref,
+    order: &mut Vec<Ref>,
+) -> Result<Ref, NativeSessionError> {
+    use NativePageCommand::*;
+    let page = order[index];
     let selected = match command {
         RotatePage { degrees, .. } if matches!(degrees, -90 | 90) => {
             let rotation = projected[index]
@@ -1557,52 +1628,52 @@ pub(super) fn stage(
             if position >= order.len() {
                 return Err(NativeSessionError::TargetUnavailable);
             }
-            let old = order.clone();
             order.remove(index);
             order.insert(position, page);
-            page_tree_reorder(graph, &old, &order)?;
+            page_tree_reorder(graph, order)?;
             page
         }
         InsertBlankPage { .. } | DuplicatePage { .. } => {
-            let mut children = kids(graph, parent)?;
-            let slot = children
-                .iter()
-                .position(|&child| child == page)
-                .ok_or(Malformed)?;
-            let new = if matches!(command, DuplicatePage { .. }) {
-                graph.reserve_page_copy(page)?;
-                let mut copy = dict(graph, page)?.clone();
-                copy.remove("Annots");
-                let new = allocate(graph, copy)?;
-                let annots = copy_annotations(graph, page, new)?;
-                if !annots.is_empty() {
-                    dict_mut(graph, new)?.insert("Annots".into(), refs(annots));
-                }
-                new
-            } else {
-                let mut copy = effective_attributes(graph, page)?;
-                copy.insert("Type".into(), PdfValue::Name("Page".into()));
-                copy.insert("Parent".into(), PdfValue::Reference(parent));
-                copy.insert("Resources".into(), PdfValue::Dictionary(Dict::new()));
-                allocate(graph, copy)?
-            };
-            let offset = usize::from(!matches!(
-                command,
-                InsertBlankPage {
-                    side: NativePageSide::Before,
-                    ..
-                }
-            ));
-            children.insert(slot + offset, new);
-            order.insert(index + offset, new);
-            replace_kids(graph, parent, children)?;
+            let new = edit_kids(graph, parent, 1, |graph, children| {
+                let slot = children
+                    .iter()
+                    .position(|&child| child == page)
+                    .ok_or(Malformed)?;
+                let new = if matches!(command, DuplicatePage { .. }) {
+                    graph.reserve_page_copy(page)?;
+                    let mut copy = dict(graph, page)?.clone();
+                    copy.remove("Annots");
+                    let new = allocate(graph, copy)?;
+                    let annots = copy_annotations(graph, page, new)?;
+                    if !annots.is_empty() {
+                        dict_mut(graph, new)?.insert("Annots".into(), refs(annots));
+                    }
+                    new
+                } else {
+                    let mut copy = effective_attributes(graph, page)?;
+                    copy.insert("Type".into(), PdfValue::Name("Page".into()));
+                    copy.insert("Parent".into(), PdfValue::Reference(parent));
+                    copy.insert("Resources".into(), PdfValue::Dictionary(Dict::new()));
+                    allocate(graph, copy)?
+                };
+                let offset = usize::from(!matches!(
+                    command,
+                    InsertBlankPage {
+                        side: NativePageSide::Before,
+                        ..
+                    }
+                ));
+                children.insert(slot + offset, new);
+                order.insert(index + offset, new);
+                Ok(new)
+            })?;
             change_count(graph, parent, 1)?;
             new
         }
         DeletePage { .. } => unreachable!(),
     };
     graph.refresh_page_graph(&BTreeSet::new())?;
-    if graph.pages != order {
+    if graph.pages != *order {
         return Err(NativeSessionError::Postcondition);
     }
     Ok(selected)
@@ -1910,6 +1981,98 @@ fn set_ref(dict: &mut Dict, key: &str, target: Option<Ref>) {
 mod tests {
     use super::super::{NativeEditLimits, NativePdfSession, tests::redaction_fixture};
     use super::*;
+
+    #[test]
+    fn planned_order_is_charged_during_graph_refresh() {
+        let source = redaction_fixture("");
+        let open = || NativePdfGraph::open(&source, NativeEditLimits::default()).unwrap();
+        let mut refreshed = open();
+        let available = refreshed.remaining_retained();
+        refreshed.refresh_page_graph(&BTreeSet::new()).unwrap();
+        let refresh_bytes = available - refreshed.remaining_retained();
+        let order_bytes = refreshed.pages.len() * size_of::<Ref>();
+        let page = refreshed.pages[0];
+        let command = NativePageCommand::ReorderPage {
+            target: NativePageTarget {
+                page: 0,
+                stable_id: u64::from(page.object_number) << 16 | u64::from(page.generation),
+            },
+            position: 0,
+        };
+
+        for short_by in [0, 1] {
+            let mut graph = open();
+            graph
+                .charge_page_retained(available - refresh_bytes - order_bytes + short_by)
+                .unwrap();
+            let result = stage(&mut graph, command, 0, &[]);
+            if short_by == 0 {
+                assert_eq!(result, Ok(page));
+                assert_eq!(graph.remaining_retained(), order_bytes);
+            } else {
+                assert_eq!(result, Err(NativeSessionError::Budget));
+            }
+        }
+    }
+
+    #[test]
+    fn kids_replacement_reserves_scratch_and_installed_slots_together() {
+        let source = redaction_fixture("");
+        for indirect in [false, true] {
+            for short_by in [0, 1] {
+                let mut graph = NativePdfGraph::open(&source, NativeEditLimits::default()).unwrap();
+                let page = graph.pages[0];
+                let parent = reference(dict(&graph, page).unwrap(), "Parent").unwrap();
+                let copy = dict(&graph, page).unwrap().clone();
+                let new = allocate(&mut graph, copy).unwrap();
+                let original = indirect.then(|| {
+                    let array = allocate_value(&mut graph, refs([page])).unwrap();
+                    dict_mut(&mut graph, parent)
+                        .unwrap()
+                        .insert("Kids".into(), PdfValue::Reference(array));
+                    array
+                });
+                let allowance = graph.remaining_retained();
+                let mut remaining = allowance;
+                let mut work = graph.remaining_work();
+                graph
+                    .reserve_page_value(parent, &mut work, &mut remaining)
+                    .unwrap();
+                let owner_bytes = allowance - remaining;
+                let scratch = 2 * size_of::<Ref>();
+                let installed = (1 + usize::from(indirect)) * size_of::<PdfValue>();
+                graph
+                    .charge_page_retained(allowance - owner_bytes - scratch - installed + short_by)
+                    .unwrap();
+
+                let result = edit_kids(&mut graph, parent, 1, |_, children| {
+                    children.push(new);
+                    Ok(())
+                });
+                if short_by == 1 {
+                    assert_eq!(result, Err(NativeSessionError::Budget));
+                    let slot = &dict(&graph, parent).unwrap()["Kids"];
+                    if let Some(array) = original {
+                        assert_eq!(slot.as_reference(), Some(array));
+                    } else {
+                        assert_eq!(slot.as_array().unwrap().len(), 1);
+                    }
+                } else {
+                    result.unwrap();
+                    assert_eq!(graph.remaining_retained(), scratch);
+                    let kids = dict(&graph, parent).unwrap()["Kids"].as_array().unwrap();
+                    assert!(
+                        kids.iter()
+                            .map(PdfValue::as_reference)
+                            .eq([Some(page), Some(new)])
+                    );
+                }
+                if let Some(array) = original {
+                    assert_eq!(graph.objects[&array].as_array().unwrap().len(), 1);
+                }
+            }
+        }
+    }
 
     #[test]
     fn indirect_print_preferences_share_the_page_projection_work_budget() {
