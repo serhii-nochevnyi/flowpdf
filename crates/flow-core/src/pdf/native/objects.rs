@@ -1,10 +1,4 @@
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    fmt::Write,
-    io::Cursor,
-    mem::size_of,
-    ops::Range,
-};
+use std::{collections::BTreeMap, fmt::Write, io::Cursor, mem::size_of, ops::Range};
 
 use image::{ImageDecoder, ImageFormat, ImageReader, Limits};
 use serde::{Deserialize, Serialize};
@@ -17,8 +11,8 @@ use super::super::{
     scene::{ContentCursor, ContentToken, NativePdfNotePage, separated_content_streams},
 };
 use super::{
-    NativeBinding, NativePageId, NativeSessionError,
-    graph::{NativePdfGraph, collect_refs, spend},
+    NativeBinding, NativeEditError, NativePageId, NativeSessionError,
+    graph::{NativePdfGraph, Reachability, spend},
     text::reserve_content_tokens,
     verifier::{Reservation, Workspace},
 };
@@ -1489,46 +1483,6 @@ fn edited_stream(
     })
 }
 
-fn retain_reachable(
-    graph: &mut NativePdfGraph,
-    work: &mut ScanWork,
-    remaining: &mut usize,
-) -> Result<()> {
-    let mut pending = Vec::new();
-    for value in graph.trailer.values() {
-        collect_refs(value, &mut pending, &mut work.remaining, remaining)?;
-    }
-    let mut reachable = BTreeSet::new();
-    let mut reverse = BTreeMap::<_, BTreeSet<_>>::new();
-    while let Some(reference) = pending.pop() {
-        work.spend(1)?;
-        if !reachable.insert(reference) {
-            continue;
-        }
-        if reachable.len() > graph.limits.max_objects {
-            return Err(NativeSessionError::Budget);
-        }
-        let mut children = Vec::new();
-        collect_refs(
-            graph.objects.get(&reference).ok_or(State)?,
-            &mut children,
-            &mut work.remaining,
-            remaining,
-        )?;
-        for child in children {
-            work.spend(2)?;
-            reverse.entry(child).or_default().insert(reference);
-            pending.push(child);
-        }
-    }
-    work.spend(graph.objects.len())?;
-    graph
-        .objects
-        .retain(|reference, _| reachable.contains(reference));
-    graph.reverse = reverse;
-    Ok(())
-}
-
 fn invocation_resources<'a>(
     graph: &'a NativePdfGraph,
     page: PdfObjectRef,
@@ -1769,11 +1723,15 @@ pub(super) fn stage(
     if let Some(resources) = override_resources {
         dict.insert("Resources".into(), PdfValue::Dictionary(resources));
     }
-    retain_reachable(graph, &mut work, &mut remaining)?;
-
     let _edit_memory = workspace
         .reserve(workspace.remaining() - remaining)
         .map_err(|_| Budget)?;
+    graph
+        .rebuild_reverse(&mut work.remaining, &workspace, Reachability::Object)
+        .map_err(|error| match error {
+            NativeEditError::Malformed => State.into(),
+            error => NativeSessionError::from(error),
+        })?;
     let changed = expected.map(|_| index.unwrap_or(found.len()));
     let after = scan(graph, page, &mut work, &workspace)?;
     if let Some((profile, rect)) = expected {

@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet};
 
 use thiserror::Error;
 
@@ -107,12 +107,38 @@ pub struct NativePdfGraph {
     pub(super) source: Vec<u8>,
     pub(super) trailer: BTreeMap<String, PdfValue>,
     pub(super) objects: BTreeMap<PdfObjectRef, PdfValue>,
-    pub(super) reverse: BTreeMap<PdfObjectRef, BTreeSet<PdfObjectRef>>,
+    pub(super) reverse: ReverseMap,
+    reverse_bytes: usize,
     pub(super) pages: Vec<PdfObjectRef>,
     pub(super) limits: NativeEditLimits,
     retained: usize,
     work: usize,
     decoded: usize,
+}
+
+type ReverseMap = BTreeMap<PdfObjectRef, BTreeSet<PdfObjectRef>>;
+
+fn insert_reverse_edge(
+    reverse: &mut ReverseMap,
+    charge: &mut Reservation<'_>,
+    target: PdfObjectRef,
+    owner: PdfObjectRef,
+) -> Result<(), NativeEditError> {
+    if !reverse.contains_key(&target) {
+        charge
+            .tree_entry::<(PdfObjectRef, BTreeSet<PdfObjectRef>)>()
+            .map_err(|_| NativeEditError::Budget)?;
+    }
+    charge
+        .insert(reverse.entry(target).or_default(), owner)
+        .map_err(|_| NativeEditError::Budget)?;
+    Ok(())
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum Reachability<'a> {
+    Page(&'a BTreeSet<PdfObjectRef>),
+    Object,
 }
 
 struct PageValidation<'a> {
@@ -184,65 +210,87 @@ impl NativePdfGraph {
                 return Err(NativeEditError::Unsupported);
             }
         }
-        let mut queue = VecDeque::new();
+        let workspace = Workspace::new(retained);
+        let mut object_charge = workspace.scope();
+        let mut reverse_charge = workspace.scope();
+        let mut queue_charge = workspace.scope();
+        let mut seen_charge = workspace.scope();
+        let mut queue = Vec::new();
         let mut queued = BTreeSet::new();
-        let mut initial = Vec::new();
+        let mut enqueue = |queue: &mut Vec<_>, dependency| {
+            if seen_charge
+                .insert(&mut queued, dependency)
+                .map_err(|_| NativeEditError::Budget)?
+            {
+                queue_charge
+                    .push(queue, dependency)
+                    .map_err(|_| NativeEditError::Budget)?;
+            }
+            Ok(())
+        };
         inspect_dict(
             trailer,
             DictionaryRole::Trailer,
             0,
             &limits,
             &mut work,
-            &mut retained,
-            &mut initial,
+            &mut |dependency| enqueue(&mut queue, dependency),
         )?;
-        for reference in initial {
-            if queued.insert(reference) {
-                queue.push_back(reference);
-            }
-        }
-        while let Some((reference, role)) = queue.pop_front() {
+        let mut next = 0;
+        while let Some(&(reference, role)) = queue.get(next) {
+            next += 1;
             if !objects.contains_key(&reference) {
                 if objects.len() >= limits.max_objects {
                     return Err(NativeEditError::Budget);
                 }
-                spend(&mut retained, 512)?;
+                object_charge
+                    .grow(512)
+                    .map_err(|_| NativeEditError::Budget)?;
                 let (value, cost, tokens) = reader.retained_object(
                     reference,
-                    retained,
+                    workspace.remaining(),
                     decoded.min(limits.max_decoded_stream_bytes),
                     work,
                 )?;
-                spend(&mut retained, cost)?;
+                object_charge
+                    .grow(cost)
+                    .map_err(|_| NativeEditError::Budget)?;
                 spend(&mut work, tokens)?;
                 if let PdfValue::Stream(stream) = &value {
                     spend(&mut decoded, stream.data.len())?;
                 }
                 objects.insert(reference, value);
             }
-            let mut refs = Vec::new();
             inspect(
                 &objects[&reference],
                 role,
                 0,
                 &limits,
                 &mut work,
-                &mut retained,
-                &mut refs,
+                &mut |dependency| {
+                    insert_reverse_edge(
+                        &mut reverse,
+                        &mut reverse_charge,
+                        dependency.0,
+                        reference,
+                    )?;
+                    enqueue(&mut queue, dependency)
+                },
             )?;
-            for dependency in refs {
-                reverse.entry(dependency.0).or_default().insert(reference);
-                if queued.insert(dependency) {
-                    queue.push_back(dependency);
-                }
-            }
         }
+        drop(queue);
+        drop(queued);
+        drop(queue_charge);
+        drop(seen_charge);
+        let retained = workspace.remaining();
+        let reverse_bytes = reverse_charge.into_charge();
         let (source, trailer) = reader.into_retained_parts();
         let mut graph = Self {
             source,
             trailer,
             objects,
             reverse,
+            reverse_bytes,
             pages: Vec::new(),
             limits,
             retained,
@@ -349,16 +397,19 @@ impl NativePdfGraph {
         if existing.iter().any(|value| value.as_reference().is_none()) {
             return Err(NativeEditError::Unsupported);
         }
-        let mut old_refs = Vec::new();
-        let mut new_refs = Vec::new();
+        let workspace = Workspace::new(remaining);
+        let mut scratch = workspace.scope();
+        let mut edges = workspace.scope();
+        let mut old_refs = BTreeSet::new();
+        let mut new_refs = BTreeSet::new();
         for (key, value) in page_dict {
-            collect_refs(value, &mut old_refs, &mut work, &mut remaining)?;
+            collect_reference_set(value, &mut old_refs, &mut work, &mut scratch)?;
             if key != "Annots" {
-                collect_refs(value, &mut new_refs, &mut work, &mut remaining)?;
+                collect_reference_set(value, &mut new_refs, &mut work, &mut scratch)?;
             }
         }
         for value in existing {
-            collect_refs(value, &mut new_refs, &mut work, &mut remaining)?;
+            collect_reference_set(value, &mut new_refs, &mut work, &mut scratch)?;
         }
         let mut annots = existing.to_vec();
         let mut reference = None;
@@ -394,22 +445,44 @@ impl NativePdfGraph {
             ("P".into(), PdfValue::Reference(page)),
         ]);
         annots.push(PdfValue::Reference(reference));
-        new_refs.push(reference);
+        scratch
+            .insert(&mut new_refs, reference)
+            .map_err(|_| NativeEditError::Budget)?;
+        for (target, owner) in new_refs
+            .iter()
+            .map(|&target| (target, page))
+            .chain(std::iter::once((page, reference)))
+        {
+            match self.reverse.get(&target) {
+                Some(owners) if owners.contains(&owner) => continue,
+                Some(_) => {}
+                None if target == page && owner == reference && new_refs.contains(&page) => {}
+                None => edges
+                    .tree_entry::<(PdfObjectRef, BTreeSet<PdfObjectRef>)>()
+                    .map_err(|_| NativeEditError::Budget)?,
+            }
+            edges
+                .tree_entry::<PdfObjectRef>()
+                .map_err(|_| NativeEditError::Budget)?;
+        }
         // @invariant: Replacing the page entry preserves the array for its other owners.
         if let Some(PdfValue::Dictionary(page_dict)) = self.objects.get_mut(&page) {
             page_dict.insert("Annots".into(), PdfValue::Array(annots));
         }
-        for old in old_refs {
-            if let Some(owners) = self.reverse.get_mut(&old) {
+        for old in old_refs.difference(&new_refs) {
+            if let Some(owners) = self.reverse.get_mut(old) {
                 owners.remove(&page);
             }
         }
-        for new in new_refs {
-            self.reverse.entry(new).or_default().insert(page);
+        for target in new_refs {
+            self.reverse.entry(target).or_default().insert(page);
         }
         self.reverse.entry(page).or_default().insert(reference);
         self.objects.insert(reference, PdfValue::Dictionary(dict));
-        self.retained = remaining;
+        drop(old_refs);
+        drop(scratch);
+        self.reverse_bytes += edges.into_charge();
+        self.retained = workspace.remaining();
         self.work = work;
         Ok(())
     }
@@ -641,32 +714,75 @@ impl NativePdfGraph {
         &mut self,
         removed: &BTreeSet<PdfObjectRef>,
     ) -> Result<(), NativeEditError> {
+        let workspace = Workspace::new(self.retained);
+        let mut work = self.work;
+        self.rebuild_reverse(&mut work, &workspace, Reachability::Page(removed))?;
+        self.retained = workspace.remaining();
+        self.work = work;
+        self.validate_pages()
+    }
+
+    pub(super) fn rebuild_reverse(
+        &mut self,
+        work: &mut usize,
+        workspace: &Workspace,
+        mode: Reachability<'_>,
+    ) -> Result<(), NativeEditError> {
+        use NativeEditError::{Budget, Malformed, Unsupported};
+
+        let mut pending_charge = workspace.scope();
+        let mut reachable_charge = workspace.scope();
+        let mut reverse_charge = workspace.scope();
         let mut pending = Vec::new();
-        for value in self.trailer.values() {
-            collect_refs(value, &mut pending, &mut self.work, &mut self.retained)?;
-        }
         let mut reachable = BTreeSet::new();
-        let mut reverse = BTreeMap::<_, BTreeSet<_>>::new();
+        let mut reverse = ReverseMap::new();
+        for value in self.trailer.values() {
+            visit_refs(value, work, &mut |target| {
+                pending_charge
+                    .push(&mut pending, target)
+                    .map_err(|_| Budget)
+            })?;
+        }
+        let object_edit = matches!(mode, Reachability::Object);
         while let Some(owner) = pending.pop() {
-            spend(&mut self.work, 1)?;
-            if removed.contains(&owner) {
-                return Err(NativeEditError::Unsupported);
+            spend(work, 1)?;
+            if matches!(mode, Reachability::Page(removed) if removed.contains(&owner)) {
+                return Err(Unsupported);
             }
-            if !reachable.insert(owner) {
+            if !reachable_charge
+                .insert(&mut reachable, owner)
+                .map_err(|_| Budget)?
+            {
                 continue;
             }
-            let value = self.objects.get(&owner).ok_or(NativeEditError::Malformed)?;
-            let mut refs = Vec::new();
-            collect_refs(value, &mut refs, &mut self.work, &mut self.retained)?;
-            for reference in refs {
-                reverse.entry(reference).or_default().insert(owner);
-                pending.push(reference);
+            if object_edit && reachable.len() > self.limits.max_objects {
+                return Err(Budget);
             }
+            let value = self.objects.get(&owner).ok_or(Malformed)?;
+            let edge_work = if object_edit { 2 } else { 0 };
+            visit_refs_charged(value, work, edge_work, &mut |target| {
+                insert_reverse_edge(&mut reverse, &mut reverse_charge, target, owner)?;
+                pending_charge
+                    .push(&mut pending, target)
+                    .map_err(|_| Budget)
+            })?;
+        }
+        if object_edit {
+            spend(work, self.objects.len())?;
         }
         self.objects
             .retain(|reference, _| reachable.contains(reference));
-        self.reverse = reverse;
-        self.validate_pages()
+        drop(pending);
+        drop(reachable);
+        drop(pending_charge);
+        drop(reachable_charge);
+
+        let new_bytes = reverse_charge.into_charge();
+        let old_bytes = std::mem::replace(&mut self.reverse_bytes, new_bytes);
+        drop(std::mem::replace(&mut self.reverse, reverse));
+        workspace.credit(old_bytes);
+        self.retained = self.retained - new_bytes + old_bytes;
+        Ok(())
     }
 
     fn validate_pages(&mut self) -> Result<(), NativeEditError> {
@@ -918,22 +1034,34 @@ pub(super) fn visit_refs(
     work: &mut usize,
     visit: &mut impl FnMut(PdfObjectRef) -> Result<(), NativeEditError>,
 ) -> Result<(), NativeEditError> {
+    visit_refs_charged(value, work, 0, visit)
+}
+
+fn visit_refs_charged(
+    value: &PdfValue,
+    work: &mut usize,
+    edge_work: usize,
+    visit: &mut impl FnMut(PdfObjectRef) -> Result<(), NativeEditError>,
+) -> Result<(), NativeEditError> {
     spend(work, 1)?;
     match value {
-        PdfValue::Reference(reference) => visit(*reference)?,
+        PdfValue::Reference(reference) => {
+            spend(work, edge_work)?;
+            visit(*reference)?;
+        }
         PdfValue::Array(values) => {
             for value in values {
-                visit_refs(value, work, visit)?;
+                visit_refs_charged(value, work, edge_work, visit)?;
             }
         }
         PdfValue::Dictionary(dict) => {
             for value in dict.values() {
-                visit_refs(value, work, visit)?;
+                visit_refs_charged(value, work, edge_work, visit)?;
             }
         }
         PdfValue::Stream(stream) => {
             for value in stream.dict.values() {
-                visit_refs(value, work, visit)?;
+                visit_refs_charged(value, work, edge_work, visit)?;
             }
         }
         _ => {}
@@ -981,8 +1109,7 @@ fn inspect(
     depth: usize,
     limits: &NativeEditLimits,
     work: &mut usize,
-    retained: &mut usize,
-    refs: &mut Vec<(PdfObjectRef, DictionaryRole)>,
+    visit: &mut impl FnMut((PdfObjectRef, DictionaryRole)) -> Result<(), NativeEditError>,
 ) -> Result<(), NativeEditError> {
     spend(work, 1)?;
     if depth > limits.max_nesting {
@@ -991,8 +1118,7 @@ fn inspect(
     match value {
         PdfValue::Reference(reference) => {
             spend(work, 1)?;
-            spend(retained, 128)?;
-            refs.push((*reference, role));
+            visit((*reference, role))?;
         }
         PdfValue::Array(values) => {
             for value in values {
@@ -1002,14 +1128,11 @@ fn inspect(
                     depth + 1,
                     limits,
                     work,
-                    retained,
-                    refs,
+                    visit,
                 )?;
             }
         }
-        PdfValue::Dictionary(dict) => {
-            inspect_dict(dict, role, depth, limits, work, retained, refs)?
-        }
+        PdfValue::Dictionary(dict) => inspect_dict(dict, role, depth, limits, work, visit)?,
         PdfValue::Stream(stream) => {
             if stream.dict.contains_key("F")
                 || stream.dict.contains_key("FFilter")
@@ -1024,8 +1147,7 @@ fn inspect(
                 depth,
                 limits,
                 work,
-                retained,
-                refs,
+                visit,
             )?;
             // @contract: Admission preserves encoded content without interpreting operators.
         }
@@ -1077,8 +1199,7 @@ fn inspect_dict(
     depth: usize,
     limits: &NativeEditLimits,
     work: &mut usize,
-    retained: &mut usize,
-    refs: &mut Vec<(PdfObjectRef, DictionaryRole)>,
+    visit: &mut impl FnMut((PdfObjectRef, DictionaryRole)) -> Result<(), NativeEditError>,
 ) -> Result<(), NativeEditError> {
     for (key, value) in dict {
         if role != DictionaryRole::Names
@@ -1129,15 +1250,7 @@ fn inspect_dict(
         {
             return Err(NativeEditError::Unsupported);
         }
-        inspect(
-            value,
-            role.child(key),
-            depth + 1,
-            limits,
-            work,
-            retained,
-            refs,
-        )?;
+        inspect(value, role.child(key), depth + 1, limits, work, visit)?;
     }
     Ok(())
 }
@@ -1153,16 +1266,7 @@ mod tests {
             let dict = BTreeMap::from([(key.into(), PdfValue::Null)]);
             let inspect_role = |role| {
                 let mut work = limits.max_work;
-                let mut retained = limits.max_retained_bytes;
-                inspect_dict(
-                    &dict,
-                    role,
-                    0,
-                    &limits,
-                    &mut work,
-                    &mut retained,
-                    &mut Vec::new(),
-                )
+                inspect_dict(&dict, role, 0, &limits, &mut work, &mut |_| Ok(()))
             };
             assert!(inspect_role(DictionaryRole::Names).is_ok());
             assert!(matches!(
@@ -1260,6 +1364,98 @@ mod tests {
             ),
             Err(NativeEditError::Budget)
         );
+    }
+
+    #[test]
+    fn object_edge_work_is_charged_before_visiting_the_reference() {
+        let reference = PdfObjectRef {
+            object_number: 1,
+            generation: 0,
+        };
+        let value = PdfValue::Reference(reference);
+        let mut visits = 0;
+        let mut visit = |target| {
+            assert_eq!(target, reference);
+            visits += 1;
+            Ok(())
+        };
+        assert_eq!(
+            visit_refs_charged(&value, &mut 2, 2, &mut visit),
+            Err(NativeEditError::Budget)
+        );
+        visit_refs_charged(&value, &mut 3, 2, &mut visit).unwrap();
+        assert_eq!(visits, 1);
+    }
+
+    #[test]
+    fn reverse_rebuilds_charge_the_peak_and_refund_previous_and_scratch_storage() {
+        let bytes = super::super::tests::redaction_fixture("10 10 20 20 re f");
+        let open = || NativePdfGraph::open(&bytes, NativeEditLimits::default()).unwrap();
+        let empty = BTreeSet::new();
+        for mode in [Reachability::Page(&empty), Reachability::Object] {
+            let mut graph = open();
+            let installed = 3 * (128 + 12 * size_of::<(PdfObjectRef, BTreeSet<PdfObjectRef>)>())
+                + 4 * (128 + 12 * size_of::<PdfObjectRef>());
+            let visited = 4 * (128 + 12 * size_of::<PdfObjectRef>());
+            let pending = 4 * size_of::<PdfObjectRef>();
+            let peak = installed + visited + pending;
+            assert_eq!(graph.reverse_bytes, installed);
+            let reverse = graph.reverse.clone();
+            let mut work = graph.remaining_work();
+
+            graph.retained = peak - 1;
+            let workspace = Workspace::new(graph.retained);
+            assert_eq!(
+                graph.rebuild_reverse(&mut work, &workspace, mode),
+                Err(NativeEditError::Budget)
+            );
+            assert_eq!(graph.reverse, reverse);
+            assert_eq!(graph.reverse_bytes, installed);
+            assert_eq!(graph.retained, peak - 1);
+            assert_eq!(workspace.remaining(), peak - 1);
+
+            graph.retained = peak;
+            let workspace = Workspace::new(graph.retained);
+            for _ in 0..2 {
+                graph.rebuild_reverse(&mut work, &workspace, mode).unwrap();
+                assert_eq!(graph.reverse, reverse);
+                assert_eq!(graph.reverse_bytes, installed);
+                assert_eq!(graph.retained, peak);
+                assert_eq!(workspace.remaining(), peak);
+            }
+        }
+    }
+
+    #[test]
+    fn direct_note_reverse_debits_are_refundable_by_the_next_rebuild() {
+        let bytes = super::super::tests::redaction_fixture("");
+        let mut graph = NativePdfGraph::open(&bytes, NativeEditLimits::default()).unwrap();
+        let page = graph.pages[0];
+        let array =
+            super::super::pages::allocate_value(&mut graph, PdfValue::Array(Vec::new())).unwrap();
+        super::super::pages::dict_mut(&mut graph, page)
+            .unwrap()
+            .insert("Annots".into(), PdfValue::Reference(array));
+        graph.refresh_page_graph(&BTreeSet::new()).unwrap();
+        let old_bytes = graph.reverse_bytes;
+        graph
+            .add_note(PlainTextNote {
+                page_index: 0,
+                contents: "Delivery note".into(),
+                rect: [10, 10, 20, 20],
+            })
+            .unwrap();
+        let key = 128 + 12 * size_of::<(PdfObjectRef, BTreeSet<PdfObjectRef>)>();
+        let edge = 128 + 12 * size_of::<PdfObjectRef>();
+        assert_eq!(graph.reverse_bytes, old_bytes + key + 2 * edge);
+        assert!(graph.reverse[&array].is_empty());
+        let remaining = graph.remaining_retained();
+        for _ in 0..2 {
+            graph.refresh_page_graph(&BTreeSet::new()).unwrap();
+            assert!(!graph.reverse.contains_key(&array));
+            assert_eq!(graph.reverse_bytes, old_bytes + edge);
+            assert_eq!(graph.remaining_retained(), remaining + key + edge);
+        }
     }
 
     #[test]
