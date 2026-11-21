@@ -650,8 +650,8 @@ impl GraphicsState {
 
 #[derive(Debug, Clone)]
 enum RawPathCommand {
-    MoveTo(LayoutUnit, LayoutUnit, [f64; 2]),
-    LineTo(LayoutUnit, LayoutUnit, [f64; 2]),
+    MoveTo(LayoutUnit, LayoutUnit, [SceneDecimal; 2]),
+    LineTo(LayoutUnit, LayoutUnit, [SceneDecimal; 2]),
     CurveTo(
         LayoutUnit,
         LayoutUnit,
@@ -659,7 +659,7 @@ enum RawPathCommand {
         LayoutUnit,
         LayoutUnit,
         LayoutUnit,
-        [f64; 2],
+        [[SceneDecimal; 2]; 3],
     ),
     Close,
 }
@@ -697,7 +697,7 @@ impl SceneDecimal {
         }
     }
 
-    fn sum(self, other: Self) -> f64 {
+    fn sum(self, other: Self) -> Self {
         if let (
             Self::Exact {
                 coefficient: left,
@@ -713,10 +713,13 @@ impl SceneDecimal {
             let left = i128::from(left).checked_mul(10_i128.pow(scale - left_scale));
             let right = i128::from(right).checked_mul(10_i128.pow(scale - right_scale));
             if let Some(sum) = left.zip(right).and_then(|(a, b)| a.checked_add(b)) {
-                return sum as f64 / 10_i128.pow(scale) as f64;
+                return i64::try_from(sum).map_or_else(
+                    |_| Self::Approximate(sum as f64 / 10_i128.pow(scale) as f64),
+                    |coefficient| Self::Exact { coefficient, scale },
+                );
             }
         }
-        self.value() + other.value()
+        Self::Approximate(self.value() + other.value())
     }
 }
 
@@ -973,58 +976,87 @@ impl<'a> SceneBuilder<'a> {
             }
             "m" => {
                 let (x, y) = two_numbers(operands)?;
-                let [px, py] =
-                    std::array::from_fn(|i| operands[operands.len() - 2 + i].precise_number());
+                let point =
+                    std::array::from_fn(|i| operands[operands.len() - 2 + i].scene_decimal());
+                let [px, py] = point.map(SceneDecimal::value);
                 self.state.extend_path_paint_bounds([px, py, px, py]);
-                self.state.path.push(RawPathCommand::MoveTo(x, y, [px, py]));
+                self.state.path.push(RawPathCommand::MoveTo(x, y, point));
                 self.state.current_point = Some((x, y));
                 self.state.subpath_start = self.state.current_point;
             }
             "l" => {
                 let (x, y) = two_numbers(operands)?;
-                let [px, py] =
-                    std::array::from_fn(|i| operands[operands.len() - 2 + i].precise_number());
+                let point =
+                    std::array::from_fn(|i| operands[operands.len() - 2 + i].scene_decimal());
+                let [px, py] = point.map(SceneDecimal::value);
                 self.state.extend_path_paint_bounds([px, py, px, py]);
-                self.state.path.push(RawPathCommand::LineTo(x, y, [px, py]));
+                self.state.path.push(RawPathCommand::LineTo(x, y, point));
                 self.state.current_point = Some((x, y));
             }
             "c" => {
                 let values = six_number_values(operands)?;
-                for point in operands[operands.len() - 6..].chunks_exact(2) {
-                    let [x, y] = [point[0].precise_number(), point[1].precise_number()];
+                let points: [[SceneDecimal; 2]; 3] = std::array::from_fn(|i| {
+                    let pair = operands.len() - 6 + 2 * i;
+                    [
+                        operands[pair].scene_decimal(),
+                        operands[pair + 1].scene_decimal(),
+                    ]
+                });
+                for point in points {
+                    let [x, y] = point.map(SceneDecimal::value);
                     self.state.extend_path_paint_bounds([x, y, x, y]);
                 }
-                let end =
-                    std::array::from_fn(|i| operands[operands.len() - 2 + i].precise_number());
                 self.state.path.push(RawPathCommand::CurveTo(
-                    values[0], values[1], values[2], values[3], values[4], values[5], end,
+                    values[0], values[1], values[2], values[3], values[4], values[5], points,
                 ));
                 self.state.current_point = Some((values[4], values[5]));
             }
             "v" => {
                 let values = four_number_values(operands)?;
-                for point in operands[operands.len() - 4..].chunks_exact(2) {
-                    let [x, y] = [point[0].precise_number(), point[1].precise_number()];
+                let points: [[SceneDecimal; 2]; 2] = std::array::from_fn(|i| {
+                    let pair = operands.len() - 4 + 2 * i;
+                    [
+                        operands[pair].scene_decimal(),
+                        operands[pair + 1].scene_decimal(),
+                    ]
+                });
+                for point in points {
+                    let [x, y] = point.map(SceneDecimal::value);
                     self.state.extend_path_paint_bounds([x, y, x, y]);
                 }
                 let (x0, y0) = self.state.current_point.ok_or(PdfReadError::Syntax)?;
-                let end =
-                    std::array::from_fn(|i| operands[operands.len() - 2 + i].precise_number());
                 self.state.path.push(RawPathCommand::CurveTo(
-                    x0, y0, values[0], values[1], values[2], values[3], end,
+                    x0,
+                    y0,
+                    values[0],
+                    values[1],
+                    values[2],
+                    values[3],
+                    [points[0], points[0], points[1]],
                 ));
                 self.state.current_point = Some((values[2], values[3]));
             }
             "y" => {
                 let values = four_number_values(operands)?;
-                for point in operands[operands.len() - 4..].chunks_exact(2) {
-                    let [x, y] = [point[0].precise_number(), point[1].precise_number()];
+                let points: [[SceneDecimal; 2]; 2] = std::array::from_fn(|i| {
+                    let pair = operands.len() - 4 + 2 * i;
+                    [
+                        operands[pair].scene_decimal(),
+                        operands[pair + 1].scene_decimal(),
+                    ]
+                });
+                for point in points {
+                    let [x, y] = point.map(SceneDecimal::value);
                     self.state.extend_path_paint_bounds([x, y, x, y]);
                 }
-                let end =
-                    std::array::from_fn(|i| operands[operands.len() - 2 + i].precise_number());
                 self.state.path.push(RawPathCommand::CurveTo(
-                    values[0], values[1], values[2], values[3], values[2], values[3], end,
+                    values[0],
+                    values[1],
+                    values[2],
+                    values[3],
+                    values[2],
+                    values[3],
+                    [points[0], points[1], points[1]],
                 ));
                 self.state.current_point = Some((values[2], values[3]));
             }
@@ -1032,8 +1064,9 @@ impl<'a> SceneBuilder<'a> {
                 let values = four_number_values(operands)?;
                 let [x, y, width, height] =
                     std::array::from_fn(|i| operands[operands.len() - 4 + i].scene_decimal());
-                let [px, py, right, top] = [x.value(), y.value(), x.sum(width), y.sum(height)];
-                self.state.extend_path_paint_bounds([px, py, right, top]);
+                let [px, py, right, top] = [x, y, x.sum(width), y.sum(height)];
+                self.state
+                    .extend_path_paint_bounds([px, py, right, top].map(SceneDecimal::value));
                 let (x, y, width, height) = (values[0], values[1], values[2], values[3]);
                 let x1 = x.checked_add(width)?;
                 let y1 = y.checked_add(height)?;
@@ -1224,7 +1257,14 @@ impl<'a> SceneBuilder<'a> {
             };
             if visible {
                 // @contract: Only provenance records the fill rule for painted paths.
-                if matches!(operator, "f*" | "B*" | "b*")
+                if (fill
+                    && lost_visible_fill_contour(
+                        &self.state.path,
+                        &commands,
+                        self.state.paint_ctm,
+                        self.state.paint_clip,
+                    ))
+                    || matches!(operator, "f*" | "B*" | "b*")
                     || (stroke && contains_collapsed_stroke(&commands, &self.state.path))
                 {
                     self.report_partial(provenance.object_ref);
@@ -2310,16 +2350,166 @@ fn transform_path(
         .collect()
 }
 
+fn has_noncollinear_points<T: Copy>(
+    mut points: impl Iterator<Item = [T; 2]>,
+    same_point: impl Fn([T; 2], [T; 2]) -> bool,
+    is_collinear: impl Fn([T; 2], [T; 2], [T; 2]) -> bool,
+) -> bool {
+    let Some(first) = points.next() else {
+        return false;
+    };
+    let Some(second) = points.find(|&point| !same_point(point, first)) else {
+        return false;
+    };
+    points.any(|point| {
+        !same_point(point, first)
+            && !same_point(point, second)
+            && !is_collinear(first, second, point)
+    })
+}
+
+fn align_decimal_axis<const N: usize>(axis: [SceneDecimal; N]) -> Option<[i128; N]> {
+    let scale = axis
+        .iter()
+        .filter_map(|value| match value {
+            SceneDecimal::Exact { scale, .. } => Some(*scale),
+            SceneDecimal::Approximate(_) => None,
+        })
+        .max()?;
+    let mut aligned = [0; N];
+    for (target, value) in aligned.iter_mut().zip(axis) {
+        let SceneDecimal::Exact {
+            coefficient,
+            scale: source_scale,
+        } = value
+        else {
+            return None;
+        };
+        *target =
+            i128::from(coefficient).checked_mul(10_i128.checked_pow(scale - source_scale)?)?;
+    }
+    Some(aligned)
+}
+
+fn same_decimal_point([x, y]: [SceneDecimal; 2], [a, b]: [SceneDecimal; 2]) -> bool {
+    [[x, a], [y, b]]
+        .into_iter()
+        .all(|axis| align_decimal_axis(axis).is_some_and(|[first, second]| first == second))
+}
+
+fn decimal_points_collinear(
+    [x, y]: [SceneDecimal; 2],
+    [a, b]: [SceneDecimal; 2],
+    [c, d]: [SceneDecimal; 2],
+) -> Option<bool> {
+    let [x, a, c] = align_decimal_axis([x, a, c])?;
+    let [y, b, d] = align_decimal_axis([y, b, d])?;
+    Some(
+        a.checked_sub(x)?.checked_mul(d.checked_sub(y)?)?
+            == b.checked_sub(y)?.checked_mul(c.checked_sub(x)?)?,
+    )
+}
+
+fn lost_visible_fill_contour(
+    source: &[RawPathCommand],
+    commands: &[PdfPathCommand],
+    matrix: Option<PaintMatrix>,
+    clip: PaintBounds,
+) -> bool {
+    if clip.is_empty() {
+        return false;
+    }
+    let mut start = 0;
+    let mut origin = None;
+    while start < source.len() {
+        let explicit = matches!(source[start], RawPathCommand::MoveTo(..));
+        if explicit {
+            origin = Some(start);
+        }
+        let implicit_origin = origin.filter(|_| !explicit);
+        let end = source[start..]
+            .iter()
+            .enumerate()
+            .find_map(|(offset, command)| match command {
+                RawPathCommand::MoveTo(..) if offset != 0 => Some(start + offset),
+                RawPathCommand::Close => Some(start + offset + 1),
+                _ => None,
+            })
+            .unwrap_or(source.len());
+        let indices = implicit_origin.into_iter().chain(start..end);
+        let emitted = indices.clone().flat_map(|index| {
+            let raw = |x: LayoutUnit, y: LayoutUnit| [i128::from(x.raw()), i128::from(y.raw())];
+            match commands[index] {
+                PdfPathCommand::MoveTo { x, y } | PdfPathCommand::LineTo { x, y } => {
+                    [Some(raw(x, y)), None, None]
+                }
+                PdfPathCommand::CurveTo {
+                    x1,
+                    y1,
+                    x2,
+                    y2,
+                    x3,
+                    y3,
+                } => [Some(raw(x1, y1)), Some(raw(x2, y2)), Some(raw(x3, y3))],
+                PdfPathCommand::ClosePath => [None; 3],
+            }
+            .into_iter()
+            .flatten()
+        });
+        let precise = indices
+            .flat_map(|index| match &source[index] {
+                RawPathCommand::MoveTo(_, _, point) | RawPathCommand::LineTo(_, _, point) => {
+                    std::slice::from_ref(point)
+                }
+                RawPathCommand::CurveTo(_, _, _, _, _, _, points) => points,
+                RawPathCommand::Close => &[],
+            })
+            .copied();
+        start = end;
+        let product =
+            |a: i128, b: i128| (a.signum() * b.signum(), a.unsigned_abs() * b.unsigned_abs());
+        if has_noncollinear_points(
+            emitted,
+            |a, b| a == b,
+            |[x, y], [a, b], [c, d]| product(a - x, d - y) == product(b - y, c - x),
+        ) || !has_noncollinear_points(precise.clone(), same_decimal_point, |a, b, c| {
+            decimal_points_collinear(a, b, c) == Some(true)
+        }) {
+            continue;
+        }
+        let bounds = precise
+            .map(|point| point.map(SceneDecimal::value))
+            .map(|[x, y]| PaintBounds([x, y, x, y]))
+            .reduce(PaintBounds::union);
+        if matrix
+            .and_then(|matrix| matrix.bounds(bounds?.0))
+            // @invariant: A rounded point or line bound cannot by itself prove clipping.
+            .and_then(|bounds| {
+                if bounds.is_empty() {
+                    bounds.expanded(0.)
+                } else {
+                    Some(bounds)
+                }
+            })
+            .is_none_or(|bounds| !clip.intersect(bounds).is_empty())
+        {
+            return true;
+        }
+    }
+    false
+}
+
 fn contains_collapsed_stroke(commands: &[PdfPathCommand], source: &[RawPathCommand]) -> bool {
     let mut current = (None, None);
     let mut start = current;
     for (index, command) in commands.iter().enumerate() {
         let precise = match source.get(index) {
-            Some(
-                RawPathCommand::MoveTo(_, _, point)
-                | RawPathCommand::LineTo(_, _, point)
-                | RawPathCommand::CurveTo(_, _, _, _, _, _, point),
-            ) => Some(*point),
+            Some(RawPathCommand::MoveTo(_, _, point) | RawPathCommand::LineTo(_, _, point)) => {
+                Some(point.map(SceneDecimal::value))
+            }
+            Some(RawPathCommand::CurveTo(_, _, _, _, _, _, points)) => {
+                Some(points[2].map(SceneDecimal::value))
+            }
             _ => None,
         };
         match *command {
@@ -2506,7 +2696,7 @@ fn is_precise_rectangular_path(commands: &[RawPathCommand], matrix: PaintMatrix)
         return false;
     };
     if !closing.is_empty()
-        && !matches!(closing, [RawPathCommand::LineTo(_, _, point)] if point == p0)
+        && !matches!(closing, [RawPathCommand::LineTo(_, _, point)] if point.map(SceneDecimal::value) == p0.map(SceneDecimal::value))
     {
         return false;
     }
@@ -2518,10 +2708,10 @@ fn is_precise_rectangular_path(commands: &[RawPathCommand], matrix: PaintMatrix)
         [a * dx + c * dy, b * dx + d * dy]
     };
     let edges = [
-        edge(*p0, *p1),
-        edge(*p1, *p2),
-        edge(*p2, *p3),
-        edge(*p3, *p0),
+        edge(p0.map(SceneDecimal::value), p1.map(SceneDecimal::value)),
+        edge(p1.map(SceneDecimal::value), p2.map(SceneDecimal::value)),
+        edge(p2.map(SceneDecimal::value), p3.map(SceneDecimal::value)),
+        edge(p3.map(SceneDecimal::value), p0.map(SceneDecimal::value)),
     ];
     let horizontal = |[x, y]: [f64; 2]| x.is_finite() && x != 0. && y == 0.;
     let vertical = |[x, y]: [f64; 2]| x == 0. && y.is_finite() && y != 0.;
@@ -3074,7 +3264,50 @@ fn parse_decimal(bytes: &[u8]) -> Result<(LayoutUnit, SceneDecimal), PdfReadErro
 
 #[cfg(test)]
 mod tests {
-    use super::separated_content_streams;
+    use super::{
+        LayoutUnit, PaintBounds, PaintMatrix, RawPathCommand, SceneDecimal,
+        lost_visible_fill_contour, separated_content_streams, transform_path,
+    };
+
+    #[test]
+    fn precise_clip_can_exclude_only_the_collapsed_contour() {
+        let point = |x, y| {
+            [
+                SceneDecimal::Exact {
+                    coefficient: x,
+                    scale: 3,
+                },
+                SceneDecimal::Exact {
+                    coefficient: y,
+                    scale: 3,
+                },
+            ]
+        };
+        let fixed = |v: i64| LayoutUnit::from_raw(v * 64);
+        let source = [
+            RawPathCommand::MoveTo(fixed(10), fixed(10), point(10000, 10000)),
+            RawPathCommand::LineTo(fixed(30), fixed(10), point(30000, 10000)),
+            RawPathCommand::LineTo(fixed(30), fixed(30), point(30000, 30000)),
+            RawPathCommand::Close,
+            RawPathCommand::MoveTo(fixed(50), fixed(20), point(50000, 20000)),
+            RawPathCommand::LineTo(fixed(50), fixed(25), point(50004, 25000)),
+            RawPathCommand::LineTo(fixed(50), fixed(30), point(50000, 30000)),
+        ];
+        let commands = transform_path(&source, super::Matrix::IDENTITY).unwrap();
+        let matrix = Some(PaintMatrix([1., 0., 0., 1., 0., 0.]));
+        assert!(lost_visible_fill_contour(
+            &source,
+            &commands,
+            matrix,
+            PaintBounds([0., 0., 60., 40.])
+        ));
+        assert!(!lost_visible_fill_contour(
+            &source,
+            &commands,
+            matrix,
+            PaintBounds([0., 0., 40., 40.])
+        ));
+    }
 
     #[test]
     fn page_stream_boundary_proof_accepts_line_endings_on_either_side() {

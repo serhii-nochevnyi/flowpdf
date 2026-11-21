@@ -429,6 +429,101 @@ fn read_content_scene(content: &str) -> flow_core::pdf::PdfScene {
 }
 
 #[test]
+fn decimal_transform_with_nonzero_determinant_can_round_to_collinear_fill() {
+    let scene = read_content_scene("1 1 1 1.0000000000000001 0 0 cm 10 10 20 20 re f");
+    let page = &scene.pages[0];
+    let [PdfSceneElement::Path { value }] = page.elements.as_slice() else {
+        panic!("expected the quantized path");
+    };
+    assert!(value.fill && value.rect.width.raw() > 0);
+    assert!(value.commands.iter().all(|command| match command {
+        PdfPathCommand::MoveTo { x, y } | PdfPathCommand::LineTo { x, y } => x == y,
+        PdfPathCommand::ClosePath => true,
+        PdfPathCommand::CurveTo { .. } => false,
+    }));
+    assert!(page.partial && scene.report.partial);
+    assert!(matches!(page.report.diagnostics.as_slice(), [diagnostic]
+        if diagnostic.code == PdfReadDiagnosticCode::PartialPage
+            && diagnostic.object_number == Some(4)));
+}
+
+#[test]
+fn fill_reports_an_implicit_contour_that_starts_at_the_closed_origin() {
+    for closed in ["50 20 20 20 re", "50 20 m 70 20 l 70 40 l 50 40 l h"] {
+        let scene = read_content_scene(&format!("{closed} 50.004 25 l 50 30 l h f"));
+        let page = &scene.pages[0];
+        assert!(page.partial && scene.report.partial);
+        assert!(
+            matches!(page.elements.as_slice(), [PdfSceneElement::Path { value }]
+            if value.fill && value.provenance.operator.as_deref() == Some("f"))
+        );
+        assert!(matches!(page.report.diagnostics.as_slice(), [diagnostic]
+            if diagnostic.code == PdfReadDiagnosticCode::PartialPage
+                && diagnostic.object_number == Some(4)));
+    }
+}
+
+#[test]
+fn compound_fill_reports_visible_contours_lost_to_quantization() {
+    for (clip, small, retained, partial) in [
+        ("", "50.125 20 0.004 10 re", true, true),
+        ("", "50.125 20 0.0000000000000001 10 re", true, true),
+        ("", "50 20 m 50.004 22 50.004 28 50 30 c", true, true),
+        ("", "50 20 m 50.004 28 50 30 v", true, true),
+        ("", "50 20 m 50.004 22 50 30 y", true, true),
+        ("", "50 20 m 55 25.004 l 60 30 l h", true, true),
+        ("", "50 20 0 10 re", true, false),
+        ("", "50 20 m 55 25 60 30 65 35 c", true, false),
+        (
+            "",
+            "50.1 20.1 m 55.2 25.2 60.3 30.3 65.4 35.4 c",
+            true,
+            false,
+        ),
+        (
+            "100 100 20 20 re W n",
+            "50.125 20 0.004 10 re",
+            false,
+            false,
+        ),
+    ] {
+        let scene = read_content_scene(&format!("{clip} 10 10 20 20 re {small} f"));
+        let page = &scene.pages[0];
+        let paths: Vec<_> = page
+            .elements
+            .iter()
+            .filter_map(|element| match element {
+                PdfSceneElement::Path { value } => Some(value),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(paths.len(), usize::from(retained), "{small}");
+        if let Some(path) = paths.first() {
+            assert!(path.fill && !path.stroke);
+            assert_eq!(path.provenance.object_ref.object_number, 4);
+            assert_eq!(path.provenance.operator.as_deref(), Some("f"));
+            assert_eq!(
+                path.commands
+                    .iter()
+                    .filter(|command| matches!(command, PdfPathCommand::MoveTo { .. }))
+                    .count(),
+                2
+            );
+        }
+        assert_eq!(page.partial, partial, "{small}");
+        assert_eq!(scene.report.partial, partial);
+        assert_eq!(page.report.diagnostics.len(), usize::from(partial));
+        if partial {
+            assert_eq!(
+                page.report.diagnostics[0].code,
+                PdfReadDiagnosticCode::PartialPage
+            );
+            assert_eq!(page.report.diagnostics[0].object_number, Some(4));
+        }
+    }
+}
+
+#[test]
 fn explicit_clip_readback_proves_fractional_edges_and_rectangularity() {
     for (clip, paint, partial) in [
         (

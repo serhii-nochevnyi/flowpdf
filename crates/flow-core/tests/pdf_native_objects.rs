@@ -1001,6 +1001,66 @@ fn scene_reports_partial_after_turning_an_asymmetric_form_image() {
 }
 
 #[test]
+fn compound_fill_contour_loss_is_reported_after_an_unrelated_note_rewrite() {
+    for (clip, partial) in [("", true), ("100 100 20 20 re W n", false)] {
+        let paint = format!("{clip} 10 10 20 20 re 50.125 20 0.004 10 re f");
+        let source = fixture(paint.as_bytes(), false, "", &[]);
+        let mut session = open(&source);
+        let binding = session.snapshot().binding;
+        let page = session.snapshot().scene.pages[0].id;
+        session
+            .apply(
+                binding,
+                1,
+                &NativeNoteCommand::Add {
+                    page,
+                    rect: [60, 60, 80, 80],
+                    contents: "Chart note".into(),
+                },
+            )
+            .unwrap();
+
+        let reader = open_pdf(session.output_bytes(), Default::default()).unwrap();
+        let scene = read_pdf_scene(&reader, &PdfSceneRequest::default()).unwrap();
+        let page = &scene.pages[0];
+        let path = page.elements.iter().find_map(|element| match element {
+            PdfSceneElement::Path { value } => Some(value),
+            _ => None,
+        });
+        assert_eq!(page.partial, partial);
+        assert_eq!(scene.report.partial, partial);
+        let partial_objects: Vec<_> = page
+            .report
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.code == PdfReadDiagnosticCode::PartialPage)
+            .map(|diagnostic| (diagnostic.page_index, diagnostic.object_number))
+            .collect();
+        if partial {
+            let path = path.unwrap();
+            assert!(path.fill && !path.stroke);
+            assert_eq!(
+                path.commands
+                    .iter()
+                    .filter(|command| matches!(command, PdfPathCommand::MoveTo { .. }))
+                    .count(),
+                2
+            );
+            assert_eq!(path.provenance.operator.as_deref(), Some("f"));
+            assert_eq!(
+                partial_objects,
+                [(Some(0), Some(path.provenance.object_ref.object_number))]
+            );
+        } else {
+            assert!(path.is_none());
+            assert!(partial_objects.is_empty());
+        }
+        assert_eq!(session.snapshot().scene.pages[0].annotations.len(), 1);
+        assert_eq!(session.origin_bytes(), source);
+    }
+}
+
+#[test]
 fn saved_native_images_have_representable_placement_or_a_partial_diagnostic() {
     let source = fixture(b"", false, "", &[]);
     let mut jpeg = Vec::new();
