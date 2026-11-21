@@ -6,7 +6,7 @@ import { test } from 'node:test'
 import {
   alternateCheckboxPdf, checkStructure, compareCheckboxAppearances, compareFixtures, compareRaster, compareWidgetRegion,
   comparisonInvoker, decodePpm, externalExitCode, loadFixtures, matchesWidgetBounds,
-  nativeSession, operationOutput, pdfStructure, probeTool,
+  nativeSession, operationOutput, parseQpdfJson, pdfStructure, probeTool,
 } from '../../scripts/verify-pdf-native-external.mjs'
 
 const fixture = (name) => readFileSync(new URL(`../../fixtures/pdf-native/${name}`, import.meta.url))
@@ -56,6 +56,29 @@ test('the external verifier loads and validates the pinned fixture corpus', () =
   const fixtures = loadFixtures()
   assert.deepEqual(fixtures.map(({ id }) => id), JSON.parse(fixture('manifest.json')).fixtures.map(({ id }) => id))
   assert.ok(fixtures.some(({ spec }) => spec.operations.some(({ operation }) => operation === 'deletePage')))
+})
+
+test('qpdf PDF numbers are normalized outside JSON strings only', () => {
+  const input = String.raw`{"values":[+.125,-.25,3.,001,-0,true],"name":"quote \" and [+.125,]","value":+.50}`
+  assert.deepEqual(parseQpdfJson(Buffer.from(input)), {
+    values: [0.125, -0.25, 3, 1, -0, true], name: 'quote " and [+.125,]', value: 0.5,
+  })
+  assert.throws(() => parseQpdfJson(Buffer.from('{"value":+.}')), SyntaxError)
+})
+
+test('image paint includes renderer terminal pixels without accepting nearby changes', () => {
+  const page = {
+    widthPx: 4, heightPx: 4, rotation: 0, cropBoxPt: [0, 0, 4, 4],
+    raster: { comparison: 'source-with-patches', patches: [{ rectPt: [1, 2, 2, 3], rgb: [64, 64, 64] }] },
+  }
+  const source = Buffer.alloc(4 * 4 * 3, 255)
+  const actual = Buffer.from(source)
+  for (const offset of [15, 18, 27, 30]) actual.fill(64, offset, offset + 3)
+  const policy = { dpi: 72, flatChannelTolerance: 0 }
+  assert.ok(compareRaster(page, policy, actual, source, undefined, 1))
+  assert.equal(compareRaster(page, policy, actual, source), false)
+  actual.fill(64, 33, 36)
+  assert.equal(compareRaster(page, policy, actual, source, undefined, 1), false)
 })
 
 test('both CLI modes reject failed checks and only strict external rejects unavailable checks', () => {
