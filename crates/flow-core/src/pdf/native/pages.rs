@@ -530,21 +530,17 @@ pub(super) fn catalog(graph: &NativePdfGraph) -> Result<Ref, NativeEditError> {
 
 fn effective_attributes(graph: &mut NativePdfGraph, page: Ref) -> Result<Dict, NativeEditError> {
     let mut node = page;
-    let mut work = graph.remaining_work();
     let mut effective = Dict::new();
     loop {
-        spend(&mut work, 1)?;
-        let keys: Vec<_> = ["MediaBox", "CropBox", "Resources", "Rotate"]
-            .into_iter()
-            .filter(|key| {
-                !effective.contains_key(*key)
-                    && dict(graph, node).is_ok_and(|values| values.contains_key(*key))
-            })
-            .collect();
-        if !keys.is_empty() {
+        graph.charge_page_work(1)?;
+        let values = dict(graph, node)?;
+        let keys = ["MediaBox", "CropBox", "Resources", "Rotate"]
+            .map(|key| (!effective.contains_key(key) && values.contains_key(key)).then_some(key));
+        if keys.iter().any(Option::is_some) {
             graph.reserve_page_copy(node)?;
-            for key in keys {
-                effective.insert(key.into(), dict(graph, node)?[key].clone());
+            let values = dict(graph, node)?;
+            for key in keys.into_iter().flatten() {
+                effective.insert(key.into(), values[key].clone());
             }
         }
         match dict(graph, node)?.get("Parent") {
@@ -554,6 +550,7 @@ fn effective_attributes(graph: &mut NativePdfGraph, page: Ref) -> Result<Dict, N
     }
     let media = effective.get("MediaBox").ok_or(Malformed)?;
     if !effective.contains_key("CropBox") {
+        graph.reserve_page_attribute_copy("CropBox", media)?;
         effective.insert("CropBox".into(), media.clone());
     }
     effective
@@ -571,6 +568,7 @@ fn change_count(
     delta: i64,
 ) -> Result<(), NativeEditError> {
     loop {
+        graph.charge_page_work(1)?;
         let values = dict_mut(graph, node)?;
         let value = values.get_mut("Count").ok_or(Malformed)?;
         let count = value.as_integer().ok_or(Malformed)?;
@@ -2010,6 +2008,47 @@ fn set_ref(dict: &mut Dict, key: &str, target: Option<Ref>) {
 mod tests {
     use super::super::{NativeEditLimits, NativePdfSession, tests::redaction_fixture};
     use super::*;
+
+    #[test]
+    fn inherited_attributes_debit_ancestor_visits_and_default_crop_copy() {
+        let source = redaction_fixture("");
+        let page_tree_visits = 2;
+        let parent_copy_nodes = 10;
+        let fallback_box_copy_nodes = 5;
+        let spent = page_tree_visits + parent_copy_nodes + fallback_box_copy_nodes;
+        for short_by in [0, 1] {
+            let mut graph = NativePdfGraph::open(&source, NativeEditLimits::default()).unwrap();
+            let page = graph.pages[0];
+            let parent = reference(dict(&graph, page).unwrap(), "Parent").unwrap();
+            let media = dict_mut(&mut graph, page)
+                .unwrap()
+                .remove("MediaBox")
+                .unwrap();
+            dict_mut(&mut graph, parent)
+                .unwrap()
+                .insert("MediaBox".into(), media);
+            graph
+                .charge_page_work(graph.remaining_work() - spent + short_by)
+                .unwrap();
+
+            let result = effective_attributes(&mut graph, page);
+            if short_by == 0 {
+                let attributes = result.unwrap();
+                for key in ["MediaBox", "CropBox"] {
+                    let coordinates = attributes[key].as_array().unwrap();
+                    assert!(coordinates.iter().map(PdfValue::as_integer).eq([
+                        Some(0),
+                        Some(0),
+                        Some(100),
+                        Some(100),
+                    ]));
+                }
+                assert_eq!(graph.remaining_work(), 0);
+            } else {
+                assert_eq!(result.unwrap_err(), Budget);
+            }
+        }
+    }
 
     #[test]
     fn planned_order_is_charged_during_graph_refresh() {

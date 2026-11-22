@@ -605,6 +605,15 @@ impl NativePdfGraph {
         reserve_page_value(value, &mut self.work, &mut self.retained)
     }
 
+    pub(super) fn reserve_page_attribute_copy(
+        &mut self,
+        key: &str,
+        value: &PdfValue,
+    ) -> Result<(), NativeEditError> {
+        spend(&mut self.retained, key.len())?;
+        reserve_page_value(value, &mut self.work, &mut self.retained)
+    }
+
     pub(super) fn reserve_page_value(
         &self,
         owner: PdfObjectRef,
