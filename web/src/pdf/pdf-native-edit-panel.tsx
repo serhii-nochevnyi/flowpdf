@@ -129,6 +129,7 @@ export function redactionAttemptFeedback(result: NativePdfRedactionResult | null
 
 function redactionResultFor(attempt: RedactionAttempt, result: NativePdfRedactionResult | null): NativePdfRedactionResult | null {
   return result !== attempt.priorResult && result?.candidate
+    && result.markCount === (result.published ? 0 : attempt.nextMarks.length)
     && sameNativeBytes(result.acceptedHash, attempt.before.outputHash)
     && sameNativeBytes(result.candidate.affectedPages, attempt.pages) ? result : null
 }
@@ -1262,7 +1263,7 @@ export function PdfNativeEditPanel({
           const result = redactionResultFor(attempt, current.redaction)
           const candidate = result?.candidate
           if (!candidate || candidate.validatorVersion !== 1 || candidate.validatorProfile !== 'classic-xref-owned-144dpi-v1'
-            || result.published || result.markCount !== attempt.nextMarks.length || !result.verification) return
+            || result.published || !result.verification) return
           if (result.action === 'stage' && result.verification.status === 'pending' && stagedRequest === null) {
             stagedRequest = current.pendingRequestId
           } else if (result.action !== 'verify' || current.pendingRequestId !== stagedRequest
@@ -1270,7 +1271,7 @@ export function PdfNativeEditPanel({
           attempt.observed = result
         })
       }
-      const result = applying ? await coordinator.applyRedaction(attempt.pages, attempt.controller.signal)
+      const result = applying ? await coordinator.applyRedaction(attempt.pages, attempt.nextMarks.length, attempt.controller.signal)
         : await coordinator.markRedaction(action, attempt.nextMarks.length)
       if (mounted.current) requiresReopen = finishRedaction(attempt, result, coordinator.snapshot().accepted)
     } catch (cause) {
