@@ -616,8 +616,7 @@ export class NativePdfEditCoordinator {
       this.requireLive(requestId)
       this.update('validating', requestId, null, job.previous, result)
       if (signal?.aborted || result.verification?.status !== 'passed') {
-        const { redaction } = await this.redactionStep(job, { kind: 'cancel', candidate })
-        result = { ...result, markCount: redaction.markCount }
+        await this.redactionStep(job, { kind: 'cancel', candidate })
         this.finishRedaction(job, result, job.previous, signal?.aborted ? REDACTION_CANCELLED : null)
         if (signal?.aborted) throw new NativePdfWorkerError(REDACTION_CANCELLED, requestId)
         return result
@@ -801,16 +800,21 @@ export class NativePdfEditCoordinator {
         || reply.snapshot.pageState.selected !== selected)) {
       throw new NativePdfWorkerError(RESPONSE_INVALID, request.requestId)
     }
+    if (action.kind === 'cancel') {
+      // @invariant: A cancelled candidate settles the attempt only when the retained mark count matches.
+      if (markCount !== job.expectedMarkCount) throw new NativePdfWorkerError(RESPONSE_INVALID, request.requestId)
+      return reply
+    }
     const unpublishedCheck = !published && (action.kind === 'stage' || action.kind === 'verify' || action.kind === 'status')
     if ((unpublishedCheck && markCount !== job.expectedMarkCount)
-      || (candidate !== null && action.kind !== 'cancel' && !sameNativeBytes(job.expectedPages, candidate.affectedPages))) {
+      || (candidate !== null && !sameNativeBytes(job.expectedPages, candidate.affectedPages))) {
       if (unpublishedCheck && candidate !== null) await this.cancelRedaction(job, candidate, RESPONSE_INVALID)
       throw new NativePdfWorkerError(RESPONSE_INVALID, request.requestId)
     }
     return reply
   }
 
-  private async cancelRedaction(job: RedactionJob, candidate: NativePdfRedactionCandidate, code: string): Promise<void> {
+  private async cancelRedaction(job: RedactionJob, candidate: NativePdfRedactionCandidate, code: string | null): Promise<void> {
     job.candidate = candidate
     const { redaction } = await this.redactionStep(job, { kind: 'cancel', candidate })
     this.finishRedaction(job, redaction, job.previous, code)
@@ -829,11 +833,8 @@ export class NativePdfEditCoordinator {
       if (job.publishedCandidate === null) {
         const { redaction } = await this.redactionStep(job, { kind: 'status', candidate: job.candidate })
         if (!redaction.published) {
-          if (redaction.candidate !== null) {
-            job.candidate = redaction.candidate
-            await this.redactionStep(job, { kind: 'cancel', candidate: redaction.candidate })
-          }
-          this.finishRedaction(job, redaction)
+          if (redaction.candidate === null) this.finishRedaction(job, redaction)
+          else await this.cancelRedaction(job, redaction.candidate, null)
           return Object.freeze({ status: 'unseen', snapshot: job.previous })
         }
         if (redaction.candidate === null) throw new NativePdfWorkerError(RESPONSE_INVALID, requestId)

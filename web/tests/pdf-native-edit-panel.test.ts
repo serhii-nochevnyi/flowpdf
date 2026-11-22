@@ -337,7 +337,11 @@ describe('redaction staging and check feedback', () => {
     ])
   }
 
-  it.each([2, 1])('authorizes a confirmed two-mark redaction only when verification reports two marks (reported %i)', async (markCount) => {
+  it.each([
+    { outcome: 'publishes with matching verification', verifyCount: 2, retainedCount: 2 },
+    { outcome: 'retains both marks after matching cancellation', verifyCount: 1, retainedCount: 2 },
+    { outcome: 'keeps editing locked when the reported mark count still disagrees', verifyCount: 1, retainedCount: 1 },
+  ])('$outcome', async ({ verifyCount, retainedCount }) => {
     const file = new File([await initializeRedactionFixture()], 'redaction.pdf', { type: 'application/pdf' })
     let coordinator: ReturnType<PdfNativeEditPanelProps['createCoordinator']>
     const { render, effects, layoutEffects, unmount } = await mountHandoffPanel({
@@ -356,15 +360,20 @@ describe('redaction staging and check feedback', () => {
       postMessage: ({ dispatchId, request }) => {
         let json = respond[request.operation](JSON.stringify(request))
         if (request.operation === 'redaction') {
-          actions.push(request.action.kind)
-          if (request.action.kind === 'verify') {
+          const { kind } = request.action
+          actions.push(kind)
+          if (kind === 'verify' || kind === 'cancel' || kind === 'status') {
             const reply = readNativeResponse(json)
             expect(reply).toMatchObject({ status: 'redaction', redaction: {
-              markCount: 2, verification: { status: 'passed' }, candidate: { affectedPages: [before.pageState.order[0]] },
+              markCount: 2, published: false,
+              ...(kind === 'verify' ? {
+                verification: { status: 'passed' }, candidate: { affectedPages: [before.pageState.order[0]] },
+              } : { verification: null }),
             } })
-            if (reply?.status !== 'redaction') throw new Error('expected an unpublished verification reply')
-            if (markCount !== 2) {
-              json = JSON.stringify({ ...reply, redaction: { ...reply.redaction, markCount } })
+            if (reply?.status !== 'redaction') throw new Error('expected an unpublished redaction reply')
+            const reportedCount = kind === 'verify' ? verifyCount : retainedCount
+            if (reportedCount !== 2) {
+              json = JSON.stringify({ ...reply, redaction: { ...reply.redaction, markCount: reportedCount } })
               controlledReply = json
             }
           }
@@ -428,18 +437,47 @@ describe('redaction staging and check feedback', () => {
       apply()
       await vi.waitFor(() => expect(control('redaction-cancel')).toBeUndefined())
 
-      const confirmed = markCount === 2
+      const confirmed = verifyCount === 2
       expect(actions).toEqual(['addMark', 'addMark', 'stage', 'verify', confirmed ? 'publish' : 'cancel'])
       if (confirmed) {
         expect(button('redaction.download')?.props.disabled).toBe(false)
       } else {
         expect(button('redaction.download')).toBeUndefined()
         expect(session.snapshot().accepted).toBe(before)
-        expect(session.outputBytes()).toEqual(nativeHexBytes(before.outputHex))
+        expect(find((element) => element.props.children === nativePdfText('en', 'redaction.markSummary', {
+          count: 2, pages: '1',
+        }))).toBeDefined()
+        if (retainedCount === 2) {
+          expect(session.snapshot().phase).toBe('ready')
+          expect(control('redaction-stage')?.props.disabled).toBe(false)
+          expect(control('redaction-clearMarks')?.props.disabled).toBe(false)
+          expect(control('reconcile')).toBeUndefined()
+          expect(session.outputBytes()).toEqual(nativeHexBytes(before.outputHex))
+        } else {
+          expect(session.snapshot().phase).toBe('reconciliationRequired')
+          expect(control('redaction-stage')?.props.disabled).toBe(true)
+          expect(control('redaction-clearMarks')?.props.disabled).toBe(true)
+          expect(session.outputBytes()).toBeNull()
+
+          const reconcile = control('reconcile')?.props.onClick as (event: { currentTarget: null }) => void
+          reconcile({ currentTarget: null })
+          await vi.waitFor(() => expect(control('reopen')?.props.disabled).toBe(false))
+          expect(actions).toEqual(['addMark', 'addMark', 'stage', 'verify', 'cancel', 'status'])
+          expect(session.snapshot()).toMatchObject({ phase: 'invalidated', reopenOriginal: true, redaction: null })
+          expect(session.snapshot().accepted).toBe(before)
+          expect(session.outputBytes()).toBeNull()
+          expect(control('redaction-stage')).toBeUndefined()
+          expect(button('redaction.download')).toBeUndefined()
+        }
       }
     } finally {
       try {
-        if (session.snapshot().phase === 'ready') await session.close()
+        const { phase, accepted } = session.snapshot()
+        if (phase === 'ready') await session.close()
+        else if (accepted) wasm.native_pdf_close(JSON.stringify({
+          protocolVersion: NATIVE_PDF_PROTOCOL_VERSION, operation: 'close', requestId: 0xffffffff,
+          binding: accepted.binding, originStoreHash: accepted.originStoreHash,
+        }))
       } finally {
         unmount()
         vi.unstubAllGlobals()
