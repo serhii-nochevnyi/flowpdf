@@ -63,7 +63,7 @@ impl Output {
     fn dict(
         &mut self,
         dict: &BTreeMap<String, PdfValue>,
-        map: &BTreeMap<PdfObjectRef, u32>,
+        map: &BTreeMap<PdfObjectRef, PdfObjectRef>,
         depth: usize,
         max_depth: usize,
     ) -> Result<(), NativeEditError> {
@@ -80,7 +80,7 @@ impl Output {
     fn value(
         &mut self,
         value: &PdfValue,
-        map: &BTreeMap<PdfObjectRef, u32>,
+        map: &BTreeMap<PdfObjectRef, PdfObjectRef>,
         depth: usize,
         max_depth: usize,
     ) -> Result<(), NativeEditError> {
@@ -104,8 +104,8 @@ impl Output {
                 self.append(b">")
             }
             PdfValue::Reference(reference) => {
-                let number = map.get(reference).ok_or(NativeEditError::Malformed)?;
-                self.append(format!("{number} 0 R").as_bytes())
+                let mapped = map.get(reference).ok_or(NativeEditError::Malformed)?;
+                self.append(format!("{} {} R", mapped.object_number, mapped.generation).as_bytes())
             }
             PdfValue::Array(values) => {
                 self.append(b"[")?;
@@ -130,13 +130,19 @@ impl Output {
 }
 
 pub(super) fn rewrite(graph: &NativePdfGraph) -> Result<Vec<u8>, NativeEditError> {
-    rewrite_with_workspace(graph, graph.remaining_retained())
+    Ok(rewrite_with_workspace(graph, graph.remaining_retained())?.bytes)
+}
+
+pub(super) struct Rewrite {
+    pub bytes: Vec<u8>,
+    pub reopened: NativePdfGraph,
+    pub mapping: BTreeMap<PdfObjectRef, PdfObjectRef>,
 }
 
 pub(super) fn rewrite_with_workspace(
     graph: &NativePdfGraph,
     mut workspace: usize,
-) -> Result<Vec<u8>, NativeEditError> {
+) -> Result<Rewrite, NativeEditError> {
     let mut work = graph.remaining_work();
     spend(
         &mut workspace,
@@ -167,7 +173,10 @@ pub(super) fn rewrite_with_workspace(
     for (index, reference) in reachable.iter().enumerate() {
         map.insert(
             *reference,
-            u32::try_from(index + 1).map_err(|_| NativeEditError::Budget)?,
+            PdfObjectRef {
+                object_number: u32::try_from(index + 1).map_err(|_| NativeEditError::Budget)?,
+                generation: 0,
+            },
         );
     }
     let mut out = Output {
@@ -178,19 +187,19 @@ pub(super) fn rewrite_with_workspace(
     };
     out.append(b"%PDF-1.7\n%\xE2\xE3\xCF\xD3\n")?;
     let mut offsets = Vec::new();
-    for reference in &reachable {
+    for (reference, mapped) in &map {
         offsets.push(out.bytes.len());
-        out.append(format!("{} 0 obj\n", map[reference]).as_bytes())?;
+        out.append(format!("{} {} obj\n", mapped.object_number, mapped.generation).as_bytes())?;
         out.value(&graph.objects[reference], &map, 0, graph.limits.max_nesting)?;
         out.append(b"\nendobj\n")?;
     }
     let xref = out.bytes.len();
-    out.append(format!("xref\n0 {}\n0000000000 65535 f \n", reachable.len() + 1).as_bytes())?;
+    out.append(format!("xref\n0 {}\n0000000000 65535 f \n", map.len() + 1).as_bytes())?;
     for offset in offsets {
         out.append(format!("{offset:010} 00000 n \n").as_bytes())?;
     }
     out.append(b"trailer\n<< /Size ")?;
-    out.append((reachable.len() + 1).to_string().as_bytes())?;
+    out.append((map.len() + 1).to_string().as_bytes())?;
     for (key, value) in &graph.trailer {
         if key == "Size" {
             continue;
@@ -203,7 +212,7 @@ pub(super) fn rewrite_with_workspace(
     out.append(format!(" >>\nstartxref\n{xref}\n%%EOF\n").as_bytes())?;
     // @invariant: The exact output must reopen before any bytes are returned.
     let mut reopen_limits = graph.limits;
-    // @security: Reopen shares the edit’s cumulative retained and decoded budgets.
+    // @security: Reopen uses the remaining work and decoded budgets and charges output capacity.
     spend(&mut workspace, out.bytes.capacity())?;
     if workspace == 0 || out.work == 0 || graph.remaining_decoded() == 0 {
         return Err(NativeEditError::Budget);
@@ -211,8 +220,12 @@ pub(super) fn rewrite_with_workspace(
     reopen_limits.max_retained_bytes = workspace;
     reopen_limits.max_total_decoded_bytes = graph.remaining_decoded();
     reopen_limits.max_work = out.work;
-    NativePdfGraph::open(&out.bytes, reopen_limits)?;
-    Ok(out.bytes)
+    let reopened = NativePdfGraph::open(&out.bytes, reopen_limits)?;
+    Ok(Rewrite {
+        bytes: out.bytes,
+        reopened,
+        mapping: map,
+    })
 }
 
 #[cfg(test)]

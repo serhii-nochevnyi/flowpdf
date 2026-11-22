@@ -974,6 +974,66 @@ fn shared_annotation_array_preserves_geometry_but_disables_note_writes() {
 }
 
 #[test]
+fn rewrite_work_boundary_preserves_accepted_session_state() {
+    let source = graph::fixture("", "");
+    let defaults = NativeEditLimits::default();
+    let open_at = |max_work| {
+        NativePdfSession::open_scoped(
+            &source,
+            NativeEditLimits {
+                max_work,
+                ..defaults
+            },
+            [1; 16],
+        )
+    };
+    let contents = "Ї".repeat(512);
+    let add = NativeNoteCommand::Add {
+        page: open_at(defaults.max_work).unwrap().snapshot().scene.pages[0].id,
+        rect: [20, 30, 40, 50],
+        contents: contents.clone(),
+    };
+    let mut lower = 1;
+    let mut upper = defaults.max_work;
+    while lower < upper {
+        let mid = lower + (upper - lower) / 2;
+        if open_at(mid)
+            .is_ok_and(|mut session| session.apply(session.snapshot().binding, 1, &add).is_ok())
+        {
+            upper = mid;
+        } else {
+            lower = mid + 1;
+        }
+    }
+
+    let mut exact = open_at(lower).unwrap();
+    let receipt = exact.apply(exact.snapshot().binding, 1, &add).unwrap();
+    assert_eq!(receipt.binding.revision, 1);
+    assert_eq!(exact.origin_bytes(), source);
+    assert_note(&exact, 0, receipt.note, [20, 30, 40, 50], &contents);
+
+    let mut tight = open_at(lower - 1).unwrap();
+    let before = tight.snapshot().clone();
+    for _ in 0..2 {
+        assert_eq!(
+            tight.apply(before.binding, 1, &add),
+            Err(NativeSessionError::Budget)
+        );
+        assert_eq!(
+            tight.lookup(before.binding, 1),
+            Ok(NativeRequestLookup::Unseen)
+        );
+    }
+    assert_eq!(tight.snapshot().binding, before.binding);
+    assert_eq!(tight.snapshot().consumed_request, before.consumed_request);
+    assert_eq!(tight.snapshot().scene, before.scene);
+    assert_eq!(tight.snapshot().page_state, before.page_state);
+    assert_eq!(tight.snapshot().output_hash, before.output_hash);
+    assert_eq!(tight.output_bytes(), source);
+    assert_eq!(tight.origin_bytes(), source);
+}
+
+#[test]
 fn request_history_budget_refuses_before_acceptance() {
     let bytes = graph::fixture("", "");
     let limits = NativeEditLimits {

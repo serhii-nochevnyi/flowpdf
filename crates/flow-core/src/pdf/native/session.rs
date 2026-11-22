@@ -9,7 +9,7 @@ use super::super::reader::{PdfObjectRef, PdfReadError, PdfValue};
 use super::super::scene::{NativePdfAnnotation, NativePdfNotePage, NativePdfNoteScene};
 use super::candidate::{Candidate, NativeRedactionCandidateStatus, NativeRedactionStage};
 use super::forms::{self, NativeFieldCommand, NativeFieldRefusal, NativeFieldView};
-use super::graph::{NativeEditError, NativeEditLimits, NativePdfGraph, collect_refs, spend};
+use super::graph::{NativeEditError, NativeEditLimits, NativePdfGraph, spend};
 use super::notes::{self, ExpectedNote, NativeNoteCommand, NativeNoteId};
 
 use super::objects::{self, NativeObjectCommand, NativeObjectPage, NativeObjectRefusal};
@@ -20,7 +20,7 @@ use super::verifier::{
     NativeRedactionContext, NativeRedactionMark, NativeVerificationFailure,
     VersionedNativeRedactionEvidence, Workspace,
 };
-use super::writer::rewrite_with_workspace;
+use super::writer::{Rewrite, rewrite_with_workspace};
 
 pub const NATIVE_REQUEST_HISTORY: usize = 128;
 pub const NATIVE_MAX_NOTE_BYTES: usize = 16 * 1024;
@@ -694,20 +694,12 @@ impl NativePdfSession {
             &self.redaction_marks,
         )?;
         staged.limits.max_source_bytes = output_budget;
-        let bytes = rewrite_with_workspace(&staged, staged.remaining_retained() + output_budget)?;
-
-        let mut reopen_limits = staged.limits;
-        reopen_limits.max_retained_bytes = (staged.remaining_retained() + output_budget)
-            .checked_sub(bytes.capacity())
-            .ok_or(NativeSessionError::Budget)?;
-        reopen_limits.max_total_decoded_bytes = staged.remaining_decoded();
-        if reopen_limits.max_retained_bytes == 0 || reopen_limits.max_total_decoded_bytes == 0 {
-            return Err(NativeSessionError::Budget);
-        }
-        let reopened =
-            NativePdfGraph::open(&bytes, reopen_limits).map_err(redaction_graph_error)?;
-        let ids = preserve_and_remap(&staged, &reopened, &self.ids)?;
-        let candidate = Candidate::new(bytes, ids, self.redaction_context(request_id), affected);
+        let RemappedRewrite { output, ids, .. } = rewrite_and_remap(
+            &staged,
+            staged.remaining_retained() + output_budget,
+            &self.ids,
+        )?;
+        let candidate = Candidate::new(output, ids, self.redaction_context(request_id), affected);
         let mut remaining = self.remaining_retained;
         spend(&mut remaining, self.mark_bytes() + candidate.retained())?;
         let result = NativeRedactionStage::Pending(candidate.status().identity);
@@ -1388,25 +1380,19 @@ impl NativePdfSession {
                 Expected::Object(expected)
             }
         };
-        #[cfg(test)]
-        if self.fail_at == Some(FailurePoint::Serialize) {
-            staged.limits.max_output_bytes = 1;
-        }
         staged.limits.max_source_bytes = self.snapshot.limits.max_output_bytes;
-        let staged_remaining = staged_remaining.unwrap_or_else(|| staged.remaining_retained());
-        let output = rewrite_with_workspace(&staged, staged_remaining + output_budget)?;
         #[cfg(test)]
-        let output = if self.fail_at == Some(FailurePoint::Reopen) {
-            Vec::new()
-        } else {
-            output
-        };
-        let mut reopen_limits = self.snapshot.limits;
-        reopen_limits.max_source_bytes = reopen_limits.max_output_bytes;
-        reopen_limits.max_total_decoded_bytes = staged.remaining_decoded();
-        reopen_limits.max_retained_bytes = staged_remaining;
-        let (reopened, remapped_ids) =
-            reopen_rewrite(&staged, &output, output_budget, reopen_limits, &ids)?;
+        match self.fail_at {
+            Some(FailurePoint::Serialize) => staged.limits.max_output_bytes = 1,
+            Some(FailurePoint::Reopen) => staged.limits.max_source_bytes = 1,
+            _ => {}
+        }
+        let staged_remaining = staged_remaining.unwrap_or_else(|| staged.remaining_retained());
+        let RemappedRewrite {
+            output,
+            reopened,
+            ids: remapped_ids,
+        } = rewrite_and_remap(&staged, staged_remaining + output_budget, &ids)?;
         drop(ids);
         let ids = remapped_ids;
         let output_hash = *blake3::hash(&output).as_bytes();
@@ -1810,63 +1796,47 @@ fn reconcile_staged_ids(
     Ok(bytes)
 }
 
-fn reopen_rewrite(
+struct RemappedRewrite {
+    output: Vec<u8>,
+    reopened: NativePdfGraph,
+    ids: BTreeMap<PdfObjectRef, NativeNoteId>,
+}
+
+fn rewrite_and_remap(
     staged: &NativePdfGraph,
-    output: &Vec<u8>,
-    output_budget: usize,
-    mut limits: NativeEditLimits,
+    workspace: usize,
     ids: &BTreeMap<PdfObjectRef, NativeNoteId>,
-) -> Result<(NativePdfGraph, BTreeMap<PdfObjectRef, NativeNoteId>), NativeSessionError> {
-    let refund = output_budget
-        .checked_sub(output.capacity())
-        .ok_or(NativeSessionError::Budget)?;
-    limits.max_retained_bytes += refund;
-    if limits.max_retained_bytes == 0 {
-        return Err(NativeSessionError::Budget);
-    }
-    let reopened = NativePdfGraph::open(output, limits)?;
-    let ids = preserve_and_remap(staged, &reopened, ids)?;
-    Ok((reopened, ids))
+) -> Result<RemappedRewrite, NativeSessionError> {
+    let Rewrite {
+        bytes: output,
+        mut reopened,
+        mapping,
+    } = rewrite_with_workspace(staged, workspace).map_err(|error| match error {
+        NativeEditError::Reader(PdfReadError::TokenLimit) => NativeSessionError::Budget,
+        error => error.into(),
+    })?;
+    let ids = preserve_and_remap(staged, &mut reopened, &mapping, ids)?;
+    drop(mapping);
+    // @invariant: Release rewrite scratch after remapping, while output capacity stays charged.
+    let retained_limit = workspace - output.capacity();
+    reopened.release_page_retained(retained_limit - reopened.limits.max_retained_bytes);
+    reopened.limits.max_retained_bytes = retained_limit;
+    Ok(RemappedRewrite {
+        output,
+        reopened,
+        ids,
+    })
 }
 
 fn preserve_and_remap(
     staged: &NativePdfGraph,
-    reopened: &NativePdfGraph,
+    reopened: &mut NativePdfGraph,
+    mapping: &BTreeMap<PdfObjectRef, PdfObjectRef>,
     ids: &BTreeMap<PdfObjectRef, NativeNoteId>,
 ) -> Result<BTreeMap<PdfObjectRef, NativeNoteId>, NativeSessionError> {
-    let mut work = staged.remaining_work();
-    let mut remaining = reopened.remaining_retained();
-    spend(&mut remaining, staged.objects.len() * 512)?;
-    let mut pending = Vec::new();
-    for (key, value) in &staged.trailer {
-        if key != "Size" {
-            collect_refs(value, &mut pending, &mut work, &mut remaining)?;
-        }
-    }
-    let mut reachable = BTreeSet::new();
-    while let Some(reference) = pending.pop() {
-        spend(&mut work, 1)?;
-        if reachable.insert(reference) {
-            let value = staged
-                .objects
-                .get(&reference)
-                .ok_or(NativeSessionError::Postcondition)?;
-            collect_refs(value, &mut pending, &mut work, &mut remaining)?;
-        }
-    }
-    let mapping: BTreeMap<_, _> = reachable
-        .into_iter()
-        .enumerate()
-        .map(|(i, reference)| {
-            (
-                reference,
-                PdfObjectRef {
-                    object_number: (i + 1) as u32,
-                    generation: 0,
-                },
-            )
-        })
-        .collect();
+    let work_budget = reopened.remaining_work();
+    let mut work = work_budget;
+    spend(&mut work, staged.pages.len())?;
     if mapping.len() != staged.objects.len()
         || mapping.len() != reopened.objects.len()
         || reopened.trailer.get("Size").and_then(PdfValue::as_integer)
@@ -1877,52 +1847,65 @@ fn preserve_and_remap(
             .map(|page| mapping.get(page).copied())
             .ne(reopened.pages.iter().copied().map(Some))
         || staged.trailer.len() != reopened.trailer.len()
-        || staged.trailer.iter().any(|(key, value)| {
-            key != "Size"
-                && !reopened
-                    .trailer
-                    .get(key)
-                    .is_some_and(|rhs| equivalent(value, rhs, &mapping))
-        })
     {
         return Err(NativeSessionError::Postcondition);
     }
+    for (key, value) in &staged.trailer {
+        if key == "Size" {
+            continue;
+        }
+        let rhs = reopened
+            .trailer
+            .get(key)
+            .ok_or(NativeSessionError::Postcondition)?;
+        if !equivalent(value, rhs, mapping, &mut work)? {
+            return Err(NativeSessionError::Postcondition);
+        }
+    }
 
-    mapping
-        .iter()
-        .map(|(before, after)| {
-            let value = &staged.objects[before];
-            let reopened_value = reopened
-                .objects
-                .get(after)
-                .ok_or(NativeSessionError::Postcondition)?;
-            if !equivalent(value, reopened_value, &mapping) {
-                return Err(NativeSessionError::Postcondition);
-            }
-            let id = ids.get(before).ok_or(NativeSessionError::Postcondition)?;
-            Ok((*after, *id))
-        })
-        .collect()
+    let mut remapped = BTreeMap::new();
+    for (before, after) in mapping {
+        spend(&mut work, 1)?;
+        let value = &staged.objects[before];
+        let reopened_value = reopened
+            .objects
+            .get(after)
+            .ok_or(NativeSessionError::Postcondition)?;
+        if !equivalent(value, reopened_value, mapping, &mut work)? {
+            return Err(NativeSessionError::Postcondition);
+        }
+        let id = ids.get(before).ok_or(NativeSessionError::Postcondition)?;
+        remapped.insert(*after, *id);
+    }
+    reopened.charge_page_work(work_budget - work)?;
+    Ok(remapped)
 }
 
 fn same_dict(
     lhs: &BTreeMap<String, PdfValue>,
     rhs: &BTreeMap<String, PdfValue>,
     mapping: &BTreeMap<PdfObjectRef, PdfObjectRef>,
-) -> bool {
-    lhs.len() == rhs.len()
-        && lhs
-            .iter()
-            .zip(rhs)
-            .all(|((left, a), (right, b))| left == right && equivalent(a, b, mapping))
+    work: &mut usize,
+) -> Result<bool, NativeEditError> {
+    if lhs.len() != rhs.len() {
+        return Ok(false);
+    }
+    for ((left, a), (right, b)) in lhs.iter().zip(rhs) {
+        if left != right || !equivalent(a, b, mapping, work)? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 fn equivalent(
     lhs: &PdfValue,
     rhs: &PdfValue,
     mapping: &BTreeMap<PdfObjectRef, PdfObjectRef>,
-) -> bool {
-    match (lhs, rhs) {
+    work: &mut usize,
+) -> Result<bool, NativeEditError> {
+    spend(work, 1)?;
+    Ok(match (lhs, rhs) {
         (PdfValue::Null, PdfValue::Null) => true,
         (PdfValue::Boolean(a), PdfValue::Boolean(b)) => a == b,
         (PdfValue::Integer(a), PdfValue::Integer(b)) => a == b,
@@ -1931,17 +1914,24 @@ fn equivalent(
         (PdfValue::String(a), PdfValue::String(b)) => a == b,
         (PdfValue::Reference(a), PdfValue::Reference(b)) => mapping.get(a) == Some(b),
         (PdfValue::Array(a), PdfValue::Array(b)) => {
-            a.len() == b.len()
-                && a.iter()
-                    .zip(b)
-                    .all(|(lhs, rhs)| equivalent(lhs, rhs, mapping))
+            if a.len() != b.len() {
+                return Ok(false);
+            }
+            for (lhs, rhs) in a.iter().zip(b) {
+                if !equivalent(lhs, rhs, mapping, work)? {
+                    return Ok(false);
+                }
+            }
+            true
         }
-        (PdfValue::Dictionary(a), PdfValue::Dictionary(b)) => same_dict(a, b, mapping),
+        (PdfValue::Dictionary(a), PdfValue::Dictionary(b)) => same_dict(a, b, mapping, work)?,
         (PdfValue::Stream(a), PdfValue::Stream(b)) => {
-            a.encoded == b.encoded && a.data == b.data && same_dict(&a.dict, &b.dict, mapping)
+            a.encoded == b.encoded
+                && a.data == b.data
+                && same_dict(&a.dict, &b.dict, mapping, work)?
         }
         _ => false,
-    }
+    })
 }
 
 #[cfg(test)]
@@ -2262,6 +2252,7 @@ mod tests {
         let bytes = super::super::tests::redaction_fixture("q Q");
         let defaults = NativeEditLimits::default();
         let mut staged = NativePdfGraph::open(&bytes, defaults).unwrap();
+        let ids = initial_ids(&staged);
         staged.limits.max_output_bytes = 1024;
         let roomy = staged.rewrite().unwrap();
         staged.limits.max_output_bytes = roomy.len();
@@ -2269,25 +2260,70 @@ mod tests {
         assert_eq!(exact, roomy);
         assert!(exact.capacity() < roomy.capacity());
 
+        let mut lower = 1;
+        let mut upper = staged.remaining_retained();
+        while lower < upper {
+            let mid = lower + (upper - lower) / 2;
+            if rewrite_and_remap(&staged, mid, &ids).is_ok() {
+                upper = mid;
+            } else {
+                lower = mid + 1;
+            }
+        }
+        let accepted = rewrite_and_remap(&staged, lower, &ids).unwrap();
+        assert_eq!(accepted.reopened.original_bytes(), exact.as_slice());
+        assert_eq!(accepted.ids, ids);
+        assert_eq!(
+            accepted.reopened.limits.max_retained_bytes,
+            lower - exact.capacity()
+        );
+
+        staged.limits.max_output_bytes = 1024;
+        let refusal = rewrite_and_remap(&staged, lower, &ids).err();
+        assert!(
+            matches!(
+                refusal,
+                Some(
+                    NativeSessionError::Budget
+                        | NativeSessionError::Graph(NativeEditError::Reader(
+                            PdfReadError::InputSizeLimit
+                        ))
+                )
+            ),
+            "unexpected retained-capacity result: {refusal:?}"
+        );
+        let with_spare =
+            rewrite_and_remap(&staged, lower + roomy.capacity() - exact.capacity(), &ids).unwrap();
+        assert_eq!(with_spare.output.capacity(), roomy.capacity());
+        assert_eq!(
+            with_spare.reopened.remaining_retained(),
+            accepted.reopened.remaining_retained()
+        );
+    }
+
+    #[test]
+    fn preservation_uses_only_work_left_by_serialization_and_reopen() {
+        let bytes = super::super::tests::redaction_fixture("q Q");
+        let mut staged = NativePdfGraph::open(&bytes, NativeEditLimits::default()).unwrap();
         let ids = initial_ids(&staged);
-        let reopened = NativePdfGraph::open(&exact, defaults).unwrap();
-        let open_cost = defaults.max_retained_bytes - reopened.remaining_retained();
-        let remap_cost = staged.objects.len() * 512 + 5 * 128;
-        let output_budget = roomy.capacity();
-        let spare = output_budget - exact.capacity();
-        let limits = NativeEditLimits {
-            max_retained_bytes: open_cost + remap_cost - spare,
-            ..defaults
-        };
-        assert!(NativePdfGraph::open(&roomy, limits).is_ok());
+        let workspace = staged.remaining_retained();
+        let full = rewrite_and_remap(&staged, workspace, &ids).unwrap();
+        let needed = staged.remaining_work() - full.reopened.remaining_work();
+
+        staged
+            .charge_page_work(staged.remaining_work() - needed)
+            .unwrap();
+        let validated = rewrite_with_workspace(&staged, workspace).unwrap();
+        assert_eq!(validated.bytes, full.output);
+        let exact = rewrite_and_remap(&staged, workspace, &ids).unwrap();
+        assert_eq!(exact.reopened.remaining_work(), 0);
+        assert_eq!(exact.ids, full.ids);
+        staged.charge_page_work(1).unwrap();
+        assert!(rewrite_with_workspace(&staged, workspace).is_ok());
         assert!(matches!(
-            reopen_rewrite(&staged, &roomy, output_budget, limits, &ids),
+            rewrite_and_remap(&staged, workspace, &ids),
             Err(NativeSessionError::Budget)
         ));
-        let (reopened, remapped) =
-            reopen_rewrite(&staged, &exact, output_budget, limits, &ids).unwrap();
-        assert_eq!(reopened.original_bytes(), exact.as_slice());
-        assert_eq!(remapped.len(), ids.len());
     }
 
     #[test]
