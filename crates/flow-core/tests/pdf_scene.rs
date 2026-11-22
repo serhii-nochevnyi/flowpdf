@@ -239,6 +239,57 @@ fn image_payload_allowance_is_shared_across_pages_and_nested_forms() {
 }
 
 #[test]
+fn ordinary_image_payloads_spend_the_remaining_scene_bytes() {
+    let bytes = pdf(vec![
+        (1, b"<< /Type /Catalog /Pages 2 0 R >>".to_vec()),
+        (2, b"<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 /MediaBox [0 0 100 100] /Resources << /XObject << /Im 9 0 R /Outer 7 0 R /Inner 8 0 R >> >> >>".to_vec()),
+        (3, b"<< /Type /Page /Parent 2 0 R /Contents 5 0 R >>".to_vec()),
+        (4, b"<< /Type /Page /Parent 2 0 R /Contents 6 0 R >>".to_vec()),
+        stream(5, "", b"/Im Do"),
+        stream(6, "", b"/Outer Do"),
+        stream(7, "/Type /XObject /Subtype /Form /BBox [0 0 100 100]", b"/Inner Do"),
+        stream(8, "/Type /XObject /Subtype /Form /BBox [0 0 100 100]", b"/Im Do"),
+        stream(9, "/Type /XObject /Subtype /Image /Width 32 /Height 32 /ColorSpace /DeviceGray /BitsPerComponent 8", &[0x7f; 1024]),
+    ]);
+    let read = |first_page, page_count, max_scene_bytes| {
+        let reader = open_pdf(
+            &bytes,
+            PdfReaderLimits {
+                max_scene_bytes,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        read_pdf_scene(
+            &reader,
+            &PdfSceneRequest {
+                first_page,
+                page_count,
+            },
+        )
+    };
+    for (page_index, invocation_depth) in [(0, 1), (1, 3)] {
+        let single = read(page_index, 1, 4096).unwrap();
+        assert!(matches!(
+            single.pages[0].elements.last(),
+            Some(PdfSceneElement::Image { value })
+                if value.data_hex == "7f".repeat(1024)
+                    && value.provenance.object_ref.object_number == 9
+                    && value.provenance.invocation_path.len() == invocation_depth
+        ));
+    }
+    assert_eq!(read(0, 1, 2047), Err(PdfReadError::StreamLimit));
+    assert_eq!(read(0, 2, 4096), Err(PdfReadError::StreamLimit));
+
+    let mut expected = read(0, 2, PdfReaderLimits::default().max_scene_bytes).unwrap();
+    let result_hash = std::mem::take(&mut expected.result_hash);
+    let serialized = serde_json::to_vec(&expected).unwrap();
+    assert_eq!(result_hash, blake3::hash(&serialized).to_hex().as_str());
+    expected.result_hash = result_hash;
+    assert_eq!(read(0, 2, serialized.len()).unwrap(), expected);
+}
+
+#[test]
 fn unsupported_operator_and_missing_mapping_are_reported_without_authored_payloads() {
     let mut bytes = fixture();
     let needle = b"/Im1 Do";
@@ -441,6 +492,53 @@ fn form_graphics_saves_count_toward_the_enclosing_stack_limit() {
         scene_with_nested_forms(page, ["/Inner Do", "Q"], limits),
         Err(PdfReadError::Syntax)
     );
+}
+
+#[test]
+fn nested_forms_share_and_release_saved_path_and_clip_bytes() {
+    let path = "10 10 5 5 re ".repeat(8);
+    let first = format!("{path}W q\n");
+    let second = "/Outer Do /Outer Do Q n";
+    let outer = format!("1 0 0 1 20 0 cm {path}q /Inner Do Q n");
+    let inner = format!("{path}q Q n 15 20 5 5 re f");
+    let forms = [outer.as_str(), inner.as_str()];
+    let read = |first, max_scene_bytes| {
+        scene_with_nested_forms(
+            [first, second],
+            forms,
+            PdfReaderLimits {
+                max_scene_bytes,
+                ..Default::default()
+            },
+        )
+    };
+    let expected = read(&first, PdfReaderLimits::default().max_scene_bytes).unwrap();
+    let admitted = read(&first, 48 * 1024).unwrap();
+    assert_eq!(admitted, expected);
+    let elements = &admitted.pages[0].elements;
+    let paths: Vec<_> = elements
+        .iter()
+        .filter_map(|element| match element {
+            PdfSceneElement::Path { value } => Some(value),
+            _ => None,
+        })
+        .collect();
+    assert!(matches!(paths.as_slice(), [first, second]
+        if [first, second].into_iter().all(|value| value.rect.x.raw() == 35 * 64
+            && value.provenance.object_ref.object_number == 7
+            && value.provenance.invocation_path.len() == 3)
+            && first.provenance.invocation_path != second.provenance.invocation_path));
+    assert!(matches!(
+        elements.last(),
+        Some(PdfSceneElement::Clip { value }) if value.commands.len() == 40
+            && value.rect.x.raw() == 10 * 64
+            && value.provenance.object_ref.object_number == 4
+            && value.provenance.invocation_path == [0]
+            && value.provenance.operator.as_deref() == Some("W")
+    ));
+    assert_eq!(read(&first, 38 * 1024), Err(PdfReadError::StreamLimit));
+    let without_pending_clip = format!("{path}q\n");
+    assert!(read(&without_pending_clip, 38 * 1024).is_ok());
 }
 
 #[test]
