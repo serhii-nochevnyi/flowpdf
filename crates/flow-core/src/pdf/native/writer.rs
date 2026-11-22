@@ -51,7 +51,7 @@ impl Output {
     }
 
     fn name(&mut self, name: &str) -> Result<(), NativeEditError> {
-        spend(&mut self.work, name.len())?;
+        spend(&mut self.work, name.len().div_ceil(16))?;
         self.append(b"/")?;
         for character in name.chars() {
             let byte =
@@ -246,7 +246,11 @@ mod tests {
     fn payload_work_is_required_before_encoding_or_copying() {
         let map = BTreeMap::new();
         for (value, work, expected) in [
-            (PdfValue::Name("N é".into()), 5, "/N#20#E9"),
+            (
+                PdfValue::Name("NNNNNNNNNNNNNN é".into()),
+                3,
+                "/NNNNNNNNNNNNNN#20#E9",
+            ),
             (PdfValue::String(vec![0, 255]), 3, "<00FF>"),
             (
                 PdfValue::ExactReal("+.123456789012345".into()),
