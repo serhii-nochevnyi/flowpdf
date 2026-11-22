@@ -4,7 +4,11 @@
 //! elements.  It intentionally does not produce FlowDocument nodes and never
 //! invokes a PDF action, URL, file, or external resource.
 
-use std::{borrow::Cow, collections::BTreeMap, rc::Rc};
+use std::{
+    borrow::Cow,
+    collections::{BTreeMap, BTreeSet},
+    rc::Rc,
+};
 
 use serde::{Deserialize, Serialize};
 
@@ -580,7 +584,7 @@ struct GraphicsState {
     path_paint_bounds: Option<PaintBounds>,
     text_matrix: Matrix,
     line_matrix: Matrix,
-    font: Option<Rc<FontMap>>,
+    font: Option<SelectedFont>,
     font_size: LayoutUnit,
     leading: LayoutUnit,
     char_spacing: LayoutUnit,
@@ -676,11 +680,22 @@ enum RawPathCommand {
 
 #[derive(Debug)]
 struct FontMap {
-    name: Option<String>,
+    base_name: Option<String>,
     to_unicode: BTreeMap<Vec<u8>, String>,
     simple_encoding: bool,
     widths: BTreeMap<u8, LayoutUnit>,
     default_width: LayoutUnit,
+}
+
+#[derive(Debug, Clone)]
+struct SelectedFont {
+    map: Rc<FontMap>,
+    fallback_name: Option<Rc<str>>,
+}
+
+const fn scene_tree_entry_bytes<T>() -> usize {
+    // @invariant: Each entry reserves space for a full tree node, including child pointers.
+    128 + 12 * size_of::<T>()
 }
 
 #[derive(Debug, Clone)]
@@ -747,7 +762,9 @@ struct SceneBuilder<'a> {
     elements: Vec<PdfSceneElement>,
     emit_elements: bool,
     report: PdfReadReport,
-    fonts: BTreeMap<(PdfObjectRef, String), Rc<FontMap>>,
+    fonts: BTreeMap<PdfObjectRef, Rc<FontMap>>,
+    font_aliases: BTreeSet<Rc<str>>,
+    font_cache_bytes: usize,
     page_refs: BTreeMap<PdfObjectRef, u32>,
     state: GraphicsState,
     state_stack: Vec<(GraphicsState, usize)>,
@@ -783,6 +800,8 @@ impl<'a> SceneBuilder<'a> {
             emit_elements: true,
             report: PdfReadReport::default(),
             fonts: BTreeMap::new(),
+            font_aliases: BTreeSet::new(),
+            font_cache_bytes: 0,
             page_refs: pages
                 .iter()
                 .enumerate()
@@ -868,6 +887,11 @@ impl<'a> SceneBuilder<'a> {
             self.report_partial(object_ref);
         }
         self.discard_saved_states(0);
+        // @invariant: Font allocations stay charged until the page drops all owning references.
+        drop(self.state.font);
+        drop(self.fonts);
+        drop(self.font_aliases);
+        self.budget.release(self.font_cache_bytes);
         let mut page = PdfScenePage {
             page_index: self.page_index,
             source_object: self.page.object_ref,
@@ -1479,27 +1503,54 @@ impl<'a> SceneBuilder<'a> {
             .and_then(|fonts| fonts.get(name))
             .and_then(PdfValue::as_reference)
             .ok_or(PdfReadError::ReferenceInvalid)?;
-        let key = (font_ref, name.clone());
-        let font = if let Some(font) = self.fonts.get(&key) {
-            font.clone()
+        let mut budget = self.budget;
+        let cache_font = !self.fonts.contains_key(&font_ref);
+        let map = if let Some(font) = self.fonts.get(&font_ref) {
+            Rc::clone(font)
         } else {
-            let font = Rc::new(self.load_font(font_ref, name)?);
-            self.fonts.insert(key, font.clone());
-            font
+            let font = self.load_font(font_ref, &mut budget)?;
+            budget.charge(
+                size_of::<FontMap>()
+                    + 2 * size_of::<usize>()
+                    + scene_tree_entry_bytes::<(PdfObjectRef, Rc<FontMap>)>(),
+            )?;
+            Rc::new(font)
         };
-        self.state.font = Some(font);
+        let mut fallback_name = None;
+        if map.base_name.is_none()
+            && let Some(label) = scene_name_label(name)
+        {
+            let alias = if let Some(alias) = self.font_aliases.get(label) {
+                Rc::clone(alias)
+            } else {
+                budget.charge(2 * size_of::<usize>() + scene_tree_entry_bytes::<Rc<str>>())?;
+                budget.charge(label.len().next_multiple_of(align_of::<usize>()))?;
+                let alias: Rc<str> = Rc::from(label);
+                self.font_aliases.insert(Rc::clone(&alias));
+                alias
+            };
+            fallback_name = Some(alias);
+        }
+        if cache_font {
+            self.fonts.insert(font_ref, Rc::clone(&map));
+        }
+        self.font_cache_bytes += self.budget.remaining_scene_bytes - budget.remaining_scene_bytes;
+        self.budget = budget;
+        self.state.font = Some(SelectedFont { map, fallback_name });
         self.state.font_size = size;
         Ok(())
     }
 
-    fn load_font(&self, font_ref: PdfObjectRef, name: &str) -> Result<FontMap, PdfReadError> {
+    fn load_font(
+        &self,
+        font_ref: PdfObjectRef,
+        budget: &mut SceneBudget,
+    ) -> Result<FontMap, PdfReadError> {
         let font = self.reader.object(font_ref)?;
         let dictionary = font.as_dictionary().ok_or(PdfReadError::ReferenceInvalid)?;
-        let base_name = dictionary
-            .get("BaseFont")
-            .and_then(PdfValue::as_name)
-            .or_else(|| scene_name_label(name))
-            .map(str::to_owned);
+        let base_name = dictionary.get("BaseFont").and_then(PdfValue::as_name);
+        budget.charge(base_name.map_or(0, str::len))?;
+        let base_name = base_name.map(str::to_owned);
         let mut to_unicode = BTreeMap::new();
         if let Some(to_unicode_value) = dictionary.get("ToUnicode") {
             let to_unicode_ref = to_unicode_value
@@ -1507,7 +1558,7 @@ impl<'a> SceneBuilder<'a> {
                 .ok_or(PdfReadError::ReferenceInvalid)?;
             let stream = self.reader.object(to_unicode_ref)?;
             if let PdfValue::Stream(stream) = stream {
-                to_unicode = parse_to_unicode(&stream.data, self.limits)?;
+                to_unicode = parse_to_unicode(&stream.data, self.limits.max_array_items, budget)?;
             }
         }
         let simple_encoding = dictionary
@@ -1518,31 +1569,23 @@ impl<'a> SceneBuilder<'a> {
             .get("MissingWidth")
             .and_then(font_width)
             .unwrap_or(LayoutUnit::from_raw(500));
-        let widths = dictionary
-            .get("Widths")
-            .and_then(PdfValue::as_array)
-            .map(|values| {
-                let first = dictionary
-                    .get("FirstChar")
-                    .and_then(PdfValue::as_integer)
-                    .unwrap_or(0);
-                values
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(index, value)| {
-                        let code = first.checked_add(i64::try_from(index).ok()?)?;
-                        let code = u8::try_from(code).ok()?;
-                        Some((code, font_width(value).unwrap_or(default_width)))
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-        if !simple_encoding && to_unicode.is_empty() {
-            // The scene is still usable as a visual projection, but the
-            // diagnostic is added at the first shown glyph in show_text.
+        let mut widths = BTreeMap::new();
+        if let Some(values) = dictionary.get("Widths").and_then(PdfValue::as_array) {
+            let first = dictionary
+                .get("FirstChar")
+                .and_then(PdfValue::as_integer)
+                .unwrap_or(0);
+            let codes = values.iter().enumerate().filter_map(|(index, value)| {
+                let code = first.checked_add(i64::try_from(index).ok()?)?;
+                Some((u8::try_from(code).ok()?, value))
+            });
+            for (code, value) in codes {
+                budget.charge(scene_tree_entry_bytes::<(u8, LayoutUnit)>())?;
+                widths.insert(code, font_width(value).unwrap_or(default_width));
+            }
         }
         Ok(FontMap {
-            name: base_name,
+            base_name,
             to_unicode,
             simple_encoding,
             widths,
@@ -1558,11 +1601,12 @@ impl<'a> SceneBuilder<'a> {
         if !self.state.in_text {
             return Err(PdfReadError::Syntax);
         }
-        let font = self
+        let selected_font = self
             .state
             .font
             .clone()
             .ok_or(PdfReadError::ReferenceInvalid)?;
+        let font = &selected_font.map;
         let mut glyphs = Vec::new();
         let mut text = String::new();
         let mut mapping = if font.to_unicode.is_empty() {
@@ -1578,7 +1622,7 @@ impl<'a> SceneBuilder<'a> {
         while index < bytes.len() {
             let (code_bytes, code) = next_code(bytes, index, &font.to_unicode);
             index += code_bytes.len();
-            let unicode = if let Some(mapped) = font.to_unicode.get(&code_bytes) {
+            let unicode = if let Some(mapped) = font.to_unicode.get(code_bytes) {
                 Some(mapped.clone())
             } else if font.simple_encoding && code <= 0x7F {
                 char::from_u32(u32::from(code)).map(|value| value.to_string())
@@ -1661,7 +1705,11 @@ impl<'a> SceneBuilder<'a> {
                 value: PdfTextElement {
                     text,
                     rect,
-                    font_name: font.name.clone(),
+                    font_name: font
+                        .base_name
+                        .as_deref()
+                        .or(selected_font.fallback_name.as_deref())
+                        .map(str::to_owned),
                     mapping,
                     glyphs,
                     provenance,
@@ -2254,6 +2302,10 @@ impl SceneBudget {
     fn charge(&mut self, bytes: usize) -> Result<(), PdfReadError> {
         self.remaining_scene_bytes = self.remaining_after(bytes)?;
         Ok(())
+    }
+
+    fn release(&mut self, bytes: usize) {
+        self.remaining_scene_bytes += bytes;
     }
 
     fn encode(&mut self, value: &impl Serialize) -> Result<(), PdfReadError> {
@@ -2948,21 +3000,19 @@ fn parse_bbox(value: &PdfValue) -> Result<LayoutRect, PdfReadError> {
     })
 }
 
-fn next_code(bytes: &[u8], index: usize, mapping: &BTreeMap<Vec<u8>, String>) -> (Vec<u8>, u8) {
+fn next_code<'a>(
+    bytes: &'a [u8],
+    index: usize,
+    mapping: &BTreeMap<Vec<u8>, String>,
+) -> (&'a [u8], u8) {
     let remaining = &bytes[index..];
-    let mut best = None;
-    for key in mapping.keys() {
-        if key.len() > remaining.len() || !remaining.starts_with(key) {
-            continue;
-        }
-        if best
-            .as_ref()
-            .is_none_or(|value: &Vec<u8>| key.len() > value.len())
-        {
-            best = Some(key.clone());
-        }
-    }
-    let code_bytes = best.unwrap_or_else(|| vec![remaining[0]]);
+    let width = mapping
+        .keys()
+        .filter(|key| !key.is_empty() && remaining.starts_with(key))
+        .map(Vec::len)
+        .max()
+        .unwrap_or(1);
+    let code_bytes = &remaining[..width];
     let code = code_bytes
         .iter()
         .fold(0_u32, |value, byte| (value << 8) | u32::from(*byte));
@@ -2971,112 +3021,174 @@ fn next_code(bytes: &[u8], index: usize, mapping: &BTreeMap<Vec<u8>, String>) ->
 
 fn parse_to_unicode(
     bytes: &[u8],
-    limits: &PdfReaderLimits,
+    max_entries: usize,
+    budget: &mut SceneBudget,
 ) -> Result<BTreeMap<Vec<u8>, String>, PdfReadError> {
-    let text = String::from_utf8_lossy(bytes);
-    let tokens = text.split_whitespace().collect::<Vec<_>>();
-    let mut map = BTreeMap::new();
-    let mut index = 0;
-    while index < tokens.len() {
-        if tokens[index] == "beginbfchar" {
-            index += 1;
-            while index < tokens.len() && tokens[index] != "endbfchar" {
-                let source = parse_hex_token(tokens.get(index).ok_or(PdfReadError::Syntax)?)?;
-                let destination =
-                    parse_utf16_hex(tokens.get(index + 1).ok_or(PdfReadError::Syntax)?)?;
-                map.insert(source, destination);
-                index += 2;
-                if map.len() > limits.max_array_items {
-                    return Err(PdfReadError::ObjectLimit);
+    let text = match std::str::from_utf8(bytes) {
+        Ok(text) => Cow::Borrowed(text),
+        Err(_) => {
+            let capacity = bytes.utf8_chunks().try_fold(0_usize, |total, chunk| {
+                total
+                    .checked_add(chunk.valid().len())?
+                    .checked_add(3 * usize::from(!chunk.invalid().is_empty()))
+            });
+            let capacity = capacity.ok_or(PdfReadError::StreamLimit)?;
+            budget.charge(capacity)?;
+            let mut text = String::with_capacity(capacity);
+            for chunk in bytes.utf8_chunks() {
+                text.push_str(chunk.valid());
+                if !chunk.invalid().is_empty() {
+                    text.push('\u{FFFD}');
                 }
             }
-        } else if tokens[index] == "beginbfrange" {
-            index += 1;
-            while index < tokens.len() && tokens[index] != "endbfrange" {
-                let low = parse_hex_token(tokens.get(index).ok_or(PdfReadError::Syntax)?)?;
-                let high = parse_hex_token(tokens.get(index + 1).ok_or(PdfReadError::Syntax)?)?;
-                let destination = *tokens.get(index + 2).ok_or(PdfReadError::Syntax)?;
-                let low_value = bytes_to_u32(&low);
-                let high_value = bytes_to_u32(&high);
+            Cow::Owned(text)
+        }
+    };
+    let mut tokens = text.split_whitespace();
+    let mut map = BTreeMap::new();
+    while let Some(token) = tokens.next() {
+        if token == "beginbfchar" {
+            while let Some(source) = tokens.next() {
+                if source == "endbfchar" {
+                    break;
+                }
+                let source = HexToken::new(source)?;
+                let destination = HexToken::new(tokens.next().ok_or(PdfReadError::Syntax)?)?;
+                budget.charge(source.decoded_len())?;
+                let source = source.to_bytes();
+                let destination = unicode_destination(destination, budget)?;
+                insert_unicode(&mut map, source, destination, max_entries, budget)?;
+            }
+        } else if token == "beginbfrange" {
+            while let Some(low) = tokens.next() {
+                if low == "endbfrange" {
+                    break;
+                }
+                let low = HexToken::new(low)?;
+                let high = HexToken::new(tokens.next().ok_or(PdfReadError::Syntax)?)?;
+                let destination = tokens.next().ok_or(PdfReadError::Syntax)?;
                 if destination.starts_with('[') {
-                    index += 3;
                     continue;
                 }
-                let destination_bytes = parse_hex_token(destination)?;
-                let destination_start = bytes_to_u32(&destination_bytes);
+                let low_value = low.numeric_value();
+                let high_value = high.numeric_value();
+                let destination_start = HexToken::new(destination)?.numeric_value();
+                let width = low.decoded_len();
                 for value in low_value..=high_value {
-                    let source = u32_to_bytes(value, low.len());
-                    let unicode = parse_utf16_codepoint(
-                        destination_start
-                            .checked_add(value - low_value)
-                            .ok_or(PdfReadError::NumericLimit)?,
-                    );
-                    map.insert(source, unicode);
-                    if map.len() > limits.max_array_items {
-                        return Err(PdfReadError::ObjectLimit);
-                    }
+                    let codepoint = destination_start
+                        .checked_add(value - low_value)
+                        .ok_or(PdfReadError::NumericLimit)?;
+                    let scalar = char::from_u32(codepoint).unwrap_or('\u{FFFD}');
+                    budget.charge(width)?;
+                    budget.charge(scalar.len_utf8())?;
+                    let mut source = vec![0; width];
+                    let bytes = value.to_be_bytes();
+                    let copied_width = width.min(bytes.len());
+                    source[width - copied_width..]
+                        .copy_from_slice(&bytes[bytes.len() - copied_width..]);
+                    let mut destination = String::with_capacity(scalar.len_utf8());
+                    destination.push(scalar);
+                    insert_unicode(&mut map, source, destination, max_entries, budget)?;
                 }
-                index += 3;
             }
         }
-        index += 1;
+    }
+    if let Cow::Owned(text) = text {
+        let capacity = text.capacity();
+        drop(text);
+        budget.release(capacity);
     }
     Ok(map)
 }
 
-fn parse_hex_token(token: &str) -> Result<Vec<u8>, PdfReadError> {
-    let bytes = token.as_bytes();
-    if bytes.len() < 2 || bytes[0] != b'<' || *bytes.last().ok_or(PdfReadError::Syntax)? != b'>' {
-        return Err(PdfReadError::Syntax);
-    }
-    let mut result = Vec::new();
-    let mut high = None;
-    for byte in &bytes[1..bytes.len() - 1] {
-        let Some(nibble) = hex_nibble(*byte) else {
-            return Err(PdfReadError::Syntax);
-        };
-        if let Some(high) = high.take() {
-            result.push((high << 4) | nibble);
-        } else {
-            high = Some(nibble);
+struct HexToken<'a>(&'a [u8]);
+
+impl<'a> HexToken<'a> {
+    fn new(token: &'a str) -> Result<Self, PdfReadError> {
+        match token.as_bytes() {
+            [b'<', digits @ .., b'>'] if digits.iter().all(|&byte| hex_nibble(byte).is_some()) => {
+                Ok(Self(digits))
+            }
+            _ => Err(PdfReadError::Syntax),
         }
     }
-    if let Some(high) = high {
-        result.push(high << 4);
+
+    fn decoded_len(&self) -> usize {
+        self.0.len().div_ceil(2)
     }
-    Ok(result)
+
+    fn bytes(&self) -> impl Iterator<Item = u8> + 'a {
+        self.0.chunks(2).map(|pair| {
+            let high = hex_nibble(pair[0]).unwrap();
+            let low = pair.get(1).and_then(|&byte| hex_nibble(byte)).unwrap_or(0);
+            (high << 4) | low
+        })
+    }
+
+    fn to_bytes(&self) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(self.decoded_len());
+        bytes.extend(self.bytes());
+        bytes
+    }
+
+    fn numeric_value(&self) -> u32 {
+        self.bytes()
+            .fold(0, |value, byte| (value << 8) | u32::from(byte))
+    }
+
+    fn utf16(&self) -> impl Iterator<Item = Result<char, std::char::DecodeUtf16Error>> + 'a {
+        let mut bytes = self.bytes();
+        char::decode_utf16(std::iter::from_fn(move || {
+            Some(u16::from_be_bytes([bytes.next()?, bytes.next()?]))
+        }))
+    }
 }
 
-fn parse_utf16_hex(token: &str) -> Result<String, PdfReadError> {
-    decode_utf16_be(&parse_hex_token(token)?)
+fn parse_hex_token(token: &str) -> Result<Vec<u8>, PdfReadError> {
+    Ok(HexToken::new(token)?.to_bytes())
 }
 
-fn decode_utf16_be(bytes: &[u8]) -> Result<String, PdfReadError> {
-    if bytes.len() % 2 != 0 {
+fn unicode_destination(
+    token: HexToken<'_>,
+    budget: &mut SceneBudget,
+) -> Result<String, PdfReadError> {
+    if token.decoded_len() % 2 != 0 {
         return Err(PdfReadError::Syntax);
     }
-    let units = bytes
-        .chunks_exact(2)
-        .map(|bytes| u16::from_be_bytes([bytes[0], bytes[1]]))
-        .collect::<Vec<_>>();
-    String::from_utf16(&units).map_err(|_| PdfReadError::Syntax)
+    let capacity = token.utf16().try_fold(0_usize, |total, scalar| {
+        let scalar = scalar.map_err(|_| PdfReadError::Syntax)?;
+        total
+            .checked_add(scalar.len_utf8())
+            .ok_or(PdfReadError::StreamLimit)
+    })?;
+    budget.charge(capacity)?;
+    let mut destination = String::with_capacity(capacity);
+    for scalar in token.utf16() {
+        destination.push(scalar.map_err(|_| PdfReadError::Syntax)?);
+    }
+    Ok(destination)
 }
 
-fn bytes_to_u32(bytes: &[u8]) -> u32 {
-    bytes
-        .iter()
-        .fold(0_u32, |value, byte| (value << 8) | u32::from(*byte))
-}
-
-fn u32_to_bytes(value: u32, width: usize) -> Vec<u8> {
-    (0..width)
-        .rev()
-        .map(|shift| u8::try_from((value >> (shift * 8)) & 0xFF).unwrap_or(0))
-        .collect()
-}
-
-fn parse_utf16_codepoint(value: u32) -> String {
-    char::from_u32(value).unwrap_or('\u{FFFD}').to_string()
+fn insert_unicode(
+    map: &mut BTreeMap<Vec<u8>, String>,
+    source: Vec<u8>,
+    destination: String,
+    max_entries: usize,
+    budget: &mut SceneBudget,
+) -> Result<(), PdfReadError> {
+    if let Some(existing) = map.get_mut(source.as_slice()) {
+        let released = source.capacity() + existing.capacity();
+        drop(source);
+        *existing = destination;
+        budget.release(released);
+    } else {
+        if map.len() >= max_entries {
+            return Err(PdfReadError::ObjectLimit);
+        }
+        budget.charge(scene_tree_entry_bytes::<(Vec<u8>, String)>())?;
+        map.insert(source, destination);
+    }
+    Ok(())
 }
 
 pub(super) fn separated_content_streams(previous: &[u8], next: &[u8]) -> bool {
