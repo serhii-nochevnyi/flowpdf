@@ -1218,6 +1218,70 @@ fn shared_form_content_is_removed_from_every_retained_placement() {
 }
 
 #[test]
+fn redaction_rewrite_work_boundary_preserves_accepted_state_and_marks() {
+    let paint = format!("10 10 10 10 re f {}", "40 40 10 10 re f ".repeat(32));
+    let source = raster_fixture(100, &paint);
+    let defaults = NativeEditLimits::default();
+    let open_marked_at = |max_work| {
+        let mut session = NativePdfSession::open_scoped(
+            &source,
+            NativeEditLimits {
+                max_work,
+                ..defaults
+            },
+            [5; 16],
+        )?;
+        let binding = session.snapshot().binding;
+        let target = mark(&session, 0, [11_000, 11_000, 13_000, 13_000]);
+        session.add_redaction_mark(binding, 1, target)?;
+        Ok::<_, NativeSessionError>(session)
+    };
+    let mut lower = 1;
+    let mut upper = defaults.max_work;
+    while lower < upper {
+        let mid = lower + (upper - lower) / 2;
+        if open_marked_at(mid).is_ok_and(|mut session| {
+            session
+                .stage_redaction(session.snapshot().binding, 2)
+                .is_ok()
+        }) {
+            upper = mid;
+        } else {
+            lower = mid + 1;
+        }
+    }
+
+    let mut exact = open_marked_at(lower).unwrap();
+    let binding = exact.snapshot().binding;
+    let pending = exact.stage_redaction(binding, 2).unwrap();
+    assert!(matches!(pending, NativeRedactionStage::Pending(_)));
+    assert_eq!(exact.stage_redaction(binding, 2), Ok(pending));
+    assert_accepted(&exact, &source, 0, &source);
+
+    let mut tight = open_marked_at(lower - 1).unwrap();
+    let before = tight.snapshot().clone();
+    let mark = tight.redaction_marks()[0];
+    for _ in 0..2 {
+        assert_eq!(
+            tight.stage_redaction(before.binding, 2),
+            Err(NativeSessionError::Budget)
+        );
+        assert_eq!(
+            tight.lookup(before.binding, 2),
+            Ok(NativeRequestLookup::Unseen)
+        );
+    }
+    assert_accepted(&tight, &source, 0, &source);
+    assert_eq!(tight.snapshot().binding, before.binding);
+    assert_eq!(tight.snapshot().consumed_request, before.consumed_request);
+    assert_eq!(tight.snapshot().scene, before.scene);
+    assert_eq!(tight.snapshot().page_state, before.page_state);
+    assert!(tight.redaction_candidate_status().is_none());
+    assert_eq!(tight.redaction_marks(), &[mark]);
+    assert_eq!(tight.redaction_marks_binding(), Some(before.binding));
+}
+
+#[test]
 fn output_budget_refusal_creates_no_candidate() {
     let source = fixture();
     let mut session = NativePdfSession::open_scoped(
