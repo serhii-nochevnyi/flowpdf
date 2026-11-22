@@ -160,21 +160,63 @@ fn checkbox_add_refuses_atomically_below_the_widget_work_boundary() {
     objects[4] = b"<< /Fields 10 0 R >>".to_vec();
     objects.push(b"[6 0 R]".to_vec());
     let source = build_pdf(&objects);
-    let limits = NativeEditLimits::default();
-    let open = |max_work| {
-        NativePdfSession::open_scoped(&source, NativeEditLimits { max_work, ..limits }, [7; 16])
-    };
-    let command = NativeFieldCommand::AddCheckboxField {
+    let fitting = apply_at_work_boundary(&source, |_| NativeFieldCommand::AddCheckboxField {
         page: 0,
         rect: [40, 40, 60, 60],
         name: "approval".into(),
         checked: true,
+    });
+    assert_saved_value(fitting.output_bytes(), "approval", "Btn", "Yes");
+}
+
+#[test]
+fn multi_field_lookup_preserves_projection_and_refuses_atomically_at_the_work_boundary() {
+    let mut objects =
+        imported_field_objects("[10 10 30 30]", "/Annots [10 0 R]", "Off", "Btn", "", "");
+    objects[4] = b"<< /Fields [6 0 R 10 0 R] >>".to_vec();
+    objects.push(b"<< /Type /Annot /Subtype /Widget /P 4 0 R /FT /Btn /T (acceptance) /V /Off /Rect [10 10 30 30] /AP << /N << /Off 8 0 R /Agreed 9 0 R >> >> /AS /Off >>".to_vec());
+    let source = build_pdf(&objects);
+    let labels = ["agreement", "acceptance"];
+    let fitting = apply_at_work_boundary(&source, |pdf| {
+        let fields = &pdf.snapshot().fields;
+        assert_eq!(fields.len(), labels.len());
+        for (field, label) in fields.iter().zip(labels) {
+            assert_eq!(field.name.as_deref(), Some(label));
+            assert!(field.can_edit_appearance);
+            assert_eq!(field.checked, Some(false));
+        }
+        NativeFieldCommand::SetFieldChecked {
+            field: fields[0].id,
+            checked: true,
+        }
+    });
+    assert_saved_value(fitting.output_bytes(), "agreement", "Btn", "Agreed");
+    let fields = &fitting.snapshot().fields;
+    assert_eq!(fields.len(), labels.len());
+    for ((field, label), checked) in fields.iter().zip(labels).zip([true, false]) {
+        assert_eq!(field.name.as_deref(), Some(label));
+        assert!(field.can_edit_appearance);
+        assert_eq!(field.checked, Some(checked));
+    }
+    assert_eq!(fitting.origin_bytes(), source);
+}
+
+fn apply_at_work_boundary(
+    source: &[u8],
+    command: impl Fn(&NativePdfSession) -> NativeFieldCommand,
+) -> NativePdfSession {
+    let limits = NativeEditLimits::default();
+    let open = |max_work| {
+        NativePdfSession::open_scoped(source, NativeEditLimits { max_work, ..limits }, [7; 16])
     };
-    let add = |pdf: &mut NativePdfSession| pdf.apply_field(pdf.snapshot().binding, 1, &command);
+    let apply = |pdf: &mut NativePdfSession| {
+        let command = command(pdf);
+        pdf.apply_field(pdf.snapshot().binding, 1, &command)
+    };
     let (mut low, mut high) = (1, limits.max_work);
     while low < high {
         let mid = low + (high - low) / 2;
-        match open(mid).and_then(|mut pdf| add(&mut pdf)) {
+        match open(mid).and_then(|mut pdf| apply(&mut pdf)) {
             Ok(_) => high = mid,
             Err(
                 NativeSessionError::Budget
@@ -186,10 +228,15 @@ fn checkbox_add_refuses_atomically_below_the_widget_work_boundary() {
 
     let mut constrained = open(low - 1).unwrap();
     let accepted = constrained.snapshot().clone();
-    assert_eq!(add(&mut constrained), Err(NativeSessionError::Budget));
+    assert_eq!(apply(&mut constrained), Err(NativeSessionError::Budget));
     assert_eq!(constrained.output_bytes(), source);
+    assert_eq!(constrained.origin_bytes(), source);
     assert_eq!(constrained.snapshot().binding, accepted.binding);
     assert_eq!(constrained.snapshot().output_hash, accepted.output_hash);
+    assert_eq!(
+        constrained.snapshot().scene.scene_hash,
+        accepted.scene.scene_hash
+    );
     assert_eq!(constrained.snapshot().fields, accepted.fields);
     assert_eq!(
         constrained.snapshot().consumed_request,
@@ -202,13 +249,13 @@ fn checkbox_add_refuses_atomically_below_the_widget_work_boundary() {
 
     let mut fitting = open(low).unwrap();
     let binding = fitting.snapshot().binding;
-    let receipt = add(&mut fitting).unwrap();
+    let receipt = apply(&mut fitting).unwrap();
     assert_eq!(receipt.binding.revision, binding.revision + 1);
     assert_eq!(
         fitting.lookup(binding, 1),
         Ok(NativeRequestLookup::Accepted(receipt))
     );
-    assert_saved_value(fitting.output_bytes(), "approval", "Btn", "Yes");
+    fitting
 }
 
 #[test]
