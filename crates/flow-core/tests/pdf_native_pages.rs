@@ -207,20 +207,24 @@ fn independent_note_and_checkbox_clone_survive_cross_parent_reorder_and_navigati
 }
 
 #[test]
-fn indirect_link_destination_tracks_the_same_page_after_reorder() {
+fn direct_and_indirect_link_destinations_track_the_same_page_after_reorder() {
     let source = build_pdf(&[
         (0, "<< /Type /Catalog /Pages 2 0 R >>"),
         (
             0,
             "<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 /MediaBox [0 0 200 200] >>",
         ),
-        (0, "<< /Type /Page /Parent 2 0 R /Annots [5 0 R] >>"),
+        (0, "<< /Type /Page /Parent 2 0 R /Annots [5 0 R 7 0 R] >>"),
         (0, "<< /Type /Page /Parent 2 0 R >>"),
         (
             0,
             "<< /Type /Annot /Subtype /Link /P 3 0 R /Rect [10 10 30 30] /Dest 6 0 R >>",
         ),
         (0, "[4 0 R /Fit]"),
+        (
+            0,
+            "<< /Type /Annot /Subtype /Link /P 3 0 R /Rect [40 10 60 30] /Dest [4 0 R /Fit] >>",
+        ),
     ]);
     let mut session =
         NativePdfSession::open_scoped(&source, NativeEditLimits::default(), [6; 16]).unwrap();
@@ -247,12 +251,19 @@ fn indirect_link_destination_tracks_the_same_page_after_reorder() {
             },
         )
         .unwrap();
-        let [PdfSceneElement::Link { value }] = scene.pages[link_page].elements.as_slice() else {
-            panic!("expected a retained link");
+        let [
+            PdfSceneElement::Link { value: indirect },
+            PdfSceneElement::Link { value: direct },
+        ] = scene.pages[link_page].elements.as_slice()
+        else {
+            panic!("expected both retained links");
         };
-        assert_eq!(value.provenance.object_ref.object_number, 5);
-        assert!(value.internal);
-        assert_eq!(value.destination_page, Some(target_page as u32));
+        assert!(!scene.report.partial);
+        for (value, object_number) in [(indirect, 5), (direct, 7)] {
+            assert_eq!(value.provenance.object_ref.object_number, object_number);
+            assert!(value.internal);
+            assert_eq!(value.destination_page, Some(target_page as u32));
+        }
         assert_eq!(scene.pages[target_page].source_object.object_number, 4);
     }
 }

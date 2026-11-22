@@ -733,6 +733,7 @@ struct SceneBuilder<'a> {
     link_work: usize,
     widget_work: usize,
     remaining_content_tokens: usize,
+    remaining_image_hex_bytes: usize,
     elements: Vec<PdfSceneElement>,
     emit_elements: bool,
     report: PdfReadReport,
@@ -756,6 +757,7 @@ impl<'a> SceneBuilder<'a> {
         page_index: u32,
         page: &'a PdfPageRecord,
         field_counts: &'a BTreeMap<PdfObjectRef, usize>,
+        remaining_image_hex_bytes: usize,
     ) -> Self {
         Self {
             reader,
@@ -766,6 +768,7 @@ impl<'a> SceneBuilder<'a> {
             link_work: reader.limits().max_content_tokens,
             widget_work: reader.limits().max_content_tokens,
             remaining_content_tokens: reader.limits().max_content_tokens,
+            remaining_image_hex_bytes,
             elements: Vec::new(),
             emit_elements: true,
             report: PdfReadReport::default(),
@@ -785,7 +788,7 @@ impl<'a> SceneBuilder<'a> {
         }
     }
 
-    fn run(mut self) -> Result<PdfScenePage, PdfReadError> {
+    fn run(mut self) -> Result<(PdfScenePage, usize), PdfReadError> {
         if let Some(crop_box) = self.page.crop_box {
             self.state.clip = self.state.clip.intersect(crop_box, true)?;
         }
@@ -855,14 +858,17 @@ impl<'a> SceneBuilder<'a> {
             self.report_partial(object_ref);
         }
         let partial = self.report.partial;
-        Ok(PdfScenePage {
-            page_index: self.page_index,
-            source_object: self.page.object_ref,
-            bounds: self.page.media_box,
-            elements: self.elements,
-            report: self.report,
-            partial,
-        })
+        Ok((
+            PdfScenePage {
+                page_index: self.page_index,
+                source_object: self.page.object_ref,
+                bounds: self.page.media_box,
+                elements: self.elements,
+                report: self.report,
+                partial,
+            },
+            self.remaining_image_hex_bytes,
+        ))
     }
 
     fn interpret_stream(
@@ -1842,14 +1848,6 @@ impl<'a> SceneBuilder<'a> {
         } else {
             ("application/octet-stream", &stream.data)
         };
-        if data.len() > self.limits.max_stream_bytes / 2 {
-            self.report.push(PdfReadDiagnostic::blocked(
-                PdfReadDiagnosticCode::ImageLimit,
-                Some(self.page_index),
-                Some(object_ref.object_number),
-            ));
-            return Ok(());
-        }
         let zero = LayoutUnit::from_raw(0);
         let one = LayoutUnit::from_raw(LayoutUnit::UNITS_PER_POINT);
         let rect = transformed_rect(
@@ -1882,13 +1880,24 @@ impl<'a> SceneBuilder<'a> {
             self.report_partial(provenance.object_ref);
             return Ok(());
         }
+        if !self.emit_elements {
+            return Ok(());
+        }
+        let Some(data_hex) = encode_image_hex(data, &mut self.remaining_image_hex_bytes) else {
+            self.report.push(PdfReadDiagnostic::blocked(
+                PdfReadDiagnosticCode::ImageLimit,
+                Some(self.page_index),
+                Some(object_ref.object_number),
+            ));
+            return Ok(());
+        };
         self.push_element(PdfSceneElement::Image {
             value: PdfImageElement {
                 width,
                 height,
                 media_type: media_type.to_owned(),
                 filter,
-                data_hex: hex_encode(data),
+                data_hex,
                 rect,
                 provenance: PdfSourceProvenance {
                     object_ref,
@@ -1940,27 +1949,14 @@ impl<'a> SceneBuilder<'a> {
                         Some(annotation_ref.object_number),
                     ));
                 }
-                let destination = dictionary
+                let target = dictionary
                     .get("Dest")
-                    .or_else(|| goto.and_then(|action| action.get("D")))
-                    .and_then(|destination| {
-                        resolve_annotation_value(
-                            destination,
-                            self.limits.max_nesting,
-                            &mut self.link_work,
-                            &mut |reference| {
-                                self.reader
-                                    .label_object(reference)
-                                    .map(|v| v.map(Cow::Owned))
-                            },
-                        )
-                        .ok()
-                        .flatten()
-                    })
-                    .as_deref()
-                    .and_then(PdfValue::as_array)
-                    .and_then(explicit_destination_target)
-                    .and_then(|reference| self.page_refs.get(&reference).copied());
+                    .or_else(|| goto.and_then(|action| action.get("D")));
+                let destination = if target.is_some() || goto.is_some() {
+                    self.read_link_destination(*annotation_ref, target)?
+                } else {
+                    None
+                };
                 self.push_element(PdfSceneElement::Link {
                     value: PdfLinkElement {
                         destination_page: destination,
@@ -2064,6 +2060,45 @@ impl<'a> SceneBuilder<'a> {
             }
         }
         Ok(())
+    }
+
+    fn read_link_destination(
+        &mut self,
+        annotation_ref: PdfObjectRef,
+        target: Option<&PdfValue>,
+    ) -> Result<Option<u32>, PdfReadError> {
+        let resolved = match target {
+            Some(value) => self
+                .reader
+                .link_destination_value(value, &mut self.link_work),
+            None => Ok(None),
+        };
+        let code = match resolved {
+            Ok(value) => {
+                if let Some(page_index) = value
+                    .as_deref()
+                    .and_then(PdfValue::as_array)
+                    .and_then(explicit_destination_target)
+                    .and_then(|reference| self.page_refs.get(&reference).copied())
+                {
+                    return Ok(Some(page_index));
+                }
+                PdfReadDiagnosticCode::UnsupportedAnnotation
+            }
+            Err(
+                PdfReadError::ObjectLimit
+                | PdfReadError::TokenLimit
+                | PdfReadError::NestingLimit
+                | PdfReadError::StreamLimit,
+            ) => PdfReadDiagnosticCode::ContentLimit,
+            Err(error) => return Err(error),
+        };
+        self.report.push(PdfReadDiagnostic::blocked(
+            code,
+            Some(self.page_index),
+            Some(annotation_ref.object_number),
+        ));
+        Ok(None)
     }
 
     fn widget_field_owner(
@@ -2173,6 +2208,38 @@ fn explicit_destination_target(destination: &[PdfValue]) -> Option<PdfObjectRef>
     destination.first()?.as_reference()
 }
 
+struct SceneJsonWriter<W> {
+    output: W,
+    remaining: usize,
+}
+
+impl<W: std::io::Write> SceneJsonWriter<W> {
+    fn encode(&mut self, value: &impl Serialize) -> Result<(), PdfReadError> {
+        serde_json::to_writer(self, value).map_err(|error| {
+            if error.io_error_kind() == Some(std::io::ErrorKind::FileTooLarge) {
+                PdfReadError::StreamLimit
+            } else {
+                PdfReadError::Syntax
+            }
+        })
+    }
+}
+
+impl<W: std::io::Write> std::io::Write for SceneJsonWriter<W> {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        if bytes.len() > self.remaining {
+            return Err(std::io::ErrorKind::FileTooLarge.into());
+        }
+        let written = self.output.write(bytes)?;
+        self.remaining -= written;
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.output.flush()
+    }
+}
+
 /// Reads a bounded page window and calculates a stable scene hash.
 pub fn read_pdf_scene(
     reader: &PdfReader,
@@ -2211,10 +2278,28 @@ pub fn read_pdf_scene(
         }
     }
     let mut scene_pages = Vec::with_capacity(end.saturating_sub(first));
+    let scene_byte_limit = reader.limits().max_scene_bytes;
+    let mut page_bytes = SceneJsonWriter {
+        output: std::io::sink(),
+        remaining: scene_byte_limit,
+    };
+    // @invariant: Retained image hex shares a single allowance across the requested page window.
+    let mut remaining_image_hex_bytes = reader.limits().max_stream_bytes;
     for (index, page) in pages.iter().enumerate().take(end).skip(first) {
         let page_index = u32::try_from(index).map_err(|_| PdfReadError::PageCountLimit)?;
-        match SceneBuilder::new(reader, &pages, page_index, page, &field_counts).run() {
-            Ok(page) => {
+        match SceneBuilder::new(
+            reader,
+            &pages,
+            page_index,
+            page,
+            &field_counts,
+            remaining_image_hex_bytes,
+        )
+        .run()
+        {
+            Ok((page, remaining)) => {
+                remaining_image_hex_bytes = remaining;
+                page_bytes.encode(&page)?;
                 report.extend(&page.report);
                 scene_pages.push(page);
             }
@@ -2237,8 +2322,12 @@ pub fn read_pdf_scene(
         report,
         result_hash: String::new(),
     };
-    let bytes = serde_json::to_vec(&scene).map_err(|_| PdfReadError::Syntax)?;
-    scene.result_hash = blake3::hash(&bytes).to_hex().to_string();
+    let mut hasher = SceneJsonWriter {
+        output: blake3::Hasher::new(),
+        remaining: scene_byte_limit,
+    };
+    hasher.encode(&scene)?;
+    scene.result_hash = hasher.output.finalize().to_hex().to_string();
     Ok(scene)
 }
 
@@ -2920,14 +3009,18 @@ fn parse_utf16_codepoint(value: u32) -> String {
     char::from_u32(value).unwrap_or('\u{FFFD}').to_string()
 }
 
-fn hex_encode(bytes: &[u8]) -> String {
+fn encode_image_hex(bytes: &[u8], remaining: &mut usize) -> Option<String> {
     const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut output = String::with_capacity(bytes.len() * 2);
+    let len = bytes.len().checked_mul(2)?;
+    let available = remaining.checked_sub(len)?;
+    let mut output = String::new();
+    output.try_reserve_exact(len).ok()?;
+    *remaining = available;
     for byte in bytes {
         output.push(HEX[usize::from(byte >> 4)] as char);
         output.push(HEX[usize::from(byte & 0x0F)] as char);
     }
-    output
+    Some(output)
 }
 
 pub(super) fn separated_content_streams(previous: &[u8], next: &[u8]) -> bool {
