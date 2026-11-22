@@ -628,20 +628,72 @@ fn assert_detached_object_projection_after_work_exhaustion(unsupported_curve: bo
             live,
         )
     };
+    let verify_page = |claimed_scene, claimed_objects: &[NativeObjectPage]| {
+        NativePdfSession::verify_page_projection_with_objects(
+            session.output_bytes(),
+            limits,
+            snapshot.binding,
+            claimed_scene,
+            Some(claimed_objects),
+            &snapshot.page_state,
+        )
+    };
+    let verify_page_exact = |binding, claimed_scene, page_state| {
+        NativePdfSession::verify_page_projection(
+            session.output_bytes(),
+            limits,
+            binding,
+            claimed_scene,
+            page_state,
+        )
+    };
+    let verify_edit = |claimed_objects: &[NativeObjectPage]| {
+        NativePdfSession::verify_edit_projection(
+            session.output_bytes(),
+            limits,
+            snapshot.binding,
+            &snapshot.scene.text_pages,
+            claimed_objects,
+        )
+    };
     assert_eq!(hash_with_rows(rows), snapshot.scene.scene_hash);
     assert_eq!(verify(rows, None), Ok(true));
     assert_eq!(verify(rows, Some(&session)), Ok(true));
+    assert_eq!(verify_edit(rows), Ok(true));
+    assert_eq!(verify_page(snapshot.scene.scene_hash, rows), Ok(true));
+    let mut wrong_scene_hash = snapshot.scene.scene_hash;
+    wrong_scene_hash[0] ^= 1;
+    assert_eq!(verify_page(wrong_scene_hash, rows), Ok(false));
+    assert_eq!(
+        verify_page_exact(
+            snapshot.binding,
+            snapshot.scene.scene_hash,
+            &snapshot.page_state,
+        ),
+        Ok(false)
+    );
+    assert_eq!(
+        verify_page_exact(full.binding, full.scene.scene_hash, &full.page_state),
+        Ok(true)
+    );
 
+    let verify_detached = |claimed: &[NativeObjectPage]| {
+        [
+            verify(claimed, None),
+            verify_edit(claimed),
+            verify_page(hash_with_rows(claimed), claimed),
+        ]
+    };
     let mut altered = rows.clone();
     altered[0].can_add = true;
-    assert_eq!(verify(&altered, None), Ok(false));
+    assert_eq!(verify_detached(&altered), [Ok(false), Ok(false), Ok(false)]);
     assert_eq!(verify(&altered, Some(&session)), Ok(false));
     altered[0].can_add = false;
     altered[2].refusal = None;
-    assert_eq!(verify(&altered, None), Ok(false));
+    assert_eq!(verify_detached(&altered), [Ok(false), Ok(false), Ok(false)]);
     altered[2].refusal = rows[2].refusal;
     altered.swap(1, 2);
-    assert_eq!(verify(&altered, None), Ok(false));
+    assert_eq!(verify_detached(&altered), [Ok(false), Ok(false), Ok(false)]);
     altered.swap(1, 2);
     altered[1].can_add = false;
     assert_eq!(verify(&altered, Some(&session)), Ok(false));
