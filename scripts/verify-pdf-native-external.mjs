@@ -362,8 +362,8 @@ export function nativeSession(wasm, input) {
       originStoreHash, ...(binding ? { binding } : {}), ...payload,
     }
     const response = wasm[`native_pdf_${operation}`](JSON.stringify(request))
-    requireMatch(operation === 'snapshot' ? wasm.verify_native_pdf_worker_response(response) :
-      wasm.verify_native_pdf_response(response), 'native-response')
+    // @contract: Verify replies against the live Rust registry before using their contents.
+    requireMatch(wasm.verify_native_pdf_worker_response(response) === true, 'native-response')
     const reply = JSON.parse(response)
     requireMatch(reply.operation === request.operation && reply.requestId === request.requestId &&
       reply.originStoreHash === request.originStoreHash &&
