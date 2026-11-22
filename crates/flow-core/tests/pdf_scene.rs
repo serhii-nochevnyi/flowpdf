@@ -155,6 +155,120 @@ fn text_only_scene_window_has_an_exact_serialized_byte_limit() {
 }
 
 #[test]
+fn mapped_font_scene_reserves_decode_workspace_at_the_allowance_boundary() {
+    let cmap = b"begincmap\n2 beginbfchar\n<41> <0410>\n<42> <00660069>\nendbfchar\nendcmap\n";
+    let compressed = miniz_oxide::deflate::compress_to_vec_zlib(cmap, 6);
+    let bytes = pdf(vec![
+        (1, b"<< /Type /Catalog /Pages 2 0 R >>".to_vec()),
+        (2, b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec()),
+        (3, b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] /Resources << /Font 7 0 R >> /Contents 4 0 R >>".to_vec()),
+        stream(4, "", b"BT /F1 10 Tf 5 20 Td [(A) 15 (B)] TJ ET"),
+        (5, b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /FirstChar 65 /Widths [600 500] /ToUnicode 6 0 R >>".to_vec()),
+        stream(6, "/Filter /FlateDecode", &compressed),
+        (7, b"<< /F1 5 0 R >>".to_vec()),
+    ]);
+    let read = |max_scene_bytes, max_decoded_stream_bytes| {
+        let reader = open_pdf(
+            &bytes,
+            PdfReaderLimits {
+                max_scene_bytes,
+                max_decoded_stream_bytes,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        read_pdf_scene(&reader, &PdfSceneRequest::default())
+    };
+    let limits = PdfReaderLimits::default();
+    let read_with_allowance = |allowance| read(allowance, limits.max_decoded_stream_bytes);
+    let expected = read_with_allowance(limits.max_scene_bytes).unwrap();
+    assert!(matches!(
+        expected.pages[0].elements.as_slice(),
+        [PdfSceneElement::Text { value: first }, PdfSceneElement::Text { value: second }]
+        if first.text == "А" && second.text == "fi"
+            && [first, second].into_iter().all(|value| {
+                value.mapping == PdfTextMapping::ToUnicode
+                    && value.font_name.as_deref() == Some("Helvetica")
+                    && value.glyphs[0].provenance == value.provenance
+                    && value.provenance.operator.as_deref() == Some("TJ")
+            })
+    ));
+    let mut serialized = expected.clone();
+    serialized.result_hash.clear();
+    let mut rejected = size_of::<miniz_oxide::inflate::core::DecompressorOxide>();
+    let mut admitted = 64 * 1024;
+    assert!(serde_json::to_vec(&serialized).unwrap().len() < rejected);
+    assert_eq!(
+        read_with_allowance(rejected),
+        Err(PdfReadError::StreamLimit)
+    );
+    assert_eq!(read_with_allowance(admitted).unwrap(), expected);
+    while admitted - rejected > 1 {
+        let middle = rejected + (admitted - rejected) / 2;
+        match read_with_allowance(middle) {
+            Err(PdfReadError::StreamLimit) => rejected = middle,
+            Ok(scene) => {
+                assert_eq!(scene, expected);
+                admitted = middle;
+            }
+            result => panic!("unexpected boundary result: {result:?}"),
+        }
+    }
+    assert_eq!(
+        read_with_allowance(rejected),
+        Err(PdfReadError::StreamLimit)
+    );
+    assert_eq!(read_with_allowance(admitted).unwrap(), expected);
+    assert_eq!(
+        read(limits.max_scene_bytes, cmap.len() - 1),
+        Err(PdfReadError::DecodedStreamLimit)
+    );
+}
+
+#[test]
+fn clipped_mapped_text_reserves_glyph_workspace_even_without_a_text_element() {
+    let content = format!(
+        "110 110 5 5 re W n BT /F1 10 Tf 5 20 Td ({}) Tj ET",
+        "A".repeat(96),
+    );
+    let bytes = pdf(vec![
+        (1, b"<< /Type /Catalog /Pages 2 0 R >>".to_vec()),
+        (2, b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec()),
+        (3, b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>".to_vec()),
+        stream(4, "", content.as_bytes()),
+        (5, b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /ToUnicode 6 0 R >>".to_vec()),
+        stream(6, "", b"begincmap\n1 beginbfchar\n<41> <0410>\nendbfchar\nendcmap\n"),
+    ]);
+    let read = |max_scene_bytes, max_scene_elements| {
+        let reader = open_pdf(
+            &bytes,
+            PdfReaderLimits {
+                max_scene_bytes,
+                max_scene_elements,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        read_pdf_scene(&reader, &PdfSceneRequest::default())
+    };
+    let limits = PdfReaderLimits::default();
+    let expected = read(limits.max_scene_bytes, limits.max_scene_elements).unwrap();
+    assert!(matches!(
+        expected.pages[0].elements.as_slice(),
+        [PdfSceneElement::Clip { .. }]
+    ));
+    assert_eq!(
+        read(8 * 1024, limits.max_scene_elements),
+        Err(PdfReadError::StreamLimit)
+    );
+    assert_eq!(
+        read(32 * 1024, limits.max_scene_elements).unwrap(),
+        expected
+    );
+    assert_eq!(read(32 * 1024, 95), Err(PdfReadError::TokenLimit));
+}
+
+#[test]
 fn image_payload_allowance_is_shared_across_pages_and_nested_forms() {
     let bytes = pdf(vec![
         (1, b"<< /Type /Catalog /Pages 2 0 R >>".to_vec()),
@@ -879,12 +993,13 @@ fn nested_form_font_aliases_share_maps_and_the_scene_allowance() {
     assert!(read(&distinct, default_limit).is_ok());
     assert_eq!(read(&distinct, constrained), Err(PdfReadError::StreamLimit));
 
+    let comment_allowance = 128 * 1024;
     let ascii_comments = document(8, &b"% cafe\n".repeat(7_000));
-    assert!(read(&ascii_comments, constrained).is_ok());
+    assert!(read(&ascii_comments, comment_allowance).is_ok());
     let legacy_comments = document(8, &b"% caf\xe9\n".repeat(7_000));
     assert!(read(&legacy_comments, default_limit).is_ok());
     assert_eq!(
-        read(&legacy_comments, constrained),
+        read(&legacy_comments, comment_allowance),
         Err(PdfReadError::StreamLimit)
     );
 }
