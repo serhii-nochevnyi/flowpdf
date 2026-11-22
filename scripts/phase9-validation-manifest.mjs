@@ -34,7 +34,7 @@ export const tasks = Object.freeze([
   task('09-01-01', 'local', cargo('flow-core', '--lib', 'pdf::native'), requirements(1), ['09-01-02']),
   task('09-18-01', 'local', core('pdf_native_graph', 'pdf_native_session', 'pdf_reader', 'pdf_scene', 'pdf_cos'),
     requirements(1), ['09-18-02']),
-  task('09-02-01', 'local', cargo('flow-wasm', '--test', 'pdf_native_edit'), all,
+  task('09-02-01', 'local', cargo('flow-wasm', '--test', 'pdf_native_edit', '--test', 'pdf_reader'), all,
     ['09-04-02', '09-06-02', '09-08-02', '09-10-02', '09-14-01']),
   task('09-02-02', 'local', unit('edit'), all, ['09-14-02']),
   task('09-02-03', 'local', ['npm', 'run', 'typecheck'], all, ['09-03-01']),
