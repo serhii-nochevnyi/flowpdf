@@ -112,6 +112,49 @@ fn scene_preserves_text_glyphs_paths_clips_images_forms_links_and_provenance() {
 }
 
 #[test]
+fn text_only_scene_window_has_an_exact_serialized_byte_limit() {
+    let bytes = pdf(vec![
+        (1, b"<< /Type /Catalog /Pages 2 0 R >>".to_vec()),
+        (2, b"<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 /MediaBox [0 0 100 100] /Resources << /Font << /F1 6 0 R >> >> >>".to_vec()),
+        (3, b"<< /Type /Page /Parent 2 0 R /Contents 5 0 R >>".to_vec()),
+        (4, b"<< /Type /Page /Parent 2 0 R /Contents 5 0 R >>".to_vec()),
+        stream(5, "", b"BT /F1 10 Tf 5 20 Td (Ordinary text) Tj ET"),
+        (6, b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_vec()),
+    ]);
+    let request = PdfSceneRequest {
+        first_page: 0,
+        page_count: 2,
+    };
+    let read = |max_scene_bytes| {
+        let reader = open_pdf(
+            &bytes,
+            PdfReaderLimits {
+                max_scene_bytes,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        read_pdf_scene(&reader, &request)
+    };
+    let mut expected = read(PdfReaderLimits::default().max_scene_bytes).unwrap();
+    assert_eq!(expected.pages.len(), 2);
+    assert!(expected.pages.iter().all(|page| {
+        page.elements
+            .iter()
+            .any(|item| matches!(item, PdfSceneElement::Text { .. }))
+    }));
+    let result_hash = std::mem::take(&mut expected.result_hash);
+    let serialized = serde_json::to_vec(&expected).unwrap();
+    assert_eq!(result_hash, blake3::hash(&serialized).to_hex().as_str());
+    expected.result_hash = result_hash;
+    assert_eq!(read(serialized.len()).unwrap(), expected);
+    assert!(matches!(
+        read(serialized.len() - 1),
+        Err(PdfReadError::StreamLimit)
+    ));
+}
+
+#[test]
 fn image_payload_allowance_is_shared_across_pages_and_nested_forms() {
     let bytes = pdf(vec![
         (1, b"<< /Type /Catalog /Pages 2 0 R >>".to_vec()),

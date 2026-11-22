@@ -38,6 +38,7 @@ pub struct PdfReaderLimits {
     pub max_decoded_stream_bytes: usize,
     pub max_content_tokens: usize,
     pub max_scene_elements: usize,
+    pub max_scene_bytes: usize,
     pub max_image_pixels: u64,
     pub max_form_depth: usize,
 }
@@ -56,6 +57,7 @@ impl Default for PdfReaderLimits {
             max_decoded_stream_bytes: 16 * 1024 * 1024,
             max_content_tokens: 1_000_000,
             max_scene_elements: 250_000,
+            max_scene_bytes: 16 * 1024 * 1024,
             max_image_pixels: 64 * 1024 * 1024,
             max_form_depth: 16,
         }
@@ -75,6 +77,7 @@ impl PdfReaderLimits {
             || self.max_decoded_stream_bytes == 0
             || self.max_content_tokens == 0
             || self.max_scene_elements == 0
+            || self.max_scene_bytes == 0
             || self.max_image_pixels == 0
             || self.max_form_depth == 0
         {

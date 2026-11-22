@@ -2208,6 +2208,38 @@ fn explicit_destination_target(destination: &[PdfValue]) -> Option<PdfObjectRef>
     destination.first()?.as_reference()
 }
 
+struct SceneJsonWriter<W> {
+    output: W,
+    remaining: usize,
+}
+
+impl<W: std::io::Write> SceneJsonWriter<W> {
+    fn encode(&mut self, value: &impl Serialize) -> Result<(), PdfReadError> {
+        serde_json::to_writer(self, value).map_err(|error| {
+            if error.io_error_kind() == Some(std::io::ErrorKind::FileTooLarge) {
+                PdfReadError::StreamLimit
+            } else {
+                PdfReadError::Syntax
+            }
+        })
+    }
+}
+
+impl<W: std::io::Write> std::io::Write for SceneJsonWriter<W> {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        if bytes.len() > self.remaining {
+            return Err(std::io::ErrorKind::FileTooLarge.into());
+        }
+        let written = self.output.write(bytes)?;
+        self.remaining -= written;
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.output.flush()
+    }
+}
+
 /// Reads a bounded page window and calculates a stable scene hash.
 pub fn read_pdf_scene(
     reader: &PdfReader,
@@ -2246,6 +2278,11 @@ pub fn read_pdf_scene(
         }
     }
     let mut scene_pages = Vec::with_capacity(end.saturating_sub(first));
+    let scene_byte_limit = reader.limits().max_scene_bytes;
+    let mut page_bytes = SceneJsonWriter {
+        output: std::io::sink(),
+        remaining: scene_byte_limit,
+    };
     // @invariant: Retained image hex shares a single allowance across the requested page window.
     let mut remaining_image_hex_bytes = reader.limits().max_stream_bytes;
     for (index, page) in pages.iter().enumerate().take(end).skip(first) {
@@ -2262,6 +2299,7 @@ pub fn read_pdf_scene(
         {
             Ok((page, remaining)) => {
                 remaining_image_hex_bytes = remaining;
+                page_bytes.encode(&page)?;
                 report.extend(&page.report);
                 scene_pages.push(page);
             }
@@ -2284,9 +2322,12 @@ pub fn read_pdf_scene(
         report,
         result_hash: String::new(),
     };
-    let mut hasher = blake3::Hasher::new();
-    serde_json::to_writer(&mut hasher, &scene).map_err(|_| PdfReadError::Syntax)?;
-    scene.result_hash = hasher.finalize().to_hex().to_string();
+    let mut hasher = SceneJsonWriter {
+        output: blake3::Hasher::new(),
+        remaining: scene_byte_limit,
+    };
+    hasher.encode(&scene)?;
+    scene.result_hash = hasher.output.finalize().to_hex().to_string();
     Ok(scene)
 }
 
