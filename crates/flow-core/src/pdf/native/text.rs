@@ -1381,13 +1381,16 @@ impl<'a, 'w> Recognition<'a, 'w> {
             text_memory.grow(max_text).map_err(|_| Budget)?;
             let mut text = String::with_capacity(max_text);
             let metrics = font.measure(&show, codes, |scalar| text.push(scalar))?;
+            let profile = font.profile;
             let bounds = metrics.wire_bounds()?;
-            if !contains(crop, bounds)
-                || islands
-                    .iter()
-                    .any(|neighbor| intersects(neighbor.view.bounds, bounds))
-            {
+            if !contains(crop, bounds) {
                 return Err(Layout.into());
+            }
+            for neighbor in &islands {
+                self.work_exhaustion.charge(&mut self.work, 1, Layout)?;
+                if intersects(neighbor.view.bounds, bounds) {
+                    return Err(Layout.into());
+                }
             }
             let mut id = blake3::Hasher::new();
             id.update(b"flowpdf:native-text-island:v1");
@@ -1411,7 +1414,7 @@ impl<'a, 'w> Recognition<'a, 'w> {
                             id: *id.finalize().as_bytes(),
                             text,
                             bounds,
-                            profile: font.profile,
+                            profile,
                             operator: if show.array {
                                 NativeTextOperator::TJ
                             } else {
@@ -1675,8 +1678,28 @@ mod tests {
             .unwrap();
         let traversal_work = graph.remaining_work() - work;
         let content_work = traversal_work + content.stream.data.len();
+        let island_count = snapshot.scene.text_pages[0].islands.len();
+        assert_eq!(island_count, 4);
+        let overlap_work = island_count * (island_count - 1) / 2;
+        let recognition_work = content_work + 250_000 + overlap_work;
         let workspace = Workspace::new(graph.remaining_retained());
+        graph
+            .charge_page_work(graph.remaining_work() - recognition_work)
+            .unwrap();
+        let mut retained = graph.remaining_retained();
+        let projected = project(
+            &graph,
+            std::slice::from_ref(page),
+            snapshot.output_hash,
+            snapshot.binding,
+            &mut retained,
+            WorkExhaustion::PageRefusal,
+        )
+        .unwrap();
+        assert_eq!(projected, snapshot.scene.text_pages);
+
         for (work, refusal) in [
+            (recognition_work - 1, NativeTextRefusal::Layout),
             (content_work + 250_000 - 1, NativeTextRefusal::Font),
             (content_work - 1, NativeTextRefusal::Layout),
             (traversal_work - 1, NativeTextRefusal::Font),
