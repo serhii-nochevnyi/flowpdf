@@ -469,6 +469,18 @@ pub(super) fn resolve_annotation_value<'value, 'object: 'value>(
     work: &mut usize,
     object: &mut impl FnMut(PdfObjectRef) -> Result<Option<Cow<'object, PdfValue>>, PdfReadError>,
 ) -> Result<Option<Cow<'value, PdfValue>>, PdfReadError> {
+    Ok(
+        follow_annotation_references(value, max_nesting, work, object)?
+            .filter(|value| value.as_reference().is_none()),
+    )
+}
+
+fn follow_annotation_references<'value, 'object: 'value>(
+    value: &'value PdfValue,
+    max_nesting: usize,
+    work: &mut usize,
+    object: &mut impl FnMut(PdfObjectRef) -> Result<Option<Cow<'object, PdfValue>>, PdfReadError>,
+) -> Result<Option<Cow<'value, PdfValue>>, PdfReadError> {
     let mut value = Cow::Borrowed(value);
     for _ in 0..max_nesting {
         let Some(reference) = value.as_reference() else {
@@ -480,7 +492,7 @@ pub(super) fn resolve_annotation_value<'value, 'object: 'value>(
         };
         value = resolved;
     }
-    Ok(value.as_reference().is_none().then_some(value))
+    Ok(Some(value))
 }
 
 // @invariant: Allow for a new B-tree node and its slots before insertion.
@@ -686,6 +698,34 @@ impl PdfReader {
             ) => Err(error),
             Err(_) => Ok(None),
         }
+    }
+
+    pub(super) fn link_destination_value<'a>(
+        &self,
+        value: &'a PdfValue,
+        work: &mut usize,
+    ) -> Result<Option<Cow<'a, PdfValue>>, PdfReadError> {
+        let destination =
+            follow_annotation_references(value, self.limits.max_nesting, work, &mut |reference| {
+                match self.non_stream_object(reference) {
+                    Ok(value) => Ok(Some(Cow::Owned(value))),
+                    Err(
+                        PdfReadError::ObjectMissing
+                        | PdfReadError::ReferenceInvalid
+                        | PdfReadError::Syntax
+                        | PdfReadError::XrefInvalid,
+                    ) => Ok(None),
+                    Err(error) => Err(error),
+                }
+            })?;
+        if destination
+            .as_deref()
+            .and_then(PdfValue::as_reference)
+            .is_some()
+        {
+            return Err(PdfReadError::NestingLimit);
+        }
+        Ok(destination)
     }
 
     pub(crate) fn object_offset(&self, reference: PdfObjectRef) -> Option<usize> {
