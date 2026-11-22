@@ -727,14 +727,14 @@ fn nested_forms_share_the_inherited_page_resource_allowance() {
 #[test]
 fn scene_page_window_defers_unused_direct_resources() {
     let inherited = format!(
-        "<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 /MediaBox [0 0 100 100] /Resources << /XObject << /Outer 7 0 R /Inner 8 0 R >> /Properties << /MC0 << /ActualText ({}) >> >> >> >>",
+        "<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 /MediaBox [0 0 100 100] /Resources << /XObj#65ct << /Ou#74er 7 0 R /In#6Eer 8 0 R >> /Propert#69es << /MC#30 << /Subtype /Lay#65r /ActualText ({}) >> >> >> >>",
         "a".repeat(32 * 1024)
     );
     let bytes = pdf(vec![
         (1, b"<< /Type /Catalog /Pages 2 0 R >>".to_vec()),
         (2, inherited.into_bytes()),
         (3, b"<< /Type /Page /Parent 2 0 R /Contents 5 0 R >>".to_vec()),
-        (4, b"<< /Type /Page /Parent 2 0 R /Resources << /XObject << /Outer 7 0 R /Inner 8 0 R >> >> /Contents 6 0 R >>".to_vec()),
+        (4, b"<< /Type /Page /Parent 2 0 R /Resources << /XObj#65ct << /Ou#74er 7 0 R /In#6Eer 8 0 R >> >> /Contents 6 0 R >>".to_vec()),
         stream(5, "", b"/Outer Do"),
         stream(6, "", b"/Outer Do"),
         stream(7, "/Type /XObject /Subtype /Form /BBox [0 0 100 100]", b"/Inner Do"),
