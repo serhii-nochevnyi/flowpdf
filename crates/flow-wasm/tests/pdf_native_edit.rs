@@ -1276,14 +1276,48 @@ fn redaction_wire_releases_only_the_verified_exact_output() {
         call(native_pdf_redaction, add(6))["redaction"]["markCount"],
         1
     );
-    for id in [7, 8] {
-        let busy = call(native_pdf_redaction, add(id));
-        assert_eq!(busy["code"], "FLOW_PDF_NATIVE_REDACTION_BUSY");
-    }
-    let busy_close = call(native_pdf_close, bound("close", 8, base));
+    let collision = call(native_pdf_redaction, add(7));
+    assert_eq!(collision["code"], "FLOW_PDF_NATIVE_REDACTION_BUSY");
+    status_only(&collision);
+
+    let fresh_wire = native_pdf_redaction(add(8).to_string());
+    assert!(verify_native_pdf_worker_response(fresh_wire.clone()));
+    let fresh: Value = serde_json::from_str(&fresh_wire).unwrap();
+    assert_eq!(fresh["status"], "redaction");
+    assert_eq!(fresh["requestId"], 8);
+    assert_eq!(fresh["binding"], pending["binding"]);
+    assert_eq!(fresh["redaction"]["acceptedHash"], base["outputHash"]);
+    assert_eq!(fresh["redaction"]["markCount"], 1);
+    assert!(fresh["redaction"]["candidate"].is_null());
+    assert!(fresh["redaction"]["verification"].is_null());
+    assert_eq!(fresh["redaction"]["published"], false);
+    status_only(&fresh);
+    assert_eq!(native_pdf_redaction(add(8).to_string()), fresh_wire);
+
+    let different = request(
+        9,
+        json!({"kind":"addMark","pageId":page,"rect":[42000,42000,43000,43000]}),
+    );
+    let busy = call(native_pdf_redaction, different);
+    assert_eq!(busy["code"], "FLOW_PDF_NATIVE_REDACTION_BUSY");
+    status_only(&busy);
+    assert!(verify_native_pdf_worker_response(fresh_wire));
+    assert_eq!(
+        call(native_pdf_redaction, request(8, json!({"kind":"stage"})))["code"],
+        "FLOW_PDF_NATIVE_REQUEST_INVALID"
+    );
+    let busy_close = call(native_pdf_close, bound("close", 9, base));
     assert_eq!(busy_close["status"], "failed");
     status_only(&pending);
     let candidate = pending["redaction"]["candidate"].clone();
+    assert_eq!(
+        call(native_pdf_redaction, request(7, json!({"kind":"stage"}))),
+        pending
+    );
+    let status = call(native_pdf_redaction, lookup(candidate.clone()));
+    assert_eq!(status["redaction"]["candidate"], candidate);
+    assert_eq!(status["redaction"]["verification"]["status"], "pending");
+    status_only(&status);
     assert_eq!(call(native_pdf_preview, preview), accepted_raster);
     assert_eq!(candidate["affectedPages"], json!([page]));
     let publish = request(7, json!({"kind":"publish","candidate":candidate}));
@@ -1340,10 +1374,10 @@ fn redaction_wire_releases_only_the_verified_exact_output() {
     );
     status_only(&premature_readback);
     assert_eq!(
-        call(native_pdf_snapshot, bound("snapshot", 8, base))["snapshot"],
+        call(native_pdf_snapshot, bound("snapshot", 9, base))["snapshot"],
         *base
     );
-    edit["requestId"] = json!(8);
+    edit["requestId"] = json!(9);
     let blocked = call(native_pdf_command, edit.clone());
     assert_eq!(blocked["code"], "FLOW_PDF_NATIVE_REDACTION_BUSY");
     status_only(&blocked);
@@ -1418,7 +1452,7 @@ fn redaction_wire_releases_only_the_verified_exact_output() {
 
     let current = &advanced["snapshot"];
     let empty = native_pdf_redaction(
-        redaction_request(9, current, json!({"kind":"status","candidate":null})).to_string(),
+        redaction_request(10, current, json!({"kind":"status","candidate":null})).to_string(),
     );
     assert!(verify_native_pdf_worker_response(empty.clone()));
     let different = rehash_with_replacement(
