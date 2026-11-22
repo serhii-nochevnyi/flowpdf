@@ -10,7 +10,7 @@ use super::super::{
     reader::{PdfObjectRef, PdfReaderLimits, PdfStream, PdfValue},
     scene::{ContentCursor, ContentToken, NativePdfNotePage},
 };
-use super::graph::{NativeEditError, NativePdfGraph};
+use super::graph::{NativeEditError, NativePdfGraph, spend};
 use super::verifier::{Reservation, Workspace};
 use super::{NativeBinding, NativePageId, NativeSessionError};
 use NativeSessionError::Budget;
@@ -1231,22 +1231,51 @@ struct ReservedFont<'w> {
     _memory: Reservation<'w>,
 }
 
+pub(super) enum WorkExhaustion {
+    PageRefusal,
+    BudgetError,
+}
+
+impl WorkExhaustion {
+    fn charge(
+        &self,
+        work: &mut usize,
+        amount: usize,
+        refusal: NativeTextRefusal,
+    ) -> RecognitionResult<()> {
+        spend(work, amount).map_err(|_| match self {
+            Self::PageRefusal => refusal.into(),
+            Self::BudgetError => Budget,
+        })
+    }
+}
+
 struct Recognition<'a, 'w> {
     graph: &'a NativePdfGraph,
     workspace: &'w Workspace,
     fonts: BTreeMap<*const Dict, TextResult<ReservedFont<'w>>>,
     cache_memory: Reservation<'w>,
     work: usize,
+    work_exhaustion: WorkExhaustion,
 }
 
 impl<'a, 'w> Recognition<'a, 'w> {
     fn new(graph: &'a NativePdfGraph, workspace: &'w Workspace) -> Self {
+        Self::with_work_exhaustion(graph, workspace, WorkExhaustion::PageRefusal)
+    }
+
+    fn with_work_exhaustion(
+        graph: &'a NativePdfGraph,
+        workspace: &'w Workspace,
+        work_exhaustion: WorkExhaustion,
+    ) -> Self {
         Self {
             graph,
             workspace,
             fonts: BTreeMap::new(),
             cache_memory: workspace.scope(),
             work: graph.remaining_work(),
+            work_exhaustion,
         }
     }
 
@@ -1262,7 +1291,7 @@ impl<'a, 'w> Recognition<'a, 'w> {
         let cached = match self.fonts.entry(key) {
             std::collections::btree_map::Entry::Occupied(entry) => entry.into_mut(),
             std::collections::btree_map::Entry::Vacant(entry) => {
-                self.work = self.work.checked_sub(250_000).ok_or(Font)?;
+                self.work_exhaustion.charge(&mut self.work, 250_000, Font)?;
                 self.cache_memory
                     .tree_entry::<(*const Dict, TextResult<ReservedFont<'w>>)>()
                     .map_err(|_| Budget)?;
@@ -1295,10 +1324,8 @@ impl<'a, 'w> Recognition<'a, 'w> {
         let Some(content) = content(self.graph, page)? else {
             return Ok(None);
         };
-        self.work = self
-            .work
-            .checked_sub(content.stream.data.len())
-            .ok_or(Layout)?;
+        self.work_exhaustion
+            .charge(&mut self.work, content.stream.data.len(), Layout)?;
         let shows = shows(&content.stream.data, self.workspace, memory)?;
         if shows.is_empty() {
             return Ok(None);
@@ -1376,9 +1403,10 @@ pub(super) fn project(
     output_hash: [u8; 32],
     binding: NativeBinding,
     retained: &mut usize,
+    work_exhaustion: WorkExhaustion,
 ) -> RecognitionResult<Vec<NativeTextPage>> {
     let workspace = Workspace::new(*retained);
-    let mut recognition = Recognition::new(graph, &workspace);
+    let mut recognition = Recognition::with_work_exhaustion(graph, &workspace, work_exhaustion);
     let mut projected = workspace.scope();
     let mut result = Vec::new();
     for page in pages {
@@ -1441,9 +1469,10 @@ pub(super) fn stage<'a>(
         return Err(Layout.into());
     }
     let mut operand_memory = workspace.scope();
-    let (index, span, size, original_reference, copy_on_write, original_bounds, operand) = {
+    let (index, span, size, original_reference, copy_on_write, original_bounds, operand, work) = {
         let mut memory = workspace.scope();
-        let mut recognition = Recognition::new(graph, workspace);
+        let mut recognition =
+            Recognition::with_work_exhaustion(graph, workspace, WorkExhaustion::BudgetError);
         let recognized = recognition
             .page(page, output_hash, binding, &mut memory)?
             .ok_or(TargetUnavailable)?;
@@ -1500,8 +1529,10 @@ pub(super) fn stage<'a>(
             content.copy_on_write,
             island.view.bounds,
             operand,
+            recognition.work,
         )
     };
+    graph.charge_page_work(graph.remaining_work() - work)?;
     graph.reserve_replacement_stream(size)?;
     if operand.capacity() > graph.remaining_retained() {
         return Err(Budget);
@@ -1580,6 +1611,39 @@ mod tests {
     use super::*;
 
     #[test]
+    fn staging_preserves_budget_refusals_from_content_and_font_recognition() {
+        let bytes = text_projection_fixture();
+        let limits = super::super::NativeEditLimits::default();
+        let session = super::super::NativePdfSession::open_scoped(&bytes, limits, [7; 16]).unwrap();
+        let snapshot = session.snapshot();
+        let page = &snapshot.scene.pages[0];
+        let command = NativeTextCommand::ReplaceText {
+            island: snapshot.scene.text_pages[0].islands[0].id,
+            text: "AA".into(),
+        };
+        let mut graph = NativePdfGraph::open(&bytes, limits).unwrap();
+        let content_work = content(&graph, page).unwrap().unwrap().stream.data.len();
+        let workspace = Workspace::new(graph.remaining_retained());
+        for work in [content_work + 250_000 - 1, content_work - 1] {
+            graph
+                .charge_page_work(graph.remaining_work() - work)
+                .unwrap();
+            assert_eq!(
+                stage(
+                    &mut graph,
+                    page,
+                    snapshot.binding,
+                    snapshot.output_hash,
+                    &command,
+                    &workspace
+                )
+                .err(),
+                Some(Budget)
+            );
+        }
+    }
+
+    #[test]
     fn projection_transfers_text_charges_at_exact_fit() {
         let bytes = text_projection_fixture();
         let graph =
@@ -1607,7 +1671,15 @@ mod tests {
             ample - workspace.remaining() + view_bytes
         };
         let mut retained = fit;
-        let result = project(&graph, &pages, hash, binding, &mut retained).unwrap();
+        let result = project(
+            &graph,
+            &pages,
+            hash,
+            binding,
+            &mut retained,
+            WorkExhaustion::PageRefusal,
+        )
+        .unwrap();
         let [page] = result.as_slice() else {
             panic!("expected one projected page");
         };
@@ -1626,7 +1698,14 @@ mod tests {
 
         let mut short = fit - 1;
         assert_eq!(
-            project(&graph, &pages, hash, binding, &mut short),
+            project(
+                &graph,
+                &pages,
+                hash,
+                binding,
+                &mut short,
+                WorkExhaustion::PageRefusal
+            ),
             Err(Budget)
         );
         assert_eq!(short, fit - 1);

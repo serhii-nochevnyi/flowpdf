@@ -672,6 +672,73 @@ fn assert_detached_object_projection_after_work_exhaustion(unsupported_curve: bo
 }
 
 #[test]
+fn note_edit_refuses_when_rewrite_leaves_too_little_work_for_text_projection() {
+    let content = format!("%{}\nq Q", " ".repeat(8 * 1024));
+    let stream = format!(
+        "<< /Length {} >>\nstream\n{content}\nendstream",
+        content.len()
+    );
+    let source = pdf_with_objects(&[
+        "<< /Type /Catalog /Pages 2 0 R >>",
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Resources << >> /Contents 4 0 R >>",
+        &stream,
+    ]);
+    let defaults = NativeEditLimits::default();
+    let limits_at = |max_work| NativeEditLimits {
+        max_work,
+        ..defaults
+    };
+    let open_at = |max_work| {
+        NativePdfSession::open_scoped(source.as_bytes(), limits_at(max_work), [1; 16]).unwrap()
+    };
+    let mut roomy = open_at(defaults.max_work);
+    let add = NativeNoteCommand::Add {
+        page: roomy.snapshot().scene.pages[0].id,
+        rect: [60, 60, 80, 80],
+        contents: "Chart note".into(),
+    };
+    roomy.apply(roomy.snapshot().binding, 1, &add).unwrap();
+    let snapshot = roomy.snapshot();
+    assert!(snapshot.scene.text_pages.is_empty());
+    let verify_text = |max_work| {
+        NativePdfSession::verify_text_projection(
+            roomy.output_bytes(),
+            limits_at(max_work),
+            snapshot.binding,
+            &snapshot.scene.text_pages,
+        )
+    };
+    let (mut low, mut high) = (content.len(), defaults.max_work);
+    assert_eq!(verify_text(high), Ok(true));
+    while low + 1 < high {
+        let mid = low + (high - low) / 2;
+        match verify_text(mid) {
+            Ok(true) => high = mid,
+            Err(NativeSessionError::Budget) => low = mid,
+            result => panic!("unexpected detached text projection at {mid} work units: {result:?}"),
+        }
+    }
+    assert_eq!(verify_text(low), Err(NativeSessionError::Budget));
+    assert_eq!(verify_text(high), Ok(true));
+
+    let mut tight = open_at(high);
+    let before = tight.snapshot().clone();
+    assert_eq!(
+        tight.apply(before.binding, 1, &add),
+        Err(NativeSessionError::Budget)
+    );
+    assert_eq!(tight.output_bytes(), source.as_bytes());
+    assert_eq!(tight.snapshot().binding, before.binding);
+    assert_eq!(tight.snapshot().scene, before.scene);
+    assert_eq!(tight.snapshot().consumed_request, before.consumed_request);
+    assert_eq!(
+        tight.lookup(before.binding, 1),
+        Ok(NativeRequestLookup::Unseen)
+    );
+}
+
+#[test]
 fn detached_projections_exhaust_the_shared_identity_allowance() {
     let source = pdf_with_objects(&[
         "<< /Type /Catalog /Pages 2 0 R >>",

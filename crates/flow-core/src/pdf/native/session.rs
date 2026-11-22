@@ -1764,7 +1764,20 @@ fn project_scene(
         SESSION_BYTES + graph.pages.len() * std::mem::size_of::<u64>(),
     )?;
     let pages = notes::project(graph, ids, &mut remaining)?;
-    let text_pages = text::project(graph, &pages, output_hash, binding, &mut remaining)?;
+    // @invariant: Revised text projections must agree with detached verification of the exact bytes.
+    let work_exhaustion = if binding.revision == 0 {
+        text::WorkExhaustion::PageRefusal
+    } else {
+        text::WorkExhaustion::BudgetError
+    };
+    let text_pages = text::project(
+        graph,
+        &pages,
+        output_hash,
+        binding,
+        &mut remaining,
+        work_exhaustion,
+    )?;
     let object_pages = objects::project(graph, &pages, output_hash, binding, &mut remaining)?;
     Ok((
         NativePdfNoteScene::new(output_hash, pages, text_pages, object_pages)?,
