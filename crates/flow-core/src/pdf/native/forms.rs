@@ -726,14 +726,7 @@ fn recognize_identity(
     {
         return Err(Profile.into());
     }
-    let owner = form.owner.ok_or(Reference)?;
-    let fields_slot = pages::form_dict(graph, owner)
-        .map_err(|_| Reference)?
-        .get("Fields")
-        .ok_or(Reference)?;
-    // @invariant: The caller charges the array walk, and an indirect field array costs one lookup.
-    spend(work, usize::from(fields_slot.as_reference().is_some()))?;
-    if pages::annotation_membership(graph, page.object, widget, false)
+    if pages::annotation_membership(graph, page.object, widget, false, work)
         .map_err(|error| metered_refusal(error, Reference))?
         != Some(field)
     {
@@ -1000,8 +993,7 @@ pub(super) fn project(
     for (page, object, data) in widgets {
         spend(remaining, std::mem::size_of::<NativeFieldView>() * 2)?;
         spend(&mut work, 1)?;
-        if let Ok(form) = &form {
-            spend(&mut work, form.fields.len() + page.annotations.len())?;
+        if form.is_ok() {
             spend(&mut work, data.get("AP").map_or(0, |_| MAX_TEXT))?;
         }
         let admitted = form
@@ -1483,7 +1475,6 @@ fn stage_form(
         let old_page = page_at(view.page)?;
         let mut work = graph.remaining_work();
         let budget = work;
-        spend(&mut work, old_page.annotations.len() + form.fields.len())?;
         let identity = recognize_identity(
             graph,
             &form,
@@ -1748,11 +1739,10 @@ mod tests {
         let mut inventory_remaining = graph.remaining_retained();
         let initial_work = graph.remaining_work();
         let mut work = initial_work;
-        let form = load_form(&graph, &mut work, &mut inventory_remaining).unwrap();
+        load_form(&graph, &mut work, &mut inventory_remaining).unwrap();
         let inventory_bytes = graph.remaining_retained() - inventory_remaining;
-        let work_per_widget = 1 + form.fields.len() + page.annotations.len() + 5;
+        let work_per_widget = 1 + 5;
         let needed_work = initial_work - work + 2 * work_per_widget;
-        drop(form);
         graph.charge_page_work(initial_work - needed_work).unwrap();
         let view_bytes = 4 * size_of::<NativeFieldView>();
         let label_bytes = 3 * label.len();
@@ -1780,6 +1770,83 @@ mod tests {
             project(&graph, &[page], binding, &mut remaining),
             Err(NativeSessionError::Budget)
         );
+    }
+
+    #[test]
+    fn widget_membership_spends_projection_and_staging_work() {
+        let source = redaction_fixture("");
+        let limits = NativeEditLimits::default();
+        let session = NativePdfSession::open_scoped(&source, limits, [7; 16]).unwrap();
+        let binding = session.snapshot().binding;
+        let mut page = session.snapshot().scene.pages[0].clone();
+        let mut graph = NativePdfGraph::open(&source, limits).unwrap();
+        stage(
+            &mut graph,
+            std::slice::from_ref(&page),
+            &[],
+            &NativeFieldCommand::AddCheckboxField {
+                page: 0,
+                rect: [10, 10, 30, 30],
+                name: "approved".into(),
+                checked: false,
+            },
+        )
+        .unwrap();
+        let widget = pages::annotation_refs(&graph, page.object, &mut graph.remaining_work())
+            .unwrap()[0]
+            .as_reference()
+            .unwrap();
+        let catalog = pages::catalog(&graph).unwrap();
+        let owner = dict(&graph, catalog).unwrap()["AcroForm"]
+            .as_reference()
+            .unwrap();
+        let fields = pages::allocate_value(&mut graph, refs([widget])).unwrap();
+        dict_mut(&mut graph, owner)
+            .unwrap()
+            .insert("Fields".into(), Value::Reference(fields));
+        graph.refresh_page_graph(&BTreeSet::new()).unwrap();
+        page.annotations = vec![NativePdfAnnotation::ReadOnly {
+            object: Some(widget),
+            profile: NativeReadOnlyAnnotation::Widget,
+            rect: None,
+        }];
+
+        let budget = graph.remaining_work();
+        let memory = graph.remaining_retained();
+        let mut work = budget;
+        let mut remaining = memory;
+        let form = load_form(&graph, &mut work, &mut remaining).unwrap();
+        let inventory_work = budget - work;
+        let membership_work = 1 + 2 * form.fields.len() + page.annotations.len();
+        let before_owners = work;
+        for owner in &graph.reverse[&widget] {
+            visit_refs(&graph.objects[owner], &mut work, &mut |_| Ok(())).unwrap();
+        }
+        let identity_work = membership_work + before_owners - work;
+        let projection_work = inventory_work + identity_work + 1 + MAX_TEXT;
+        graph.charge_page_work(budget - projection_work).unwrap();
+        let pages = std::slice::from_ref(&page);
+        remaining = memory;
+        let fields = project(&graph, pages, binding, &mut remaining).unwrap();
+        assert_eq!(fields[0].checked, Some(false));
+        graph.charge_page_work(1).unwrap();
+        remaining = memory;
+        assert_eq!(
+            project(&graph, pages, binding, &mut remaining),
+            Err(NativeSessionError::Budget)
+        );
+
+        graph.charge_page_work(MAX_TEXT + 1).unwrap();
+        let toggle = NativeFieldCommand::SetFieldChecked {
+            field: fields[0].id,
+            checked: true,
+        };
+        assert!(matches!(
+            stage(&mut graph, pages, &fields, &toggle),
+            Err(NativeSessionError::Budget)
+        ));
+        assert_eq!(graph.remaining_work(), identity_work - 1);
+        assert_eq!(dict(&graph, widget).unwrap()["V"].as_name(), Some("Off"));
     }
 
     #[test]

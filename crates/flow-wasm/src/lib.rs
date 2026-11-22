@@ -2427,6 +2427,16 @@ impl NativeRegistryEntry {
                 return Ok(result);
             }
             if self.session.redaction_candidate_status().is_some() {
+                if let NativeRedactionMarkAction::Add { page_id, rect } = mark_action {
+                    match self
+                        .session
+                        .acknowledge_existing_redaction_mark(binding, request_id, page_id, rect)
+                    {
+                        Ok(true) => return Ok(result),
+                        Ok(false) | Err(NativeSessionError::ReconciliationRequired) => {}
+                        Err(error) => return Err(map_error(error)),
+                    }
+                }
                 return Err(NATIVE_REDACTION_BUSY);
             }
             if self
@@ -2474,11 +2484,18 @@ impl NativeRegistryEntry {
             result.mark_count = self.session.redaction_marks().len();
             return Ok(result);
         }
+        let live_candidate_request =
+            self.session
+                .redaction_candidate_status()
+                .is_some_and(|status| {
+                    status.identity.binding == binding && status.identity.request_id == request_id
+                });
         if request_id <= current.consumed_request
-            || self
-                .session
-                .last_redaction_mark()
-                .is_some_and(|last| request_id <= last.request_id)
+            || (!live_candidate_request
+                && self
+                    .session
+                    .last_redaction_mark()
+                    .is_some_and(|last| request_id <= last.request_id))
         {
             return Err(NativeSessionError::InvalidRequest.code());
         }

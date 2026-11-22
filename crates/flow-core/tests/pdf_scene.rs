@@ -105,7 +105,137 @@ fn scene_preserves_text_glyphs_paths_clips_images_forms_links_and_provenance() {
             .iter()
             .any(|diagnostic| diagnostic.code == PdfReadDiagnosticCode::ActiveContent)
     );
-    assert!(!scene.result_hash.is_empty());
+    let mut scene = scene;
+    let result_hash = std::mem::take(&mut scene.result_hash);
+    let serialized = serde_json::to_vec(&scene).unwrap();
+    assert_eq!(result_hash, blake3::hash(&serialized).to_hex().as_str());
+}
+
+#[test]
+fn text_only_scene_window_has_an_exact_serialized_byte_limit() {
+    let bytes = pdf(vec![
+        (1, b"<< /Type /Catalog /Pages 2 0 R >>".to_vec()),
+        (2, b"<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 /MediaBox [0 0 100 100] /Resources << /Font << /F1 6 0 R >> >> >>".to_vec()),
+        (3, b"<< /Type /Page /Parent 2 0 R /Contents 5 0 R >>".to_vec()),
+        (4, b"<< /Type /Page /Parent 2 0 R /Contents 5 0 R >>".to_vec()),
+        stream(5, "", b"BT /F1 10 Tf 5 20 Td (Ordinary text) Tj ET"),
+        (6, b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_vec()),
+    ]);
+    let request = PdfSceneRequest {
+        first_page: 0,
+        page_count: 2,
+    };
+    let read = |max_scene_bytes| {
+        let reader = open_pdf(
+            &bytes,
+            PdfReaderLimits {
+                max_scene_bytes,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        read_pdf_scene(&reader, &request)
+    };
+    let mut expected = read(PdfReaderLimits::default().max_scene_bytes).unwrap();
+    assert_eq!(expected.pages.len(), 2);
+    assert!(expected.pages.iter().all(|page| {
+        page.elements
+            .iter()
+            .any(|item| matches!(item, PdfSceneElement::Text { .. }))
+    }));
+    let result_hash = std::mem::take(&mut expected.result_hash);
+    let serialized = serde_json::to_vec(&expected).unwrap();
+    assert_eq!(result_hash, blake3::hash(&serialized).to_hex().as_str());
+    expected.result_hash = result_hash;
+    assert_eq!(read(serialized.len()).unwrap(), expected);
+    assert!(matches!(
+        read(serialized.len() - 1),
+        Err(PdfReadError::StreamLimit)
+    ));
+}
+
+#[test]
+fn image_payload_allowance_is_shared_across_pages_and_nested_forms() {
+    let bytes = pdf(vec![
+        (1, b"<< /Type /Catalog /Pages 2 0 R >>".to_vec()),
+        (2, b"<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 /MediaBox [0 0 100 100] /Resources << /XObject << /Im 8 0 R /Outer 6 0 R /Inner 7 0 R >> /Font << /F1 10 0 R >> >> >>".to_vec()),
+        (3, b"<< /Type /Page /Parent 2 0 R /Contents 5 0 R >>".to_vec()),
+        (4, b"<< /Type /Page /Parent 2 0 R /Contents 9 0 R >>".to_vec()),
+        stream(5, "", b"/Im Do /Outer Do"),
+        stream(6, "/Type /XObject /Subtype /Form /BBox [0 0 100 100]", b"/Inner Do"),
+        stream(7, "/Type /XObject /Subtype /Form /BBox [0 0 100 100]", b"/Im Do /Im Do"),
+        stream(8, "/Type /XObject /Subtype /Image /Width 4 /Height 4 /ColorSpace /DeviceGray /BitsPerComponent 8", &[0x7f; 16]),
+        stream(9, "", b"/Im Do BT /F1 10 Tf 5 20 Td (Second) Tj ET"),
+        (10, b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_vec()),
+    ]);
+    let reader = open_pdf(
+        &bytes,
+        PdfReaderLimits {
+            max_stream_bytes: 64,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let scene = read_pdf_scene(
+        &reader,
+        &PdfSceneRequest {
+            first_page: 0,
+            page_count: 2,
+        },
+    )
+    .unwrap();
+    let [first, second] = scene.pages.as_slice() else {
+        panic!("expected both pages");
+    };
+    let [
+        PdfSceneElement::Image { value: direct },
+        PdfSceneElement::Annotation { value: outer },
+        PdfSceneElement::Annotation { value: inner },
+        PdfSceneElement::Image { value: nested },
+    ] = first.elements.as_slice()
+    else {
+        panic!("expected two Form markers, one direct image, and one nested image");
+    };
+    assert_eq!(outer.provenance.object_ref.object_number, 6);
+    assert_eq!(inner.provenance.object_ref.object_number, 7);
+    for (value, invocation_depth) in [(direct, 1), (nested, 3)] {
+        assert_eq!(value.data_hex, "7f".repeat(16));
+        assert_eq!(value.provenance.object_ref.object_number, 8);
+        assert_eq!(value.provenance.invocation_path.len(), invocation_depth);
+    }
+    assert!(scene.report.partial);
+    for page in [first, second] {
+        assert!(page.partial);
+        assert!(page.report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == PdfReadDiagnosticCode::ImageLimit
+                && diagnostic.page_index == Some(page.page_index)
+                && diagnostic.object_number == Some(8)
+        }));
+    }
+    assert!(matches!(
+        second.elements.as_slice(),
+        [PdfSceneElement::Text { value }] if value.text == "Second"
+    ));
+
+    let second_only = read_pdf_scene(
+        &reader,
+        &PdfSceneRequest {
+            first_page: 1,
+            page_count: 1,
+        },
+    )
+    .unwrap();
+    assert!(
+        second_only
+            .report
+            .diagnostics
+            .iter()
+            .all(|diagnostic| diagnostic.code != PdfReadDiagnosticCode::ImageLimit)
+    );
+    assert!(matches!(
+        second_only.pages[0].elements.as_slice(),
+        [PdfSceneElement::Image { .. }, PdfSceneElement::Text { value }] if value.text == "Second"
+    ));
 }
 
 #[test]
@@ -1161,13 +1291,30 @@ fn widget_readback_decodes_saved_pdf_17_text_and_requires_a_saved_value() {
 
 #[test]
 fn link_destinations_resolve_within_reader_limits() {
-    for (entries, destination, max_nesting, expected) in [
-        ("/Dest 5 0 R", "6 0 R", 8, Some(0)),
-        ("/Dest 5 0 R", "6 0 R", 4, None),
-        ("/A << /S /GoTo /D 8 0 R >>", "null", 4, Some(0)),
-        ("/A << /S /GoToR /D 8 0 R >>", "null", 4, None),
-        ("/Dest 5 0 R", "5 0 R", 4, None),
-        ("/Dest 5 0 R", "[3 0 R /FitR null 0 20 30]", 4, None),
+    use PdfReadDiagnosticCode::{ActiveContent, ContentLimit, UnsupportedAnnotation};
+
+    for (entries, destination, max_nesting, max_array_items, expected, diagnostic) in [
+        ("/Dest 5 0 R", "6 0 R", 8, 6, Some(0), None),
+        ("/Dest 5 0 R", "6 0 R", 4, 6, None, Some(ContentLimit)),
+        ("/Dest 5 0 R", "6 0 R", 8, 4, None, Some(ContentLimit)),
+        ("/A << /S /GoTo /D 8 0 R >>", "null", 4, 6, Some(0), None),
+        (
+            "/A << /S /GoToR /D 8 0 R >>",
+            "null",
+            4,
+            6,
+            None,
+            Some(ActiveContent),
+        ),
+        ("/Dest 5 0 R", "5 0 R", 4, 6, None, Some(ContentLimit)),
+        (
+            "/Dest 5 0 R",
+            "[3 0 R /FitR null 0 20 30]",
+            4,
+            6,
+            None,
+            Some(UnsupportedAnnotation),
+        ),
     ] {
         let bytes = pdf(vec![
             (1, b"<< /Type /Catalog /Pages 2 0 R >>".to_vec()),
@@ -1190,6 +1337,7 @@ fn link_destinations_resolve_within_reader_limits() {
             &bytes,
             PdfReaderLimits {
                 max_nesting,
+                max_array_items,
                 ..Default::default()
             },
         )
@@ -1200,6 +1348,15 @@ fn link_destinations_resolve_within_reader_limits() {
         };
         assert_eq!(value.destination_page, expected, "{entries} {destination}");
         assert_eq!(value.internal, expected.is_some());
+        assert_eq!(scene.pages[0].partial, diagnostic.is_some());
+        assert_eq!(scene.report.partial, diagnostic.is_some());
+        if let Some(code) = diagnostic {
+            assert!(scene.report.diagnostics.iter().any(|diagnostic| {
+                diagnostic.code == code
+                    && diagnostic.page_index == Some(0)
+                    && diagnostic.object_number == Some(4)
+            }));
+        }
     }
 }
 
@@ -1228,7 +1385,7 @@ fn indirect_page_crop_obeys_the_reader_nesting_limit() {
 #[test]
 fn link_resolution_does_not_consume_widget_readback_budget() {
     for widget_first in [true, false] {
-        let mut annotations = (9..=20).collect::<Vec<_>>();
+        let mut annotations = (8..=20).collect::<Vec<_>>();
         annotations.insert(if widget_first { 0 } else { annotations.len() }, 4);
         let references = annotations
             .into_iter()
@@ -1258,7 +1415,7 @@ fn link_resolution_does_not_consume_widget_readback_budget() {
             ),
             (6, b"[4 0 R]".to_vec()),
         ];
-        objects.extend((9..=20).map(|id| {
+        objects.extend((8..=20).map(|id| {
             (
                 id,
                 b"<< /Subtype /Link /Rect [50 10 70 30] /Dest 21 0 R >>".to_vec(),
@@ -1275,6 +1432,25 @@ fn link_resolution_does_not_consume_widget_readback_budget() {
         )
         .unwrap();
         let scene = read_pdf_scene(&reader, &PdfSceneRequest::default()).unwrap();
+        let page = &scene.pages[0];
+        assert!(page.partial);
+        assert!(scene.report.partial);
+        let mut links = page.elements.iter().filter_map(|element| match element {
+            PdfSceneElement::Link { value } => Some(value),
+            _ => None,
+        });
+        for object_number in 8..=20 {
+            let link = links.next().unwrap();
+            assert_eq!(link.provenance.object_ref.object_number, object_number);
+            assert_eq!(link.destination_page, (object_number < 20).then_some(0));
+            assert_eq!(link.internal, object_number < 20);
+        }
+        assert!(links.next().is_none());
+        assert!(page.report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == PdfReadDiagnosticCode::ContentLimit
+                && diagnostic.page_index == Some(0)
+                && diagnostic.object_number == Some(20)
+        }));
         assert!(scene.pages[0].elements.iter().any(|element| {
             matches!(element, PdfSceneElement::Form { value }
                 if value.field_type.as_deref() == Some("Tx")

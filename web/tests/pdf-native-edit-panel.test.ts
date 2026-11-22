@@ -47,7 +47,7 @@ import {
   type NativePdfTextIsland,
   type NativePdfVerifiedSnapshot,
 } from '../src/pdf/pdf-native-edit-protocol.js'
-import { NativePdfWorkerError, type NativePdfCoordinatorState } from '../src/pdf/pdf-native-edit-worker.js'
+import { NativePdfWorkerError, type NativePdfCoordinatorState, type NativePdfWorkerPort } from '../src/pdf/pdf-native-edit-worker.js'
 
 const geometry = { bounds: [-10, 20, 190, 120], rotation: 90 } as const
 const hash = Array<number>(32).fill(42)
@@ -85,11 +85,14 @@ function fixturePdf(objects: readonly string[]): string {
 }
 
 async function mountHandoffPanel(props: PdfNativeEditPanelProps) {
+  type Effect = () => void | (() => void)
   const states: unknown[] = []
   const refs: { current: unknown }[] = []
+  const effects: Effect[] = []
+  const layoutEffects: Effect[] = []
   let stateIndex = 0
   let refIndex = 0
-  let mount: (() => void | (() => void)) | undefined
+  let mount: Effect | undefined
   vi.resetModules()
   vi.doMock('react', async (importOriginal) => ({
     ...await importOriginal<typeof import('react')>(),
@@ -106,9 +109,10 @@ async function mountHandoffPanel(props: PdfNativeEditPanelProps) {
       const index = refIndex++
       return refs[index] ??= { current: initial }
     },
-    useLayoutEffect: () => undefined,
-    useEffect: (effect: () => void | (() => void), dependencies: readonly unknown[]) => {
+    useLayoutEffect: (effect: Effect) => { layoutEffects.push(effect) },
+    useEffect: (effect: Effect, dependencies: readonly unknown[]) => {
       if (dependencies.length === 0) mount = effect
+      else effects.push(effect)
     },
     useSyncExternalStore: (_subscribe: unknown, snapshot: () => unknown) => snapshot(),
   }))
@@ -117,12 +121,14 @@ async function mountHandoffPanel(props: PdfNativeEditPanelProps) {
     const render = () => {
       stateIndex = 0
       refIndex = 0
+      effects.length = 0
+      layoutEffects.length = 0
       return Panel(props)
     }
     render()
     const unmount = mount?.()
     if (typeof unmount !== 'function') throw new Error('Expected panel teardown')
-    return { render, unmount }
+    return { render, unmount, effects, layoutEffects }
   } finally {
     vi.doUnmock('react')
   }
@@ -317,19 +323,132 @@ describe('redaction staging and check feedback', () => {
     expect(redactionAttemptFeedback(null, false, new NativePdfWorkerError(code))).toEqual({ checks: null, reason })
   })
 
-  it('shows a genuine pending rewrite after a pre-candidate refusal and can stage again after cancellation', async () => {
+  async function initializeRedactionFixture() {
     const { readFileSync } = await vi.importActual<{ readFileSync(path: URL): Uint8Array }>('node:fs')
     const module = new Uint8Array(readFileSync(new URL('../generated/flow_wasm_bg.wasm', import.meta.url)))
     wasm.initSync({ module })
     const paint = '10 10 10 10 re f 40 40 10 10 re f'
-    const objects = [
+    return fixturePdf([
       '<< /Type /Catalog /Pages 2 0 R >>',
       '<< /Type /Pages /Kids [3 0 R 5 0 R] /Count 2 /MediaBox [0 0 100 100] >>',
       '<< /Type /Page /Parent 2 0 R /Contents 4 0 R >>',
       `<< /Length ${paint.length} >>\nstream\n${paint}\nendstream`,
       '<< /Type /Page /Parent 2 0 R >>',
-    ]
-    const bytes = new TextEncoder().encode(fixturePdf(objects))
+    ])
+  }
+
+  it.each([2, 1])('authorizes a confirmed two-mark redaction only when verification reports two marks (reported %i)', async (markCount) => {
+    const file = new File([await initializeRedactionFixture()], 'redaction.pdf', { type: 'application/pdf' })
+    let coordinator: ReturnType<PdfNativeEditPanelProps['createCoordinator']>
+    const { render, effects, layoutEffects, unmount } = await mountHandoffPanel({
+      createCoordinator: () => coordinator,
+      sourceStore: { put: vi.fn().mockResolvedValue(undefined), get: vi.fn().mockResolvedValue(null) },
+      locale: 'en',
+    })
+    const actions: NativePdfRedactionAction['kind'][] = []
+    const respond = {
+      open: wasm.native_pdf_open, snapshot: wasm.native_pdf_snapshot, close: wasm.native_pdf_close,
+      command: wasm.native_pdf_command, preview: wasm.native_pdf_preview, redaction: wasm.native_pdf_redaction,
+    }
+    let controlledReply: string | undefined
+    const worker: NativePdfWorkerPort = {
+      onmessage: null, onerror: null, onmessageerror: null, terminate: vi.fn(),
+      postMessage: ({ dispatchId, request }) => {
+        let json = respond[request.operation](JSON.stringify(request))
+        if (request.operation === 'redaction') {
+          actions.push(request.action.kind)
+          if (request.action.kind === 'verify') {
+            const reply = readNativeResponse(json)
+            expect(reply).toMatchObject({ status: 'redaction', redaction: {
+              markCount: 2, verification: { status: 'passed' }, candidate: { affectedPages: [before.pageState.order[0]] },
+            } })
+            if (reply?.status !== 'redaction') throw new Error('expected an unpublished verification reply')
+            if (markCount !== 2) {
+              json = JSON.stringify({ ...reply, redaction: { ...reply.redaction, markCount } })
+              controlledReply = json
+            }
+          }
+        }
+        worker.onmessage?.(new MessageEvent('message', { data: { dispatchId, type: 'response', json } }))
+      },
+    }
+    const { NativePdfEditCoordinator } = await import('../src/pdf/pdf-native-edit-worker.js')
+    const session = new NativePdfEditCoordinator(worker, (json) => json === controlledReply || wasm.verify_native_pdf_response(json))
+    coordinator = session
+    const find = (matches: (element: PanelElement) => boolean) => panelElement(render(), matches)
+    const control = (name: string) => find((element) => element.props.id === `native-test-${name}`)
+    const button = (name: 'redaction.apply' | 'redaction.download') =>
+      find((element) => element.type === 'button' && element.props.children === nativePdfText('en', name)
+        && (name !== 'redaction.apply' || element.props.id === undefined))
+    vi.stubGlobal('document', { activeElement: null, body: {}, getElementById: () => null })
+    let before: NativePdfVerifiedSnapshot
+    try {
+      const input = find((element) => element.type === 'input' && element.props.accept === 'application/pdf,.pdf')
+      const change = input?.props.onChange as (event: { currentTarget: { files: File[]; value: string } }) => void
+      change({ currentTarget: { files: [file], value: file.name } })
+      await vi.waitFor(() => expect(control('viewport')).toBeDefined())
+      before = session.snapshot().accepted!
+      render()
+      effects.forEach((effect) => effect())
+      const canvasRef = await vi.waitFor(() => {
+        const paper = find((element) => element.props.raster != null)
+        expect(paper).toBeDefined()
+        return paper!.props.canvasRef as { current: unknown }
+      })
+      canvasRef.current = { getContext: () => ({
+        createImageData: (width: number, height: number) => ({ data: new Uint8ClampedArray(width * height * 4) }),
+        putImageData: vi.fn(),
+      }) }
+      layoutEffects.forEach((effect) => effect())
+
+      const markForm = () => find((element) => element.type === 'form' && panelElement(element.props.children,
+        (child) => child.props.id === 'native-test-redaction-add') !== undefined)
+      for (const offset of [12, 42]) {
+        for (const [coordinate, value] of [['x', offset], ['y', offset], ['width', 1], ['height', 1]] as const) {
+          const label = panelElement(markForm()?.props.children, (element) => element.type === 'label'
+            && Children.toArray(element.props.children)[0] === nativePdfText('en', `geometry.${coordinate}`))
+          const field = panelElement(label?.props.children, (element) => element.type === 'input')
+          const update = field?.props.onChange as (event: { target: { value: string } }) => void
+          update({ target: { value: String(value) } })
+        }
+        expect(control('redaction-add')?.props.disabled).toBe(false)
+        const submit = markForm()?.props.onSubmit as (event: { preventDefault: () => void }) => void
+        submit({ preventDefault: vi.fn() })
+        await vi.waitFor(() => expect(find((element) => element.props.children === nativePdfText('en', 'redaction.markSummary', {
+          count: offset === 12 ? 1 : 2, pages: '1',
+        }))).toBeDefined())
+      }
+
+      const openConfirmation = control('redaction-stage')?.props.onClick as (event: { currentTarget: null }) => void
+      openConfirmation({ currentTarget: null })
+      expect(control('remove-target')?.props.children).toBe(nativePdfText('en', 'redaction.markSummary', { count: 2, pages: '1' }))
+      const confirm = button('redaction.apply')
+      expect(confirm?.props.disabled).toBe(false)
+      const apply = confirm?.props.onClick as () => void
+      apply()
+      await vi.waitFor(() => expect(control('redaction-cancel')).toBeUndefined())
+
+      const confirmed = markCount === 2
+      expect(actions).toEqual(['addMark', 'addMark', 'stage', 'verify', confirmed ? 'publish' : 'cancel'])
+      if (confirmed) {
+        expect(button('redaction.download')?.props.disabled).toBe(false)
+      } else {
+        expect(button('redaction.download')).toBeUndefined()
+        expect(session.snapshot().accepted).toBe(before)
+        expect(session.outputBytes()).toEqual(nativeHexBytes(before.outputHex))
+      }
+    } finally {
+      try {
+        if (session.snapshot().phase === 'ready') await session.close()
+      } finally {
+        unmount()
+        vi.unstubAllGlobals()
+      }
+    }
+  })
+
+  it('shows a genuine pending rewrite after a pre-candidate refusal and can stage again after cancellation', async () => {
+    const bytes = new TextEncoder().encode(await initializeRedactionFixture())
     const originStoreHash = (await hashPdfSourceBytes(bytes)).slice('sha256:v1:'.length)
     const identity = { protocolVersion: NATIVE_PDF_PROTOCOL_VERSION, originStoreHash }
     const opening = readNativeResponse(wasm.native_pdf_open(JSON.stringify({

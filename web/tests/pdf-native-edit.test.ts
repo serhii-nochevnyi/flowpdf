@@ -1166,7 +1166,7 @@ describe('native redaction quarantine', () => {
     expect(lane.coordinator.originalForReopen()).toEqual(original())
     expect(lane.coordinator.outputBytes()).toBeNull()
     await expect(lane.coordinator.command(note('blocked edit'))).rejects.toMatchObject({ code: 'FLOW_PDF_NATIVE_SESSION_UNAVAILABLE' })
-    await expect(lane.coordinator.applyRedaction([mark.pageId])).rejects.toMatchObject({ code: 'FLOW_PDF_NATIVE_SESSION_UNAVAILABLE' })
+    await expect(lane.coordinator.applyRedaction([mark.pageId], 1)).rejects.toMatchObject({ code: 'FLOW_PDF_NATIVE_SESSION_UNAVAILABLE' })
     expect(lane.sent).toEqual([])
   })
 
@@ -1178,13 +1178,20 @@ describe('native redaction quarantine', () => {
     await deliverWasmMark(lane, 'addMark')
     await marking
 
-    const applying = lane.coordinator.applyRedaction([pageId])
-    await deliverWasmRedaction(lane, 'stage')
-    await deliverWasmRedaction(lane, 'verify')
+    const secondMark = lane.coordinator.markRedaction({ kind: 'addMark', pageId, rect: [42_000, 42_000, 43_000, 43_000] }, 2)
+    await deliverWasmMark(lane, 'addMark')
+    await secondMark
+
+    const applying = lane.coordinator.applyRedaction([pageId], 2)
+    for (const step of ['stage', 'verify'] as const) {
+      expect(await deliverWasmRedaction(lane, step)).toMatchObject({
+        status: 'redaction', redaction: { markCount: 2, candidate: { affectedPages: [pageId] } },
+      })
+    }
     await deliverWasmRedaction(lane, 'publish')
     const receipt = await applying
     const published = lane.coordinator.snapshot().accepted!
-    expect(receipt).toMatchObject({ published: true, candidate: { hash: published.outputHash, affectedPages: [pageId] } })
+    expect(receipt).toMatchObject({ published: true, markCount: 0, candidate: { hash: published.outputHash, affectedPages: [pageId] } })
     expect(published.binding.revision).toBe(initial.binding.revision + 1)
     expect(published.outputHex).not.toBe(initial.outputHex)
 
@@ -1209,6 +1216,45 @@ describe('native redaction quarantine', () => {
     await closeRedactionFixture(lane)
   })
 
+  it.each(['stage', 'verify', 'status'] as const)('refuses a different mark count on the same page in %s', async (step) => {
+    const lane = fakePort(500)
+    const initial = await redactionMarked(lane)
+    vi.useFakeTimers()
+    const applying = lane.coordinator.applyRedaction([mark.pageId], 1)
+    let refused = expect(applying).rejects.toMatchObject({
+      code: step === 'status' ? 'FLOW_PDF_NATIVE_REPLY_LOST' : 'FLOW_PDF_NATIVE_RESPONSE_INVALID',
+    })
+
+    let dispatch = await lane.take()
+    expect(redactionAction(dispatch)).toEqual({ kind: 'stage' })
+    if (step !== 'stage') {
+      lane.deliver(dispatch, redactionReply(dispatch.request, redactionCandidate))
+      dispatch = await lane.take()
+      expect(redactionAction(dispatch)).toEqual({ kind: 'verify', candidate: redactionCandidate })
+    }
+    if (step === 'status') {
+      await vi.advanceTimersByTimeAsync(500)
+      await refused
+      refused = expect(lane.coordinator.reconcile()).rejects.toMatchObject({ code: 'FLOW_PDF_NATIVE_RESPONSE_INVALID' })
+      dispatch = await lane.take()
+      expect(redactionAction(dispatch)).toEqual({ kind: 'status', candidate: redactionCandidate })
+    }
+
+    const reply = redactionReply(dispatch.request, redactionCandidate, step === 'stage' ? 'pending' : 'passed')
+    lane.deliver(dispatch, { ...reply, redaction: { ...reply.redaction, markCount: 2 } })
+    const cancel = await lane.take()
+    expect(redactionAction(cancel)).toEqual({ kind: 'cancel', candidate: redactionCandidate })
+    expect(lane.coordinator.snapshot().accepted).toBe(initial)
+    expect(lane.coordinator.outputBytes()).toBeNull()
+    lane.deliver(cancel, redactionReply(cancel.request))
+    await refused
+    expect(lane.coordinator.snapshot()).toMatchObject({ phase: 'ready', redaction: { action: 'cancel', published: false } })
+    expect(lane.coordinator.snapshot().accepted).toBe(initial)
+    expect(lane.coordinator.outputBytes()).toEqual(nativeHexBytes(initial.outputHex))
+    expect(lane.sent).toEqual([])
+    lane.coordinator.dispose()
+  })
+
   it.each(['stage', 'status'] as const)('discards an unpublished candidate when %s reports a different marked page', async (step) => {
     const lane = fakePort(500, (json) => wasm.verify_native_pdf_response(json))
     const initial = await openRedactionFixture(lane)
@@ -1219,7 +1265,7 @@ describe('native redaction quarantine', () => {
     await marking
 
     vi.useFakeTimers()
-    const applying = lane.coordinator.applyRedaction([otherPage!])
+    const applying = lane.coordinator.applyRedaction([otherPage!], 1)
     const refused = expect(applying).rejects.toMatchObject({
       code: step === 'stage' ? 'FLOW_PDF_NATIVE_RESPONSE_INVALID' : 'FLOW_PDF_NATIVE_REPLY_LOST',
     })
@@ -1270,7 +1316,7 @@ describe('native redaction quarantine', () => {
     const after = await editing
     expect(after.binding.revision).toBe(before.binding.revision + 1)
     await expect(lane.coordinator.markRedaction(mark, 1)).rejects.toMatchObject({ code: 'FLOW_PDF_NATIVE_UNSUPPORTED' })
-    await expect(lane.coordinator.applyRedaction([mark.pageId])).rejects.toMatchObject({ code: 'FLOW_PDF_NATIVE_UNSUPPORTED' })
+    await expect(lane.coordinator.applyRedaction([mark.pageId], 1)).rejects.toMatchObject({ code: 'FLOW_PDF_NATIVE_UNSUPPORTED' })
     expect(lane.sent).toHaveLength(0)
     expect(lane.coordinator.snapshot()).toMatchObject({ phase: 'ready', accepted: after })
   })
@@ -1325,7 +1371,7 @@ describe('native redaction quarantine', () => {
     expect(lane.coordinator.outputBytes()).toEqual(nativeHexBytes(before.outputHex))
     const secondMark = { ...mark, rect: [42_000, 42_000, 43_000, 43_000] } as const
     await expect(lane.coordinator.markRedaction(secondMark, 2)).rejects.toMatchObject({ code: 'FLOW_PDF_NATIVE_UNSUPPORTED' })
-    await expect(lane.coordinator.applyRedaction([pageId])).rejects.toMatchObject({ code: 'FLOW_PDF_NATIVE_UNSUPPORTED' })
+    await expect(lane.coordinator.applyRedaction([pageId], 1)).rejects.toMatchObject({ code: 'FLOW_PDF_NATIVE_UNSUPPORTED' })
     expect(lane.sent).toEqual([])
 
     const removing = lane.coordinator.markRedaction({ ...mark, kind: 'removeMark' }, 0)
@@ -1459,7 +1505,7 @@ describe('native redaction quarantine', () => {
   it.each(['failed', 'unavailable', 'inconclusive'] as const)('keeps marks and the prior revision when verification is %s', async (status) => {
     const lane = fakePort()
     const initial = await redactionMarked(lane)
-    const applying = lane.coordinator.applyRedaction([mark.pageId])
+    const applying = lane.coordinator.applyRedaction([mark.pageId], 1)
     const stage = await lane.take()
     expect(redactionAction(stage)).toEqual({ kind: 'stage' })
     expect(lane.coordinator.snapshot()).toMatchObject({ phase: 'validating', accepted: initial, showingPriorAccepted: true })
@@ -1489,7 +1535,7 @@ describe('native redaction quarantine', () => {
     'halts on an invalid %s verification reply before dispatching publish', async (mutation) => {
       const lane = fakePort()
       const initial = await redactionMarked(lane)
-      const applying = lane.coordinator.applyRedaction([mark.pageId])
+      const applying = lane.coordinator.applyRedaction([mark.pageId], 1)
       const refused = expect(applying).rejects.toMatchObject({ code: 'FLOW_PDF_NATIVE_RESPONSE_INVALID' })
       const stage = await lane.take()
       lane.deliver(stage, redactionReply(stage.request, redactionCandidate))
@@ -1523,7 +1569,7 @@ describe('native redaction quarantine', () => {
     const lane = fakePort(500)
     const initial = await redactionMarked(lane)
     vi.useFakeTimers()
-    const applying = lane.coordinator.applyRedaction([mark.pageId])
+    const applying = lane.coordinator.applyRedaction([mark.pageId], 1)
     const lost = expect(applying).rejects.toMatchObject({ code: 'FLOW_PDF_NATIVE_REPLY_LOST' })
     const stage = await lane.take()
     lane.deliver(stage, redactionReply(stage.request, redactionCandidate))
@@ -1544,11 +1590,11 @@ describe('native redaction quarantine', () => {
     lane.coordinator.dispose()
   })
 
-  it('offers original-file recovery when status definitively refuses a prepublication check', async () => {
+  it.each(['refused', 'empty with a different mark count'] as const)('offers original-file recovery when prepublication status is %s', async (status) => {
     const lane = fakePort(500)
     const initial = await redactionMarked(lane)
     vi.useFakeTimers()
-    const applying = lane.coordinator.applyRedaction([mark.pageId])
+    const applying = lane.coordinator.applyRedaction([mark.pageId], 1)
     const lost = expect(applying).rejects.toMatchObject({ code: 'FLOW_PDF_NATIVE_REPLY_LOST' })
     const stage = await lane.take()
     lane.deliver(stage, redactionReply(stage.request, redactionCandidate))
@@ -1557,13 +1603,18 @@ describe('native redaction quarantine', () => {
     await vi.advanceTimersByTimeAsync(500)
     await lost
 
-    const code = 'FLOW_PDF_NATIVE_REDACTION_CANDIDATE_UNAVAILABLE'
+    const code = status === 'refused' ? 'FLOW_PDF_NATIVE_REDACTION_CANDIDATE_UNAVAILABLE' : 'FLOW_PDF_NATIVE_RESPONSE_INVALID'
     const refused = expect(lane.coordinator.reconcile()).rejects.toMatchObject({ code })
     const lookup = await lane.take()
     expect(lookup.request.requestId).toBe(stage.request.requestId)
     expect(redactionAction(lookup)).toEqual({ kind: 'status', candidate: redactionCandidate })
-    const { redaction: _redaction, ...base } = redactionReply(lookup.request)
-    lane.deliver(lookup, { ...base, status: 'failed', code })
+    const reply = redactionReply(lookup.request)
+    if (status === 'refused') {
+      const { redaction: _redaction, ...base } = reply
+      lane.deliver(lookup, { ...base, status: 'failed', code })
+    } else {
+      lane.deliver(lookup, { ...reply, redaction: { ...reply.redaction, markCount: 2 } })
+    }
     await refused
 
     expect(lane.coordinator.snapshot()).toMatchObject({ phase: 'invalidated', reopenOriginal: true, redaction: null })
@@ -1578,7 +1629,7 @@ describe('native redaction quarantine', () => {
     const lane = fakePort(500)
     const initial = await redactionMarked(lane)
     vi.useFakeTimers()
-    const applying = lane.coordinator.applyRedaction([mark.pageId])
+    const applying = lane.coordinator.applyRedaction([mark.pageId], 1)
     const lost = expect(applying).rejects.toMatchObject({ code: 'FLOW_PDF_NATIVE_REPLY_LOST' })
     const stage = await lane.take()
     lane.deliver(stage, redactionReply(stage.request, redactionCandidate))
@@ -1640,7 +1691,7 @@ describe('native redaction quarantine', () => {
     const lane = fakePort()
     const initial = await redactionMarked(lane)
     const abort = new AbortController()
-    const applying = lane.coordinator.applyRedaction([mark.pageId], abort.signal)
+    const applying = lane.coordinator.applyRedaction([mark.pageId], 1, abort.signal)
     const cancelled = expect(applying).rejects.toMatchObject({ code: 'FLOW_PDF_NATIVE_REDACTION_CANCELLED' })
     const stage = await lane.take()
     lane.deliver(stage, redactionReply(stage.request, redactionCandidate))
@@ -1656,15 +1707,16 @@ describe('native redaction quarantine', () => {
     lane.coordinator.dispose()
   })
 
-  it('keeps downloads locked when cancellation acknowledges a different candidate', async () => {
+  it.each([1, 2])('keeps downloads locked when cancellation acknowledges a different candidate after verifying %i marks', async (markCount) => {
     const lane = fakePort()
     const initial = await redactionMarked(lane)
-    const applying = lane.coordinator.applyRedaction([mark.pageId])
+    const applying = lane.coordinator.applyRedaction([mark.pageId], 1)
     const refused = expect(applying).rejects.toMatchObject({ code: 'FLOW_PDF_NATIVE_RESPONSE_INVALID' })
     const stage = await lane.take()
     lane.deliver(stage, redactionReply(stage.request, redactionCandidate))
     const verify = await lane.take()
-    lane.deliver(verify, redactionReply(verify.request, redactionCandidate, 'inconclusive'))
+    const reply = redactionReply(verify.request, redactionCandidate, markCount === 1 ? 'inconclusive' : 'passed')
+    lane.deliver(verify, { ...reply, redaction: { ...reply.redaction, markCount } })
     const cancel = await lane.take()
     expect(redactionAction(cancel)).toEqual({ kind: 'cancel', candidate: redactionCandidate })
     lane.deliver(cancel, redactionReply(cancel.request, { ...redactionCandidate, hash: hash(71) }))
@@ -1678,7 +1730,7 @@ describe('native redaction quarantine', () => {
   it('invalidates on worker loss and ignores a captured late positive reply', async () => {
     const lane = fakePort()
     const initial = await redactionMarked(lane)
-    const applying = lane.coordinator.applyRedaction([mark.pageId])
+    const applying = lane.coordinator.applyRedaction([mark.pageId], 1)
     const lost = expect(applying).rejects.toMatchObject({ code: 'FLOW_PDF_NATIVE_WORKER_FAILED' })
     const stage = await lane.take()
     lane.deliver(stage, redactionReply(stage.request, redactionCandidate))

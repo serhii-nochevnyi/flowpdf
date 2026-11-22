@@ -23,6 +23,10 @@ pub const PDF_READER_SCHEMA_VERSION: u32 = 1;
 const MAX_PDF_VERSION: &[u8] = b"1.7";
 const MAX_PDF_IDENTITY_BYTES: usize = 128;
 
+const fn default_scene_bytes() -> usize {
+    16 * 1024 * 1024
+}
+
 /// Limits applied to one request-local PDF reader.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -38,6 +42,8 @@ pub struct PdfReaderLimits {
     pub max_decoded_stream_bytes: usize,
     pub max_content_tokens: usize,
     pub max_scene_elements: usize,
+    #[serde(default = "default_scene_bytes")]
+    pub max_scene_bytes: usize,
     pub max_image_pixels: u64,
     pub max_form_depth: usize,
 }
@@ -56,6 +62,7 @@ impl Default for PdfReaderLimits {
             max_decoded_stream_bytes: 16 * 1024 * 1024,
             max_content_tokens: 1_000_000,
             max_scene_elements: 250_000,
+            max_scene_bytes: default_scene_bytes(),
             max_image_pixels: 64 * 1024 * 1024,
             max_form_depth: 16,
         }
@@ -75,6 +82,7 @@ impl PdfReaderLimits {
             || self.max_decoded_stream_bytes == 0
             || self.max_content_tokens == 0
             || self.max_scene_elements == 0
+            || !(1..=default_scene_bytes()).contains(&self.max_scene_bytes)
             || self.max_image_pixels == 0
             || self.max_form_depth == 0
         {
@@ -469,6 +477,18 @@ pub(super) fn resolve_annotation_value<'value, 'object: 'value>(
     work: &mut usize,
     object: &mut impl FnMut(PdfObjectRef) -> Result<Option<Cow<'object, PdfValue>>, PdfReadError>,
 ) -> Result<Option<Cow<'value, PdfValue>>, PdfReadError> {
+    Ok(
+        follow_annotation_references(value, max_nesting, work, object)?
+            .filter(|value| value.as_reference().is_none()),
+    )
+}
+
+fn follow_annotation_references<'value, 'object: 'value>(
+    value: &'value PdfValue,
+    max_nesting: usize,
+    work: &mut usize,
+    object: &mut impl FnMut(PdfObjectRef) -> Result<Option<Cow<'object, PdfValue>>, PdfReadError>,
+) -> Result<Option<Cow<'value, PdfValue>>, PdfReadError> {
     let mut value = Cow::Borrowed(value);
     for _ in 0..max_nesting {
         let Some(reference) = value.as_reference() else {
@@ -480,7 +500,7 @@ pub(super) fn resolve_annotation_value<'value, 'object: 'value>(
         };
         value = resolved;
     }
-    Ok(value.as_reference().is_none().then_some(value))
+    Ok(Some(value))
 }
 
 // @invariant: Allow for a new B-tree node and its slots before insertion.
@@ -686,6 +706,34 @@ impl PdfReader {
             ) => Err(error),
             Err(_) => Ok(None),
         }
+    }
+
+    pub(super) fn link_destination_value<'a>(
+        &self,
+        value: &'a PdfValue,
+        work: &mut usize,
+    ) -> Result<Option<Cow<'a, PdfValue>>, PdfReadError> {
+        let destination =
+            follow_annotation_references(value, self.limits.max_nesting, work, &mut |reference| {
+                match self.non_stream_object(reference) {
+                    Ok(value) => Ok(Some(Cow::Owned(value))),
+                    Err(
+                        PdfReadError::ObjectMissing
+                        | PdfReadError::ReferenceInvalid
+                        | PdfReadError::Syntax
+                        | PdfReadError::XrefInvalid,
+                    ) => Ok(None),
+                    Err(error) => Err(error),
+                }
+            })?;
+        if destination
+            .as_deref()
+            .and_then(PdfValue::as_reference)
+            .is_some()
+        {
+            return Err(PdfReadError::NestingLimit);
+        }
+        Ok(destination)
     }
 
     pub(crate) fn object_offset(&self, reference: PdfObjectRef) -> Option<usize> {

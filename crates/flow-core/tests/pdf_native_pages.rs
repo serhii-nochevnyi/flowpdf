@@ -207,20 +207,24 @@ fn independent_note_and_checkbox_clone_survive_cross_parent_reorder_and_navigati
 }
 
 #[test]
-fn indirect_link_destination_tracks_the_same_page_after_reorder() {
+fn direct_and_indirect_link_destinations_track_the_same_page_after_reorder() {
     let source = build_pdf(&[
         (0, "<< /Type /Catalog /Pages 2 0 R >>"),
         (
             0,
             "<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 /MediaBox [0 0 200 200] >>",
         ),
-        (0, "<< /Type /Page /Parent 2 0 R /Annots [5 0 R] >>"),
+        (0, "<< /Type /Page /Parent 2 0 R /Annots [5 0 R 7 0 R] >>"),
         (0, "<< /Type /Page /Parent 2 0 R >>"),
         (
             0,
             "<< /Type /Annot /Subtype /Link /P 3 0 R /Rect [10 10 30 30] /Dest 6 0 R >>",
         ),
         (0, "[4 0 R /Fit]"),
+        (
+            0,
+            "<< /Type /Annot /Subtype /Link /P 3 0 R /Rect [40 10 60 30] /Dest [4 0 R /Fit] >>",
+        ),
     ]);
     let mut session =
         NativePdfSession::open_scoped(&source, NativeEditLimits::default(), [6; 16]).unwrap();
@@ -247,12 +251,19 @@ fn indirect_link_destination_tracks_the_same_page_after_reorder() {
             },
         )
         .unwrap();
-        let [PdfSceneElement::Link { value }] = scene.pages[link_page].elements.as_slice() else {
-            panic!("expected a retained link");
+        let [
+            PdfSceneElement::Link { value: indirect },
+            PdfSceneElement::Link { value: direct },
+        ] = scene.pages[link_page].elements.as_slice()
+        else {
+            panic!("expected both retained links");
         };
-        assert_eq!(value.provenance.object_ref.object_number, 5);
-        assert!(value.internal);
-        assert_eq!(value.destination_page, Some(target_page as u32));
+        assert!(!scene.report.partial);
+        for (value, object_number) in [(indirect, 5), (direct, 7)] {
+            assert_eq!(value.provenance.object_ref.object_number, object_number);
+            assert!(value.internal);
+            assert_eq!(value.destination_page, Some(target_page as u32));
+        }
         assert_eq!(scene.pages[target_page].source_object.object_number, 4);
     }
 }
@@ -1621,7 +1632,19 @@ fn duplicate_with_widget_uses_cumulative_work() {
         let command = command("duplicatePage", 0, session.snapshot());
         session.apply_page(session.snapshot().binding, 1, &command)
     };
-    let work_fit = 1191;
+    let (mut low, mut high) = (1, NativeEditLimits::default().max_work);
+    while low < high {
+        let mid = low + (high - low) / 2;
+        match open(mid).and_then(|mut session| duplicate(&mut session)) {
+            Ok(_) => high = mid,
+            Err(
+                NativeSessionError::Budget
+                | NativeSessionError::Graph(NativeEditError::Reader(PdfReadError::TokenLimit)),
+            ) => low = mid + 1,
+            Err(error) => panic!("unexpected refusal at {mid} work units: {error:?}"),
+        }
+    }
+    let work_fit = low;
     let mut constrained = open(work_fit - 1).unwrap();
     let before = constrained.snapshot().clone();
     assert_eq!(duplicate(&mut constrained), Err(NativeSessionError::Budget));
