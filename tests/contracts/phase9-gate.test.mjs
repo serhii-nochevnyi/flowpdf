@@ -16,7 +16,7 @@ test('inventory covers each planned task once and runs the existing note tracer'
     ['node', 'scripts/check-native-note-tracer.mjs', '--run'])
   assert.equal(tasks.at(-1).lane, 'terminal')
   const inventory = createHash('sha256').update(JSON.stringify(tasks)).digest('hex')
-  assert.equal(inventory, 'c06e06d521eb58e5e4e98afeffa7fe390c07640245fc53c620e39602d440fbc4')
+  assert.equal(inventory, 'ec51979a491a681962f750d3ec15a88a2122d840169a27384e13c14653497f37')
   assert.throws(() => assertManifest(tasks.slice(1)))
   assert.throws(() => assertManifest(tasks.toReversed()))
   assert.throws(() => assertManifest(tasks.map((task) => ({ ...task, argv: [] }))))
@@ -39,7 +39,7 @@ test('only declared product inputs participate in the fingerprint', () => {
   assert.ok(tasks.every(({ argv }) => argv.every((value) => !/\.planning|\.shipyard|install$/.test(value) || value === '--no-install')))
 })
 
-test('local execution builds WASM in a clean checkout and runs the checksum and fixture suites', (t) => {
+test('local execution builds WASM in a clean checkout and runs the reader, checksum, and fixture suites', (t) => {
   const cwd = mkdtempSync(join(tmpdir(), 'phase9-gate-'))
   t.after(() => rmSync(cwd, { recursive: true, force: true }))
   const calls = []
@@ -63,6 +63,8 @@ test('local execution builds WASM in a clean checkout and runs the checksum and 
   assert.equal(result.status, 'pass')
   assert.deepEqual(calls.filter((argv) => argv.includes('scripts/verify-wasm-bindgen-tool.test.mjs')),
     [['node', '--test', 'scripts/verify-wasm-bindgen-tool.test.mjs']])
+  assert.deepEqual(calls.filter((argv) => argv.includes('flow-wasm') && argv.includes('pdf_reader')),
+    [['cargo', 'test', '--offline', '--locked', '-p', 'flow-wasm', '--test', 'pdf_native_edit', '--test', 'pdf_reader', '--', '--nocapture']])
   assert.ok(calls.some((argv) => argv.includes('tests/contracts/pdf-native-fixtures.test.mjs')))
 })
 
