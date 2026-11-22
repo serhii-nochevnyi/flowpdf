@@ -1205,7 +1205,8 @@ export function PdfNativeEditPanel({
     }
     const candidate = current && verifiedRedactionCandidate(attempt.before, current, result, attempt.pages)
     if (!current || !candidate) {
-      const requiresReopen = result?.published === true || (current !== null && !sameNativeAcceptedOutput(attempt.before, current))
+      const requiresReopen = (result !== null && (result.published || result.markCount !== attempt.nextMarks.length))
+        || (current !== null && !sameNativeAcceptedOutput(attempt.before, current))
       refuseRedaction(attempt, requiresReopen ? null : result, undefined, requiresReopen)
       return requiresReopen
     }

@@ -1565,7 +1565,7 @@ describe('native redaction quarantine', () => {
     },
   )
 
-  it('looks up a lost verification by the same identity and discards the unpublished result', async () => {
+  it.each([1, 2])('recovers a lost verification only when cancellation confirms the retained marks (reported %i)', async (markCount) => {
     const lane = fakePort(500)
     const initial = await redactionMarked(lane)
     vi.useFakeTimers()
@@ -1577,6 +1577,9 @@ describe('native redaction quarantine', () => {
     await vi.advanceTimersByTimeAsync(500)
     await lost
     const reconciling = lane.coordinator.reconcile()
+    const settled = markCount === 1
+      ? expect(reconciling).resolves.toEqual({ status: 'unseen', snapshot: initial })
+      : expect(reconciling).rejects.toMatchObject({ code: 'FLOW_PDF_NATIVE_RESPONSE_INVALID' })
     const lookup = await lane.take()
     expect(lookup.request.requestId).toBe(verify.request.requestId)
     expect(redactionAction(lookup)).toEqual({ kind: 'status', candidate: redactionCandidate })
@@ -1584,8 +1587,20 @@ describe('native redaction quarantine', () => {
     lane.deliver(lookup, redactionReply(lookup.request, redactionCandidate, 'passed'))
     const cancel = await lane.take()
     expect(redactionAction(cancel)).toEqual({ kind: 'cancel', candidate: redactionCandidate })
-    lane.deliver(cancel, redactionReply(cancel.request))
-    await expect(reconciling).resolves.toEqual({ status: 'unseen', snapshot: initial })
+    expect(cancel.request.requestId).toBe(verify.request.requestId)
+    expect(lane.coordinator.outputBytes()).toBeNull()
+    const reply = redactionReply(cancel.request)
+    lane.deliver(cancel, { ...reply, redaction: { ...reply.redaction, markCount } })
+    await settled
+    expect(lane.coordinator.snapshot().accepted).toBe(initial)
+    if (markCount === 1) {
+      expect(lane.coordinator.snapshot()).toMatchObject({ phase: 'ready', redaction: { action: 'cancel', markCount: 1 } })
+      expect(lane.coordinator.outputBytes()).toEqual(nativeHexBytes(initial.outputHex))
+    } else {
+      expect(lane.coordinator.snapshot()).toMatchObject({ phase: 'invalidated', reopenOriginal: true, redaction: null })
+      expect(lane.coordinator.outputBytes()).toBeNull()
+      await expect(lane.coordinator.command(note('conflicting'))).rejects.toThrow()
+    }
     expect(lane.sent).toEqual([])
     lane.coordinator.dispose()
   })
@@ -1703,6 +1718,50 @@ describe('native redaction quarantine', () => {
     lane.deliver(cancel, redactionReply(cancel.request))
     await cancelled
     expect(lane.coordinator.snapshot()).toMatchObject({ phase: 'ready', accepted: initial, redaction: { markCount: 1 } })
+    expect(lane.sent).toEqual([])
+    lane.coordinator.dispose()
+  })
+
+  it.each([1, 2])('requires same-request settlement after cancellation reports a different count (status reports %i)', async (markCount) => {
+    const lane = fakePort()
+    const initial = await redactionMarked(lane)
+    const abort = new AbortController()
+    const applying = lane.coordinator.applyRedaction([mark.pageId], 1, abort.signal)
+    const refused = expect(applying).rejects.toMatchObject({ code: 'FLOW_PDF_NATIVE_RESPONSE_INVALID' })
+    const stage = await lane.take()
+    lane.deliver(stage, redactionReply(stage.request, redactionCandidate))
+    const verify = await lane.take()
+    abort.abort()
+    lane.deliver(verify, redactionReply(verify.request, redactionCandidate, 'passed'))
+    const cancel = await lane.take()
+    expect(redactionAction(cancel)).toEqual({ kind: 'cancel', candidate: redactionCandidate })
+    const reply = redactionReply(cancel.request)
+    lane.deliver(cancel, { ...reply, redaction: { ...reply.redaction, markCount: 2 } })
+    await refused
+    expect(lane.coordinator.snapshot()).toMatchObject({ phase: 'reconciliationRequired', accepted: initial })
+    expect(lane.coordinator.outputBytes()).toBeNull()
+    await expect(lane.coordinator.command(note('conflicting'))).rejects.toThrow()
+    await expect(lane.coordinator.markRedaction({ kind: 'clearMarks' }, 0)).rejects.toThrow()
+
+    const reconciling = lane.coordinator.reconcile()
+    const settled = markCount === 1
+      ? expect(reconciling).resolves.toEqual({ status: 'unseen', snapshot: initial })
+      : expect(reconciling).rejects.toMatchObject({ code: 'FLOW_PDF_NATIVE_RESPONSE_INVALID' })
+    const lookup = await lane.take()
+    expect(lookup.request.requestId).toBe(stage.request.requestId)
+    expect(redactionAction(lookup)).toEqual({ kind: 'status', candidate: redactionCandidate })
+    const status = redactionReply(lookup.request)
+    lane.deliver(lookup, { ...status, redaction: { ...status.redaction, markCount } })
+    await settled
+    expect(lane.coordinator.snapshot().accepted).toBe(initial)
+    if (markCount === 1) {
+      expect(lane.coordinator.snapshot().phase).toBe('ready')
+      expect(lane.coordinator.outputBytes()).toEqual(nativeHexBytes(initial.outputHex))
+    } else {
+      expect(lane.coordinator.snapshot()).toMatchObject({ phase: 'invalidated', reopenOriginal: true, redaction: null })
+      expect(lane.coordinator.outputBytes()).toBeNull()
+      await expect(lane.coordinator.markRedaction(mark, 2)).rejects.toThrow()
+    }
     expect(lane.sent).toEqual([])
     lane.coordinator.dispose()
   })
