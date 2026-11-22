@@ -1503,19 +1503,18 @@ impl<'a> SceneBuilder<'a> {
             .and_then(|fonts| fonts.get(name))
             .and_then(PdfValue::as_reference)
             .ok_or(PdfReadError::ReferenceInvalid)?;
-        let before = self.budget.remaining_scene_bytes;
+        let mut budget = self.budget;
+        let cache_font = !self.fonts.contains_key(&font_ref);
         let map = if let Some(font) = self.fonts.get(&font_ref) {
             Rc::clone(font)
         } else {
-            let font = self.load_font(font_ref)?;
-            self.budget.charge(
+            let font = self.load_font(font_ref, &mut budget)?;
+            budget.charge(
                 size_of::<FontMap>()
                     + 2 * size_of::<usize>()
                     + scene_tree_entry_bytes::<(PdfObjectRef, Rc<FontMap>)>(),
             )?;
-            let font = Rc::new(font);
-            self.fonts.insert(font_ref, Rc::clone(&font));
-            font
+            Rc::new(font)
         };
         let mut fallback_name = None;
         if map.base_name.is_none()
@@ -1524,27 +1523,33 @@ impl<'a> SceneBuilder<'a> {
             let alias = if let Some(alias) = self.font_aliases.get(label) {
                 Rc::clone(alias)
             } else {
-                self.budget
-                    .charge(2 * size_of::<usize>() + scene_tree_entry_bytes::<Rc<str>>())?;
-                self.budget
-                    .charge(label.len().next_multiple_of(align_of::<usize>()))?;
+                budget.charge(2 * size_of::<usize>() + scene_tree_entry_bytes::<Rc<str>>())?;
+                budget.charge(label.len().next_multiple_of(align_of::<usize>()))?;
                 let alias: Rc<str> = Rc::from(label);
                 self.font_aliases.insert(Rc::clone(&alias));
                 alias
             };
             fallback_name = Some(alias);
         }
-        self.font_cache_bytes += before - self.budget.remaining_scene_bytes;
+        if cache_font {
+            self.fonts.insert(font_ref, Rc::clone(&map));
+        }
+        self.font_cache_bytes += self.budget.remaining_scene_bytes - budget.remaining_scene_bytes;
+        self.budget = budget;
         self.state.font = Some(SelectedFont { map, fallback_name });
         self.state.font_size = size;
         Ok(())
     }
 
-    fn load_font(&mut self, font_ref: PdfObjectRef) -> Result<FontMap, PdfReadError> {
+    fn load_font(
+        &self,
+        font_ref: PdfObjectRef,
+        budget: &mut SceneBudget,
+    ) -> Result<FontMap, PdfReadError> {
         let font = self.reader.object(font_ref)?;
         let dictionary = font.as_dictionary().ok_or(PdfReadError::ReferenceInvalid)?;
         let base_name = dictionary.get("BaseFont").and_then(PdfValue::as_name);
-        self.budget.charge(base_name.map_or(0, str::len))?;
+        budget.charge(base_name.map_or(0, str::len))?;
         let base_name = base_name.map(str::to_owned);
         let mut to_unicode = BTreeMap::new();
         if let Some(to_unicode_value) = dictionary.get("ToUnicode") {
@@ -1553,8 +1558,7 @@ impl<'a> SceneBuilder<'a> {
                 .ok_or(PdfReadError::ReferenceInvalid)?;
             let stream = self.reader.object(to_unicode_ref)?;
             if let PdfValue::Stream(stream) = stream {
-                to_unicode =
-                    parse_to_unicode(&stream.data, self.limits.max_array_items, &mut self.budget)?;
+                to_unicode = parse_to_unicode(&stream.data, self.limits.max_array_items, budget)?;
             }
         }
         let simple_encoding = dictionary
@@ -1576,8 +1580,7 @@ impl<'a> SceneBuilder<'a> {
                 Some((u8::try_from(code).ok()?, value))
             });
             for (code, value) in codes {
-                self.budget
-                    .charge(scene_tree_entry_bytes::<(u8, LayoutUnit)>())?;
+                budget.charge(scene_tree_entry_bytes::<(u8, LayoutUnit)>())?;
                 widths.insert(code, font_width(value).unwrap_or(default_width));
             }
         }

@@ -740,6 +740,56 @@ fn nested_forms_resolve_equivalent_names_and_report_uncertain_clipping() {
 }
 
 #[test]
+fn recovered_font_syntax_releases_scene_allowance_for_the_next_page() {
+    let mut interrupted =
+        b"% caf\xe9\nbegincmap\n1 beginbfrange\n<20> <83> <0020>\nendbfrange\n".to_vec();
+    interrupted.extend_from_slice(b"1 beginbfchar\n<41> <D800>\nendbfchar\nendcmap\n");
+    let complete = b"begincmap\n1 beginbfrange\n<20> <5F> <0020>\nendbfrange\nendcmap\n";
+    let bytes = pdf(vec![
+        (1, b"<< /Type /Catalog /Pages 2 0 R >>".to_vec()),
+        (2, b"<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 /MediaBox [0 0 100 100] >>".to_vec()),
+        (3, b"<< /Type /Page /Parent 2 0 R /Resources << /Font << /F1 7 0 R >> >> /Contents [11 0 R 5 0 R] >>".to_vec()),
+        (4, b"<< /Type /Page /Parent 2 0 R /Resources << /Font << /F1 8 0 R >> >> /Contents 6 0 R >>".to_vec()),
+        stream(5, "", b"BT /F1 10 Tf 15 25 Td (A) Tj ET"),
+        stream(6, "", b"BT /F1 10 Tf 15 25 Td (NEXT PAGE) Tj ET"),
+        (7, b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /ToUnicode 9 0 R >>".to_vec()),
+        (8, b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /ToUnicode 10 0 R >>".to_vec()),
+        stream(9, "", &interrupted),
+        stream(10, "", complete),
+        stream(11, "", b"10 10 10 10 re f"),
+    ]);
+    let read = |max_scene_bytes| {
+        let reader = open_pdf(
+            &bytes,
+            PdfReaderLimits {
+                max_scene_bytes,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        read_pdf_scene(
+            &reader,
+            &PdfSceneRequest {
+                first_page: 0,
+                page_count: 2,
+            },
+        )
+    };
+    let expected = read(PdfReaderLimits::default().max_scene_bytes).unwrap();
+    assert!(expected.pages[0].partial);
+    assert!(matches!(
+        expected.pages[0].elements.as_slice(),
+        [PdfSceneElement::Path { .. }]
+    ));
+    assert!(
+        matches!(expected.pages[1].elements.as_slice(), [PdfSceneElement::Text { value }]
+        if value.text == "NEXT PAGE" && value.mapping == PdfTextMapping::ToUnicode)
+    );
+    assert_eq!(read(96 * 1024).unwrap(), expected);
+    assert_eq!(read(16 * 1024), Err(PdfReadError::StreamLimit));
+}
+
+#[test]
 fn nested_form_font_aliases_share_maps_and_the_scene_allowance() {
     let document = |inner_font, cmap_prefix: &[u8]| {
         let widths = "600 ".repeat(64);
