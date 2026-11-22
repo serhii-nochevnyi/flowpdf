@@ -1520,28 +1520,37 @@ fn take_pdf_name<'a>(bytes: &'a [u8], position: &mut usize) -> Result<&'a [u8], 
 fn decode_pdf_name_bytes(bytes: &[u8]) -> Result<Vec<u8>, PdfReadError> {
     let capacity = bytes.len().min(MAX_PDF_IDENTITY_BYTES);
     let mut output = Vec::with_capacity(capacity);
+    scan_pdf_name_bytes(bytes, |byte| output.push(byte))?;
+    Ok(output)
+}
+
+fn scan_pdf_name_bytes(bytes: &[u8], mut emit: impl FnMut(u8)) -> Result<(), PdfReadError> {
     let mut index = 0;
+    let mut decoded = 0;
     while index < bytes.len() {
-        if output.len() == MAX_PDF_IDENTITY_BYTES {
+        if decoded == MAX_PDF_IDENTITY_BYTES {
             return Err(PdfReadError::Syntax);
         }
-        if bytes[index] == b'#' {
+        let byte = if bytes[index] == b'#' {
             if index + 2 >= bytes.len() {
                 return Err(PdfReadError::Syntax);
             }
             let high = hex_nibble(bytes[index + 1]).ok_or(PdfReadError::Syntax)?;
             let low = hex_nibble(bytes[index + 2]).ok_or(PdfReadError::Syntax)?;
-            output.push((high << 4) | low);
             index += 3;
+            (high << 4) | low
         } else {
-            output.push(bytes[index]);
+            let byte = bytes[index];
             index += 1;
+            byte
+        };
+        if byte == 0 {
+            return Err(PdfReadError::Syntax);
         }
+        emit(byte);
+        decoded += 1;
     }
-    if output.contains(&0) {
-        return Err(PdfReadError::Syntax);
-    }
-    Ok(output)
+    Ok(())
 }
 
 pub(super) fn read_scene_name(bytes: &[u8], position: &mut usize) -> Result<String, PdfReadError> {
@@ -2252,6 +2261,10 @@ impl<'a> Cursor<'a> {
             Some(b'<') => self
                 .parse_dictionary(depth, retain)
                 .map(PdfValue::Dictionary),
+            Some(b'/') if !retain => {
+                self.skip_name()?;
+                Ok(PdfValue::Null)
+            }
             Some(b'/') => self.parse_name().map(PdfValue::Name),
             Some(_) => {
                 let token = self.token_bytes()?.ok_or(PdfReadError::Syntax)?;
@@ -2361,13 +2374,15 @@ impl<'a> Cursor<'a> {
             if entries >= self.limits.max_dictionary_entries {
                 return Err(PdfReadError::ObjectLimit);
             }
-            let key = self.parse_name()?;
-            let defer_resource = self.defer_page_resources && depth == 0 && key == "Resources";
-            let value = self.parse_value_with_storage(depth + 1, retain && !defer_resource)?;
             entries += 1;
             if !retain {
+                self.skip_name()?;
+                self.parse_value_with_storage(depth + 1, false)?;
                 continue;
             }
+            let key = self.parse_name()?;
+            let defer_resource = self.defer_page_resources && depth == 0 && key == "Resources";
+            let value = self.parse_value_with_storage(depth + 1, !defer_resource)?;
             // @invariant: Reserve a root node and one node per five additional dictionary entries.
             if self.scene && dictionary.len().is_multiple_of(5) {
                 self.charge(128 + 12 * std::mem::size_of::<(String, PdfValue)>())?;
@@ -2378,12 +2393,20 @@ impl<'a> Cursor<'a> {
         }
     }
 
-    fn parse_name(&mut self) -> Result<String, PdfReadError> {
+    fn name_bytes(&mut self) -> Result<&'a [u8], PdfReadError> {
         if self.bytes.get(self.position) != Some(&b'/') {
             return Err(PdfReadError::Syntax);
         }
         self.position += 1;
-        let bytes = take_pdf_name(self.bytes, &mut self.position)?;
+        take_pdf_name(self.bytes, &mut self.position)
+    }
+
+    fn skip_name(&mut self) -> Result<(), PdfReadError> {
+        scan_pdf_name_bytes(self.name_bytes()?, |_| {})
+    }
+
+    fn parse_name(&mut self) -> Result<String, PdfReadError> {
+        let bytes = self.name_bytes()?;
         self.charge(bytes.len().min(MAX_PDF_IDENTITY_BYTES))?;
         let output = decode_pdf_name_bytes(bytes)?;
         if !self.exact {
@@ -2575,6 +2598,32 @@ fn parse_signed_i64(bytes: &[u8]) -> Result<i64, PdfReadError> {
 #[cfg(test)]
 mod retained_reader_tests {
     use super::*;
+
+    #[test]
+    fn discarded_names_validate_escapes_and_decoded_length() {
+        for resource in ["<< /Na#GGme /Value >>", "<< /Name /Val#00ue >>", "/Value#2"] {
+            let source = format!("<< /Resources {resource} >>");
+            let mut cursor = Cursor::new(source.as_bytes(), 0, PdfReaderLimits::default());
+            cursor.defer_page_resources = true;
+            assert!(matches!(cursor.object_value(), Err(PdfReadError::Syntax)));
+        }
+
+        for (name, expected) in [
+            ("#41".repeat(MAX_PDF_IDENTITY_BYTES), Ok(())),
+            (
+                "#41".repeat(MAX_PDF_IDENTITY_BYTES + 1),
+                Err(PdfReadError::Syntax),
+            ),
+            (
+                "A".repeat(MAX_PDF_IDENTITY_BYTES + 1),
+                Err(PdfReadError::Syntax),
+            ),
+        ] {
+            let name = format!("/{name}");
+            let mut cursor = Cursor::new(name.as_bytes(), 0, PdfReaderLimits::default());
+            assert_eq!(cursor.skip_name(), expected);
+        }
+    }
 
     #[test]
     fn page_discovery_keeps_only_the_resource_locator() {
