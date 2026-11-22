@@ -447,6 +447,25 @@ impl NativePdfSession {
         });
     }
 
+    pub fn acknowledge_existing_redaction_mark(
+        &mut self,
+        binding: NativeBinding,
+        request_id: u64,
+        page_id: u64,
+        rect: [i64; 4],
+    ) -> Result<bool, NativeSessionError> {
+        let Some(mark) = self
+            .redaction_marks
+            .iter()
+            .find(|mark| mark.page_id == page_id && mark.rect == rect)
+            .copied()
+        else {
+            return Ok(false);
+        };
+        self.add_redaction_mark(binding, request_id, mark)?;
+        Ok(true)
+    }
+
     pub fn add_redaction_mark(
         &mut self,
         binding: NativeBinding,
