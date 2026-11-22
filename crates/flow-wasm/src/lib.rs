@@ -2490,14 +2490,32 @@ impl NativeRegistryEntry {
                 .is_some_and(|status| {
                     status.identity.binding == binding && status.identity.request_id == request_id
                 });
-        if request_id <= current.consumed_request
-            || (!live_candidate_request
-                && self
-                    .session
-                    .last_redaction_mark()
-                    .is_some_and(|last| request_id <= last.request_id))
+        let invalid_request = NativeSessionError::InvalidRequest.code();
+        if request_id <= current.consumed_request {
+            return Err(invalid_request);
+        }
+        if !live_candidate_request
+            && self
+                .session
+                .last_redaction_mark()
+                .is_some_and(|last| request_id <= last.request_id)
         {
-            return Err(NativeSessionError::InvalidRequest.code());
+            // @contract: Only the exact retained cancellation permits stale status recovery.
+            let Status {
+                candidate: Some(candidate),
+            } = &action
+            else {
+                return Err(invalid_request);
+            };
+            let mut cancelled = NativeWireRedaction::new(
+                NativeRedactionActionKind::Cancel,
+                accepted_hash,
+                result.mark_count,
+            );
+            cancelled.candidate = Some(candidate.clone());
+            if !self.matches_live_redaction(binding, request_id, &cancelled) {
+                return Err(invalid_request);
+            }
         }
         match &action {
             Stage {} => {
