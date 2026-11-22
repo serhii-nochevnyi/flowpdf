@@ -300,54 +300,79 @@ fn core_refuses_replacement_when_recognition_workspace_is_exhausted() {
 
 #[test]
 fn core_replacement_shares_work_with_rewrite_and_exact_byte_projection() {
-    let bytes = fixture(CID_CONTENT, false, true, "", false);
+    let content = format!(
+        "{CID_CONTENT}\nBT /F1 12 Tf 20 200 Td <0001> Tj ET\nBT /F1 12 Tf 20 250 Td <0001> Tj ET"
+    );
+    let bytes = fixture(&content, false, true, "", false);
     let defaults = NativeEditLimits::default();
-    let open_at = |max_work| {
-        NativePdfSession::open_scoped(
+    let accept_note = |max_work| {
+        let mut session = NativePdfSession::open_scoped(
             &bytes,
             NativeEditLimits {
                 max_work,
                 ..defaults
             },
             [7; 16],
-        )
+        )?;
+        let snapshot = session.snapshot();
+        let origin_binding = snapshot.binding;
+        let note = NativeNoteCommand::Add {
+            page: snapshot.scene.pages[0].id,
+            rect: [60, 60, 80, 80],
+            contents: "Review note".into(),
+        };
+        let receipt = session.apply(origin_binding, 1, &note)?;
+        Ok::<_, NativeSessionError>((session, origin_binding, receipt))
     };
     let replace = |session: &mut NativePdfSession| {
         let snapshot = session.snapshot();
+        let islands = &snapshot.scene.text_pages[0].islands;
+        assert_eq!(islands.len(), 4);
         let command = NativeTextCommand::ReplaceText {
-            island: snapshot.scene.text_pages[0].islands[0].id,
+            island: islands[0].id,
             text: "ЇA".into(),
         };
-        session.apply_text(snapshot.binding, 1, &command)
+        session.apply_text(snapshot.binding, 2, &command)
     };
     let (mut low, mut high) = (500_000, defaults.max_work);
     while low < high {
         let mid = low + (high - low) / 2;
-        match replace(&mut open_at(mid).unwrap()) {
+        match accept_note(mid).and_then(|(mut session, _, _)| replace(&mut session)) {
             Ok(_) => high = mid,
             Err(NativeSessionError::Budget) => low = mid + 1,
             Err(error) => panic!("unexpected refusal at {mid} work units: {error:?}"),
         }
     }
 
-    let mut tight = open_at(low - 1).unwrap();
-    let binding = tight.snapshot().binding;
+    let (mut tight, origin_binding, note_receipt) = accept_note(low - 1).unwrap();
+    let before = tight.snapshot().clone();
+    let accepted_bytes = tight.output_bytes().to_vec();
     assert_eq!(replace(&mut tight), Err(NativeSessionError::Budget));
-    assert_eq!(tight.output_bytes(), bytes);
-    assert_eq!(tight.snapshot().binding, binding);
-    assert_eq!(tight.snapshot().consumed_request, 0);
-    assert_eq!(tight.lookup(binding, 1), Ok(NativeRequestLookup::Unseen));
+    assert_eq!(tight.output_bytes(), accepted_bytes);
+    assert_eq!(tight.origin_bytes(), bytes);
+    assert_eq!(tight.snapshot().scene, before.scene);
+    assert_eq!(tight.snapshot().binding, before.binding);
+    assert_eq!(tight.snapshot().output_hash, before.output_hash);
+    assert_eq!(tight.snapshot().consumed_request, before.consumed_request);
+    assert_eq!(
+        tight.lookup(before.binding, 2),
+        Ok(NativeRequestLookup::Unseen)
+    );
+    assert_eq!(
+        tight.lookup(origin_binding, 1),
+        Ok(NativeRequestLookup::Accepted(note_receipt))
+    );
 
-    let mut exact = open_at(low).unwrap();
+    let (mut exact, _, _) = accept_note(low).unwrap();
     let binding = exact.snapshot().binding;
     let receipt = replace(&mut exact).unwrap();
     let snapshot = exact.snapshot();
     let island = &snapshot.scene.text_pages[0].islands[0];
     assert_eq!(island.text, "ЇA");
-    assert_eq!(receipt.binding.revision, 1);
+    assert_eq!(receipt.binding.revision, 2);
     assert_eq!(receipt.text_island, Some(island.id));
     assert_eq!(
-        exact.lookup(binding, 1),
+        exact.lookup(binding, 2),
         Ok(NativeRequestLookup::Accepted(receipt))
     );
     assert_eq!(
