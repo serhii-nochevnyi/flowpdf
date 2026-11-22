@@ -587,6 +587,8 @@ test('redaction refusal preserves the verifier classification through bounded cl
     ['failed', 'none', 'fail', [1, 1]],
     ['failed', 'close', 'fail', [1, 1]],
     ['failed', 'cancel', 'fail', [1, 1]],
+    ['verify-refused', 'none', 'fail', [1, 1]],
+    ['verify-refused', 'close', 'fail', [1, 1]],
     ['publish-refused', 'none', 'fail', [1, 1]],
     ['inconclusive', 'none', 'unavailable', [0, 2]],
     ['inconclusive', 'close', 'unavailable', [0, 2]],
@@ -626,6 +628,9 @@ test('redaction refusal preserves the verifier classification through bounded cl
             return result({ candidate, markCount: stageCountMismatch ? markCount - 1 : markCount,
               verification: { status: 'pending' } })
           case 'verify':
+            if (verdict === 'verify-refused') {
+              return { status: 'failed', code: 'FLOW_PDF_NATIVE_BINDING_MISMATCH' }
+            }
             if (verdict === 'missing-verdict') {
               return { status: 'failed', code: 'FLOW_PDF_NATIVE_REDACTION_CANDIDATE_UNAVAILABLE' }
             }
