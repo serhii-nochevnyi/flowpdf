@@ -1621,7 +1621,19 @@ fn duplicate_with_widget_uses_cumulative_work() {
         let command = command("duplicatePage", 0, session.snapshot());
         session.apply_page(session.snapshot().binding, 1, &command)
     };
-    let work_fit = 1191;
+    let (mut low, mut high) = (1, NativeEditLimits::default().max_work);
+    while low < high {
+        let mid = low + (high - low) / 2;
+        match open(mid).and_then(|mut session| duplicate(&mut session)) {
+            Ok(_) => high = mid,
+            Err(
+                NativeSessionError::Budget
+                | NativeSessionError::Graph(NativeEditError::Reader(PdfReadError::TokenLimit)),
+            ) => low = mid + 1,
+            Err(error) => panic!("unexpected refusal at {mid} work units: {error:?}"),
+        }
+    }
+    let work_fit = low;
     let mut constrained = open(work_fit - 1).unwrap();
     let before = constrained.snapshot().clone();
     assert_eq!(duplicate(&mut constrained), Err(NativeSessionError::Budget));

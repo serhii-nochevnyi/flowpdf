@@ -275,11 +275,9 @@ fn page_widget_count(
     work: &mut usize,
 ) -> Result<usize, NativeEditError> {
     let items = annotation_refs(graph, page, work)?;
-    let cost_per_annotation = items.len() + MAX_FIELDS + graph.limits.max_nesting;
-    spend(work, items.len().saturating_mul(cost_per_annotation))?;
     items.iter().try_fold(0, |count, annot| {
         let annot = annot.as_reference().ok_or(Unsupported)?;
-        let is_widget = annotation_membership_metered(graph, page, annot, true, work)?.is_some();
+        let is_widget = annotation_membership(graph, page, annot, true, work)?.is_some();
         Ok(count + usize::from(is_widget))
     })
 }
@@ -902,21 +900,6 @@ pub(super) fn annotation_membership(
     page: Ref,
     annot: Ref,
     for_page_operation: bool,
-) -> Result<Option<Ref>, NativeEditError> {
-    annotation_membership_metered(
-        graph,
-        page,
-        annot,
-        for_page_operation,
-        &mut graph.remaining_work(),
-    )
-}
-
-fn annotation_membership_metered(
-    graph: &NativePdfGraph,
-    page: Ref,
-    annot: Ref,
-    for_page_operation: bool,
     work: &mut usize,
 ) -> Result<Option<Ref>, NativeEditError> {
     let field = annotation_profile(graph, page, annot)?;
@@ -952,6 +935,7 @@ fn annotation_membership_metered(
     let annots_array = exclusive_container(graph, page, annots)?
         .as_array()
         .ok_or(Unsupported)?;
+    spend(work, annots_array.len())?;
     if annots_array
         .iter()
         .filter(|entry| entry.as_reference() == Some(annot))
@@ -963,6 +947,7 @@ fn annotation_membership_metered(
     exclusive_array_member(graph, page, annots, annot, extra_owner)?;
     if let Some(field) = field {
         let (form, fields) = form.ok_or(Malformed)?;
+        spend(work, fields.len())?;
         if fields
             .iter()
             .filter(|entry| entry.as_reference() == Some(field))
@@ -1036,7 +1021,6 @@ fn copy_annotations(
     let mut work = budget;
     let values = reference_array(graph, slot, &mut work)?;
     let count = values.len();
-    spend(&mut work, count.checked_mul(count).ok_or(Budget)?)?;
     let scratch_bytes = count.checked_mul(size_of::<Ref>()).ok_or(Budget)?;
     let installed_bytes = indirect_array_slot_bytes(slot, count)?;
     let mut remaining = graph.remaining_retained();
@@ -1069,7 +1053,7 @@ fn copy_annotation_objects(
     for annot in original.iter().copied() {
         let budget = graph.remaining_work();
         let mut work = budget;
-        let field = annotation_membership_metered(graph, source, annot, true, &mut work)?;
+        let field = annotation_membership(graph, source, annot, true, &mut work)?;
         graph.charge_page_work(budget - work)?;
         graph.reserve_page_copy(annot)?;
         let mut copy = dict(graph, annot)?.clone();
@@ -1483,13 +1467,12 @@ fn deletion_preflight<'a>(
         let mut field_bytes = workspace.scope();
         let mut fields = BTreeSet::new();
         let annotations = annotation_refs(graph, page, work)?;
-        spend(work, annotations.len().saturating_mul(annotations.len()))?;
         for annot in annotations {
             let annot = annot.as_reference().ok_or(Unsupported)?;
             if !plan.remove(annot)? {
                 return Err(Unsupported);
             }
-            if let Some(field) = annotation_membership_metered(graph, page, annot, true, work)? {
+            if let Some(field) = annotation_membership(graph, page, annot, true, work)? {
                 field_bytes.insert(&mut fields, field).map_err(|_| Budget)?;
                 plan.remove(field)?;
             }
@@ -2111,7 +2094,7 @@ mod tests {
         let (mut graph, page, target) = open();
         let work = graph.remaining_work();
         assert_eq!(copy_annotations(&mut graph, page, target).unwrap().len(), 1);
-        let spent = 30;
+        let spent = 31;
         assert_eq!(work - graph.remaining_work(), spent);
         for short in [0, 1] {
             let (mut graph, page, target) = open();
