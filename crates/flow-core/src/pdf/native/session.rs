@@ -1092,21 +1092,23 @@ impl NativePdfSession {
             if binding.revision == 0 || rows.len() != scene.object_pages.len() {
                 return Ok(false);
             }
-            // @contract: Reopening the bytes can recover object capabilities omitted for workspace.
-            for (row, claim) in scene.object_pages.iter_mut().zip(rows) {
+            // @invariant: An accepted rewrite can exhaust work or workspace before a detached reopen does.
+            for ((row, claim), page) in scene.object_pages.iter_mut().zip(rows).zip(&scene.pages) {
                 if row == claim {
                     continue;
                 }
                 if row.page != claim.page
-                    || row.refusal.is_some()
                     || claim.refusal.is_some()
                     || claim.can_add
                     || !claim.objects.is_empty()
+                    || (row.refusal.is_some()
+                        && !objects::refusal_can_follow_budget_check(&graph, page))
                 {
                     return Ok(false);
                 }
                 row.can_add = false;
                 row.objects = Vec::new();
+                row.refusal = None;
             }
             scene =
                 NativePdfNoteScene::new(hash, scene.pages, scene.text_pages, scene.object_pages)?;
