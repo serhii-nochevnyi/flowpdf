@@ -153,22 +153,65 @@ fn stream(value: &PdfValue) -> Option<&PdfStream> {
     }
 }
 
-fn inherited_resources(graph: &NativePdfGraph, mut page: PdfObjectRef) -> Option<&Dict> {
+fn inherited_resources<'a>(
+    graph: &'a NativePdfGraph,
+    mut page: PdfObjectRef,
+    work: &mut usize,
+    exhaustion: &WorkExhaustion,
+) -> RecognitionResult<&'a Dict> {
+    use NativeTextRefusal::Font;
     for _ in 0..=graph.limits.max_nesting {
-        let dict = graph.objects.get(&page)?.as_dictionary()?;
-        if dict.contains_key("Resources") {
-            return entry(graph, dict, "Resources")?.as_dictionary();
+        exhaustion.charge(work, 1, Font)?;
+        let dict = graph
+            .objects
+            .get(&page)
+            .and_then(PdfValue::as_dictionary)
+            .ok_or(Font)?;
+        if let Some(resources) = dict.get("Resources") {
+            return graph
+                .resolve_metered(resources, work)
+                .map_err(|error| match error {
+                    NativeEditError::Budget => exhaustion.error(Font),
+                    _ => Font.into(),
+                })?
+                .as_dictionary()
+                .ok_or_else(|| Font.into());
         }
-        page = dict.get("Parent")?.as_reference()?;
+        page = dict
+            .get("Parent")
+            .and_then(PdfValue::as_reference)
+            .ok_or(Font)?;
     }
-    None
+    Err(Font.into())
+}
+
+fn contains_reference<'a>(
+    values: impl Iterator<Item = &'a PdfValue>,
+    target: Option<PdfObjectRef>,
+    work: &mut usize,
+) -> Result<bool, NativeEditError> {
+    for value in values {
+        spend(work, 1)?;
+        let found = match value {
+            PdfValue::Reference(reference) => target.is_none_or(|target| target == *reference),
+            PdfValue::Array(items) => contains_reference(items.iter(), target, work)?,
+            PdfValue::Dictionary(dict) => contains_reference(dict.values(), target, work)?,
+            _ => false,
+        };
+        if found {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn content<'a>(
     graph: &'a NativePdfGraph,
     page: &NativePdfNotePage,
-) -> TextResult<Option<Content<'a>>> {
-    use NativeTextRefusal::{Font, Layout, Ownership};
+    work: &mut usize,
+    exhaustion: &WorkExhaustion,
+) -> RecognitionResult<Option<Content<'a>>> {
+    use NativeTextRefusal::{Layout, Ownership};
     let dict = graph
         .objects
         .get(&page.object)
@@ -181,7 +224,7 @@ fn content<'a>(
         PdfValue::Array(values) if values.is_empty() => return Ok(None),
         PdfValue::Array(values) if values.len() == 1 => &values[0],
         PdfValue::Reference(_) => contents,
-        _ => return Err(Ownership),
+        _ => return Err(Ownership.into()),
     };
     let reference = operand.as_reference().ok_or(Ownership)?;
     let stream = graph
@@ -197,38 +240,36 @@ fn content<'a>(
         .get(&reference)
         .is_none_or(|owners| owners.len() != 1 || !owners.contains(&page.object))
     {
-        return Err(Ownership);
+        return Err(Ownership.into());
     }
-    fn references(value: &PdfValue, reference: PdfObjectRef) -> bool {
-        match value {
-            PdfValue::Reference(object) => *object == reference,
-            PdfValue::Array(items) => items.iter().any(|value| references(value, reference)),
-            PdfValue::Dictionary(dict) => dict.values().any(|value| references(value, reference)),
-            _ => false,
+    let ownership_budget = |_| exhaustion.error(Ownership);
+    let page_values = dict
+        .iter()
+        .filter(|(key, _)| *key != "Contents")
+        .map(|(_, value)| value);
+    let copy_on_write = contains_reference(
+        page_values.chain(graph.trailer.values()),
+        Some(reference),
+        work,
+    )
+    .map_err(ownership_budget)?;
+    if contains_reference(dict.get("Resources").into_iter(), Some(reference), work)
+        .map_err(ownership_budget)?
+    {
+        return Err(Ownership.into());
+    }
+    if stream.data.len() > MAX_CONTENT_BYTES || !local_stream(stream) {
+        return Err(Layout.into());
+    }
+    for (key, value) in &stream.dict {
+        if !matches!(key.as_str(), "Length" | "Filter" | "DecodeParms")
+            || contains_reference(std::iter::once(value), None, work)
+                .map_err(|_| exhaustion.error(Layout))?
+        {
+            return Err(Layout.into());
         }
     }
-    let copy_on_write = dict
-        .iter()
-        .any(|(key, value)| key != "Contents" && references(value, reference))
-        || graph
-            .trailer
-            .values()
-            .any(|value| references(value, reference));
-    if dict
-        .get("Resources")
-        .is_some_and(|value| references(value, reference))
-    {
-        return Err(Ownership);
-    }
-    if stream.data.len() > MAX_CONTENT_BYTES
-        || !local_stream(stream)
-        || stream.dict.iter().any(|(key, value)| {
-            !matches!(key.as_str(), "Length" | "Filter" | "DecodeParms") || has_reference(value)
-        })
-    {
-        return Err(Layout);
-    }
-    let resources = inherited_resources(graph, page.object).ok_or(Font)?;
+    let resources = inherited_resources(graph, page.object, work, exhaustion)?;
     Ok(Some(Content {
         reference,
         stream,
@@ -241,15 +282,6 @@ fn local_stream(stream: &PdfStream) -> bool {
     ["F", "FFilter", "FDecodeParms", "DecodeParms"]
         .into_iter()
         .all(|key| matches!(stream.dict.get(key), None | Some(PdfValue::Null)))
-}
-
-fn has_reference(value: &PdfValue) -> bool {
-    match value {
-        PdfValue::Reference(_) => true,
-        PdfValue::Array(items) => items.iter().any(has_reference),
-        PdfValue::Dictionary(dict) => dict.values().any(has_reference),
-        _ => false,
-    }
 }
 
 fn milli(raw: &[u8]) -> Option<i64> {
@@ -1243,10 +1275,14 @@ impl WorkExhaustion {
         amount: usize,
         refusal: NativeTextRefusal,
     ) -> RecognitionResult<()> {
-        spend(work, amount).map_err(|_| match self {
+        spend(work, amount).map_err(|_| self.error(refusal))
+    }
+
+    fn error(&self, refusal: NativeTextRefusal) -> NativeSessionError {
+        match self {
             Self::PageRefusal => refusal.into(),
             Self::BudgetError => Budget,
-        })
+        }
     }
 }
 
@@ -1321,7 +1357,8 @@ impl<'a, 'w> Recognition<'a, 'w> {
         memory: &mut Reservation<'_>,
     ) -> RecognitionResult<Option<RecognizedPage<'a, 'w>>> {
         use NativeTextRefusal::Layout;
-        let Some(content) = content(self.graph, page)? else {
+        let Some(content) = content(self.graph, page, &mut self.work, &self.work_exhaustion)?
+        else {
             return Ok(None);
         };
         self.work_exhaustion
@@ -1611,7 +1648,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn staging_preserves_budget_refusals_from_content_and_font_recognition() {
+    fn traversal_and_recognition_preserve_work_refusals() {
         let bytes = text_projection_fixture();
         let limits = super::super::NativeEditLimits::default();
         let session = super::super::NativePdfSession::open_scoped(&bytes, limits, [7; 16]).unwrap();
@@ -1622,12 +1659,44 @@ mod tests {
             text: "AA".into(),
         };
         let mut graph = NativePdfGraph::open(&bytes, limits).unwrap();
-        let content_work = content(&graph, page).unwrap().unwrap().stream.data.len();
+        let mut inheritance_work = 3;
+        inherited_resources(
+            &graph,
+            page.object,
+            &mut inheritance_work,
+            &WorkExhaustion::PageRefusal,
+        )
+        .unwrap();
+        assert_eq!(inheritance_work, 0);
+
+        let mut work = graph.remaining_work();
+        let content = content(&graph, page, &mut work, &WorkExhaustion::PageRefusal)
+            .unwrap()
+            .unwrap();
+        let traversal_work = graph.remaining_work() - work;
+        let content_work = traversal_work + content.stream.data.len();
         let workspace = Workspace::new(graph.remaining_retained());
-        for work in [content_work + 250_000 - 1, content_work - 1] {
+        for (work, refusal) in [
+            (content_work + 250_000 - 1, NativeTextRefusal::Font),
+            (content_work - 1, NativeTextRefusal::Layout),
+            (traversal_work - 1, NativeTextRefusal::Font),
+            (0, NativeTextRefusal::Ownership),
+        ] {
             graph
                 .charge_page_work(graph.remaining_work() - work)
                 .unwrap();
+            let mut retained = graph.remaining_retained();
+            let projected = project(
+                &graph,
+                std::slice::from_ref(page),
+                snapshot.output_hash,
+                snapshot.binding,
+                &mut retained,
+                WorkExhaustion::PageRefusal,
+            )
+            .unwrap();
+            assert_eq!(projected[0].refusal, Some(refusal));
+            assert!(projected[0].islands.is_empty());
             assert_eq!(
                 stage(
                     &mut graph,
@@ -1727,13 +1796,14 @@ mod tests {
             .collect::<String>();
         let objects = [
             b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
-            b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
-            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>".to_vec(),
+            b"<< /Type /Pages /Kids [3 0 R] /Count 1 /Resources 9 0 R >>".to_vec(),
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Contents 4 0 R >>".to_vec(),
             stream("", content.as_bytes()),
             b"<< /Type /Font /Subtype /TrueType /BaseFont /NotoSans-Regular /Encoding /WinAnsiEncoding /FirstChar 65 /LastChar 65 /Widths [639] /FontDescriptor 6 0 R /ToUnicode 7 0 R >>".to_vec(),
             b"<< /Type /FontDescriptor /FontName /NotoSans-Regular /Flags 32 /FontFile2 8 0 R >>".to_vec(),
             stream("", b"/CIDInit /ProcSet findresource begin 12 dict begin begincmap\n/CMapType 2 def\n/CMapName /Example def\n1 begincodespacerange\n<00> <FF>\nendcodespacerange\n1 beginbfchar\n<41> <0041>\nendbfchar\nendcmap CMapName currentdict /CMap defineresource pop\nend end"),
             stream(&format!("/Length1 {}", font.len()), font),
+            b"<< /Font << /F1 5 0 R >> >>".to_vec(),
         ];
         let mut pdf = b"%PDF-1.7\n".to_vec();
         let offsets = objects

@@ -130,7 +130,8 @@ fn jpeg_pdf(filter: &str, data: &[u8]) -> Vec<u8> {
 
 #[test]
 fn ordinary_rgb_scan_readback() {
-    let samples = [208, 140, 80].repeat(1_600 * 1_200);
+    let (width, height) = (1440, 1080);
+    let samples = [208, 140, 80].repeat(width * height);
     let source = pdf(
         vec![
             b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
@@ -138,7 +139,7 @@ fn ordinary_rgb_scan_readback() {
             b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] /Contents 4 0 R /Resources << /XObject << /Photo 5 0 R >> >> >>".to_vec(),
             stream("", b"q 80 0 0 60 10 20 cm /Photo Do Q"),
             flate(
-                "/Type /XObject /Subtype /Image /Width 1600 /Height 1200 /ColorSpace /DeviceRGB /BitsPerComponent 8",
+                &format!("/Type /XObject /Subtype /Image /Width {width} /Height {height} /ColorSpace /DeviceRGB /BitsPerComponent 8"),
                 &samples,
             ),
         ],
