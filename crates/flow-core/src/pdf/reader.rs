@@ -873,13 +873,13 @@ impl PdfReader {
         self.read_object(reference, 0, ObjectRead::Retained(retained, decoded, work))
     }
 
-    pub(super) fn scene_font_object(
+    pub(super) fn scene_object(
         &self,
         reference: PdfObjectRef,
+        depth: usize,
         workspace: usize,
     ) -> Result<(PdfValue, usize), PdfReadError> {
-        // @invariant: Font scene reads keep only the decoded stream representation.
-        self.read_object(reference, 0, ObjectRead::Scene(workspace))
+        self.read_object(reference, depth, ObjectRead::Scene(workspace))
             .map(|(value, bytes, _)| (value, bytes))
             .map_err(|error| match error {
                 PdfReadError::InputSizeLimit => PdfReadError::StreamLimit,
@@ -1006,6 +1006,7 @@ impl PdfReader {
             if !cursor.exact {
                 cursor.require_object_keyword(b"endstream")?;
             }
+            // @invariant: Scene streams own one payload; DCT data stays encoded for image output.
             let encoded = if cursor.scene {
                 Vec::new()
             } else {

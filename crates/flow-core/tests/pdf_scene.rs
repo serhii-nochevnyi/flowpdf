@@ -112,7 +112,7 @@ fn scene_preserves_text_glyphs_paths_clips_images_forms_links_and_provenance() {
 }
 
 #[test]
-fn text_only_scene_window_has_an_exact_serialized_byte_limit() {
+fn text_only_scene_window_preserves_output_with_live_stream_workspace() {
     let bytes = pdf(vec![
         (1, b"<< /Type /Catalog /Pages 2 0 R >>".to_vec()),
         (2, b"<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 /MediaBox [0 0 100 100] /Resources << /Font << /F1 6 0 R >> >> >>".to_vec()),
@@ -147,7 +147,7 @@ fn text_only_scene_window_has_an_exact_serialized_byte_limit() {
     let serialized = serde_json::to_vec(&expected).unwrap();
     assert_eq!(result_hash, blake3::hash(&serialized).to_hex().as_str());
     expected.result_hash = result_hash;
-    assert_eq!(read(serialized.len()).unwrap(), expected);
+    assert_eq!(read(serialized.len() + 4096).unwrap(), expected);
     assert!(matches!(
         read(serialized.len() - 1),
         Err(PdfReadError::StreamLimit)
@@ -426,7 +426,7 @@ fn ordinary_image_payloads_spend_the_remaining_scene_bytes() {
         )
     };
     for (page_index, invocation_depth) in [(0, 1), (1, 3)] {
-        let single = read(page_index, 1, 4096).unwrap();
+        let single = read(page_index, 1, 16 * 1024).unwrap();
         assert!(matches!(
             single.pages[0].elements.last(),
             Some(PdfSceneElement::Image { value })
@@ -443,7 +443,8 @@ fn ordinary_image_payloads_spend_the_remaining_scene_bytes() {
     let serialized = serde_json::to_vec(&expected).unwrap();
     assert_eq!(result_hash, blake3::hash(&serialized).to_hex().as_str());
     expected.result_hash = result_hash;
-    assert_eq!(read(0, 2, serialized.len()).unwrap(), expected);
+    assert_eq!(read(0, 2, serialized.len()), Err(PdfReadError::StreamLimit));
+    assert_eq!(read(0, 2, 16 * 1024).unwrap(), expected);
 }
 
 #[test]
@@ -612,6 +613,61 @@ fn repeated_nested_forms_spend_the_page_token_limit_including_array_entries() {
 }
 
 #[test]
+fn nested_forms_charge_live_streams_and_indirect_resources_together() {
+    let padded =
+        |content, kibibytes: usize| format!("%{}\n{content}\n", " ".repeat(kibibytes * 1024));
+    let document = |property_bytes| {
+        let resources = format!(
+            "<< /XObject 9 0 R /Properties << /MC0 << /ActualText ({}) >> >> >>",
+            "a".repeat(property_bytes)
+        );
+        pdf(vec![
+            (1, b"<< /Type /Catalog /Pages 2 0 R >>".to_vec()),
+            (2, b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec()),
+            (3, b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] /Resources << /XObject << /Outer 6 0 R >> >> /Contents [4 0 R 5 0 R] >>".to_vec()),
+            stream(4, "", padded("/Outer Do", 12).as_bytes()),
+            stream(5, "", padded("20 20 4 4 re f", 40).as_bytes()),
+            stream(6, "/Type /XObject /Subtype /Form /BBox [0 0 100 100] /Resources 8 0 R", padded("q /Inner Do Q", 12).as_bytes()),
+            stream(7, "/Type /XObject /Subtype /Form /BBox [0 0 100 100]", padded("10 10 4 4 re f", 12).as_bytes()),
+            (8, resources.into_bytes()),
+            (9, b"<< /Inner 7 0 R >>".to_vec()),
+        ])
+    };
+    let read = |bytes: &[u8], max_scene_bytes| {
+        let reader = open_pdf(
+            bytes,
+            PdfReaderLimits {
+                max_scene_bytes,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        read_pdf_scene(&reader, &PdfSceneRequest::default())
+    };
+    let constrained = 50 * 1024;
+    assert!(read(&document(0), constrained).is_ok());
+
+    let bytes = document(7 * 1024);
+    assert_eq!(read(&bytes, constrained), Err(PdfReadError::StreamLimit));
+    let expected = read(&bytes, PdfReaderLimits::default().max_scene_bytes).unwrap();
+    assert_eq!(read(&bytes, 64 * 1024).unwrap(), expected);
+    let page = &expected.pages[0];
+    assert!(!page.partial);
+    assert!(matches!(
+        page.elements.as_slice(),
+        [PdfSceneElement::Annotation { value: outer }, PdfSceneElement::Annotation { value: inner },
+         PdfSceneElement::Path { value: nested }, PdfSceneElement::Path { value: following }]
+        if outer.provenance.object_ref.object_number == 6
+            && inner.provenance.object_ref.object_number == 7
+            && nested.provenance.object_ref.object_number == 7
+            && nested.provenance.invocation_path ==
+                [0, outer.provenance.stream_offset, inner.provenance.stream_offset]
+            && following.provenance.object_ref.object_number == 5
+            && following.provenance.invocation_path == [1]
+    ));
+}
+
+#[test]
 fn form_graphics_saves_count_toward_the_enclosing_stack_limit() {
     let page = ["q q\n", "/Outer Do Q Q 10 10 5 5 re f"];
     let forms = ["1 0 0 1 20 0 cm /Inner Do", "q Q 15 20 5 5 re f"];
@@ -652,6 +708,47 @@ fn form_graphics_saves_count_toward_the_enclosing_stack_limit() {
 }
 
 #[test]
+fn graphics_state_allowance_covers_stack_slots_and_restored_paths() {
+    let read = |first, second, max_scene_bytes| {
+        scene_with_nested_forms(
+            [first, second],
+            ["", ""],
+            PdfReaderLimits {
+                max_scene_bytes,
+                ..Default::default()
+            },
+        )
+    };
+    let saves = format!("{}{}\n", "q ".repeat(48), "Q ".repeat(48));
+    assert_eq!(read(&saves, "", 8 * 1024), Err(PdfReadError::StreamLimit));
+    assert!(read(&saves, "", 96 * 1024).is_ok());
+
+    let path = "10 10 5 5 re ".repeat(16);
+    let restored = format!("{path}q Q\n");
+    let discarded = format!("q {path}Q\n");
+    let following = format!("%{}\nf", " ".repeat(26 * 1024));
+    let expected = read(
+        &restored,
+        &following,
+        PdfReaderLimits::default().max_scene_bytes,
+    )
+    .unwrap();
+    assert!(matches!(
+        expected.pages[0].elements.as_slice(),
+        [PdfSceneElement::Path { value }] if value.commands.len() == 80
+            && value.provenance.object_ref.object_number == 5
+            && value.provenance.invocation_path == [1]
+    ));
+    assert_eq!(read(&restored, &following, 48 * 1024).unwrap(), expected);
+    assert_eq!(
+        read(&restored, &following, 32 * 1024),
+        Err(PdfReadError::StreamLimit)
+    );
+    assert!(read(&restored, "", 32 * 1024).is_ok());
+    assert!(read(&discarded, &following, 32 * 1024).is_ok());
+}
+
+#[test]
 fn nested_forms_share_and_release_saved_path_and_clip_bytes() {
     let path = "10 10 5 5 re ".repeat(8);
     let first = format!("{path}W q\n");
@@ -670,7 +767,7 @@ fn nested_forms_share_and_release_saved_path_and_clip_bytes() {
         )
     };
     let expected = read(&first, PdfReaderLimits::default().max_scene_bytes).unwrap();
-    let admitted = read(&first, 48 * 1024).unwrap();
+    let admitted = read(&first, 64 * 1024).unwrap();
     assert_eq!(admitted, expected);
     let elements = &admitted.pages[0].elements;
     let paths: Vec<_> = elements
@@ -693,9 +790,10 @@ fn nested_forms_share_and_release_saved_path_and_clip_bytes() {
             && value.provenance.invocation_path == [0]
             && value.provenance.operator.as_deref() == Some("W")
     ));
-    assert_eq!(read(&first, 38 * 1024), Err(PdfReadError::StreamLimit));
+    let constrained = 52 * 1024;
+    assert_eq!(read(&first, constrained), Err(PdfReadError::StreamLimit));
     let without_pending_clip = format!("{path}q\n");
-    assert!(read(&without_pending_clip, 38 * 1024).is_ok());
+    assert!(read(&without_pending_clip, constrained).is_ok());
 }
 
 #[test]
@@ -1001,7 +1099,7 @@ fn nested_form_font_aliases_share_maps_and_the_scene_allowance() {
 
     let shared = document(8, b"");
     let default_limit = PdfReaderLimits::default().max_scene_bytes;
-    let constrained = 76 * 1024;
+    let constrained = 88 * 1024;
     let scene = read(&shared, constrained).unwrap();
     assert_eq!(scene, read(&shared, default_limit).unwrap());
     assert_eq!(scene.pages.len(), 2);
