@@ -155,6 +155,63 @@ fn imported_checkbox_uses_parent_value_and_keeps_its_on_state_and_default() {
 }
 
 #[test]
+fn checkbox_add_refuses_atomically_below_the_widget_work_boundary() {
+    let mut objects = imported_field_objects("[10 10 30 30]", "", "Off", "Btn", "", "");
+    objects[4] = b"<< /Fields 10 0 R >>".to_vec();
+    objects.push(b"[6 0 R]".to_vec());
+    let source = build_pdf(&objects);
+    let limits = NativeEditLimits::default();
+    let open = |max_work| {
+        NativePdfSession::open_scoped(&source, NativeEditLimits { max_work, ..limits }, [7; 16])
+    };
+    let command = NativeFieldCommand::AddCheckboxField {
+        page: 0,
+        rect: [40, 40, 60, 60],
+        name: "approval".into(),
+        checked: true,
+    };
+    let add = |pdf: &mut NativePdfSession| pdf.apply_field(pdf.snapshot().binding, 1, &command);
+    let (mut low, mut high) = (1, limits.max_work);
+    while low < high {
+        let mid = low + (high - low) / 2;
+        match open(mid).and_then(|mut pdf| add(&mut pdf)) {
+            Ok(_) => high = mid,
+            Err(
+                NativeSessionError::Budget
+                | NativeSessionError::Graph(NativeEditError::Reader(PdfReadError::TokenLimit)),
+            ) => low = mid + 1,
+            Err(error) => panic!("unexpected refusal at {mid} work units: {error:?}"),
+        }
+    }
+
+    let mut constrained = open(low - 1).unwrap();
+    let accepted = constrained.snapshot().clone();
+    assert_eq!(add(&mut constrained), Err(NativeSessionError::Budget));
+    assert_eq!(constrained.output_bytes(), source);
+    assert_eq!(constrained.snapshot().binding, accepted.binding);
+    assert_eq!(constrained.snapshot().output_hash, accepted.output_hash);
+    assert_eq!(constrained.snapshot().fields, accepted.fields);
+    assert_eq!(
+        constrained.snapshot().consumed_request,
+        accepted.consumed_request
+    );
+    assert_eq!(
+        constrained.lookup(accepted.binding, 1),
+        Ok(NativeRequestLookup::Unseen)
+    );
+
+    let mut fitting = open(low).unwrap();
+    let binding = fitting.snapshot().binding;
+    let receipt = add(&mut fitting).unwrap();
+    assert_eq!(receipt.binding.revision, binding.revision + 1);
+    assert_eq!(
+        fitting.lookup(binding, 1),
+        Ok(NativeRequestLookup::Accepted(receipt))
+    );
+    assert_saved_value(fitting.output_bytes(), "approval", "Btn", "Yes");
+}
+
+#[test]
 fn passive_checkbox_state_names_survive_reopen_and_note_rewrite() {
     for (on, kids) in [
         ("Launch", Some("[7 0 R]")),
