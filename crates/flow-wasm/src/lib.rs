@@ -2484,23 +2484,22 @@ impl NativeRegistryEntry {
             result.mark_count = self.session.redaction_marks().len();
             return Ok(result);
         }
-        let live_candidate_request =
-            self.session
-                .redaction_candidate_status()
-                .is_some_and(|status| {
-                    status.identity.binding == binding && status.identity.request_id == request_id
-                });
+        let live_candidate = self.session.redaction_candidate_status();
+        let live_candidate_request = live_candidate.is_some_and(|status| {
+            status.identity.binding == binding && status.identity.request_id == request_id
+        });
         let invalid_request = NativeSessionError::InvalidRequest.code();
         if request_id <= current.consumed_request {
             return Err(invalid_request);
         }
-        if !live_candidate_request
+        let stale_mark_request = !live_candidate_request
             && self
                 .session
                 .last_redaction_mark()
-                .is_some_and(|last| request_id <= last.request_id)
-        {
-            // @contract: Only the exact retained cancellation permits stale status recovery.
+                .is_some_and(|last| request_id <= last.request_id);
+        let candidate_bound_status = matches!(&action, Status { candidate: Some(_) });
+        if stale_mark_request || (live_candidate.is_none() && candidate_bound_status) {
+            // @contract: Bound terminal status requires the exact retained cancellation.
             let Status {
                 candidate: Some(candidate),
             } = &action
@@ -2534,7 +2533,7 @@ impl NativeRegistryEntry {
                 self.last_empty_status = None;
             }
             Status { candidate } => {
-                if self.session.redaction_candidate_status().is_some() {
+                if live_candidate.is_some() {
                     result.set_candidate(self.bound_candidate(
                         binding,
                         request_id,
