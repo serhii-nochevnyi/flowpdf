@@ -1906,6 +1906,8 @@ fn object_work_refusal_preserves_the_accepted_document() {
     assert_eq!(session.output_bytes(), source);
     assert_eq!(session.origin_bytes(), source);
     assert_eq!(session.snapshot().binding, before.binding);
+    assert_eq!(session.snapshot().output_hash, before.output_hash);
+    assert_eq!(session.snapshot().scene, before.scene);
     assert_eq!(session.snapshot().consumed_request, before.consumed_request);
     assert_eq!(
         session.lookup(before.binding, 1),
