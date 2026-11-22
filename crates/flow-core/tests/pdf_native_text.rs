@@ -1,6 +1,6 @@
 use flow_core::pdf::native::{
-    NativeEditLimits, NativePdfSession, NativeRequestLookup, NativeSessionError, NativeTextCommand,
-    NativeTextRefusal,
+    NativeEditLimits, NativeNoteCommand, NativePdfSession, NativeRequestLookup, NativeSessionError,
+    NativeTextCommand, NativeTextRefusal,
 };
 use flow_core::pdf::{PdfReaderLimits, PdfSceneElement, PdfSceneRequest, open_pdf, read_pdf_scene};
 
@@ -31,6 +31,26 @@ fn build_fixture(
     private_alias: bool,
     font_alias: &str,
 ) -> Vec<u8> {
+    write_fixture(fixture_objects(
+        content,
+        simple,
+        embedded,
+        extra_mapping,
+        shared,
+        private_alias,
+        font_alias,
+    ))
+}
+
+fn fixture_objects(
+    content: &str,
+    simple: bool,
+    embedded: bool,
+    extra_mapping: &str,
+    shared: bool,
+    private_alias: bool,
+    font_alias: &str,
+) -> Vec<Vec<u8>> {
     fn stream(dict: &str, bytes: &[u8]) -> Vec<u8> {
         let mut object = format!("<< /Length {} {dict} >>\nstream\n", bytes.len()).into_bytes();
         object.extend_from_slice(bytes);
@@ -80,6 +100,10 @@ fn build_fixture(
     if shared {
         objects.push(make_page("4 0 R"));
     }
+    objects
+}
+
+fn write_fixture(objects: Vec<Vec<u8>>) -> Vec<u8> {
     let mut pdf = b"%PDF-1.7\n".to_vec();
     let mut offsets = Vec::new();
     for (index, object) in objects.iter().enumerate() {
@@ -329,6 +353,98 @@ fn core_replacement_shares_work_with_rewrite_and_exact_byte_projection() {
     assert_eq!(
         NativePdfSession::verify_text_projection(
             exact.output_bytes(),
+            snapshot.limits,
+            snapshot.binding,
+            &snapshot.scene.text_pages,
+        ),
+        Ok(true)
+    );
+}
+
+#[test]
+fn inherited_text_ownership_work_shares_the_rewrite_budget() {
+    let source = |private_data: &str| {
+        let mut objects = fixture_objects(CID_CONTENT, false, true, "", false, false, "/F1");
+        objects[1] = b"<< /Type /Pages /Kids [3 0 R] /Count 1 /Resources 11 0 R >>".to_vec();
+        objects[2] = format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /PrivateData {private_data} >>").into_bytes();
+        objects.push(b"<< /Font << /F1 5 0 R >> >>".to_vec());
+        write_fixture(objects)
+    };
+    let early = source("[4 0 R << /Values [1 2 3] >>]");
+    let late = source("[<< /Values [1 2 3] >> 4 0 R]");
+    let defaults = NativeEditLimits::default();
+    let accept_note = |bytes: &[u8], max_work| {
+        let limits = NativeEditLimits {
+            max_work,
+            ..defaults
+        };
+        let mut session = NativePdfSession::open_scoped(bytes, limits, [7; 16])?;
+        let snapshot = session.snapshot();
+        let origin_binding = snapshot.binding;
+        let note = NativeNoteCommand::Add {
+            page: snapshot.scene.pages[0].id,
+            rect: [60, 60, 80, 80],
+            contents: "Review note".into(),
+        };
+        let receipt = session.apply(origin_binding, 1, &note)?;
+        Ok::<_, NativeSessionError>((session, origin_binding, receipt))
+    };
+    let replace = |session: &mut NativePdfSession| {
+        let snapshot = session.snapshot();
+        let island = &snapshot.scene.text_pages[0].islands[0];
+        assert_eq!(island.text, "ЇAA");
+        let command = NativeTextCommand::ReplaceText {
+            island: island.id,
+            text: "ЇA".into(),
+        };
+        session.apply_text(snapshot.binding, 2, &command)
+    };
+
+    let (mut low, mut high) = (500_000, defaults.max_work);
+    while low < high {
+        let mid = low + (high - low) / 2;
+        let (mut session, _, _) = accept_note(&early, mid).unwrap();
+        match replace(&mut session) {
+            Ok(_) => high = mid,
+            Err(NativeSessionError::Budget) => low = mid + 1,
+            Err(error) => panic!("unexpected refusal at {mid} work units: {error:?}"),
+        }
+    }
+    let (mut exact, _, _) = accept_note(&early, low).unwrap();
+    replace(&mut exact).unwrap();
+
+    let (mut tight, origin_binding, note_receipt) = accept_note(&late, low).unwrap();
+    let before = tight.snapshot().clone();
+    let accepted_bytes = tight.output_bytes().to_vec();
+    assert_eq!(replace(&mut tight), Err(NativeSessionError::Budget));
+    assert_eq!(tight.output_bytes(), accepted_bytes);
+    assert_eq!(tight.origin_bytes(), late);
+    assert_eq!(tight.snapshot().scene, before.scene);
+    assert_eq!(tight.snapshot().binding, before.binding);
+    assert_eq!(tight.snapshot().output_hash, before.output_hash);
+    assert_eq!(tight.snapshot().consumed_request, before.consumed_request);
+    assert_eq!(
+        tight.lookup(before.binding, 2),
+        Ok(NativeRequestLookup::Unseen)
+    );
+    assert_eq!(
+        tight.lookup(origin_binding, 1),
+        Ok(NativeRequestLookup::Accepted(note_receipt))
+    );
+
+    let (mut roomy, _, _) = accept_note(&late, defaults.max_work).unwrap();
+    replace(&mut roomy).unwrap();
+    let snapshot = roomy.snapshot();
+    assert_eq!(snapshot.scene.text_pages[0].islands[0].text, "ЇA");
+    assert!(
+        roomy
+            .output_bytes()
+            .windows(CID_CONTENT.len())
+            .any(|bytes| bytes == CID_CONTENT.as_bytes())
+    );
+    assert_eq!(
+        NativePdfSession::verify_text_projection(
+            roomy.output_bytes(),
             snapshot.limits,
             snapshot.binding,
             &snapshot.scene.text_pages,
