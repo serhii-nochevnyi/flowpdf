@@ -1092,7 +1092,7 @@ impl NativePdfSession {
             if binding.revision == 0 || rows.len() != scene.object_pages.len() {
                 return Ok(false);
             }
-            // @contract: Reopening the bytes can recover object capabilities omitted for workspace.
+            // @invariant: An accepted rewrite can exhaust work or workspace before a detached reopen does.
             for (row, claim) in scene.object_pages.iter_mut().zip(rows) {
                 if row == claim {
                     continue;
