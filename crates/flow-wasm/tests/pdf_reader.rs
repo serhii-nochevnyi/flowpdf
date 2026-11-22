@@ -65,6 +65,35 @@ fn reader_boundary_returns_verified_scene_window() {
 }
 
 #[test]
+fn reader_boundary_accepts_original_custom_limit_fields() {
+    let request = json!({
+        "protocolVersion": 1,
+        "requestId": "reader-boundary-original-limits",
+        "bytesHex": hex(&fixture_pdf()),
+        "firstPage": 0,
+        "pageCount": 1,
+        "limits": {
+            "maxInputBytes": 1048576,
+            "maxObjects": 128,
+            "maxPages": 4,
+            "maxNesting": 8,
+            "maxStringBytes": 4096,
+            "maxArrayItems": 128,
+            "maxDictionaryEntries": 128,
+            "maxStreamBytes": 32768,
+            "maxDecodedStreamBytes": 32768,
+            "maxContentTokens": 1000,
+            "maxSceneElements": 128,
+            "maxImagePixels": 4096,
+            "maxFormDepth": 4
+        }
+    });
+    let serialized = flow_wasm::read_pdf(serde_json::to_string(&request).unwrap());
+    assert_eq!(response(&serialized)["ok"], true);
+    assert!(flow_wasm::verify_pdf_reader_response(serialized));
+}
+
+#[test]
 fn reader_boundary_rejects_unknown_fields_and_invalid_hex() {
     let bytes = fixture_pdf();
     let unknown = json!({

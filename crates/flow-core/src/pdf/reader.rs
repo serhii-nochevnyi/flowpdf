@@ -23,6 +23,10 @@ pub const PDF_READER_SCHEMA_VERSION: u32 = 1;
 const MAX_PDF_VERSION: &[u8] = b"1.7";
 const MAX_PDF_IDENTITY_BYTES: usize = 128;
 
+const fn default_scene_bytes() -> usize {
+    16 * 1024 * 1024
+}
+
 /// Limits applied to one request-local PDF reader.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -38,6 +42,7 @@ pub struct PdfReaderLimits {
     pub max_decoded_stream_bytes: usize,
     pub max_content_tokens: usize,
     pub max_scene_elements: usize,
+    #[serde(default = "default_scene_bytes")]
     pub max_scene_bytes: usize,
     pub max_image_pixels: u64,
     pub max_form_depth: usize,
@@ -57,7 +62,7 @@ impl Default for PdfReaderLimits {
             max_decoded_stream_bytes: 16 * 1024 * 1024,
             max_content_tokens: 1_000_000,
             max_scene_elements: 250_000,
-            max_scene_bytes: 16 * 1024 * 1024,
+            max_scene_bytes: default_scene_bytes(),
             max_image_pixels: 64 * 1024 * 1024,
             max_form_depth: 16,
         }
