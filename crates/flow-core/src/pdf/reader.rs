@@ -681,6 +681,12 @@ struct PageBox {
     edges: [f64; 4],
 }
 
+#[derive(Debug, Clone, Copy)]
+pub(super) enum PageResources {
+    Direct(PdfObjectRef),
+    Indirect(PdfObjectRef, usize),
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct PdfPageRecord {
     pub object_ref: PdfObjectRef,
@@ -688,7 +694,7 @@ pub(crate) struct PdfPageRecord {
     pub crop_box: Option<LayoutRect>,
     pub(super) media_edges: [f64; 4],
     pub(super) crop_edges: Option<[f64; 4]>,
-    pub resources: Option<PdfValue>,
+    pub(super) resources: Option<PageResources>,
     pub contents: Vec<PdfObjectRef>,
     pub annotations: Vec<PdfObjectRef>,
 }
@@ -1111,7 +1117,7 @@ impl PdfReader {
         &self,
         reference: PdfObjectRef,
         inherited_boxes: (Option<PageBox>, Option<PageBox>),
-        inherited_resources: Option<PdfValue>,
+        inherited_resources: Option<PageResources>,
         depth: usize,
         active: &mut BTreeSet<PdfObjectRef>,
         pages: &mut Vec<PdfPageRecord>,
@@ -1142,13 +1148,15 @@ impl PdfReader {
             .filter(|value| !matches!(value, PdfValue::Null))
             .map(|value| parse_page_box(&value, true))
             .transpose()?;
-        let resources = dictionary
-            .get("Resources")
-            .map(|value| self.resolve(value, depth + 1))
-            .transpose()?;
+        let resources = match dictionary.get("Resources") {
+            Some(PdfValue::Reference(resource)) => {
+                Some(PageResources::Indirect(*resource, depth + 2))
+            }
+            Some(_) => Some(PageResources::Direct(reference)),
+            None => inherited_resources,
+        };
         let media_box = media_box.or(inherited_media_box);
         let crop_box = crop_box.or(inherited_crop_box);
-        let resources = resources.or(inherited_resources);
         match type_name {
             "Pages" => {
                 let kids = dictionary
@@ -1166,7 +1174,7 @@ impl PdfReader {
                     self.collect_pages(
                         kid,
                         (media_box, crop_box),
-                        resources.clone(),
+                        resources,
                         depth + 1,
                         active,
                         pages,

@@ -15,10 +15,11 @@ use serde::{Deserialize, Serialize};
 use crate::layout::{LayoutRect, LayoutUnit};
 
 use super::reader::{
-    PdfObjectRef, PdfPageRecord, PdfReadDiagnostic, PdfReadDiagnosticCode, PdfReadError,
-    PdfReadReport, PdfReader, PdfReaderLimits, PdfStream, PdfValue, WIDGET_LABEL_ENTRY_BYTES,
-    WidgetLabelLimits, decode_pdf_text_string, map_widget_label, read_scene_name,
-    report_active_content, resolve_annotation_value, scene_name_label, single_filter,
+    PageResources, PdfObjectRef, PdfPageRecord, PdfReadDiagnostic, PdfReadDiagnosticCode,
+    PdfReadError, PdfReadReport, PdfReader, PdfReaderLimits, PdfStream, PdfValue,
+    WIDGET_LABEL_ENTRY_BYTES, WidgetLabelLimits, decode_pdf_text_string, map_widget_label,
+    read_scene_name, report_active_content, resolve_annotation_value, scene_name_label,
+    single_filter,
 };
 
 use super::native::{NativeNoteId, NativePageGeometry, NativePageId, NativeTextPage};
@@ -872,6 +873,32 @@ impl<'a> SceneBuilder<'a> {
             self.state.paint_clip = self.state.paint_clip.intersect(PaintBounds(crop_edges));
         }
         self.inspect_annotations()?;
+        let resource_locator = self
+            .page
+            .resources
+            .filter(|_| !self.page.contents.is_empty());
+        let resource_owner = match resource_locator {
+            Some(PageResources::Direct(owner)) => Some(self.reader.scene_object(
+                owner,
+                0,
+                self.budget.remaining_scene_bytes,
+            )?),
+            Some(PageResources::Indirect(reference, depth)) => Some(self.reader.scene_object(
+                reference,
+                depth,
+                self.budget.remaining_scene_bytes,
+            )?),
+            None => None,
+        };
+        let resource_bytes = resource_owner.as_ref().map_or(0, |(_, bytes)| *bytes);
+        self.budget.charge(resource_bytes)?;
+        let resources = resource_owner.as_ref().and_then(|(owner, _)| {
+            if matches!(resource_locator, Some(PageResources::Direct(_))) {
+                owner.as_dictionary()?.get("Resources")
+            } else {
+                Some(owner)
+            }
+        });
         let mut previous = None::<(PdfObjectRef, u8, bool)>;
         let mut unverified_boundary = None;
         for (index, content_ref) in self.page.contents.iter().enumerate() {
@@ -901,7 +928,7 @@ impl<'a> SceneBuilder<'a> {
                         &stream,
                         *content_ref,
                         0,
-                        self.page.resources.as_ref(),
+                        resources,
                         index + 1 < self.page.contents.len(),
                     );
                     drop(stream);
@@ -941,6 +968,8 @@ impl<'a> SceneBuilder<'a> {
         {
             self.report_partial(object_ref);
         }
+        drop(resource_owner);
+        self.budget.release(resource_bytes);
         self.discard_saved_states(0);
         let stack_bytes = self.state_stack.capacity() * size_of::<GraphicsState>();
         drop(self.state_stack);
@@ -1235,14 +1264,7 @@ impl<'a> SceneBuilder<'a> {
                 }
             }
             "S" | "s" | "f" | "F" | "f*" | "B" | "B*" | "b" | "b*" | "n" => {
-                let clip_bytes = self
-                    .state
-                    .pending_clip
-                    .as_ref()
-                    .map_or(0, PendingClip::heap_bytes);
-                let result = self.finish_path(operator, provenance);
-                self.budget.release(clip_bytes);
-                result?;
+                self.finish_path(operator, provenance)?;
             }
             "BT" => {
                 self.state.in_text = true;
@@ -1424,16 +1446,18 @@ impl<'a> SceneBuilder<'a> {
                 self.report_partial(provenance.object_ref);
             }
             self.state.path.clear();
+            if let Some(clip) = pending_clip {
+                let bytes = clip.heap_bytes();
+                drop(clip);
+                self.budget.release(bytes);
+            }
             return Ok(());
         }
 
         if !self.state.path.is_empty() && operator != "n" {
-            let mut commands = transform_path(&self.state.path, self.state.ctm)?;
-            if matches!(operator, "s" | "b" | "b*")
-                && !matches!(commands.last(), Some(PdfPathCommand::ClosePath))
-            {
-                commands.push(PdfPathCommand::ClosePath);
-            }
+            let close = matches!(operator, "s" | "b" | "b*")
+                && !matches!(self.state.path.last(), Some(RawPathCommand::Close));
+            let commands = transform_path(&self.state.path, self.state.ctm, close, self.budget)?;
             let rect = path_bounds(&commands)?;
             let stroke = matches!(operator, "S" | "s" | "B" | "B*" | "b" | "b*");
             let fill = !matches!(operator, "S" | "s");
@@ -1465,15 +1489,20 @@ impl<'a> SceneBuilder<'a> {
                 self.report_partial(provenance.object_ref);
             }
             if visible {
-                self.push_element(PdfSceneElement::Path {
-                    value: PdfPathElement {
-                        commands,
-                        rect,
-                        stroke,
-                        fill,
-                        provenance,
+                let heap_bytes =
+                    commands.capacity() * size_of::<PdfPathCommand>() + provenance.heap_bytes();
+                self.push_element_with_workspace(
+                    PdfSceneElement::Path {
+                        value: PdfPathElement {
+                            commands,
+                            rect,
+                            stroke,
+                            fill,
+                            provenance,
+                        },
                     },
-                })?;
+                    heap_bytes,
+                )?;
             }
         }
         self.state.path.clear();
@@ -1492,20 +1521,30 @@ impl<'a> SceneBuilder<'a> {
                     .state
                     .paint_ctm
                     .is_some_and(|matrix| is_precise_rectangular_path(&commands, matrix));
-            let commands = transform_path(&commands, self.state.ctm)?;
-            let rect = path_bounds(&commands)?;
+            let transformed = transform_path(&commands, self.state.ctm, false, self.budget)?;
+            let raw_bytes = commands.capacity() * size_of::<RawPathCommand>();
+            drop(commands);
+            self.budget.release(raw_bytes);
+            let rect = path_bounds(&transformed)?;
             self.state.clip = self
                 .state
                 .clip
-                .intersect(rect, rectangular && is_rectangular_path(&commands))?;
-            self.push_element(PdfSceneElement::Clip {
-                value: PdfClipElement {
-                    rect,
-                    even_odd,
-                    provenance: clip_provenance,
-                    commands,
+                .intersect(rect, rectangular && is_rectangular_path(&transformed))?;
+            let provenance_bytes = clip_provenance.heap_bytes();
+            let heap_bytes =
+                transformed.capacity() * size_of::<PdfPathCommand>() + provenance_bytes;
+            self.budget.release(provenance_bytes);
+            self.push_element_with_workspace(
+                PdfSceneElement::Clip {
+                    value: PdfClipElement {
+                        rect,
+                        even_odd,
+                        provenance: clip_provenance,
+                        commands: transformed,
+                    },
                 },
-            })?;
+                heap_bytes,
+            )?;
         }
         Ok(())
     }
@@ -2809,34 +2848,41 @@ fn six_number_values(values: &[ContentToken]) -> Result<[LayoutUnit; 6], PdfRead
 fn transform_path(
     commands: &[RawPathCommand],
     matrix: Matrix,
+    close: bool,
+    mut workspace: SceneBudget,
 ) -> Result<Vec<PdfPathCommand>, PdfReadError> {
-    commands
-        .iter()
-        .map(|command| match command {
+    let mut transformed = Vec::new();
+    workspace.reserve_vec(&mut transformed, commands.len() + usize::from(close))?;
+    for command in commands {
+        transformed.push(match command {
             RawPathCommand::MoveTo(x, y, _) => {
                 let (x, y) = matrix.point(*x, *y)?;
-                Ok(PdfPathCommand::MoveTo { x, y })
+                PdfPathCommand::MoveTo { x, y }
             }
             RawPathCommand::LineTo(x, y, _) => {
                 let (x, y) = matrix.point(*x, *y)?;
-                Ok(PdfPathCommand::LineTo { x, y })
+                PdfPathCommand::LineTo { x, y }
             }
             RawPathCommand::CurveTo(x1, y1, x2, y2, x3, y3, _) => {
                 let (x1, y1) = matrix.point(*x1, *y1)?;
                 let (x2, y2) = matrix.point(*x2, *y2)?;
                 let (x3, y3) = matrix.point(*x3, *y3)?;
-                Ok(PdfPathCommand::CurveTo {
+                PdfPathCommand::CurveTo {
                     x1,
                     y1,
                     x2,
                     y2,
                     x3,
                     y3,
-                })
+                }
             }
-            RawPathCommand::Close => Ok(PdfPathCommand::ClosePath),
-        })
-        .collect()
+            RawPathCommand::Close => PdfPathCommand::ClosePath,
+        });
+    }
+    if close {
+        transformed.push(PdfPathCommand::ClosePath);
+    }
+    Ok(transformed)
 }
 
 fn has_noncollinear_points<T: Copy>(
@@ -3830,7 +3876,16 @@ mod tests {
             RawPathCommand::LineTo(fixed(50), fixed(25), point(50004, 25000)),
             RawPathCommand::LineTo(fixed(50), fixed(30), point(50000, 30000)),
         ];
-        let commands = transform_path(&source, super::Matrix::IDENTITY).unwrap();
+        let commands = transform_path(
+            &source,
+            super::Matrix::IDENTITY,
+            false,
+            super::SceneBudget {
+                remaining_scene_bytes: usize::MAX,
+                remaining_image_hex_bytes: 0,
+            },
+        )
+        .unwrap();
         let matrix = Some(PaintMatrix([1., 0., 0., 1., 0., 0.]));
         assert!(lost_visible_fill_contour(
             &source,
