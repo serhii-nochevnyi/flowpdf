@@ -82,7 +82,7 @@ impl PdfReaderLimits {
             || self.max_decoded_stream_bytes == 0
             || self.max_content_tokens == 0
             || self.max_scene_elements == 0
-            || self.max_scene_bytes == 0
+            || !(1..=default_scene_bytes()).contains(&self.max_scene_bytes)
             || self.max_image_pixels == 0
             || self.max_form_depth == 0
         {

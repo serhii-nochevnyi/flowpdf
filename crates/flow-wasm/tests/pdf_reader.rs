@@ -66,7 +66,7 @@ fn reader_boundary_returns_verified_scene_window() {
 
 #[test]
 fn reader_boundary_accepts_original_custom_limit_fields() {
-    let request = json!({
+    let mut request = json!({
         "protocolVersion": 1,
         "requestId": "reader-boundary-original-limits",
         "bytesHex": hex(&fixture_pdf()),
@@ -91,6 +91,13 @@ fn reader_boundary_accepts_original_custom_limit_fields() {
     let serialized = flow_wasm::read_pdf(serde_json::to_string(&request).unwrap());
     assert_eq!(response(&serialized)["ok"], true);
     assert!(flow_wasm::verify_pdf_reader_response(serialized));
+
+    request["limits"]["maxSceneBytes"] = json!(16 * 1024 * 1024 + 1);
+    let response = response(&flow_wasm::read_pdf(
+        serde_json::to_string(&request).unwrap(),
+    ));
+    assert_eq!(response["ok"], false);
+    assert_eq!(response["error"]["code"], "FLOW_PDF_READER_LIMITS_INVALID");
 }
 
 #[test]
