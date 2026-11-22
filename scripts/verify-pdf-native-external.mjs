@@ -483,9 +483,11 @@ function redact(session, operation) {
     requireMatch(same(candidate.affectedPages, affectedPages), 'native-redaction-coverage')
     requireMatch(staged.redaction.markCount === expectedMarkCount, 'native-redaction-mark-count')
     const verified = session.redact({ kind: 'verify', candidate }, true)
-    if (verified.status !== 'failed') {
-      requireMatch(verified.redaction?.markCount === expectedMarkCount, 'native-redaction-mark-count')
+    if (verified.status === 'failed') {
+      requireMatch(verified.code === 'FLOW_PDF_NATIVE_REDACTION_CANDIDATE_UNAVAILABLE', 'native-redaction-verification')
+      throw new GateError('unavailable', 'native-redaction-verification')
     }
+    requireMatch(verified.redaction?.markCount === expectedMarkCount, 'native-redaction-mark-count')
     const verdict = verified.redaction?.verification?.status
     requireMatch(verdict !== 'failed', 'native-redaction-verification')
     requireInput(verdict === 'passed', 'native-redaction-verification')
