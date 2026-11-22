@@ -1765,9 +1765,7 @@ impl<'a> SceneBuilder<'a> {
                 .base_name
                 .as_deref()
                 .or(selected_font.fallback_name.as_deref());
-            workspace.charge(
-                size_of::<PdfSceneElement>() + provenance_bytes + font_name.map_or(0, str::len),
-            )?;
+            workspace.charge(provenance_bytes + font_name.map_or(0, str::len))?;
             let retained_bytes =
                 self.budget.remaining_scene_bytes - workspace.remaining_scene_bytes;
             self.push_element_with_workspace(
@@ -2322,9 +2320,35 @@ impl<'a> SceneBuilder<'a> {
         let mut encoded = self.budget;
         encoded.charge(usize::from(!self.elements.is_empty()))?;
         let heap_remaining = encoded.remaining_after(heap_bytes)?;
+        let slot_bytes = size_of::<PdfSceneElement>();
+        // @invariant: The occupied slot can cover part of the element's encoded charge.
+        encoded.release(slot_bytes);
         encoded.encode(&element)?;
-        // @invariant: Retained text reserves the larger of its heap footprint and encoded length.
-        self.budget.remaining_scene_bytes = encoded.remaining_scene_bytes.min(heap_remaining);
+        let mut remaining = encoded.remaining_scene_bytes.min(heap_remaining);
+        let old_capacity = self.elements.capacity();
+        if self.elements.len() == old_capacity {
+            let capacity = old_capacity
+                .saturating_add((old_capacity / 2).max(1))
+                .min(self.limits.max_scene_elements);
+            let old_bytes = old_capacity * slot_bytes;
+            let new_bytes = capacity
+                .checked_mul(slot_bytes)
+                .ok_or(PdfReadError::StreamLimit)?;
+            // @invariant: Both buffers can coexist with the pending element's heap.
+            let growth_allowance = heap_remaining.min(remaining + old_bytes);
+            if new_bytes > growth_allowance {
+                return Err(PdfReadError::StreamLimit);
+            }
+            self.elements
+                .try_reserve_exact(capacity - self.elements.len())
+                .map_err(|_| PdfReadError::StreamLimit)?;
+            let actual_bytes = self.elements.capacity() * slot_bytes;
+            if actual_bytes > growth_allowance {
+                return Err(PdfReadError::StreamLimit);
+            }
+            remaining = remaining + old_bytes - actual_bytes;
+        }
+        self.budget.remaining_scene_bytes = remaining;
         self.elements.push(element);
         Ok(())
     }

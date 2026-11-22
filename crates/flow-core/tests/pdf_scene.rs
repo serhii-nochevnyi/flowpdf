@@ -226,6 +226,49 @@ fn mapped_font_scene_reserves_decode_workspace_at_the_allowance_boundary() {
 }
 
 #[test]
+fn mapped_text_runs_require_allowance_for_element_storage_growth() {
+    let mut content = String::from("BT /F1 10 Tf 5 20 Td (A) Tj\n");
+    content.push_str(&"0 12 Td (A) Tj\n".repeat(63));
+    content.push_str("ET");
+    let bytes = pdf(vec![
+        (1, b"<< /Type /Catalog /Pages 2 0 R >>".to_vec()),
+        (2, b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec()),
+        (3, b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 900] /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>".to_vec()),
+        stream(4, "", content.as_bytes()),
+        (5, b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /ToUnicode 6 0 R >>".to_vec()),
+        stream(6, "", b"begincmap\n1 beginbfchar\n<41> <0410>\nendbfchar\nendcmap\n"),
+    ]);
+    let read = |max_scene_bytes| {
+        let reader = open_pdf(
+            &bytes,
+            PdfReaderLimits {
+                max_scene_bytes,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        read_pdf_scene(&reader, &PdfSceneRequest::default())
+    };
+    let expected = read(PdfReaderLimits::default().max_scene_bytes).unwrap();
+    assert_eq!(expected.pages[0].elements.len(), 64);
+    assert!(expected.pages[0].elements.iter().all(|element| matches!(
+        element,
+        PdfSceneElement::Text { value }
+            if value.text == "А" && value.mapping == PdfTextMapping::ToUnicode
+    )));
+    let mut serialized = expected.clone();
+    serialized.result_hash.clear();
+    let serialized_bytes = serde_json::to_vec(&serialized).unwrap().len();
+    let slot_bytes = size_of::<PdfSceneElement>();
+    // @invariant: The last run grows 63 slots to 94, overlapping both buffers.
+    assert_eq!(
+        read(serialized_bytes + 64 * slot_bytes),
+        Err(PdfReadError::StreamLimit)
+    );
+    assert_eq!(read(serialized_bytes + 128 * slot_bytes).unwrap(), expected);
+}
+
+#[test]
 fn clipped_mapped_text_reserves_glyph_workspace_even_without_a_text_element() {
     let content = format!(
         "110 110 5 5 re W n BT /F1 10 Tf 5 20 Td ({}) Tj ET",
