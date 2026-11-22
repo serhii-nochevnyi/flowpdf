@@ -709,6 +709,13 @@ pub struct PdfReader {
     limits: PdfReaderLimits,
 }
 
+#[derive(Clone, Copy)]
+enum ObjectRead {
+    Preview,
+    Scene(usize),
+    Retained(usize, usize, usize),
+}
+
 impl PdfReader {
     #[must_use]
     pub fn source_hash(&self) -> &str {
@@ -758,7 +765,7 @@ impl PdfReader {
         &self,
         reference: PdfObjectRef,
     ) -> Result<PdfValue, PdfReadError> {
-        let (mut cursor, _) = self.object_cursor(reference, 0, None)?;
+        let (mut cursor, _) = self.object_cursor(reference, 0, ObjectRead::Preview)?;
         let value = cursor.parse_value(0)?;
         if !cursor.consume_keyword(b"endobj")? {
             return Err(PdfReadError::Syntax);
@@ -863,7 +870,21 @@ impl PdfReader {
         decoded: usize,
         work: usize,
     ) -> Result<(PdfValue, usize, usize), PdfReadError> {
-        self.read_object(reference, 0, Some((retained, decoded, work)))
+        self.read_object(reference, 0, ObjectRead::Retained(retained, decoded, work))
+    }
+
+    pub(super) fn scene_font_object(
+        &self,
+        reference: PdfObjectRef,
+        workspace: usize,
+    ) -> Result<(PdfValue, usize), PdfReadError> {
+        // @invariant: Font scene reads keep only the decoded stream representation.
+        self.read_object(reference, 0, ObjectRead::Scene(workspace))
+            .map(|(value, bytes, _)| (value, bytes))
+            .map_err(|error| match error {
+                PdfReadError::InputSizeLimit => PdfReadError::StreamLimit,
+                error => error,
+            })
     }
 
     fn object_with_depth(
@@ -871,7 +892,7 @@ impl PdfReader {
         reference: PdfObjectRef,
         depth: usize,
     ) -> Result<PdfValue, PdfReadError> {
-        self.read_object(reference, depth, None)
+        self.read_object(reference, depth, ObjectRead::Preview)
             .map(|result| result.0)
     }
 
@@ -879,7 +900,7 @@ impl PdfReader {
         &self,
         reference: PdfObjectRef,
         depth: usize,
-        retention: Option<(usize, usize, usize)>,
+        mode: ObjectRead,
     ) -> Result<(Cursor<'_>, usize), PdfReadError> {
         if depth > self.limits.max_nesting {
             return Err(PdfReadError::NestingLimit);
@@ -891,7 +912,8 @@ impl PdfReader {
         if entry.generation != reference.generation {
             return Err(PdfReadError::ReferenceInvalid);
         }
-        let bytes = if retention.is_some() {
+        let exact = matches!(mode, ObjectRead::Retained(..));
+        let bytes = if exact {
             let index = self
                 .retained_starts
                 .binary_search(&entry.offset)
@@ -905,12 +927,19 @@ impl PdfReader {
             &self.bytes
         };
         let mut cursor = Cursor::new(bytes, entry.offset, self.limits.clone());
-        if let Some((retained, decoded, work)) = retention {
-            cursor.exact = true;
-            cursor.remaining = Some(retained);
-            cursor.limits.max_decoded_stream_bytes =
-                decoded.min(self.limits.max_decoded_stream_bytes);
-            cursor.limits.max_content_tokens = work;
+        cursor.exact = exact;
+        match mode {
+            ObjectRead::Preview => {}
+            ObjectRead::Scene(workspace) => {
+                cursor.scene = true;
+                cursor.remaining = Some(workspace);
+            }
+            ObjectRead::Retained(retained, decoded, work) => {
+                cursor.remaining = Some(retained);
+                cursor.limits.max_decoded_stream_bytes =
+                    decoded.min(self.limits.max_decoded_stream_bytes);
+                cursor.limits.max_content_tokens = work;
+            }
         }
         let object_number = cursor
             .parse_u64_token()?
@@ -935,9 +964,13 @@ impl PdfReader {
         &self,
         reference: PdfObjectRef,
         depth: usize,
-        retention: Option<(usize, usize, usize)>,
+        mode: ObjectRead,
     ) -> Result<(PdfValue, usize, usize), PdfReadError> {
-        let (mut cursor, source_offset) = self.object_cursor(reference, depth, retention)?;
+        let (mut cursor, source_offset) = self.object_cursor(reference, depth, mode)?;
+        let initial = match mode {
+            ObjectRead::Preview => 0,
+            ObjectRead::Scene(bytes) | ObjectRead::Retained(bytes, ..) => bytes,
+        };
         let mut value = cursor.object_value()?;
         cursor.skip_space();
         if cursor.consume_keyword(b"stream")? {
@@ -950,30 +983,45 @@ impl PdfReader {
             }
             cursor.consume_stream_eol();
             let length_value = dictionary.get("Length").ok_or(PdfReadError::Syntax)?;
-            let length = if retention.is_some() {
+            let length = if cursor.exact {
                 self.retained_stream_length(length_value, &mut cursor)?
             } else {
-                self.stream_length(length_value, depth + 1)?
+                self.stream_length(length_value, depth + 1, cursor.remaining)?
             };
             if length > self.limits.max_stream_bytes {
                 return Err(PdfReadError::StreamLimit);
             }
             let payload = cursor.stream_payload(length)?;
-            if retention.is_some() {
+            if cursor.exact {
                 cursor.require_object_keyword(b"endstream")?;
                 cursor.require_object_keyword(b"endobj")?;
             }
-            cursor.charge(length.checked_mul(2).ok_or(PdfReadError::InputSizeLimit)?)?;
+            let copies = if cursor.scene { 1 } else { 2 };
+            cursor.charge(
+                length
+                    .checked_mul(copies)
+                    .ok_or(PdfReadError::InputSizeLimit)?,
+            )?;
             let raw = payload.to_vec();
-            if retention.is_none() {
+            if !cursor.exact {
                 cursor.require_object_keyword(b"endstream")?;
             }
-            let encoded = raw.clone();
-            let data = decode_stream(&dictionary, raw, &cursor.limits, cursor.remaining)?;
-            if matches!(
-                dictionary.get("Filter").and_then(single_filter),
-                Some("FlateDecode" | "Fl" | "DCTDecode" | "DCT")
-            ) && let Some(remaining) = &mut cursor.remaining
+            let encoded = if cursor.scene {
+                Vec::new()
+            } else {
+                raw.clone()
+            };
+            let data = decode_stream(
+                &dictionary,
+                raw,
+                &cursor.limits,
+                cursor.remaining,
+                cursor.scene,
+            )?;
+            let filter = dictionary.get("Filter").and_then(single_filter);
+            if (matches!(filter, Some("FlateDecode" | "Fl"))
+                || (cursor.exact && matches!(filter, Some("DCTDecode" | "DCT"))))
+                && let Some(remaining) = &mut cursor.remaining
             {
                 *remaining += length;
                 cursor.charge(data.capacity())?;
@@ -985,12 +1033,14 @@ impl PdfReader {
                 source_offset,
             });
         }
-        if retention.is_none() || !matches!(value, PdfValue::Stream(_)) {
+        if !cursor.exact || !matches!(value, PdfValue::Stream(_)) {
             cursor.require_object_keyword(b"endobj")?;
         }
-        let retained =
-            retention.map_or(0, |(initial, _, _)| initial - cursor.remaining.unwrap_or(0));
-        Ok((value, retained, cursor.tokens))
+        Ok((
+            value,
+            initial - cursor.remaining.unwrap_or(0),
+            cursor.tokens,
+        ))
     }
 
     fn retained_stream_length(
@@ -1008,11 +1058,11 @@ impl PdfReader {
             let (mut cursor, _) = self.object_cursor(
                 *reference,
                 0,
-                Some((
+                ObjectRead::Retained(
                     owner.remaining.ok_or(PdfReadError::InputSizeLimit)?,
                     owner.limits.max_decoded_stream_bytes,
                     work,
-                )),
+                ),
             )?;
             let number = cursor
                 .object_value()?
@@ -1031,8 +1081,24 @@ impl PdfReader {
         usize::try_from(length).map_err(|_| PdfReadError::StreamLimit)
     }
 
-    fn stream_length(&self, value: &PdfValue, depth: usize) -> Result<usize, PdfReadError> {
-        let value = self.resolve(value, depth)?;
+    fn stream_length(
+        &self,
+        value: &PdfValue,
+        depth: usize,
+        workspace: Option<usize>,
+    ) -> Result<usize, PdfReadError> {
+        if depth > self.limits.max_nesting {
+            return Err(PdfReadError::NestingLimit);
+        }
+        let resolved;
+        let value = if let PdfValue::Reference(reference) = value {
+            let mode = workspace.map_or(ObjectRead::Preview, ObjectRead::Scene);
+            let depth = depth.checked_add(1).ok_or(PdfReadError::NestingLimit)?;
+            resolved = self.read_object(*reference, depth, mode)?.0;
+            &resolved
+        } else {
+            value
+        };
         let length = value.as_integer().ok_or(PdfReadError::Syntax)?;
         if length < 0 {
             return Err(PdfReadError::NumericLimit);
@@ -1114,7 +1180,8 @@ impl PdfReader {
                 let contents = match dictionary.get("Contents") {
                     None | Some(PdfValue::Null) => Vec::new(),
                     Some(PdfValue::Reference(reference)) => {
-                        let (mut cursor, _) = self.object_cursor(*reference, 0, None)?;
+                        let (mut cursor, _) =
+                            self.object_cursor(*reference, 0, ObjectRead::Preview)?;
                         cursor.skip_space();
                         if cursor.bytes.get(cursor.position) == Some(&b'[')
                             && depth + 2 > self.limits.max_nesting
@@ -1546,6 +1613,7 @@ fn decode_stream(
     raw: Vec<u8>,
     limits: &PdfReaderLimits,
     workspace: Option<usize>,
+    scene: bool,
 ) -> Result<Vec<u8>, PdfReadError> {
     let Some(filter) = dictionary.get("Filter") else {
         if raw.len() > limits.max_decoded_stream_bytes {
@@ -1555,6 +1623,7 @@ fn decode_stream(
     };
     let filter = single_filter(filter).ok_or(PdfReadError::FilterUnsupported)?;
     if let Some(available) = workspace
+        && !scene
         && matches!(filter, "DCTDecode" | "DCT")
     {
         return decode_retained_jpeg(dictionary, &raw, limits, available);
@@ -1574,22 +1643,31 @@ fn decode_stream(
         }
         "FlateDecode" | "Fl" => {
             let mut output_limit = limits.max_decoded_stream_bytes;
+            let workspace_error = if scene {
+                PdfReadError::StreamLimit
+            } else {
+                PdfReadError::DecodedStreamLimit
+            };
             if let Some(available) = workspace {
                 let scratch = std::mem::size_of::<miniz_oxide::inflate::core::DecompressorOxide>();
                 let buffers = available
                     .checked_sub(scratch + 8)
-                    .ok_or(PdfReadError::DecodedStreamLimit)?;
+                    .ok_or_else(|| workspace_error.clone())?;
                 // @security: Vec growth may briefly hold both the old and new output buffers.
                 output_limit = output_limit.min(buffers / 3);
                 if output_limit == 0 {
-                    return Err(PdfReadError::DecodedStreamLimit);
+                    return Err(workspace_error);
                 }
             }
             let decoded =
                 miniz_oxide::inflate::decompress_to_vec_zlib_with_limit(&raw, output_limit)
                     .map_err(|error| {
                         if error.status == miniz_oxide::inflate::TINFLStatus::HasMoreOutput {
-                            PdfReadError::DecodedStreamLimit
+                            if output_limit < limits.max_decoded_stream_bytes {
+                                workspace_error
+                            } else {
+                                PdfReadError::DecodedStreamLimit
+                            }
                         } else {
                             PdfReadError::Syntax
                         }
@@ -1945,6 +2023,7 @@ struct Cursor<'a> {
     limits: PdfReaderLimits,
     tokens: usize,
     exact: bool,
+    scene: bool,
     remaining: Option<usize>,
 }
 
@@ -1956,6 +2035,7 @@ impl<'a> Cursor<'a> {
             limits,
             tokens: 0,
             exact: false,
+            scene: false,
             remaining: None,
         }
     }
@@ -1965,6 +2045,24 @@ impl<'a> Cursor<'a> {
             *remaining = remaining
                 .checked_sub(bytes)
                 .ok_or(PdfReadError::InputSizeLimit)?;
+        }
+        Ok(())
+    }
+
+    fn reserve_scene_item<T>(&mut self, values: &mut Vec<T>) -> Result<(), PdfReadError> {
+        if self.scene && values.len() == values.capacity() {
+            let capacity = values.capacity().saturating_mul(2).max(4);
+            let bytes = capacity
+                .checked_mul(std::mem::size_of::<T>())
+                .ok_or(PdfReadError::InputSizeLimit)?;
+            self.charge(bytes)?;
+            let old_bytes = std::mem::size_of::<T>() * values.capacity();
+            values
+                .try_reserve_exact(capacity - values.len())
+                .map_err(|_| PdfReadError::InputSizeLimit)?;
+            if let Some(remaining) = &mut self.remaining {
+                *remaining += old_bytes;
+            }
         }
         Ok(())
     }
@@ -2005,10 +2103,16 @@ impl<'a> Cursor<'a> {
         let start = self.position;
         if self.bytes[start] == b'<' && self.bytes.get(start + 1) == Some(&b'<') {
             self.position += 2;
+            if self.scene {
+                self.charge(2)?;
+            }
             return Ok(Some(b"<<".to_vec()));
         }
         if self.bytes[start] == b'>' && self.bytes.get(start + 1) == Some(&b'>') {
             self.position += 2;
+            if self.scene {
+                self.charge(2)?;
+            }
             return Ok(Some(b">>".to_vec()));
         }
         while self.position < self.bytes.len() && !is_delimiter(self.bytes[self.position]) {
@@ -2109,7 +2213,9 @@ impl<'a> Cursor<'a> {
                 return Err(PdfReadError::TokenLimit);
             }
         }
-        self.charge(std::mem::size_of::<PdfValue>() * 2)?;
+        if !self.scene {
+            self.charge(std::mem::size_of::<PdfValue>() * 2)?;
+        }
         self.skip_space();
         match self.bytes.get(self.position).copied() {
             Some(b'(') => self.parse_literal_string().map(PdfValue::String),
@@ -2193,7 +2299,9 @@ impl<'a> Cursor<'a> {
             if values.len() >= self.limits.max_array_items {
                 return Err(PdfReadError::ObjectLimit);
             }
-            values.push(self.parse_value(depth + 1)?);
+            let value = self.parse_value(depth + 1)?;
+            self.reserve_scene_item(&mut values)?;
+            values.push(value);
         }
     }
 
@@ -2221,6 +2329,10 @@ impl<'a> Cursor<'a> {
             }
             let key = self.parse_name()?;
             let value = self.parse_value(depth + 1)?;
+            // @invariant: Reserve a root node and one node per five additional dictionary entries.
+            if self.scene && dictionary.len().is_multiple_of(5) {
+                self.charge(128 + 12 * std::mem::size_of::<(String, PdfValue)>())?;
+            }
             if dictionary.insert(key, value).is_some() {
                 return Err(PdfReadError::Syntax);
             }
@@ -2236,6 +2348,9 @@ impl<'a> Cursor<'a> {
         self.charge(bytes.len().min(MAX_PDF_IDENTITY_BYTES))?;
         let output = decode_pdf_name_bytes(bytes)?;
         if !self.exact {
+            if self.scene && std::str::from_utf8(&output).is_err() {
+                self.charge(1 + output.len() * 2)?;
+            }
             return Ok(scene_name_identity(output));
         }
         let utf8_len = output.len() + output.iter().filter(|byte| !byte.is_ascii()).count();
@@ -2250,7 +2365,11 @@ impl<'a> Cursor<'a> {
         let mut output = Vec::new();
         let mut nesting = 1_usize;
         while self.position < self.bytes.len() {
-            self.charge(2)?;
+            if self.scene {
+                self.reserve_scene_item(&mut output)?;
+            } else {
+                self.charge(2)?;
+            }
             let byte = self.bytes[self.position];
             self.position += 1;
             match byte {
@@ -2324,7 +2443,9 @@ impl<'a> Cursor<'a> {
         let mut output = Vec::new();
         let mut high: Option<u8> = None;
         while self.position < self.bytes.len() {
-            self.charge(2)?;
+            if !self.scene {
+                self.charge(2)?;
+            }
             let byte = self.bytes[self.position];
             self.position += 1;
             if is_pdf_space(byte) {
@@ -2332,6 +2453,7 @@ impl<'a> Cursor<'a> {
             }
             if byte == b'>' {
                 if let Some(high) = high {
+                    self.reserve_scene_item(&mut output)?;
                     output.push(high << 4);
                 }
                 if output.len() > self.limits.max_string_bytes {
@@ -2341,6 +2463,7 @@ impl<'a> Cursor<'a> {
             }
             let nibble = hex_nibble(byte).ok_or(PdfReadError::Syntax)?;
             if let Some(high) = high.take() {
+                self.reserve_scene_item(&mut output)?;
                 output.push((high << 4) | nibble);
             } else {
                 high = Some(nibble);
@@ -2494,25 +2617,25 @@ mod retained_reader_tests {
             ..Default::default()
         };
         assert_eq!(
-            decode_stream(&dictionary, bytes.clone(), &limits, Some(usize::MAX)),
+            decode_stream(&dictionary, bytes.clone(), &limits, Some(usize::MAX), false),
             Err(PdfReadError::DecodedStreamLimit)
         );
         limits.max_decoded_stream_bytes = 4;
         let (_, _, _, components) = jpeg_frame(&bytes).unwrap();
         let peak = jpeg_decode_peak(bytes.len(), 2, 2, components, 4).unwrap();
         assert_eq!(
-            decode_stream(&dictionary, bytes.clone(), &limits, Some(peak - 1)),
+            decode_stream(&dictionary, bytes.clone(), &limits, Some(peak - 1), false),
             Err(PdfReadError::DecodedStreamLimit)
         );
         assert_eq!(
-            decode_stream(&dictionary, bytes.clone(), &limits, Some(peak))
+            decode_stream(&dictionary, bytes.clone(), &limits, Some(peak), false)
                 .unwrap()
                 .len(),
             4
         );
         dictionary.insert("Width".into(), PdfValue::Integer(1));
         assert_eq!(
-            decode_stream(&dictionary, bytes, &limits, Some(usize::MAX)),
+            decode_stream(&dictionary, bytes, &limits, Some(usize::MAX), false),
             Err(PdfReadError::Syntax)
         );
     }
