@@ -762,6 +762,8 @@ fn recognize_identity(
         }
     }
     fields.get("T").and_then(Value::as_bytes).ok_or(Reference)?;
+    // @security: Charge for every inventory entry the owner lookup can visit.
+    spend(work, form.names.len())?;
     let field_name = form
         .names
         .iter()
@@ -1800,7 +1802,7 @@ mod tests {
     }
 
     #[test]
-    fn widget_membership_spends_projection_and_staging_work() {
+    fn widget_identity_spends_projection_and_staging_work() {
         let source = redaction_fixture("");
         let limits = NativeEditLimits::default();
         let session = NativePdfSession::open_scoped(&source, limits, [7; 16]).unwrap();
@@ -1849,7 +1851,7 @@ mod tests {
         for owner in &graph.reverse[&widget] {
             visit_refs(&graph.objects[owner], &mut work, &mut |_| Ok(())).unwrap();
         }
-        let identity_work = membership_work + before_owners - work;
+        let identity_work = membership_work + before_owners - work + form.names.len();
         let projection_work = inventory_work + identity_work + 1 + MAX_TEXT;
         graph.charge_page_work(budget - projection_work).unwrap();
         let pages = std::slice::from_ref(&page);
