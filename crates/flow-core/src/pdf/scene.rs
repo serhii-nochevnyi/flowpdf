@@ -754,7 +754,7 @@ struct SceneBuilder<'a> {
     limits: &'a PdfReaderLimits,
     page_index: u32,
     page: &'a PdfPageRecord,
-    field_counts: &'a BTreeMap<PdfObjectRef, usize>,
+    field_root_counts: &'a BTreeMap<PdfObjectRef, usize>,
     link_work: usize,
     widget_work: usize,
     remaining_content_tokens: usize,
@@ -783,7 +783,7 @@ impl<'a> SceneBuilder<'a> {
         pages: &'a [PdfPageRecord],
         page_index: u32,
         page: &'a PdfPageRecord,
-        field_counts: &'a BTreeMap<PdfObjectRef, usize>,
+        field_root_counts: &'a BTreeMap<PdfObjectRef, usize>,
         budget: SceneBudget,
     ) -> Self {
         Self {
@@ -791,7 +791,7 @@ impl<'a> SceneBuilder<'a> {
             limits: reader.limits(),
             page_index,
             page,
-            field_counts,
+            field_root_counts,
             link_work: reader.limits().max_content_tokens,
             widget_work: reader.limits().max_content_tokens,
             remaining_content_tokens: reader.limits().max_content_tokens,
@@ -2047,14 +2047,9 @@ impl<'a> SceneBuilder<'a> {
                 let field_type = field.get("FT").and_then(PdfValue::as_name);
                 let limit = self.limits.max_string_bytes;
                 let mut available = limit.saturating_mul(3);
-                let parent = dictionary
-                    .get("Parent")
-                    .and_then(PdfValue::as_reference)
-                    .filter(|parent| self.field_counts.get(parent) == Some(&1));
                 let name = map_widget_label(
                     *annotation_ref,
-                    dictionary.get("T"),
-                    parent,
+                    dictionary,
                     WidgetLabelLimits {
                         max_nesting: self.limits.max_nesting,
                         scratch_bytes: self
@@ -2067,19 +2062,12 @@ impl<'a> SceneBuilder<'a> {
                         if reference == *annotation_ref {
                             Ok(Some(Cow::Borrowed(&value)))
                         } else {
-                            let Some(object) = self.reader.label_object(reference)? else {
-                                return Ok(None);
-                            };
-                            if Some(reference) == parent
-                                && !object
-                                    .as_dictionary()
-                                    .is_some_and(|dict| !dict.contains_key("Parent"))
-                            {
-                                return Ok(None);
-                            }
-                            Ok(Some(Cow::Owned(object)))
+                            self.reader
+                                .label_object(reference)
+                                .map(|v| v.map(Cow::Owned))
                         }
                     },
+                    |field, _| Ok(self.field_root_counts.get(&field).copied().unwrap_or(0)),
                     |bytes| decode_pdf_text_string(bytes, limit, &mut available),
                 )?
                 .flatten()
@@ -2186,7 +2174,7 @@ impl<'a> SceneBuilder<'a> {
             return Ok(None);
         };
         if parent_ref == widget
-            || self.field_counts.get(&parent_ref) != Some(&1)
+            || self.field_root_counts.get(&parent_ref) != Some(&1)
             || ["FT", "V", "Kids"]
                 .iter()
                 .any(|key| dictionary.contains_key(*key))
@@ -2390,7 +2378,7 @@ pub fn read_pdf_scene(
         .ok_or(PdfReadError::PageCountLimit)?
         .min(pages.len());
     let mut report = reader.preflight_report();
-    let mut field_counts = BTreeMap::new();
+    let mut field_root_counts = BTreeMap::new();
     if let Ok(catalog) = reader.object(reader.root_for_scene())
         && let Some(dictionary) = catalog.as_dictionary()
     {
@@ -2406,7 +2394,7 @@ pub fn read_pdf_scene(
             && let Ok(PdfValue::Array(fields)) = reader.resolve(fields, 2)
         {
             for field in fields.iter().filter_map(PdfValue::as_reference) {
-                *field_counts.entry(field).or_insert(0) += 1;
+                *field_root_counts.entry(field).or_insert(0) += 1;
             }
         }
     }
@@ -2419,7 +2407,8 @@ pub fn read_pdf_scene(
     };
     for (index, page) in pages.iter().enumerate().take(end).skip(first) {
         let page_index = u32::try_from(index).map_err(|_| PdfReadError::PageCountLimit)?;
-        match SceneBuilder::new(reader, &pages, page_index, page, &field_counts, budget).run() {
+        match SceneBuilder::new(reader, &pages, page_index, page, &field_root_counts, budget).run()
+        {
             Ok((page, remaining_budget)) => {
                 budget = remaining_budget;
                 report.extend(&page.report);

@@ -513,14 +513,14 @@ pub(super) struct WidgetLabelLimits {
 
 pub(super) fn map_widget_label<'a, T>(
     widget: PdfObjectRef,
-    label: Option<&'a PdfValue>,
-    parent: Option<PdfObjectRef>,
+    dictionary: &'a BTreeMap<String, PdfValue>,
     limits: WidgetLabelLimits,
     work: &mut usize,
     mut object: impl FnMut(PdfObjectRef) -> Result<Option<Cow<'a, PdfValue>>, PdfReadError>,
+    mut root_count: impl FnMut(PdfObjectRef, &mut usize) -> Result<usize, PdfReadError>,
     read: impl FnOnce(&[u8]) -> Result<T, PdfReadError>,
 ) -> Result<Option<T>, PdfReadError> {
-    if let Some(label) = label {
+    if let Some(label) = dictionary.get("T") {
         let Some(label) = resolve_annotation_value(label, limits.max_nesting, work, &mut object)?
         else {
             return Ok(None);
@@ -529,14 +529,32 @@ pub(super) fn map_widget_label<'a, T>(
             return label.as_bytes().map(read).transpose();
         }
     }
-    let Some(parent) = parent.filter(|&parent| parent != widget) else {
+    let Some(parent) = dictionary
+        .get("Parent")
+        .and_then(PdfValue::as_reference)
+        .filter(|&parent| parent != widget)
+    else {
         return Ok(None);
     };
+    if root_count(widget, work)? != 0 {
+        return Ok(None);
+    }
     *work = work.checked_sub(1).ok_or(PdfReadError::TokenLimit)?;
     let field = object(parent)?;
     let Some(field) = field.as_deref().and_then(PdfValue::as_dictionary) else {
         return Ok(None);
     };
+    if !has_registered_field_ancestry(
+        widget,
+        parent,
+        field,
+        limits.max_nesting,
+        work,
+        &mut object,
+        &mut root_count,
+    )? {
+        return Ok(None);
+    }
     let Some(kids) = field.get("Kids") else {
         return Ok(None);
     };
@@ -594,6 +612,61 @@ pub(super) fn map_widget_label<'a, T>(
         .and_then(PdfValue::as_bytes)
         .map(read)
         .transpose()
+}
+
+fn has_registered_field_ancestry<'a>(
+    widget: PdfObjectRef,
+    mut child: PdfObjectRef,
+    field: &BTreeMap<String, PdfValue>,
+    max_nesting: usize,
+    work: &mut usize,
+    object: &mut impl FnMut(PdfObjectRef) -> Result<Option<Cow<'a, PdfValue>>, PdfReadError>,
+    root_count: &mut impl FnMut(PdfObjectRef, &mut usize) -> Result<usize, PdfReadError>,
+) -> Result<bool, PdfReadError> {
+    let parent_ref =
+        |field: &BTreeMap<String, PdfValue>| field.get("Parent").map(PdfValue::as_reference);
+    let mut parent = parent_ref(field);
+    for depth in 1..=max_nesting {
+        let registrations = root_count(child, work)?;
+        let Some(next) = parent else {
+            return Ok(registrations == 1);
+        };
+        let Some(next) = next else {
+            return Ok(false);
+        };
+        // @invariant: A nested field has one reciprocal parent link and no root registration.
+        if registrations != 0 || next == widget || next == child || depth == max_nesting {
+            return Ok(false);
+        }
+        *work = work.checked_sub(1).ok_or(PdfReadError::TokenLimit)?;
+        let ancestor = object(next)?;
+        let Some(ancestor) = ancestor.as_deref().and_then(PdfValue::as_dictionary) else {
+            return Ok(false);
+        };
+        let Some(kids) = ancestor.get("Kids") else {
+            return Ok(false);
+        };
+        let children = resolve_annotation_value(kids, max_nesting, work, object)?;
+        let Some(children) = children.as_deref().and_then(PdfValue::as_array) else {
+            return Ok(false);
+        };
+        *work = work
+            .checked_sub(children.len())
+            .ok_or(PdfReadError::TokenLimit)?;
+        let mut matches = 0;
+        for entry in children {
+            let Some(reference) = entry.as_reference() else {
+                return Ok(false);
+            };
+            matches += usize::from(reference == child);
+        }
+        if matches != 1 {
+            return Ok(false);
+        }
+        child = next;
+        parent = parent_ref(ancestor);
+    }
+    Ok(false)
 }
 
 #[derive(Debug, Clone, Copy)]
