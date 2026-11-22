@@ -15,10 +15,11 @@ use serde::{Deserialize, Serialize};
 use crate::layout::{LayoutRect, LayoutUnit};
 
 use super::reader::{
-    PdfObjectRef, PdfPageRecord, PdfReadDiagnostic, PdfReadDiagnosticCode, PdfReadError,
-    PdfReadReport, PdfReader, PdfReaderLimits, PdfStream, PdfValue, WIDGET_LABEL_ENTRY_BYTES,
-    WidgetLabelLimits, decode_pdf_text_string, map_widget_label, read_scene_name,
-    report_active_content, resolve_annotation_value, scene_name_label, single_filter,
+    PageResources, PdfObjectRef, PdfPageRecord, PdfReadDiagnostic, PdfReadDiagnosticCode,
+    PdfReadError, PdfReadReport, PdfReader, PdfReaderLimits, PdfStream, PdfValue,
+    WIDGET_LABEL_ENTRY_BYTES, WidgetLabelLimits, decode_pdf_text_string, map_widget_label,
+    read_scene_name, report_active_content, resolve_annotation_value, scene_name_label,
+    single_filter,
 };
 
 use super::native::{NativeNoteId, NativePageGeometry, NativePageId, NativeTextPage};
@@ -172,6 +173,11 @@ pub struct PdfSourceProvenance {
 }
 
 impl PdfSourceProvenance {
+    fn heap_bytes(&self) -> usize {
+        self.operator.as_ref().map_or(0, String::capacity)
+            + self.invocation_path.capacity() * size_of::<u32>()
+    }
+
     fn clone_heap_bytes(&self) -> usize {
         self.operator.as_deref().map_or(0, str::len) + size_of_val(self.invocation_path.as_slice())
     }
@@ -605,12 +611,7 @@ struct GraphicsState {
     line_width: Option<f64>,
     miter_limit: Option<f64>,
     path_ctm_changed: bool,
-    pending_clip: Option<(
-        Vec<RawPathCommand>,
-        bool,
-        PdfSourceProvenance,
-        Option<PaintBounds>,
-    )>,
+    pending_clip: Option<PendingClip>,
 }
 
 impl GraphicsState {
@@ -655,16 +656,38 @@ impl GraphicsState {
         };
     }
 
-    fn saved_heap_bytes(&self) -> Option<usize> {
-        let path_bytes = size_of_val(self.path.as_slice());
-        if let Some((commands, _, provenance, _)) = &self.pending_clip {
-            path_bytes
-                .checked_add(size_of_val(commands.as_slice()))?
-                .checked_add(provenance.operator.as_ref().map_or(0, String::len))?
-                .checked_add(size_of_val(provenance.invocation_path.as_slice()))
-        } else {
-            Some(path_bytes)
-        }
+    fn heap_bytes(&self) -> usize {
+        self.path.capacity() * size_of::<RawPathCommand>()
+            + self
+                .pending_clip
+                .as_ref()
+                .map_or(0, PendingClip::heap_bytes)
+    }
+
+    fn clone_heap_bytes(&self) -> usize {
+        size_of_val(self.path.as_slice())
+            + self
+                .pending_clip
+                .as_ref()
+                .map_or(0, PendingClip::clone_heap_bytes)
+    }
+}
+
+#[derive(Debug, Clone)]
+struct PendingClip {
+    commands: Vec<RawPathCommand>,
+    even_odd: bool,
+    provenance: PdfSourceProvenance,
+    paint_bounds: Option<PaintBounds>,
+}
+
+impl PendingClip {
+    fn heap_bytes(&self) -> usize {
+        self.commands.capacity() * size_of::<RawPathCommand>() + self.provenance.heap_bytes()
+    }
+
+    fn clone_heap_bytes(&self) -> usize {
+        size_of_val(self.commands.as_slice()) + self.provenance.clone_heap_bytes()
     }
 }
 
@@ -792,7 +815,7 @@ struct SceneBuilder<'a> {
     font_cache_bytes: usize,
     page_refs: BTreeMap<PdfObjectRef, u32>,
     state: GraphicsState,
-    state_stack: Vec<(GraphicsState, usize)>,
+    state_stack: Vec<GraphicsState>,
     invocation_path: Vec<u32>,
 }
 
@@ -850,13 +873,42 @@ impl<'a> SceneBuilder<'a> {
             self.state.paint_clip = self.state.paint_clip.intersect(PaintBounds(crop_edges));
         }
         self.inspect_annotations()?;
+        let resource_locator = self
+            .page
+            .resources
+            .filter(|_| !self.page.contents.is_empty());
+        let resource_owner = match resource_locator {
+            Some(PageResources::Direct(owner)) => Some(self.reader.scene_object(
+                owner,
+                0,
+                self.budget.remaining_scene_bytes,
+            )?),
+            Some(PageResources::Indirect(reference, depth)) => Some(self.reader.scene_object(
+                reference,
+                depth,
+                self.budget.remaining_scene_bytes,
+            )?),
+            None => None,
+        };
+        let resource_bytes = resource_owner.as_ref().map_or(0, |(_, bytes)| *bytes);
+        self.budget.charge(resource_bytes)?;
+        let resources = resource_owner.as_ref().and_then(|(owner, _)| {
+            if matches!(resource_locator, Some(PageResources::Direct(_))) {
+                owner.as_dictionary()?.get("Resources")
+            } else {
+                Some(owner)
+            }
+        });
         let mut previous = None::<(PdfObjectRef, u8, bool)>;
         let mut unverified_boundary = None;
         for (index, content_ref) in self.page.contents.iter().enumerate() {
             self.invocation_path =
                 vec![u32::try_from(index).map_err(|_| PdfReadError::NumericLimit)?];
-            match self.reader.object(*content_ref) {
-                Ok(PdfValue::Stream(stream)) => {
+            match self
+                .reader
+                .scene_object(*content_ref, 0, self.budget.remaining_scene_bytes)
+            {
+                Ok((PdfValue::Stream(stream), bytes)) => {
                     let Some(&last_byte) = stream.data.last() else {
                         continue;
                     };
@@ -864,19 +916,23 @@ impl<'a> SceneBuilder<'a> {
                         .filter(|(_, byte, _)| !separated_content_streams(&[*byte], &stream.data));
                     if let Some((previous_ref, _, open_comment)) = uncertain {
                         if open_comment {
+                            drop(stream);
                             self.report_partial(previous_ref);
                             break;
                         }
                         // @contract: Independent stream previews across unverified boundaries are partial.
                         unverified_boundary.get_or_insert(previous_ref);
                     }
+                    self.budget.charge(bytes)?;
                     let end = self.interpret_stream(
                         &stream,
                         *content_ref,
                         0,
-                        self.page.resources.as_ref(),
+                        resources,
                         index + 1 < self.page.contents.len(),
                     );
+                    drop(stream);
+                    self.budget.release(bytes);
                     let end = match (end, uncertain) {
                         (Err(ContentParseError::OperatorSyntax), Some((previous_ref, _, _))) => {
                             self.report_partial(previous_ref);
@@ -891,7 +947,8 @@ impl<'a> SceneBuilder<'a> {
                     }
                     previous = Some((*content_ref, last_byte, end.open_comment));
                 }
-                Ok(_) => {
+                Ok((value, _)) => {
+                    drop(value);
                     self.report_partial(*content_ref);
                     break;
                 }
@@ -911,9 +968,16 @@ impl<'a> SceneBuilder<'a> {
         {
             self.report_partial(object_ref);
         }
+        drop(resource_owner);
+        self.budget.release(resource_bytes);
         self.discard_saved_states(0);
+        let stack_bytes = self.state_stack.capacity() * size_of::<GraphicsState>();
+        drop(self.state_stack);
+        self.budget.release(stack_bytes);
+        let state_bytes = self.state.heap_bytes();
         // @invariant: Font allocations stay charged until the page drops all owning references.
-        drop(self.state.font);
+        drop(self.state);
+        self.budget.release(state_bytes);
         drop(self.fonts);
         drop(self.font_aliases);
         self.budget.release(self.font_cache_bytes);
@@ -1072,7 +1136,7 @@ impl<'a> SceneBuilder<'a> {
                     std::array::from_fn(|i| operands[operands.len() - 2 + i].scene_decimal());
                 let [px, py] = point.map(SceneDecimal::value);
                 self.state.extend_path_paint_bounds([px, py, px, py]);
-                self.state.path.push(RawPathCommand::MoveTo(x, y, point));
+                self.push_path(RawPathCommand::MoveTo(x, y, point))?;
                 self.state.current_point = Some((x, y));
                 self.state.subpath_start = self.state.current_point;
             }
@@ -1082,7 +1146,7 @@ impl<'a> SceneBuilder<'a> {
                     std::array::from_fn(|i| operands[operands.len() - 2 + i].scene_decimal());
                 let [px, py] = point.map(SceneDecimal::value);
                 self.state.extend_path_paint_bounds([px, py, px, py]);
-                self.state.path.push(RawPathCommand::LineTo(x, y, point));
+                self.push_path(RawPathCommand::LineTo(x, y, point))?;
                 self.state.current_point = Some((x, y));
             }
             "c" => {
@@ -1098,9 +1162,9 @@ impl<'a> SceneBuilder<'a> {
                     let [x, y] = point.map(SceneDecimal::value);
                     self.state.extend_path_paint_bounds([x, y, x, y]);
                 }
-                self.state.path.push(RawPathCommand::CurveTo(
+                self.push_path(RawPathCommand::CurveTo(
                     values[0], values[1], values[2], values[3], values[4], values[5], points,
-                ));
+                ))?;
                 self.state.current_point = Some((values[4], values[5]));
             }
             "v" => {
@@ -1117,7 +1181,7 @@ impl<'a> SceneBuilder<'a> {
                     self.state.extend_path_paint_bounds([x, y, x, y]);
                 }
                 let (x0, y0) = self.state.current_point.ok_or(PdfReadError::Syntax)?;
-                self.state.path.push(RawPathCommand::CurveTo(
+                self.push_path(RawPathCommand::CurveTo(
                     x0,
                     y0,
                     values[0],
@@ -1125,7 +1189,7 @@ impl<'a> SceneBuilder<'a> {
                     values[2],
                     values[3],
                     [points[0], points[0], points[1]],
-                ));
+                ))?;
                 self.state.current_point = Some((values[2], values[3]));
             }
             "y" => {
@@ -1141,7 +1205,7 @@ impl<'a> SceneBuilder<'a> {
                     let [x, y] = point.map(SceneDecimal::value);
                     self.state.extend_path_paint_bounds([x, y, x, y]);
                 }
-                self.state.path.push(RawPathCommand::CurveTo(
+                self.push_path(RawPathCommand::CurveTo(
                     values[0],
                     values[1],
                     values[2],
@@ -1149,7 +1213,7 @@ impl<'a> SceneBuilder<'a> {
                     values[2],
                     values[3],
                     [points[0], points[1], points[1]],
-                ));
+                ))?;
                 self.state.current_point = Some((values[2], values[3]));
             }
             "re" => {
@@ -1162,6 +1226,7 @@ impl<'a> SceneBuilder<'a> {
                 let (x, y, width, height) = (values[0], values[1], values[2], values[3]);
                 let x1 = x.checked_add(width)?;
                 let y1 = y.checked_add(height)?;
+                self.budget.reserve_vec(&mut self.state.path, 5)?;
                 self.state.path.push(RawPathCommand::MoveTo(x, y, [px, py]));
                 self.state
                     .path
@@ -1177,17 +1242,25 @@ impl<'a> SceneBuilder<'a> {
                 self.state.subpath_start = self.state.current_point;
             }
             "h" => {
-                self.state.path.push(RawPathCommand::Close);
+                self.push_path(RawPathCommand::Close)?;
                 self.state.current_point = self.state.subpath_start;
             }
             "W" | "W*" => {
                 if !self.state.path.is_empty() {
-                    self.state.pending_clip = Some((
-                        self.state.path.clone(),
-                        operator == "W*",
+                    self.budget.charge(
+                        size_of_val(self.state.path.as_slice()) + provenance.heap_bytes(),
+                    )?;
+                    let clip = PendingClip {
+                        commands: self.state.path.clone(),
+                        even_odd: operator == "W*",
                         provenance,
-                        self.state.path_paint_bounds,
-                    ));
+                        paint_bounds: self.state.path_paint_bounds,
+                    };
+                    if let Some(old_clip) = self.state.pending_clip.replace(clip) {
+                        let bytes = old_clip.heap_bytes();
+                        drop(old_clip);
+                        self.budget.release(bytes);
+                    }
                 }
             }
             "S" | "s" | "f" | "F" | "f*" | "B" | "B*" | "b" | "b*" | "n" => {
@@ -1282,30 +1355,55 @@ impl<'a> SceneBuilder<'a> {
         Ok(())
     }
 
-    fn save_state(&mut self) -> Result<(), PdfReadError> {
+    fn push_path(&mut self, command: RawPathCommand) -> Result<(), PdfReadError> {
+        self.budget.reserve_vec(&mut self.state.path, 1)?;
+        self.state.path.push(command);
+        Ok(())
+    }
+
+    fn reserve_saved_state(&mut self) -> Result<(), PdfReadError> {
         // @invariant: The stack also holds callers' saved states during Form interpretation.
         if self.state_stack.len() >= self.limits.max_nesting {
             return Err(PdfReadError::TokenLimit);
         }
-        let bytes = self
-            .state
-            .saved_heap_bytes()
-            .ok_or(PdfReadError::StreamLimit)?;
-        self.budget.charge(bytes)?;
-        self.state_stack.push((self.state.clone(), bytes));
+        self.budget.reserve_vec(&mut self.state_stack, 1)
+    }
+
+    fn save_state(&mut self) -> Result<(), PdfReadError> {
+        self.reserve_saved_state()?;
+        self.budget.charge(self.state.clone_heap_bytes())?;
+        self.state_stack.push(self.state.clone());
+        Ok(())
+    }
+
+    fn save_form_caller(&mut self) -> Result<(), PdfReadError> {
+        self.reserve_saved_state()?;
+        // @invariant: The caller keeps ownership of its charged path and pending clip.
+        let path = std::mem::take(&mut self.state.path);
+        let pending_clip = self.state.pending_clip.take();
+        self.state_stack.push(GraphicsState {
+            path,
+            pending_clip,
+            ..self.state.clone()
+        });
         Ok(())
     }
 
     fn restore_state(&mut self) -> Result<(), PdfReadError> {
-        let (state, bytes) = self.state_stack.pop().ok_or(PdfReadError::Syntax)?;
-        self.state = state;
-        self.budget.remaining_scene_bytes += bytes;
+        let state = self.state_stack.pop().ok_or(PdfReadError::Syntax)?;
+        let discarded = std::mem::replace(&mut self.state, state);
+        let bytes = discarded.heap_bytes();
+        // @invariant: Restoring a state transfers its allocation charge to the active state.
+        drop(discarded);
+        self.budget.release(bytes);
         Ok(())
     }
 
     fn discard_saved_states(&mut self, keep: usize) {
-        for (_, bytes) in self.state_stack.drain(keep..) {
-            self.budget.remaining_scene_bytes += bytes;
+        for state in self.state_stack.drain(keep..) {
+            let bytes = state.heap_bytes();
+            drop(state);
+            self.budget.release(bytes);
         }
     }
 
@@ -1348,16 +1446,18 @@ impl<'a> SceneBuilder<'a> {
                 self.report_partial(provenance.object_ref);
             }
             self.state.path.clear();
+            if let Some(clip) = pending_clip {
+                let bytes = clip.heap_bytes();
+                drop(clip);
+                self.budget.release(bytes);
+            }
             return Ok(());
         }
 
         if !self.state.path.is_empty() && operator != "n" {
-            let mut commands = transform_path(&self.state.path, self.state.ctm)?;
-            if matches!(operator, "s" | "b" | "b*")
-                && !matches!(commands.last(), Some(PdfPathCommand::ClosePath))
-            {
-                commands.push(PdfPathCommand::ClosePath);
-            }
+            let close = matches!(operator, "s" | "b" | "b*")
+                && !matches!(self.state.path.last(), Some(RawPathCommand::Close));
+            let commands = transform_path(&self.state.path, self.state.ctm, close, self.budget)?;
             let rect = path_bounds(&commands)?;
             let stroke = matches!(operator, "S" | "s" | "B" | "B*" | "b" | "b*");
             let fill = !matches!(operator, "S" | "s");
@@ -1389,19 +1489,30 @@ impl<'a> SceneBuilder<'a> {
                 self.report_partial(provenance.object_ref);
             }
             if visible {
-                self.push_element(PdfSceneElement::Path {
-                    value: PdfPathElement {
-                        commands,
-                        rect,
-                        stroke,
-                        fill,
-                        provenance,
+                let heap_bytes =
+                    commands.capacity() * size_of::<PdfPathCommand>() + provenance.heap_bytes();
+                self.push_element_with_workspace(
+                    PdfSceneElement::Path {
+                        value: PdfPathElement {
+                            commands,
+                            rect,
+                            stroke,
+                            fill,
+                            provenance,
+                        },
                     },
-                })?;
+                    heap_bytes,
+                )?;
             }
         }
         self.state.path.clear();
-        if let Some((commands, even_odd, clip_provenance, paint_bounds)) = pending_clip {
+        if let Some(PendingClip {
+            commands,
+            even_odd,
+            provenance: clip_provenance,
+            paint_bounds,
+        }) = pending_clip
+        {
             if let Some(bounds) = paint_bounds {
                 self.state.paint_clip = self.state.paint_clip.intersect(bounds);
             }
@@ -1410,20 +1521,30 @@ impl<'a> SceneBuilder<'a> {
                     .state
                     .paint_ctm
                     .is_some_and(|matrix| is_precise_rectangular_path(&commands, matrix));
-            let commands = transform_path(&commands, self.state.ctm)?;
-            let rect = path_bounds(&commands)?;
+            let transformed = transform_path(&commands, self.state.ctm, false, self.budget)?;
+            let raw_bytes = commands.capacity() * size_of::<RawPathCommand>();
+            drop(commands);
+            self.budget.release(raw_bytes);
+            let rect = path_bounds(&transformed)?;
             self.state.clip = self
                 .state
                 .clip
-                .intersect(rect, rectangular && is_rectangular_path(&commands))?;
-            self.push_element(PdfSceneElement::Clip {
-                value: PdfClipElement {
-                    rect,
-                    even_odd,
-                    provenance: clip_provenance,
-                    commands,
+                .intersect(rect, rectangular && is_rectangular_path(&transformed))?;
+            let provenance_bytes = clip_provenance.heap_bytes();
+            let heap_bytes =
+                transformed.capacity() * size_of::<PdfPathCommand>() + provenance_bytes;
+            self.budget.release(provenance_bytes);
+            self.push_element_with_workspace(
+                PdfSceneElement::Clip {
+                    value: PdfClipElement {
+                        rect,
+                        even_odd,
+                        provenance: clip_provenance,
+                        commands: transformed,
+                    },
                 },
-            })?;
+                heap_bytes,
+            )?;
         }
         Ok(())
     }
@@ -1507,7 +1628,6 @@ impl<'a> SceneBuilder<'a> {
         resources: Option<&PdfValue>,
         category: &str,
         name: &str,
-        workspace: Option<usize>,
     ) -> Result<PdfObjectRef, PdfReadError> {
         let value = resources
             .and_then(PdfValue::as_dictionary)
@@ -1515,10 +1635,10 @@ impl<'a> SceneBuilder<'a> {
             .ok_or(PdfReadError::ReferenceInvalid)?;
         let resolved;
         let value = if let PdfValue::Reference(reference) = value {
-            resolved = match workspace {
-                Some(bytes) => self.reader.scene_font_object(*reference, bytes)?.0,
-                None => self.reader.object(*reference)?,
-            };
+            resolved = self
+                .reader
+                .scene_object(*reference, 0, self.budget.remaining_scene_bytes)?
+                .0;
             &resolved
         } else {
             value
@@ -1542,12 +1662,7 @@ impl<'a> SceneBuilder<'a> {
             .get(1)
             .and_then(ContentToken::number)
             .ok_or(PdfReadError::Syntax)?;
-        let font_ref = self.resource_reference(
-            resources,
-            "Font",
-            name,
-            Some(self.budget.remaining_scene_bytes),
-        )?;
+        let font_ref = self.resource_reference(resources, "Font", name)?;
         let mut budget = self.budget;
         let cache_font = !self.fonts.contains_key(&font_ref);
         let map = if let Some(font) = self.fonts.get(&font_ref) {
@@ -1591,9 +1706,9 @@ impl<'a> SceneBuilder<'a> {
         font_ref: PdfObjectRef,
         budget: &mut SceneBudget,
     ) -> Result<FontMap, PdfReadError> {
-        let (font, font_bytes) = self
-            .reader
-            .scene_font_object(font_ref, budget.remaining_scene_bytes)?;
+        let (font, font_bytes) =
+            self.reader
+                .scene_object(font_ref, 0, budget.remaining_scene_bytes)?;
         budget.charge(font_bytes)?;
         let dictionary = font.as_dictionary().ok_or(PdfReadError::ReferenceInvalid)?;
         let base_name = dictionary.get("BaseFont").and_then(PdfValue::as_name);
@@ -1630,9 +1745,9 @@ impl<'a> SceneBuilder<'a> {
         budget.release(font_bytes);
         let mut to_unicode = BTreeMap::new();
         if let Some(reference) = to_unicode_ref {
-            let (object, stream_bytes) = self
-                .reader
-                .scene_font_object(reference, budget.remaining_scene_bytes)?;
+            let (object, stream_bytes) =
+                self.reader
+                    .scene_object(reference, 0, budget.remaining_scene_bytes)?;
             budget.charge(stream_bytes)?;
             if let PdfValue::Stream(stream) = &object {
                 to_unicode = parse_to_unicode(&stream.data, self.limits.max_array_items, budget)?;
@@ -1801,152 +1916,187 @@ impl<'a> SceneBuilder<'a> {
         let Some(ContentToken::Name(name)) = operands.last() else {
             return Err(ContentParseError::OperatorSyntax);
         };
-        let xobject_ref = self.resource_reference(resources, "XObject", name, None)?;
-        let xobject = self.reader.object(xobject_ref)?;
-        let stream = match xobject {
-            PdfValue::Stream(stream) => stream,
-            _ => return Err(PdfReadError::ReferenceInvalid.into()),
-        };
+        let xobject_ref = self.resource_reference(resources, "XObject", name)?;
+        self.with_scene_object(xobject_ref, |builder, xobject| {
+            let PdfValue::Stream(stream) = xobject else {
+                return Err(PdfReadError::ReferenceInvalid);
+            };
+            match stream.dict.get("Subtype").and_then(PdfValue::as_name) {
+                Some("Image") => builder.paint_image(stream, xobject_ref, provenance),
+                Some("Form") => {
+                    if depth + 1 > builder.limits.max_form_depth {
+                        builder.report.push(PdfReadDiagnostic::blocked(
+                            PdfReadDiagnosticCode::FormDepthLimit,
+                            Some(builder.page_index),
+                            Some(xobject_ref.object_number),
+                        ));
+                        return Ok(());
+                    }
+                    let paint = |builder: &mut Self, local_resources: Option<&PdfValue>| {
+                        let effective_resources = local_resources
+                            .filter(|value| !matches!(value, PdfValue::Null))
+                            .or(resources);
+                        builder.paint_form(
+                            stream,
+                            xobject_ref,
+                            provenance,
+                            depth,
+                            effective_resources,
+                        )
+                    };
+                    match stream.dict.get("Resources") {
+                        Some(PdfValue::Reference(reference)) => builder
+                            .with_scene_object(*reference, |builder, value| {
+                                paint(builder, Some(value))
+                            }),
+                        value => paint(builder, value),
+                    }
+                }
+                _ => {
+                    builder.report.push(
+                        PdfReadDiagnostic::warning(
+                            PdfReadDiagnosticCode::UnsupportedOperator,
+                            Some(builder.page_index),
+                            Some(object_ref.object_number),
+                        )
+                        .with_operator("Do"),
+                    );
+                    Ok(())
+                }
+            }
+        })
+        .map_err(ContentParseError::from)
+    }
+
+    fn with_scene_object(
+        &mut self,
+        reference: PdfObjectRef,
+        use_object: impl FnOnce(&mut Self, &PdfValue) -> Result<(), PdfReadError>,
+    ) -> Result<(), PdfReadError> {
+        let (value, bytes) =
+            self.reader
+                .scene_object(reference, 0, self.budget.remaining_scene_bytes)?;
+        // @invariant: The owner stays charged across nested interpretation and error returns.
+        self.budget.charge(bytes)?;
+        let result = use_object(self, &value);
+        drop(value);
+        self.budget.release(bytes);
+        result
+    }
+
+    fn paint_form(
+        &mut self,
+        stream: &PdfStream,
+        xobject_ref: PdfObjectRef,
+        provenance: PdfSourceProvenance,
+        depth: usize,
+        effective_resources: Option<&PdfValue>,
+    ) -> Result<(), PdfReadError> {
         let dictionary = &stream.dict;
-        match dictionary.get("Subtype").and_then(PdfValue::as_name) {
-            Some("Image") => self
-                .paint_image(&stream, xobject_ref, provenance)
-                .map_err(ContentParseError::from),
-            Some("Form") => {
-                if depth + 1 > self.limits.max_form_depth {
-                    self.report.push(PdfReadDiagnostic::blocked(
-                        PdfReadDiagnosticCode::FormDepthLimit,
-                        Some(self.page_index),
-                        Some(xobject_ref.object_number),
-                    ));
-                    return Ok(());
-                }
-                let local_resources;
-                let effective_resources = match dictionary.get("Resources") {
-                    Some(PdfValue::Reference(reference)) => {
-                        local_resources = self.reader.object(*reference)?;
-                        match &local_resources {
-                            PdfValue::Null => resources,
-                            value => Some(value),
-                        }
-                    }
-                    None | Some(PdfValue::Null) => resources,
-                    Some(value) => Some(value),
+        let mut form_paint_ctm = self.state.paint_ctm;
+        let form_ctm = match dictionary.get("Matrix") {
+            None | Some(PdfValue::Null) => self.state.ctm,
+            Some(value) => {
+                let resolved;
+                let value = if let PdfValue::Reference(reference) = value {
+                    resolved = self
+                        .reader
+                        .scene_object(*reference, 0, self.budget.remaining_scene_bytes)?
+                        .0;
+                    &resolved
+                } else {
+                    value
                 };
-                let mut form_paint_ctm = self.state.paint_ctm;
-                let form_ctm = match dictionary.get("Matrix") {
-                    None | Some(PdfValue::Null) => self.state.ctm,
-                    Some(value) => {
-                        let resolved;
-                        let value = if let PdfValue::Reference(reference) = value {
-                            resolved = self.reader.object(*reference)?;
-                            &resolved
-                        } else {
-                            value
+                match value {
+                    PdfValue::Null => self.state.ctm,
+                    value => {
+                        let Ok(matrix) = Matrix::from_pdf_array(value) else {
+                            self.report_partial(xobject_ref);
+                            return Ok(());
                         };
-                        match value {
-                            PdfValue::Null => self.state.ctm,
-                            value => {
-                                let Ok(matrix) = Matrix::from_pdf_array(value) else {
-                                    self.report_partial(xobject_ref);
-                                    return Ok(());
-                                };
-                                form_paint_ctm = form_paint_ctm.and_then(|outer| {
-                                    outer.multiply(PaintMatrix(PaintMatrix::pdf_numbers(value)?))
-                                });
-                                self.state.ctm.multiply(matrix)?
-                            }
-                        }
+                        form_paint_ctm = form_paint_ctm.and_then(|outer| {
+                            outer.multiply(PaintMatrix(PaintMatrix::pdf_numbers(value)?))
+                        });
+                        self.state.ctm.multiply(matrix)?
                     }
-                };
-                let local_bbox = dictionary
-                    .get("BBox")
-                    .map(|value| self.reader.resolve(value, depth))
-                    .transpose()?;
-                let precise_bbox = local_bbox.as_ref().and_then(|value| {
-                    let [x, y, right, top] = PaintMatrix::pdf_numbers(value)?;
-                    (x < right && y < top).then_some([x, y, right, top])
-                });
-                let form_paint_bounds =
-                    form_paint_ctm.and_then(|matrix| matrix.bounds(precise_bbox?));
-                let form_paint_clip = form_paint_bounds.map_or(self.state.paint_clip, |bounds| {
-                    self.state.paint_clip.intersect(bounds)
-                });
-                let Some(bbox) = local_bbox
-                    .as_ref()
-                    .and_then(|value| parse_bbox(value).ok())
-                    .filter(|bbox| {
-                        precise_bbox.is_some() || (bbox.width.raw() > 0 && bbox.height.raw() > 0)
-                    })
-                else {
-                    self.report_partial(xobject_ref);
-                    return Ok(());
-                };
-                let form_bounds = transformed_rect(form_ctm, bbox)?;
-                let zero = LayoutUnit::from_raw(0);
-                let rectangular = ((form_ctm.b == zero && form_ctm.c == zero)
-                    || (form_ctm.a == zero && form_ctm.d == zero))
-                    && form_paint_bounds.is_some()
-                    && form_paint_ctm.is_some_and(PaintMatrix::is_axis_aligned);
-                let clip = self.state.clip.intersect(form_bounds, rectangular)?;
-                self.push_element(PdfSceneElement::Annotation {
-                    value: PdfAnnotationElement {
-                        subtype: Some("FormXObject".to_owned()),
-                        kind: PdfAnnotationKind::Supported,
-                        rect: form_bounds,
-                        provenance: PdfSourceProvenance {
-                            object_ref: xobject_ref,
-                            ..provenance.clone()
-                        },
-                    },
-                })?;
-                if clip.is_empty() && form_paint_clip.is_empty() {
-                    return Ok(());
                 }
-                let caller_state_index = self.state_stack.len();
-                self.save_state()?;
-                let caller_emit_elements = self.emit_elements;
-                self.emit_elements &= !clip.is_empty();
-                self.state.ctm = form_ctm;
-                self.state.paint_ctm = form_paint_ctm;
-                self.state.paint_clip = form_paint_clip;
-                self.state.path_paint_bounds = None;
-                self.state.clip = clip;
-                self.state.path = Vec::new();
-                self.state.current_point = None;
-                self.state.subpath_start = None;
-                self.state.pending_clip = None;
-                self.state.path_ctm_changed = false;
-                self.invocation_path.push(provenance.stream_offset);
-                let result = self.interpret_stream(
-                    &stream,
-                    xobject_ref,
-                    depth + 1,
-                    effective_resources,
-                    false,
-                );
-                self.invocation_path.pop();
-                self.emit_elements = caller_emit_elements;
-                if self.state_stack.len() > caller_state_index + 1 {
-                    self.report_partial(xobject_ref);
+            }
+        };
+        let (precise_bbox, bbox) = {
+            let resolved;
+            let value = match dictionary.get("BBox") {
+                Some(PdfValue::Reference(reference)) => {
+                    resolved = self
+                        .reader
+                        .scene_object(*reference, depth + 1, self.budget.remaining_scene_bytes)?
+                        .0;
+                    Some(&resolved)
                 }
-                self.discard_saved_states(caller_state_index + 1);
-                self.restore_state()?;
-                result.map_err(PdfReadError::from)?;
-                Ok(())
-            }
-            _ => {
-                self.report.push(
-                    PdfReadDiagnostic::warning(
-                        PdfReadDiagnosticCode::UnsupportedOperator,
-                        Some(self.page_index),
-                        Some(object_ref.object_number),
-                    )
-                    .with_operator("Do"),
-                );
-                Ok(())
-            }
+                value => value,
+            };
+            let precise = value.and_then(|value| {
+                let [x, y, right, top] = PaintMatrix::pdf_numbers(value)?;
+                (x < right && y < top).then_some([x, y, right, top])
+            });
+            let bbox = value
+                .and_then(|value| parse_bbox(value).ok())
+                .filter(|bbox| {
+                    precise.is_some() || (bbox.width.raw() > 0 && bbox.height.raw() > 0)
+                });
+            (precise, bbox)
+        };
+        let Some(bbox) = bbox else {
+            self.report_partial(xobject_ref);
+            return Ok(());
+        };
+        let form_paint_bounds = form_paint_ctm.and_then(|matrix| matrix.bounds(precise_bbox?));
+        let form_paint_clip = form_paint_bounds.map_or(self.state.paint_clip, |bounds| {
+            self.state.paint_clip.intersect(bounds)
+        });
+        let form_bounds = transformed_rect(form_ctm, bbox)?;
+        let zero = LayoutUnit::from_raw(0);
+        let rectangular = ((form_ctm.b == zero && form_ctm.c == zero)
+            || (form_ctm.a == zero && form_ctm.d == zero))
+            && form_paint_bounds.is_some()
+            && form_paint_ctm.is_some_and(PaintMatrix::is_axis_aligned);
+        let clip = self.state.clip.intersect(form_bounds, rectangular)?;
+        self.push_element(PdfSceneElement::Annotation {
+            value: PdfAnnotationElement {
+                subtype: Some("FormXObject".to_owned()),
+                kind: PdfAnnotationKind::Supported,
+                rect: form_bounds,
+                provenance: PdfSourceProvenance {
+                    object_ref: xobject_ref,
+                    ..provenance.clone()
+                },
+            },
+        })?;
+        if clip.is_empty() && form_paint_clip.is_empty() {
+            return Ok(());
         }
+        let caller_state_index = self.state_stack.len();
+        self.save_form_caller()?;
+        let caller_emit_elements = self.emit_elements;
+        self.emit_elements &= !clip.is_empty();
+        self.state.ctm = form_ctm;
+        self.state.paint_ctm = form_paint_ctm;
+        self.state.paint_clip = form_paint_clip;
+        self.state.path_paint_bounds = None;
+        self.state.clip = clip;
+        self.state.current_point = None;
+        self.state.subpath_start = None;
+        self.state.path_ctm_changed = false;
+        self.invocation_path.push(provenance.stream_offset);
+        let result =
+            self.interpret_stream(stream, xobject_ref, depth + 1, effective_resources, false);
+        self.invocation_path.pop();
+        self.emit_elements = caller_emit_elements;
+        if self.state_stack.len() > caller_state_index + 1 {
+            self.report_partial(xobject_ref);
+        }
+        self.discard_saved_states(caller_state_index + 1);
+        self.restore_state()?;
+        result.map(|_| ()).map_err(PdfReadError::from)
     }
 
     fn paint_image(
@@ -1980,10 +2130,10 @@ impl<'a> SceneBuilder<'a> {
             .and_then(single_filter)
             .unwrap_or("Identity")
             .to_owned();
-        let (media_type, data) = if filter == "DCTDecode" || filter == "DCT" {
-            ("image/jpeg", &stream.encoded)
+        let media_type = if filter == "DCTDecode" || filter == "DCT" {
+            "image/jpeg"
         } else {
-            ("application/octet-stream", &stream.data)
+            "application/octet-stream"
         };
         let zero = LayoutUnit::from_raw(0);
         let one = LayoutUnit::from_raw(LayoutUnit::UNITS_PER_POINT);
@@ -2020,7 +2170,7 @@ impl<'a> SceneBuilder<'a> {
         if !self.emit_elements {
             return Ok(());
         }
-        let Some(data_hex) = self.budget.image_hex(data)? else {
+        let Some(data_hex) = self.budget.image_hex(&stream.data)? else {
             self.report.push(PdfReadDiagnostic::blocked(
                 PdfReadDiagnosticCode::ImageLimit,
                 Some(self.page_index),
@@ -2028,21 +2178,25 @@ impl<'a> SceneBuilder<'a> {
             ));
             return Ok(());
         };
-        self.push_element(PdfSceneElement::Image {
-            value: PdfImageElement {
-                width,
-                height,
-                media_type: media_type.to_owned(),
-                filter,
-                data_hex,
-                rect,
-                provenance: PdfSourceProvenance {
-                    object_ref,
-                    ..provenance
+        let heap_bytes =
+            data_hex.capacity() + filter.capacity() + media_type.len() + provenance.heap_bytes();
+        self.push_element_with_workspace(
+            PdfSceneElement::Image {
+                value: PdfImageElement {
+                    width,
+                    height,
+                    media_type: media_type.to_owned(),
+                    filter,
+                    data_hex,
+                    rect,
+                    provenance: PdfSourceProvenance {
+                        object_ref,
+                        ..provenance
+                    },
                 },
             },
-        })?;
-        Ok(())
+            heap_bytes,
+        )
     }
 
     fn inspect_annotations(&mut self) -> Result<(), PdfReadError> {
@@ -2395,6 +2549,29 @@ impl SceneBudget {
         self.remaining_scene_bytes += bytes;
     }
 
+    fn reserve_vec<T>(
+        &mut self,
+        values: &mut Vec<T>,
+        additional: usize,
+    ) -> Result<(), PdfReadError> {
+        let old_capacity = values.capacity();
+        let needed = values.len() + additional;
+        if needed > old_capacity {
+            let capacity = needed.max(old_capacity.saturating_add(old_capacity / 2));
+            let bytes = capacity
+                .checked_mul(size_of::<T>())
+                .ok_or(PdfReadError::StreamLimit)?;
+            // @invariant: Growth reserves a new buffer while the old allocation is charged.
+            self.remaining_after(bytes)?;
+            values
+                .try_reserve_exact(capacity - values.len())
+                .map_err(|_| PdfReadError::StreamLimit)?;
+            self.charge(values.capacity() * size_of::<T>())?;
+            self.release(old_capacity * size_of::<T>());
+        }
+        Ok(())
+    }
+
     fn encode(&mut self, value: &impl Serialize) -> Result<(), PdfReadError> {
         let mut writer = SceneJsonWriter {
             output: std::io::sink(),
@@ -2671,34 +2848,41 @@ fn six_number_values(values: &[ContentToken]) -> Result<[LayoutUnit; 6], PdfRead
 fn transform_path(
     commands: &[RawPathCommand],
     matrix: Matrix,
+    close: bool,
+    mut workspace: SceneBudget,
 ) -> Result<Vec<PdfPathCommand>, PdfReadError> {
-    commands
-        .iter()
-        .map(|command| match command {
+    let mut transformed = Vec::new();
+    workspace.reserve_vec(&mut transformed, commands.len() + usize::from(close))?;
+    for command in commands {
+        transformed.push(match command {
             RawPathCommand::MoveTo(x, y, _) => {
                 let (x, y) = matrix.point(*x, *y)?;
-                Ok(PdfPathCommand::MoveTo { x, y })
+                PdfPathCommand::MoveTo { x, y }
             }
             RawPathCommand::LineTo(x, y, _) => {
                 let (x, y) = matrix.point(*x, *y)?;
-                Ok(PdfPathCommand::LineTo { x, y })
+                PdfPathCommand::LineTo { x, y }
             }
             RawPathCommand::CurveTo(x1, y1, x2, y2, x3, y3, _) => {
                 let (x1, y1) = matrix.point(*x1, *y1)?;
                 let (x2, y2) = matrix.point(*x2, *y2)?;
                 let (x3, y3) = matrix.point(*x3, *y3)?;
-                Ok(PdfPathCommand::CurveTo {
+                PdfPathCommand::CurveTo {
                     x1,
                     y1,
                     x2,
                     y2,
                     x3,
                     y3,
-                })
+                }
             }
-            RawPathCommand::Close => Ok(PdfPathCommand::ClosePath),
-        })
-        .collect()
+            RawPathCommand::Close => PdfPathCommand::ClosePath,
+        });
+    }
+    if close {
+        transformed.push(PdfPathCommand::ClosePath);
+    }
+    Ok(transformed)
 }
 
 fn has_noncollinear_points<T: Copy>(
@@ -2903,12 +3087,19 @@ fn contains_collapsed_stroke(commands: &[PdfPathCommand], source: &[RawPathComma
 }
 
 fn path_bounds(commands: &[PdfPathCommand]) -> Result<LayoutRect, PdfReadError> {
-    let mut points = Vec::new();
-    for command in commands {
-        match command {
-            PdfPathCommand::MoveTo { x, y } | PdfPathCommand::LineTo { x, y } => {
-                points.push((*x, *y))
+    let mut bounds = None::<[i64; 4]>;
+    let mut include = |x: LayoutUnit, y: LayoutUnit| {
+        let (x, y) = (x.raw(), y.raw());
+        bounds = Some(match bounds {
+            Some([min_x, min_y, max_x, max_y]) => {
+                [min_x.min(x), min_y.min(y), max_x.max(x), max_y.max(y)]
             }
+            None => [x, y, x, y],
+        });
+    };
+    for command in commands {
+        match *command {
+            PdfPathCommand::MoveTo { x, y } | PdfPathCommand::LineTo { x, y } => include(x, y),
             PdfPathCommand::CurveTo {
                 x1,
                 y1,
@@ -2916,38 +3107,15 @@ fn path_bounds(commands: &[PdfPathCommand]) -> Result<LayoutRect, PdfReadError> 
                 y2,
                 x3,
                 y3,
-            } => points.extend([(*x1, *y1), (*x2, *y2), (*x3, *y3)]),
+            } => {
+                include(x1, y1);
+                include(x2, y2);
+                include(x3, y3);
+            }
             PdfPathCommand::ClosePath => {}
         }
     }
-    if points.is_empty() {
-        return Ok(LayoutRect {
-            x: LayoutUnit::from_raw(0),
-            y: LayoutUnit::from_raw(0),
-            width: LayoutUnit::from_raw(0),
-            height: LayoutUnit::from_raw(0),
-        });
-    }
-    let min_x = points
-        .iter()
-        .map(|(x, _)| x.raw())
-        .min()
-        .ok_or(PdfReadError::NumericLimit)?;
-    let min_y = points
-        .iter()
-        .map(|(_, y)| y.raw())
-        .min()
-        .ok_or(PdfReadError::NumericLimit)?;
-    let max_x = points
-        .iter()
-        .map(|(x, _)| x.raw())
-        .max()
-        .ok_or(PdfReadError::NumericLimit)?;
-    let max_y = points
-        .iter()
-        .map(|(_, y)| y.raw())
-        .max()
-        .ok_or(PdfReadError::NumericLimit)?;
+    let [min_x, min_y, max_x, max_y] = bounds.unwrap_or([0; 4]);
     Ok(LayoutRect {
         x: LayoutUnit::from_raw(min_x),
         y: LayoutUnit::from_raw(min_y),
@@ -3669,6 +3837,28 @@ mod tests {
     };
 
     #[test]
+    fn path_bounds_preserves_empty_and_numeric_limit_results() {
+        use super::{LayoutUnit, PdfPathCommand, PdfReadError, path_bounds};
+
+        assert_eq!(
+            path_bounds(&[PdfPathCommand::ClosePath]).unwrap().width,
+            LayoutUnit::from_raw(0)
+        );
+        let zero = LayoutUnit::from_raw(0);
+        let commands = [
+            PdfPathCommand::MoveTo {
+                x: LayoutUnit::from_raw(i64::MIN),
+                y: zero,
+            },
+            PdfPathCommand::LineTo {
+                x: LayoutUnit::from_raw(i64::MAX),
+                y: zero,
+            },
+        ];
+        assert_eq!(path_bounds(&commands), Err(PdfReadError::NumericLimit));
+    }
+
+    #[test]
     fn precise_clip_can_exclude_only_the_collapsed_contour() {
         let point = |x, y| {
             [
@@ -3692,7 +3882,16 @@ mod tests {
             RawPathCommand::LineTo(fixed(50), fixed(25), point(50004, 25000)),
             RawPathCommand::LineTo(fixed(50), fixed(30), point(50000, 30000)),
         ];
-        let commands = transform_path(&source, super::Matrix::IDENTITY).unwrap();
+        let commands = transform_path(
+            &source,
+            super::Matrix::IDENTITY,
+            false,
+            super::SceneBudget {
+                remaining_scene_bytes: usize::MAX,
+                remaining_image_hex_bytes: 0,
+            },
+        )
+        .unwrap();
         let matrix = Some(PaintMatrix([1., 0., 0., 1., 0., 0.]));
         assert!(lost_visible_fill_contour(
             &source,
