@@ -1105,14 +1105,14 @@ pub(super) fn project(
     hash: [u8; 32],
     binding: NativeBinding,
     remaining: &mut usize,
+    work: &mut usize,
 ) -> Result<Vec<NativeObjectPage>> {
-    let mut work = graph.remaining_work();
     spend(remaining, pages.len() * 128)?;
     let workspace = Workspace::new(*remaining);
     let mut projected = workspace.scope();
     let mut result = Vec::with_capacity(pages.len());
     for page in pages {
-        let (can_add, objects, refusal) = match scan(graph, page, &mut work, &workspace) {
+        let (can_add, objects, refusal) = match scan(graph, page, work, &workspace) {
             Ok(scanned) => {
                 projected
                     .grow(scanned.found.len() * 256)
@@ -1794,11 +1794,11 @@ pub(super) fn verify(
     views: &[NativeObjectPage],
     expected: &ExpectedObject,
     remaining: usize,
+    mut work: usize,
 ) -> Result<Option<[u8; 32]>> {
     let index = expected.page.0 as usize;
     let page = pages.get(index).ok_or(NativeSessionError::Postcondition)?;
     let workspace = Workspace::new(remaining);
-    let mut work = graph.remaining_work();
     let scanned = scan(graph, page, &mut work, &workspace)?;
     if scanned
         .found
