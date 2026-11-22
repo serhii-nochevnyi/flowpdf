@@ -949,6 +949,23 @@ pub(super) fn field_name_inventory(
     Ok(names)
 }
 
+fn label_field_roots(graph: &NativePdfGraph) -> &[Value] {
+    let resolve = |value| match Value::as_reference(value) {
+        Some(reference) => graph.objects.get(&reference),
+        None => Some(value),
+    };
+    pages::catalog(graph)
+        .ok()
+        .and_then(|catalog| dict(graph, catalog).ok())
+        .and_then(|catalog| catalog.get("AcroForm"))
+        .and_then(resolve)
+        .and_then(Value::as_dictionary)
+        .and_then(|form| form.get("Fields"))
+        .and_then(resolve)
+        .and_then(Value::as_array)
+        .unwrap_or_default()
+}
+
 pub(super) fn project(
     graph: &NativePdfGraph,
     pages: &[NativePdfNotePage],
@@ -989,6 +1006,7 @@ pub(super) fn project(
         Err(error) => return Err(error),
     };
     spend(remaining, form_bytes)?;
+    let label_roots = label_field_roots(graph);
     let mut result = Vec::new();
     for (page, object, data) in widgets {
         spend(remaining, std::mem::size_of::<NativeFieldView>() * 2)?;
@@ -1047,14 +1065,23 @@ pub(super) fn project(
             let mut available = *remaining;
             view.name = map_widget_label(
                 object,
-                data.get("T"),
-                data.get("Parent").and_then(Value::as_reference),
+                data,
                 WidgetLabelLimits {
                     max_nesting: graph.limits.max_nesting,
                     scratch_bytes: *remaining,
                 },
                 &mut work,
                 |reference| Ok(graph.objects.get(&reference).map(Cow::Borrowed)),
+                |field, work| {
+                    *work = work
+                        .checked_sub(label_roots.len())
+                        .ok_or(PdfReadError::TokenLimit)?;
+                    Ok(label_roots
+                        .iter()
+                        .filter(|entry| entry.as_reference() == Some(field))
+                        .take(2)
+                        .count())
+                },
                 |bytes| decode_pdf_text_string(bytes, MAX_NAME, &mut available),
             )
             .map_err(|error| match error {
@@ -1708,14 +1735,14 @@ mod tests {
             let mut work = initial_work;
             let result = map_widget_label(
                 widget,
-                None,
-                Some(parent),
+                dict(&graph, widget).unwrap(),
                 WidgetLabelLimits {
                     max_nesting: 4,
                     scratch_bytes: scratch,
                 },
                 &mut work,
                 |reference| Ok(graph.objects.get(&reference).map(Cow::Borrowed)),
+                |field, _| Ok(usize::from(field == parent)),
                 |bytes| decode_pdf_text_string(bytes, MAX_NAME, &mut available),
             );
             match (scratch, initial_work) {
@@ -1741,7 +1768,7 @@ mod tests {
         let mut work = initial_work;
         load_form(&graph, &mut work, &mut inventory_remaining).unwrap();
         let inventory_bytes = graph.remaining_retained() - inventory_remaining;
-        let work_per_widget = 1 + 5;
+        let work_per_widget = 1 + 5 + 2;
         let needed_work = initial_work - work + 2 * work_per_widget;
         graph.charge_page_work(initial_work - needed_work).unwrap();
         let view_bytes = 4 * size_of::<NativeFieldView>();

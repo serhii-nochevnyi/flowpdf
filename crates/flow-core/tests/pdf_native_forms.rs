@@ -551,24 +551,57 @@ fn public_split_widget_labels_share_the_ownership_work_allowance() {
 }
 
 #[test]
-fn read_only_nested_widget_keeps_its_native_display_label() {
-    let bytes = build_pdf(&[
-        b"<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [5 0 R] >> >>".to_vec(),
-        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
-        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 500] /Annots [4 0 R] >>".to_vec(),
-        b"<< /Type /Annot /Subtype /Widget /P 3 0 R /Parent 6 0 R /Rect [10 10 30 30] >>".to_vec(),
-        b"<< /T (section) /Kids [6 0 R] >>".to_vec(),
-        b"<< /Parent 5 0 R /FT /Tx /T 7 0 R /V (saved) /Kids [4 0 R] >>".to_vec(),
-        b"(recipient)".to_vec(),
-    ]);
-    let native = session(&bytes);
-    let [widget] = native.snapshot().fields.as_slice() else {
-        panic!("expected a read-only widget");
-    };
-    assert_eq!(widget.name.as_deref(), Some("recipient"));
-    assert!(!widget.can_edit_appearance);
-    assert_eq!(widget.value, None);
-    assert_eq!(native.output_bytes(), bytes);
+fn read_only_nested_widget_labels_agree_after_reopen() {
+    for (roots, children, widget_entries, expected_label) in [
+        ("5 0 R", "6 0 R", "", Some("recipient")),
+        ("", "6 0 R", "", None),
+        ("5 0 R 5 0 R", "6 0 R", "", None),
+        ("5 0 R 6 0 R", "6 0 R", "", None),
+        ("5 0 R 4 0 R", "6 0 R", "", None),
+        ("5 0 R", "6 0 R 6 0 R", "", None),
+        ("5 0 R", "", "", None),
+        ("", "6 0 R", "/T (direct)", Some("direct")),
+    ] {
+        let bytes = build_pdf(&[
+            format!("<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [{roots}] >> >>")
+                .into_bytes(),
+            b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 500] /Annots [4 0 R] >>".to_vec(),
+            format!("<< /Type /Annot /Subtype /Widget /P 3 0 R /Parent 6 0 R /Rect [10 10 30 30] {widget_entries} >>").into_bytes(),
+            format!("<< /T (section) /Kids [{children}] >>").into_bytes(),
+            b"<< /Parent 5 0 R /FT /Tx /T 7 0 R /V (saved) /Kids [4 0 R] >>".to_vec(),
+            b"(recipient)".to_vec(),
+        ]);
+        let mut native = session(&bytes);
+        let assert_views = |native: &NativePdfSession| {
+            let [widget] = native.snapshot().fields.as_slice() else {
+                panic!("expected one native widget");
+            };
+            let reader = open_pdf(native.output_bytes(), Default::default()).unwrap();
+            let scene = read_pdf_scene(&reader, &PdfSceneRequest::default()).unwrap();
+            let [PdfSceneElement::Form { value }] = scene.pages[0].elements.as_slice() else {
+                panic!("expected one public widget");
+            };
+            assert_eq!(widget.name.as_deref(), expected_label);
+            assert_eq!(value.name, widget.name);
+            assert_eq!(value.provenance.object_ref, widget.object);
+            assert!(!widget.can_edit_appearance);
+            assert_eq!(widget.value, None);
+            assert_eq!(value.field_type, None);
+            assert_eq!(value.value, None);
+        };
+        assert_views(&native);
+        assert_eq!(native.output_bytes(), bytes);
+
+        let snapshot = native.snapshot();
+        let command = serde_json::from_value(json!({
+            "kind": "rotatePage", "degrees": 90,
+            "target": {"page": 0, "stableId": snapshot.page_state.order[0]}
+        }))
+        .unwrap();
+        native.apply_page(snapshot.binding, 1, &command).unwrap();
+        assert_views(&session(native.output_bytes()));
+    }
 }
 
 #[test]
