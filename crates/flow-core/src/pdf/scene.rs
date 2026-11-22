@@ -4,7 +4,7 @@
 //! elements.  It intentionally does not produce FlowDocument nodes and never
 //! invokes a PDF action, URL, file, or external resource.
 
-use std::{borrow::Cow, collections::BTreeMap};
+use std::{borrow::Cow, collections::BTreeMap, rc::Rc};
 
 use serde::{Deserialize, Serialize};
 
@@ -580,8 +580,7 @@ struct GraphicsState {
     path_paint_bounds: Option<PaintBounds>,
     text_matrix: Matrix,
     line_matrix: Matrix,
-    font: Option<FontMap>,
-    font_name: Option<String>,
+    font: Option<Rc<FontMap>>,
     font_size: LayoutUnit,
     leading: LayoutUnit,
     char_spacing: LayoutUnit,
@@ -614,7 +613,6 @@ impl GraphicsState {
             text_matrix: Matrix::IDENTITY,
             line_matrix: Matrix::IDENTITY,
             font: None,
-            font_name: None,
             font_size: LayoutUnit::from_raw(10 * 64),
             leading: LayoutUnit::from_raw(12 * 64),
             char_spacing: LayoutUnit::from_raw(0),
@@ -646,6 +644,18 @@ impl GraphicsState {
                 .map(|(path, next)| path.union(next))
         };
     }
+
+    fn saved_heap_bytes(&self) -> Option<usize> {
+        let path_bytes = size_of_val(self.path.as_slice());
+        if let Some((commands, _, provenance, _)) = &self.pending_clip {
+            path_bytes
+                .checked_add(size_of_val(commands.as_slice()))?
+                .checked_add(provenance.operator.as_ref().map_or(0, String::len))?
+                .checked_add(size_of_val(provenance.invocation_path.as_slice()))
+        } else {
+            Some(path_bytes)
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -664,7 +674,7 @@ enum RawPathCommand {
     Close,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 struct FontMap {
     name: Option<String>,
     to_unicode: BTreeMap<Vec<u8>, String>,
@@ -733,14 +743,14 @@ struct SceneBuilder<'a> {
     link_work: usize,
     widget_work: usize,
     remaining_content_tokens: usize,
-    remaining_image_hex_bytes: usize,
+    budget: SceneBudget,
     elements: Vec<PdfSceneElement>,
     emit_elements: bool,
     report: PdfReadReport,
-    fonts: BTreeMap<(PdfObjectRef, String), FontMap>,
+    fonts: BTreeMap<(PdfObjectRef, String), Rc<FontMap>>,
     page_refs: BTreeMap<PdfObjectRef, u32>,
     state: GraphicsState,
-    state_stack: Vec<GraphicsState>,
+    state_stack: Vec<(GraphicsState, usize)>,
     invocation_path: Vec<u32>,
 }
 
@@ -757,7 +767,7 @@ impl<'a> SceneBuilder<'a> {
         page_index: u32,
         page: &'a PdfPageRecord,
         field_counts: &'a BTreeMap<PdfObjectRef, usize>,
-        remaining_image_hex_bytes: usize,
+        budget: SceneBudget,
     ) -> Self {
         Self {
             reader,
@@ -768,7 +778,7 @@ impl<'a> SceneBuilder<'a> {
             link_work: reader.limits().max_content_tokens,
             widget_work: reader.limits().max_content_tokens,
             remaining_content_tokens: reader.limits().max_content_tokens,
-            remaining_image_hex_bytes,
+            budget,
             elements: Vec::new(),
             emit_elements: true,
             report: PdfReadReport::default(),
@@ -788,7 +798,7 @@ impl<'a> SceneBuilder<'a> {
         }
     }
 
-    fn run(mut self) -> Result<(PdfScenePage, usize), PdfReadError> {
+    fn run(mut self) -> Result<(PdfScenePage, SceneBudget), PdfReadError> {
         if let Some(crop_box) = self.page.crop_box {
             self.state.clip = self.state.clip.intersect(crop_box, true)?;
         }
@@ -857,18 +867,19 @@ impl<'a> SceneBuilder<'a> {
         {
             self.report_partial(object_ref);
         }
-        let partial = self.report.partial;
-        Ok((
-            PdfScenePage {
-                page_index: self.page_index,
-                source_object: self.page.object_ref,
-                bounds: self.page.media_box,
-                elements: self.elements,
-                report: self.report,
-                partial,
-            },
-            self.remaining_image_hex_bytes,
-        ))
+        self.discard_saved_states(0);
+        let mut page = PdfScenePage {
+            page_index: self.page_index,
+            source_object: self.page.object_ref,
+            bounds: self.page.media_box,
+            elements: Vec::new(),
+            partial: self.report.partial,
+            report: self.report,
+        };
+        // @invariant: Element JSON is charged before retention; this charges the rest of the page.
+        self.budget.encode(&page)?;
+        page.elements = self.elements;
+        Ok((page, self.budget))
     }
 
     fn interpret_stream(
@@ -979,7 +990,7 @@ impl<'a> SceneBuilder<'a> {
                 if self.state_stack.len() == stack_floor {
                     return Err(PdfReadError::Syntax);
                 }
-                self.state = self.state_stack.pop().ok_or(PdfReadError::Syntax)?;
+                self.restore_state()?;
             }
             "cm" => {
                 if let Some(matrix) = six_numbers(operands) {
@@ -1220,8 +1231,26 @@ impl<'a> SceneBuilder<'a> {
         if self.state_stack.len() >= self.limits.max_nesting {
             return Err(PdfReadError::TokenLimit);
         }
-        self.state_stack.push(self.state.clone());
+        let bytes = self
+            .state
+            .saved_heap_bytes()
+            .ok_or(PdfReadError::StreamLimit)?;
+        self.budget.charge(bytes)?;
+        self.state_stack.push((self.state.clone(), bytes));
         Ok(())
+    }
+
+    fn restore_state(&mut self) -> Result<(), PdfReadError> {
+        let (state, bytes) = self.state_stack.pop().ok_or(PdfReadError::Syntax)?;
+        self.state = state;
+        self.budget.remaining_scene_bytes += bytes;
+        Ok(())
+    }
+
+    fn discard_saved_states(&mut self, keep: usize) {
+        for (_, bytes) in self.state_stack.drain(keep..) {
+            self.budget.remaining_scene_bytes += bytes;
+        }
     }
 
     fn advance_line(&mut self) -> Result<(), PdfReadError> {
@@ -1454,11 +1483,10 @@ impl<'a> SceneBuilder<'a> {
         let font = if let Some(font) = self.fonts.get(&key) {
             font.clone()
         } else {
-            let font = self.load_font(font_ref, name)?;
+            let font = Rc::new(self.load_font(font_ref, name)?);
             self.fonts.insert(key, font.clone());
             font
         };
-        self.state.font_name = Some(name.clone());
         self.state.font = Some(font);
         self.state.font_size = size;
         Ok(())
@@ -1633,7 +1661,7 @@ impl<'a> SceneBuilder<'a> {
                 value: PdfTextElement {
                     text,
                     rect,
-                    font_name: font.name,
+                    font_name: font.name.clone(),
                     mapping,
                     glyphs,
                     provenance,
@@ -1775,7 +1803,7 @@ impl<'a> SceneBuilder<'a> {
                 self.state.paint_clip = form_paint_clip;
                 self.state.path_paint_bounds = None;
                 self.state.clip = clip;
-                self.state.path.clear();
+                self.state.path = Vec::new();
                 self.state.current_point = None;
                 self.state.subpath_start = None;
                 self.state.pending_clip = None;
@@ -1793,8 +1821,8 @@ impl<'a> SceneBuilder<'a> {
                 if self.state_stack.len() > caller_state_index + 1 {
                     self.report_partial(xobject_ref);
                 }
-                self.state_stack.truncate(caller_state_index + 1);
-                self.state = self.state_stack.pop().ok_or(PdfReadError::Syntax)?;
+                self.discard_saved_states(caller_state_index + 1);
+                self.restore_state()?;
                 result.map_err(PdfReadError::from)?;
                 Ok(())
             }
@@ -1883,7 +1911,7 @@ impl<'a> SceneBuilder<'a> {
         if !self.emit_elements {
             return Ok(());
         }
-        let Some(data_hex) = encode_image_hex(data, &mut self.remaining_image_hex_bytes) else {
+        let Some(data_hex) = self.budget.image_hex(data)? else {
             self.report.push(PdfReadDiagnostic::blocked(
                 PdfReadDiagnosticCode::ImageLimit,
                 Some(self.page_index),
@@ -2184,6 +2212,8 @@ impl<'a> SceneBuilder<'a> {
             ));
             return Err(PdfReadError::TokenLimit);
         }
+        self.budget.charge(usize::from(!self.elements.is_empty()))?;
+        self.budget.encode(&element)?;
         self.elements.push(element);
         Ok(())
     }
@@ -2206,6 +2236,57 @@ fn explicit_destination_target(destination: &[PdfValue]) -> Option<PdfObjectRef>
         return None;
     }
     destination.first()?.as_reference()
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SceneBudget {
+    remaining_scene_bytes: usize,
+    remaining_image_hex_bytes: usize,
+}
+
+impl SceneBudget {
+    fn remaining_after(&self, bytes: usize) -> Result<usize, PdfReadError> {
+        self.remaining_scene_bytes
+            .checked_sub(bytes)
+            .ok_or(PdfReadError::StreamLimit)
+    }
+
+    fn charge(&mut self, bytes: usize) -> Result<(), PdfReadError> {
+        self.remaining_scene_bytes = self.remaining_after(bytes)?;
+        Ok(())
+    }
+
+    fn encode(&mut self, value: &impl Serialize) -> Result<(), PdfReadError> {
+        let mut writer = SceneJsonWriter {
+            output: std::io::sink(),
+            remaining: self.remaining_scene_bytes,
+        };
+        writer.encode(value)?;
+        self.remaining_scene_bytes = writer.remaining;
+        Ok(())
+    }
+
+    fn image_hex(&mut self, data: &[u8]) -> Result<Option<String>, PdfReadError> {
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        let Some(len) = data
+            .len()
+            .checked_mul(2)
+            .filter(|&len| len <= self.remaining_image_hex_bytes)
+        else {
+            return Ok(None);
+        };
+        self.remaining_after(len)?;
+        let mut hex = String::new();
+        if hex.try_reserve_exact(len).is_err() {
+            return Ok(None);
+        }
+        for &byte in data {
+            hex.push(HEX[usize::from(byte >> 4)] as char);
+            hex.push(HEX[usize::from(byte & 0x0F)] as char);
+        }
+        self.remaining_image_hex_bytes -= len;
+        Ok(Some(hex))
+    }
 }
 
 struct SceneJsonWriter<W> {
@@ -2279,27 +2360,16 @@ pub fn read_pdf_scene(
     }
     let mut scene_pages = Vec::with_capacity(end.saturating_sub(first));
     let scene_byte_limit = reader.limits().max_scene_bytes;
-    let mut page_bytes = SceneJsonWriter {
-        output: std::io::sink(),
-        remaining: scene_byte_limit,
+    // @invariant: Retained elements and image hex share allowances across the requested page window.
+    let mut budget = SceneBudget {
+        remaining_scene_bytes: scene_byte_limit,
+        remaining_image_hex_bytes: reader.limits().max_stream_bytes,
     };
-    // @invariant: Retained image hex shares a single allowance across the requested page window.
-    let mut remaining_image_hex_bytes = reader.limits().max_stream_bytes;
     for (index, page) in pages.iter().enumerate().take(end).skip(first) {
         let page_index = u32::try_from(index).map_err(|_| PdfReadError::PageCountLimit)?;
-        match SceneBuilder::new(
-            reader,
-            &pages,
-            page_index,
-            page,
-            &field_counts,
-            remaining_image_hex_bytes,
-        )
-        .run()
-        {
-            Ok((page, remaining)) => {
-                remaining_image_hex_bytes = remaining;
-                page_bytes.encode(&page)?;
+        match SceneBuilder::new(reader, &pages, page_index, page, &field_counts, budget).run() {
+            Ok((page, remaining_budget)) => {
+                budget = remaining_budget;
                 report.extend(&page.report);
                 scene_pages.push(page);
             }
@@ -3007,20 +3077,6 @@ fn u32_to_bytes(value: u32, width: usize) -> Vec<u8> {
 
 fn parse_utf16_codepoint(value: u32) -> String {
     char::from_u32(value).unwrap_or('\u{FFFD}').to_string()
-}
-
-fn encode_image_hex(bytes: &[u8], remaining: &mut usize) -> Option<String> {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let len = bytes.len().checked_mul(2)?;
-    let available = remaining.checked_sub(len)?;
-    let mut output = String::new();
-    output.try_reserve_exact(len).ok()?;
-    *remaining = available;
-    for byte in bytes {
-        output.push(HEX[usize::from(byte >> 4)] as char);
-        output.push(HEX[usize::from(byte & 0x0F)] as char);
-    }
-    Some(output)
 }
 
 pub(super) fn separated_content_streams(previous: &[u8], next: &[u8]) -> bool {
