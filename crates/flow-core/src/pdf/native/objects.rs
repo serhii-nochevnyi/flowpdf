@@ -1092,6 +1092,13 @@ fn scan<'w>(
     })
 }
 
+pub(super) fn refusal_can_follow_budget_check(
+    graph: &NativePdfGraph,
+    page: &NativePdfNotePage,
+) -> bool {
+    matches!(scan(graph, page, &mut 0, &Workspace::new(0)), Err(Budget))
+}
+
 pub(super) fn project(
     graph: &NativePdfGraph,
     pages: &[NativePdfNotePage],

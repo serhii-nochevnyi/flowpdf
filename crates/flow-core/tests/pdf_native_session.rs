@@ -493,12 +493,27 @@ fn pdf_with_objects(objects: &[&str]) -> String {
 
 #[test]
 fn detached_verification_accepts_an_ordinary_rewrite_after_object_work_exhaustion() {
+    assert_detached_object_projection_after_work_exhaustion(false);
+}
+
+#[test]
+fn detached_verification_accepts_work_exhaustion_before_an_unsupported_curve() {
+    assert_detached_object_projection_after_work_exhaustion(true);
+}
+
+fn assert_detached_object_projection_after_work_exhaustion(unsupported_curve: bool) {
     use flow_core::pdf::native::{
         NativeGraphic, NativeGraphicShape, NativeObjectCommand, NativeObjectPage,
         NativeObjectRefusal,
     };
 
     let stream = |data: &str| format!("<< /Length {} >>\nstream\n{data}\nendstream", data.len());
+    let late_paint = if unsupported_curve {
+        "10 15 m 15 25 25 25 30 15 c S
+"
+    } else {
+        ""
+    };
     let source = pdf_with_objects(&[
         "<< /Type /Catalog /Pages 2 0 R >>",
         "<< /Type /Pages /Kids [3 0 R 4 0 R 5 0 R] /Count 3 >>",
@@ -506,7 +521,7 @@ fn detached_verification_accepts_an_ordinary_rewrite_after_object_work_exhaustio
         "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] >>",
         "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Group << /S /Transparency >> >>",
         &stream("10 20 30 40 re f\n"),
-        &stream(&format!("%{}\n", " ".repeat(8 * 1024))),
+        &stream(&format!("%{}\n{late_paint}", " ".repeat(8 * 1024))),
     ]);
     let defaults = NativeEditLimits::default();
     let limits_at = |max_work| NativeEditLimits {
@@ -528,8 +543,13 @@ fn detached_verification_accepts_an_ordinary_rewrite_after_object_work_exhaustio
     };
     let roomy = rewrite(defaults);
     let full = roomy.snapshot();
-    assert!(full.scene.object_pages[0].can_add);
-    assert_eq!(full.scene.object_pages[0].objects.len(), 1);
+    if unsupported_curve {
+        assert!(full.scene.object_pages[0].refusal.is_some());
+        assert!(full.scene.object_pages[0].objects.is_empty());
+    } else {
+        assert!(full.scene.object_pages[0].can_add);
+        assert_eq!(full.scene.object_pages[0].objects.len(), 1);
+    }
 
     let detached_recovers_objects = |max_work| {
         NativePdfSession::verify_edit_projection(
