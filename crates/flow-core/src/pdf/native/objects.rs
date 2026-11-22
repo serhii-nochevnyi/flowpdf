@@ -656,20 +656,9 @@ impl Found {
     }
 }
 
-struct ScanWork {
-    remaining: usize,
-    refusal: NativeSessionError,
-}
-
-impl ScanWork {
-    fn spend(&mut self, amount: usize) -> Result<()> {
-        spend(&mut self.remaining, amount).map_err(|_| self.refusal.clone())
-    }
-}
-
 struct Scan<'a, 'w> {
     graph: &'a NativePdfGraph,
-    work: &'a mut ScanWork,
+    work: &'a mut usize,
     workspace: &'w Workspace,
     found: Vec<Found>,
     found_memory: Reservation<'w>,
@@ -785,7 +774,7 @@ impl<'a, 'w> Scan<'a, 'w> {
         {
             return Err(State.into());
         }
-        self.work.spend(1 + source.data.len())?;
+        spend(self.work, 1 + source.data.len())?;
         const MAX_OPERANDS: usize = 8;
         let _parser = reserve_content_tokens(
             self.workspace,
@@ -967,7 +956,7 @@ impl<'a, 'w> Scan<'a, 'w> {
         match name(&source.dict, "Subtype") {
             Some("Image") => {
                 let profile = image_profile(source)?;
-                self.work.spend(1 + source.encoded.len() / 16)?;
+                spend(self.work, 1 + source.encoded.len() / 16)?;
                 let mut payload = blake3::Hasher::new();
                 for key in ["Width", "Height"] {
                     payload.update(&source.dict[key].as_integer().ok_or(Profile)?.to_be_bytes());
@@ -1049,7 +1038,7 @@ impl<'a, 'w> Scan<'a, 'w> {
 fn scan<'w>(
     graph: &NativePdfGraph,
     page: &NativePdfNotePage,
-    work: &mut ScanWork,
+    work: &mut usize,
     workspace: &'w Workspace,
 ) -> Result<ScannedPage<'w>> {
     let rect = page.geometry.ok_or(Geometry)?.bounds().map(|n| n as f64);
@@ -1103,6 +1092,13 @@ fn scan<'w>(
     })
 }
 
+pub(super) fn refusal_can_follow_budget_check(
+    graph: &NativePdfGraph,
+    page: &NativePdfNotePage,
+) -> bool {
+    matches!(scan(graph, page, &mut 0, &Workspace::new(0)), Err(Budget))
+}
+
 pub(super) fn project(
     graph: &NativePdfGraph,
     pages: &[NativePdfNotePage],
@@ -1110,10 +1106,7 @@ pub(super) fn project(
     binding: NativeBinding,
     remaining: &mut usize,
 ) -> Result<Vec<NativeObjectPage>> {
-    let mut work = ScanWork {
-        remaining: graph.remaining_work(),
-        refusal: State.into(),
-    };
+    let mut work = graph.remaining_work();
     spend(remaining, pages.len() * 128)?;
     let workspace = Workspace::new(*remaining);
     let mut projected = workspace.scope();
@@ -1551,10 +1544,7 @@ pub(super) fn stage(
 
     let workspace = Workspace::new(graph.remaining_retained());
     let starting_work = graph.remaining_work();
-    let mut work = ScanWork {
-        remaining: starting_work,
-        refusal: Budget,
-    };
+    let mut work = starting_work;
     let before = scan(graph, page, &mut work, &workspace)?;
     let found = &before.found;
     let target = command
@@ -1742,7 +1732,7 @@ pub(super) fn stage(
         .reserve(workspace.remaining() - remaining)
         .map_err(|_| Budget)?;
     graph
-        .rebuild_reverse(&mut work.remaining, &workspace, Reachability::Object)
+        .rebuild_reverse(&mut work, &workspace, Reachability::Object)
         .map_err(|error| match error {
             NativeEditError::Malformed => State.into(),
             error => NativeSessionError::from(error),
@@ -1793,7 +1783,7 @@ pub(super) fn stage(
         changed,
     };
     drop(after);
-    graph.charge_page_work(starting_work - work.remaining)?;
+    graph.charge_page_work(starting_work - work)?;
     // Keep the expected signatures charged through serialization and reopen verification.
     Ok((expected, workspace.remaining()))
 }
@@ -1808,10 +1798,7 @@ pub(super) fn verify(
     let index = expected.page.0 as usize;
     let page = pages.get(index).ok_or(NativeSessionError::Postcondition)?;
     let workspace = Workspace::new(remaining);
-    let mut work = ScanWork {
-        remaining: graph.remaining_work(),
-        refusal: Budget,
-    };
+    let mut work = graph.remaining_work();
     let scanned = scan(graph, page, &mut work, &workspace)?;
     if scanned
         .found
@@ -1900,7 +1887,7 @@ mod tests {
 
     #[test]
     fn object_staging_charges_scans_and_reachability_to_the_graph() {
-        use super::{NativePdfGraph, NativeSessionError, ScanWork, Workspace, scan, stage};
+        use super::{NativePdfGraph, NativeSessionError, Workspace, scan, stage};
 
         let content = miniz_oxide::deflate::compress_to_vec_zlib(b"10 20 30 40 re f", 6);
         let source = super::super::tests::fixture("", &content);
@@ -1917,10 +1904,7 @@ mod tests {
         .unwrap();
         let graph = NativePdfGraph::open(&source, limits).unwrap();
         let starting = graph.remaining_work();
-        let mut scan_work = ScanWork {
-            remaining: starting,
-            refusal: NativeSessionError::Budget,
-        };
+        let mut scan_work = starting;
         scan(
             &graph,
             page,
@@ -1928,7 +1912,7 @@ mod tests {
             &Workspace::new(graph.remaining_retained()),
         )
         .unwrap();
-        let single_scan = starting - scan_work.remaining;
+        let single_scan = starting - scan_work;
         let mut graph = graph;
         stage(
             &mut graph,

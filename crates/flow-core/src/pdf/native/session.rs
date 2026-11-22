@@ -1092,21 +1092,23 @@ impl NativePdfSession {
             if binding.revision == 0 || rows.len() != scene.object_pages.len() {
                 return Ok(false);
             }
-            // @contract: Reopening the bytes can recover object capabilities omitted for workspace.
-            for (row, claim) in scene.object_pages.iter_mut().zip(rows) {
+            // @invariant: An accepted rewrite can exhaust work or workspace before a detached reopen does.
+            for ((row, claim), page) in scene.object_pages.iter_mut().zip(rows).zip(&scene.pages) {
                 if row == claim {
                     continue;
                 }
                 if row.page != claim.page
-                    || row.refusal.is_some()
                     || claim.refusal.is_some()
                     || claim.can_add
                     || !claim.objects.is_empty()
+                    || (row.refusal.is_some()
+                        && !objects::refusal_can_follow_budget_check(&graph, page))
                 {
                     return Ok(false);
                 }
                 row.can_add = false;
                 row.objects = Vec::new();
+                row.refusal = None;
             }
             scene =
                 NativePdfNoteScene::new(hash, scene.pages, scene.text_pages, scene.object_pages)?;
@@ -1762,7 +1764,20 @@ fn project_scene(
         SESSION_BYTES + graph.pages.len() * std::mem::size_of::<u64>(),
     )?;
     let pages = notes::project(graph, ids, &mut remaining)?;
-    let text_pages = text::project(graph, &pages, output_hash, binding, &mut remaining)?;
+    // @invariant: Revised text projections must agree with detached verification of the exact bytes.
+    let work_exhaustion = if binding.revision == 0 {
+        text::WorkExhaustion::PageRefusal
+    } else {
+        text::WorkExhaustion::BudgetError
+    };
+    let text_pages = text::project(
+        graph,
+        &pages,
+        output_hash,
+        binding,
+        &mut remaining,
+        work_exhaustion,
+    )?;
     let object_pages = objects::project(graph, &pages, output_hash, binding, &mut remaining)?;
     Ok((
         NativePdfNoteScene::new(output_hash, pages, text_pages, object_pages)?,

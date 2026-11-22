@@ -492,6 +492,253 @@ fn pdf_with_objects(objects: &[&str]) -> String {
 }
 
 #[test]
+fn detached_verification_accepts_an_ordinary_rewrite_after_object_work_exhaustion() {
+    assert_detached_object_projection_after_work_exhaustion(false);
+}
+
+#[test]
+fn detached_verification_accepts_work_exhaustion_before_an_unsupported_curve() {
+    assert_detached_object_projection_after_work_exhaustion(true);
+}
+
+fn assert_detached_object_projection_after_work_exhaustion(unsupported_curve: bool) {
+    use flow_core::pdf::native::{
+        NativeGraphic, NativeGraphicShape, NativeObjectCommand, NativeObjectPage,
+        NativeObjectRefusal,
+    };
+
+    let stream = |data: &str| format!("<< /Length {} >>\nstream\n{data}\nendstream", data.len());
+    let late_paint = if unsupported_curve {
+        "10 15 m 15 25 25 25 30 15 c S
+"
+    } else {
+        ""
+    };
+    let source = pdf_with_objects(&[
+        "<< /Type /Catalog /Pages 2 0 R >>",
+        "<< /Type /Pages /Kids [3 0 R 4 0 R 5 0 R] /Count 3 >>",
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Contents [6 0 R 7 0 R] >>",
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] >>",
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Group << /S /Transparency >> >>",
+        &stream("10 20 30 40 re f\n"),
+        &stream(&format!("%{}\n{late_paint}", " ".repeat(8 * 1024))),
+    ]);
+    let defaults = NativeEditLimits::default();
+    let limits_at = |max_work| NativeEditLimits {
+        max_work,
+        ..defaults
+    };
+    let rewrite = |limits| {
+        let mut session =
+            NativePdfSession::open_scoped(source.as_bytes(), limits, [1; 16]).unwrap();
+        let snapshot = session.snapshot();
+        let add = NativeNoteCommand::Add {
+            page: snapshot.scene.pages[0].id,
+            rect: [60, 60, 80, 80],
+            contents: "Chart note".into(),
+        };
+        let receipt = session.apply(snapshot.binding, 1, &add).unwrap();
+        assert_eq!(receipt.binding.revision, 1);
+        session
+    };
+    let roomy = rewrite(defaults);
+    let full = roomy.snapshot();
+    if unsupported_curve {
+        assert!(full.scene.object_pages[0].refusal.is_some());
+        assert!(full.scene.object_pages[0].objects.is_empty());
+    } else {
+        assert!(full.scene.object_pages[0].can_add);
+        assert_eq!(full.scene.object_pages[0].objects.len(), 1);
+    }
+
+    let detached_recovers_objects = |max_work| {
+        NativePdfSession::verify_edit_projection(
+            roomy.output_bytes(),
+            limits_at(max_work),
+            full.binding,
+            &full.scene.text_pages,
+            &full.scene.object_pages,
+        ) == Ok(true)
+    };
+    let (mut low, mut high) = (0, defaults.max_work);
+    assert!(detached_recovers_objects(high));
+    while low + 1 < high {
+        let mid = low + (high - low) / 2;
+        if detached_recovers_objects(mid) {
+            high = mid;
+        } else {
+            low = mid;
+        }
+    }
+    let limits = limits_at(high);
+    let mut session = rewrite(limits);
+    assert_eq!(session.output_bytes(), roomy.output_bytes());
+    let snapshot = session.snapshot();
+    let rows = &snapshot.scene.object_pages;
+    assert!(!rows[0].can_add && rows[0].objects.is_empty() && rows[0].refusal.is_none());
+    assert!(rows[1].can_add && rows[1].objects.is_empty() && rows[1].refusal.is_none());
+    assert_eq!(rows[2].refusal, Some(NativeObjectRefusal::State));
+
+    let [NativePdfAnnotation::PlainNote(note)] = snapshot.scene.pages[0].annotations.as_slice()
+    else {
+        panic!("expected the saved chart note");
+    };
+    let notes = [(
+        0,
+        note.object,
+        serde_json::to_value(note.id).unwrap().as_u64().unwrap(),
+    )];
+    let hash_with_rows = |claimed: &[NativeObjectPage]| {
+        let scene = &snapshot.scene;
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"flowpdf:accepted-note-scene:v2");
+        hasher.update(&scene.output_hash);
+        for page in &scene.pages {
+            hasher.update(
+                &serde_json::to_vec(&(page.object, page.geometry, page.can_add_note)).unwrap(),
+            );
+            for annotation in &page.annotations {
+                let NativePdfAnnotation::PlainNote(note) = annotation else {
+                    panic!("expected only plain notes");
+                };
+                hasher.update(
+                    &serde_json::to_vec(&(note.object, note.rect, &note.contents)).unwrap(),
+                );
+            }
+        }
+        if !scene.text_pages.is_empty() {
+            hasher.update(b"flowpdf:native-text-pages:v1");
+            hasher.update(&serde_json::to_vec(&scene.text_pages).unwrap());
+        }
+        hasher.update(b"flowpdf:native-object-pages:v1");
+        hasher.update(&serde_json::to_vec(claimed).unwrap());
+        *hasher.finalize().as_bytes()
+    };
+    let verify = |claimed: &[NativeObjectPage], live| {
+        NativePdfSession::verify_page_and_field_projection_with_objects(
+            session.output_bytes(),
+            limits,
+            snapshot.binding,
+            hash_with_rows(claimed),
+            Some(claimed),
+            &snapshot.page_state,
+            &snapshot.fields,
+            &notes,
+            session.redaction_admitted(),
+            live,
+        )
+    };
+    assert_eq!(hash_with_rows(rows), snapshot.scene.scene_hash);
+    assert_eq!(verify(rows, None), Ok(true));
+    assert_eq!(verify(rows, Some(&session)), Ok(true));
+
+    let mut altered = rows.clone();
+    altered[0].can_add = true;
+    assert_eq!(verify(&altered, None), Ok(false));
+    assert_eq!(verify(&altered, Some(&session)), Ok(false));
+    altered[0].can_add = false;
+    altered[2].refusal = None;
+    assert_eq!(verify(&altered, None), Ok(false));
+    altered[2].refusal = rows[2].refusal;
+    altered.swap(1, 2);
+    assert_eq!(verify(&altered, None), Ok(false));
+    altered.swap(1, 2);
+    altered[1].can_add = false;
+    assert_eq!(verify(&altered, Some(&session)), Ok(false));
+
+    let binding = snapshot.binding;
+    for (page, refusal) in [
+        (rows[0].page, NativeSessionError::Budget),
+        (
+            rows[2].page,
+            NativeSessionError::Object(NativeObjectRefusal::State),
+        ),
+    ] {
+        let add = NativeObjectCommand::AddGraphic {
+            page,
+            graphic: NativeGraphic {
+                shape: NativeGraphicShape::Rectangle,
+                points: vec![[10_000, 20_000], [40_000, 60_000]],
+                fill: Some([0, 255, 0]),
+                stroke: None,
+                stroke_width: 0,
+            },
+        };
+        assert_eq!(session.apply_object(binding, 2, &add), Err(refusal));
+        assert_eq!(session.lookup(binding, 2), Ok(NativeRequestLookup::Unseen));
+    }
+    assert_eq!(session.snapshot().binding, binding);
+    assert_eq!(session.output_bytes(), roomy.output_bytes());
+}
+
+#[test]
+fn note_edit_refuses_when_rewrite_leaves_too_little_work_for_text_projection() {
+    let content = format!("%{}\nq Q", " ".repeat(8 * 1024));
+    let stream = format!(
+        "<< /Length {} >>\nstream\n{content}\nendstream",
+        content.len()
+    );
+    let source = pdf_with_objects(&[
+        "<< /Type /Catalog /Pages 2 0 R >>",
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Resources << >> /Contents 4 0 R >>",
+        &stream,
+    ]);
+    let defaults = NativeEditLimits::default();
+    let limits_at = |max_work| NativeEditLimits {
+        max_work,
+        ..defaults
+    };
+    let open_at = |max_work| {
+        NativePdfSession::open_scoped(source.as_bytes(), limits_at(max_work), [1; 16]).unwrap()
+    };
+    let mut roomy = open_at(defaults.max_work);
+    let add = NativeNoteCommand::Add {
+        page: roomy.snapshot().scene.pages[0].id,
+        rect: [60, 60, 80, 80],
+        contents: "Chart note".into(),
+    };
+    roomy.apply(roomy.snapshot().binding, 1, &add).unwrap();
+    let snapshot = roomy.snapshot();
+    assert!(snapshot.scene.text_pages.is_empty());
+    let verify_text = |max_work| {
+        NativePdfSession::verify_text_projection(
+            roomy.output_bytes(),
+            limits_at(max_work),
+            snapshot.binding,
+            &snapshot.scene.text_pages,
+        )
+    };
+    let (mut low, mut high) = (content.len(), defaults.max_work);
+    assert_eq!(verify_text(high), Ok(true));
+    while low + 1 < high {
+        let mid = low + (high - low) / 2;
+        match verify_text(mid) {
+            Ok(true) => high = mid,
+            Err(NativeSessionError::Budget) => low = mid,
+            result => panic!("unexpected detached text projection at {mid} work units: {result:?}"),
+        }
+    }
+    assert_eq!(verify_text(low), Err(NativeSessionError::Budget));
+    assert_eq!(verify_text(high), Ok(true));
+
+    let mut tight = open_at(high);
+    let before = tight.snapshot().clone();
+    assert_eq!(
+        tight.apply(before.binding, 1, &add),
+        Err(NativeSessionError::Budget)
+    );
+    assert_eq!(tight.output_bytes(), source.as_bytes());
+    assert_eq!(tight.snapshot().binding, before.binding);
+    assert_eq!(tight.snapshot().scene, before.scene);
+    assert_eq!(tight.snapshot().consumed_request, before.consumed_request);
+    assert_eq!(
+        tight.lookup(before.binding, 1),
+        Ok(NativeRequestLookup::Unseen)
+    );
+}
+
+#[test]
 fn detached_projections_exhaust_the_shared_identity_allowance() {
     let source = pdf_with_objects(&[
         "<< /Type /Catalog /Pages 2 0 R >>",

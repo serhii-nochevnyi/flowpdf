@@ -1,5 +1,6 @@
 use flow_core::pdf::native::{
-    NativeEditLimits, NativePdfSession, NativeSessionError, NativeTextCommand, NativeTextRefusal,
+    NativeEditLimits, NativePdfSession, NativeRequestLookup, NativeSessionError, NativeTextCommand,
+    NativeTextRefusal,
 };
 use flow_core::pdf::{PdfReaderLimits, PdfSceneElement, PdfSceneRequest, open_pdf, read_pdf_scene};
 
@@ -271,6 +272,69 @@ fn core_refuses_replacement_when_recognition_workspace_is_exhausted() {
         .apply_text(roomy.snapshot().binding, 1, &command)
         .unwrap();
     assert_eq!(roomy.snapshot().scene.text_pages[0].islands[0].text, "ЇA");
+}
+
+#[test]
+fn core_replacement_shares_work_with_rewrite_and_exact_byte_projection() {
+    let bytes = fixture(CID_CONTENT, false, true, "", false);
+    let defaults = NativeEditLimits::default();
+    let open_at = |max_work| {
+        NativePdfSession::open_scoped(
+            &bytes,
+            NativeEditLimits {
+                max_work,
+                ..defaults
+            },
+            [7; 16],
+        )
+    };
+    let replace = |session: &mut NativePdfSession| {
+        let snapshot = session.snapshot();
+        let command = NativeTextCommand::ReplaceText {
+            island: snapshot.scene.text_pages[0].islands[0].id,
+            text: "ЇA".into(),
+        };
+        session.apply_text(snapshot.binding, 1, &command)
+    };
+    let (mut low, mut high) = (500_000, defaults.max_work);
+    while low < high {
+        let mid = low + (high - low) / 2;
+        match replace(&mut open_at(mid).unwrap()) {
+            Ok(_) => high = mid,
+            Err(NativeSessionError::Budget) => low = mid + 1,
+            Err(error) => panic!("unexpected refusal at {mid} work units: {error:?}"),
+        }
+    }
+
+    let mut tight = open_at(low - 1).unwrap();
+    let binding = tight.snapshot().binding;
+    assert_eq!(replace(&mut tight), Err(NativeSessionError::Budget));
+    assert_eq!(tight.output_bytes(), bytes);
+    assert_eq!(tight.snapshot().binding, binding);
+    assert_eq!(tight.snapshot().consumed_request, 0);
+    assert_eq!(tight.lookup(binding, 1), Ok(NativeRequestLookup::Unseen));
+
+    let mut exact = open_at(low).unwrap();
+    let binding = exact.snapshot().binding;
+    let receipt = replace(&mut exact).unwrap();
+    let snapshot = exact.snapshot();
+    let island = &snapshot.scene.text_pages[0].islands[0];
+    assert_eq!(island.text, "ЇA");
+    assert_eq!(receipt.binding.revision, 1);
+    assert_eq!(receipt.text_island, Some(island.id));
+    assert_eq!(
+        exact.lookup(binding, 1),
+        Ok(NativeRequestLookup::Accepted(receipt))
+    );
+    assert_eq!(
+        NativePdfSession::verify_text_projection(
+            exact.output_bytes(),
+            snapshot.limits,
+            snapshot.binding,
+            &snapshot.scene.text_pages,
+        ),
+        Ok(true)
+    );
 }
 
 #[test]

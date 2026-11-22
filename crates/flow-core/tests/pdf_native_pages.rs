@@ -345,6 +345,132 @@ fn cross_parent_reorder_preserves_public_text_and_field_readback() {
 }
 
 #[test]
+fn inherited_page_edits_share_the_work_budget_through_rewrite() {
+    let bytes = build_pdf(&[
+        (0, "<< /Type /Catalog /Pages 2 0 R >>"),
+        (
+            0,
+            "<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 /MediaBox [0 0 200 300] >>",
+        ),
+        (
+            0,
+            "<< /Type /Pages /Parent 2 0 R /Kids [5 0 R] /Count 1 /Rotate 90 >>",
+        ),
+        (
+            0,
+            "<< /Type /Pages /Parent 2 0 R /Kids [6 0 R] /Count 1 /CropBox [10 20 160 260] >>",
+        ),
+        (0, "<< /Type /Page /Parent 3 0 R >>"),
+        (0, "<< /Type /Page /Parent 4 0 R >>"),
+    ]);
+    let open = |max_work| {
+        let mut session = NativePdfSession::open_scoped(
+            &bytes,
+            NativeEditLimits {
+                max_work,
+                ..NativeEditLimits::default()
+            },
+            [6; 16],
+        )?;
+        let original = session.snapshot().binding;
+        let rotate = NativePageCommand::RotatePage {
+            target: NativePageTarget {
+                page: 1,
+                stable_id: session.snapshot().page_state.order[1],
+            },
+            degrees: 90,
+        };
+        let accepted = session.apply_page(original, 1, &rotate)?;
+        Ok((session, original, accepted))
+    };
+    let max_work = NativeEditLimits::default().max_work;
+    let (accepted_session, _, _) = open(max_work).unwrap();
+    let target = NativePageTarget {
+        page: 0,
+        stable_id: accepted_session.snapshot().page_state.order[0],
+    };
+    for edit in [
+        NativePageCommand::ReorderPage {
+            target,
+            position: 1,
+        },
+        NativePageCommand::InsertBlankPage {
+            target,
+            side: NativePageSide::After,
+        },
+    ] {
+        let apply = |session: &mut NativePdfSession| {
+            session.apply_page(session.snapshot().binding, 2, &edit)
+        };
+        let (mut low, mut high) = (1, max_work);
+        while low < high {
+            let mid = low + (high - low) / 2;
+            match open(mid).and_then(|(mut session, _, _)| apply(&mut session)) {
+                Ok(_) => high = mid,
+                Err(
+                    NativeSessionError::Budget
+                    | NativeSessionError::Graph(NativeEditError::Reader(PdfReadError::TokenLimit)),
+                ) => low = mid + 1,
+                Err(error) => panic!("unexpected refusal at {mid} work units: {error:?}"),
+            }
+        }
+
+        let (mut constrained, original_binding, accepted) = open(low - 1).unwrap();
+        let before = constrained.snapshot().clone();
+        let accepted_bytes = constrained.output_bytes().to_vec();
+        assert_eq!(apply(&mut constrained), Err(NativeSessionError::Budget));
+        assert_eq!(constrained.output_bytes(), accepted_bytes);
+        let after = constrained.snapshot();
+        assert_eq!(after.binding, before.binding);
+        assert_eq!(after.output_hash, before.output_hash);
+        assert_eq!(after.page_state, before.page_state);
+        assert_eq!(after.scene.scene_hash, before.scene.scene_hash);
+        assert_eq!(after.consumed_request, before.consumed_request);
+        assert_eq!(
+            constrained.lookup(original_binding, 1),
+            Ok(NativeRequestLookup::Accepted(accepted))
+        );
+        assert_eq!(
+            constrained.lookup(before.binding, 2),
+            Ok(NativeRequestLookup::Unseen)
+        );
+
+        let (mut exact, _, _) = open(low).unwrap();
+        let exact_binding = exact.snapshot().binding;
+        let receipt = apply(&mut exact).unwrap();
+        assert_eq!(receipt.binding.revision, exact_binding.revision + 1);
+        let mut order = before.page_state.order;
+        let mut geometry: Vec<_> = before
+            .scene
+            .pages
+            .iter()
+            .map(|page| page.geometry)
+            .collect();
+        if matches!(edit, NativePageCommand::ReorderPage { .. }) {
+            order.swap(0, 1);
+            geometry.swap(0, 1);
+        } else {
+            order.insert(1, receipt.selected_page.unwrap());
+            geometry.insert(1, geometry[0]);
+        }
+        let after = exact.snapshot();
+        assert_eq!(after.page_state.order, order);
+        assert!(
+            after
+                .scene
+                .pages
+                .iter()
+                .map(|page| page.geometry)
+                .eq(geometry)
+        );
+        assert_eq!(
+            exact.lookup(exact_binding, 2),
+            Ok(NativeRequestLookup::Accepted(receipt))
+        );
+    }
+}
+
+#[test]
 fn final_page_and_external_dependencies_refuse_without_changing_output() {
     for (bytes, code) in [
         (fixture(), "FLOW_PDF_NATIVE_FINAL_PAGE"),
