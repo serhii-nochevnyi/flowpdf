@@ -3087,12 +3087,19 @@ fn contains_collapsed_stroke(commands: &[PdfPathCommand], source: &[RawPathComma
 }
 
 fn path_bounds(commands: &[PdfPathCommand]) -> Result<LayoutRect, PdfReadError> {
-    let mut points = Vec::new();
-    for command in commands {
-        match command {
-            PdfPathCommand::MoveTo { x, y } | PdfPathCommand::LineTo { x, y } => {
-                points.push((*x, *y))
+    let mut bounds = None::<[i64; 4]>;
+    let mut include = |x: LayoutUnit, y: LayoutUnit| {
+        let (x, y) = (x.raw(), y.raw());
+        bounds = Some(match bounds {
+            Some([min_x, min_y, max_x, max_y]) => {
+                [min_x.min(x), min_y.min(y), max_x.max(x), max_y.max(y)]
             }
+            None => [x, y, x, y],
+        });
+    };
+    for command in commands {
+        match *command {
+            PdfPathCommand::MoveTo { x, y } | PdfPathCommand::LineTo { x, y } => include(x, y),
             PdfPathCommand::CurveTo {
                 x1,
                 y1,
@@ -3100,38 +3107,15 @@ fn path_bounds(commands: &[PdfPathCommand]) -> Result<LayoutRect, PdfReadError> 
                 y2,
                 x3,
                 y3,
-            } => points.extend([(*x1, *y1), (*x2, *y2), (*x3, *y3)]),
+            } => {
+                include(x1, y1);
+                include(x2, y2);
+                include(x3, y3);
+            }
             PdfPathCommand::ClosePath => {}
         }
     }
-    if points.is_empty() {
-        return Ok(LayoutRect {
-            x: LayoutUnit::from_raw(0),
-            y: LayoutUnit::from_raw(0),
-            width: LayoutUnit::from_raw(0),
-            height: LayoutUnit::from_raw(0),
-        });
-    }
-    let min_x = points
-        .iter()
-        .map(|(x, _)| x.raw())
-        .min()
-        .ok_or(PdfReadError::NumericLimit)?;
-    let min_y = points
-        .iter()
-        .map(|(_, y)| y.raw())
-        .min()
-        .ok_or(PdfReadError::NumericLimit)?;
-    let max_x = points
-        .iter()
-        .map(|(x, _)| x.raw())
-        .max()
-        .ok_or(PdfReadError::NumericLimit)?;
-    let max_y = points
-        .iter()
-        .map(|(_, y)| y.raw())
-        .max()
-        .ok_or(PdfReadError::NumericLimit)?;
+    let [min_x, min_y, max_x, max_y] = bounds.unwrap_or([0; 4]);
     Ok(LayoutRect {
         x: LayoutUnit::from_raw(min_x),
         y: LayoutUnit::from_raw(min_y),
@@ -3851,6 +3835,28 @@ mod tests {
         LayoutUnit, PaintBounds, PaintMatrix, RawPathCommand, SceneDecimal,
         lost_visible_fill_contour, separated_content_streams, transform_path,
     };
+
+    #[test]
+    fn path_bounds_preserves_empty_and_numeric_limit_results() {
+        use super::{LayoutUnit, PdfPathCommand, PdfReadError, path_bounds};
+
+        assert_eq!(
+            path_bounds(&[PdfPathCommand::ClosePath]).unwrap().width,
+            LayoutUnit::from_raw(0)
+        );
+        let zero = LayoutUnit::from_raw(0);
+        let commands = [
+            PdfPathCommand::MoveTo {
+                x: LayoutUnit::from_raw(i64::MIN),
+                y: zero,
+            },
+            PdfPathCommand::LineTo {
+                x: LayoutUnit::from_raw(i64::MAX),
+                y: zero,
+            },
+        ];
+        assert_eq!(path_bounds(&commands), Err(PdfReadError::NumericLimit));
+    }
 
     #[test]
     fn precise_clip_can_exclude_only_the_collapsed_contour() {

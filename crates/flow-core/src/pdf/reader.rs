@@ -1128,7 +1128,10 @@ impl PdfReader {
         if !active.insert(reference) {
             return Err(PdfReadError::PageTreeInvalid);
         }
-        let value = self.object(reference)?;
+        let (mut cursor, _) = self.object_cursor(reference, 0, ObjectRead::Preview)?;
+        cursor.defer_page_resources = true;
+        let value = cursor.object_value()?;
+        cursor.require_object_keyword(b"endobj")?;
         let dictionary = value.as_dictionary().ok_or(PdfReadError::PageTreeInvalid)?;
         let type_name = dictionary
             .get("Type")
@@ -2033,6 +2036,7 @@ struct Cursor<'a> {
     tokens: usize,
     exact: bool,
     scene: bool,
+    defer_page_resources: bool,
     remaining: Option<usize>,
 }
 
@@ -2045,6 +2049,7 @@ impl<'a> Cursor<'a> {
             tokens: 0,
             exact: false,
             scene: false,
+            defer_page_resources: false,
             remaining: None,
         }
     }
@@ -2101,6 +2106,10 @@ impl<'a> Cursor<'a> {
     }
 
     fn token(&mut self) -> Result<Option<Vec<u8>>, PdfReadError> {
+        Ok(self.token_bytes()?.map(<[u8]>::to_vec))
+    }
+
+    fn token_bytes(&mut self) -> Result<Option<&'a [u8]>, PdfReadError> {
         self.skip_space();
         if self.position >= self.bytes.len() {
             return Ok(None);
@@ -2115,14 +2124,14 @@ impl<'a> Cursor<'a> {
             if self.scene {
                 self.charge(2)?;
             }
-            return Ok(Some(b"<<".to_vec()));
+            return Ok(Some(b"<<"));
         }
         if self.bytes[start] == b'>' && self.bytes.get(start + 1) == Some(&b'>') {
             self.position += 2;
             if self.scene {
                 self.charge(2)?;
             }
-            return Ok(Some(b">>".to_vec()));
+            return Ok(Some(b">>"));
         }
         while self.position < self.bytes.len() && !is_delimiter(self.bytes[self.position]) {
             self.position += 1;
@@ -2131,7 +2140,7 @@ impl<'a> Cursor<'a> {
             self.position += 1;
         }
         self.charge(self.position - start)?;
-        Ok(Some(self.bytes[start..self.position].to_vec()))
+        Ok(Some(&self.bytes[start..self.position]))
     }
 
     fn parse_u64_token(&mut self) -> Result<Option<u64>, PdfReadError> {
@@ -2153,7 +2162,7 @@ impl<'a> Cursor<'a> {
 
     fn consume_keyword(&mut self, keyword: &[u8]) -> Result<bool, PdfReadError> {
         let checkpoint = self.position;
-        if let Some(token) = self.token()?
+        if let Some(token) = self.token_bytes()?
             && token == keyword
         {
             return Ok(true);
@@ -2212,6 +2221,14 @@ impl<'a> Cursor<'a> {
     }
 
     fn parse_value(&mut self, depth: usize) -> Result<PdfValue, PdfReadError> {
+        self.parse_value_with_storage(depth, true)
+    }
+
+    fn parse_value_with_storage(
+        &mut self,
+        depth: usize,
+        retain: bool,
+    ) -> Result<PdfValue, PdfReadError> {
         if depth > self.limits.max_nesting {
             return Err(PdfReadError::NestingLimit);
         }
@@ -2227,16 +2244,18 @@ impl<'a> Cursor<'a> {
         }
         self.skip_space();
         match self.bytes.get(self.position).copied() {
-            Some(b'(') => self.parse_literal_string().map(PdfValue::String),
+            Some(b'(') => self.parse_literal_string(retain).map(PdfValue::String),
             Some(b'<') if self.bytes.get(self.position + 1) != Some(&b'<') => {
-                self.parse_hex_string().map(PdfValue::String)
+                self.parse_hex_string(retain).map(PdfValue::String)
             }
-            Some(b'[') => self.parse_array(depth),
-            Some(b'<') => self.parse_dictionary(depth).map(PdfValue::Dictionary),
+            Some(b'[') => self.parse_array(depth, retain),
+            Some(b'<') => self
+                .parse_dictionary(depth, retain)
+                .map(PdfValue::Dictionary),
             Some(b'/') => self.parse_name().map(PdfValue::Name),
             Some(_) => {
-                let token = self.token()?.ok_or(PdfReadError::Syntax)?;
-                match token.as_slice() {
+                let token = self.token_bytes()?.ok_or(PdfReadError::Syntax)?;
+                match token {
                     b"null" => Ok(PdfValue::Null),
                     b"true" => Ok(PdfValue::Boolean(true)),
                     b"false" => Ok(PdfValue::Boolean(false)),
@@ -2251,19 +2270,19 @@ impl<'a> Cursor<'a> {
                             return Err(PdfReadError::Syntax);
                         }
                         let first = if integer {
-                            let parsed = parse_signed_i64(&token)?;
+                            let parsed = parse_signed_i64(token)?;
                             PdfValue::Integer(parsed)
                         } else {
                             if self.exact {
-                                validate_decimal_token(&token)?;
+                                validate_decimal_token(token)?;
                                 self.charge(token.len())?;
                                 PdfValue::ExactReal(
-                                    String::from_utf8(token.clone())
+                                    String::from_utf8(token.to_vec())
                                         .map_err(|_| PdfReadError::Syntax)?,
                                 )
                             } else {
-                                let rounded = parse_decimal(&token)?;
-                                let precise = std::str::from_utf8(&token)
+                                let rounded = parse_decimal(token)?;
+                                let precise = std::str::from_utf8(token)
                                     .map_err(|_| PdfReadError::Syntax)?
                                     .parse::<f64>()
                                     .map_err(|_| PdfReadError::NumericLimit)?;
@@ -2273,8 +2292,8 @@ impl<'a> Cursor<'a> {
                         if let PdfValue::Integer(object_number) = first {
                             let checkpoint = self.position;
                             self.skip_space();
-                            if let Some(second) = self.token()?
-                                && let Ok(generation) = parse_u16(&second)
+                            if let Some(second) = self.token_bytes()?
+                                && let Ok(generation) = parse_u16(second)
                                 && self.consume_keyword(b"R")?
                                 && object_number >= 0
                             {
@@ -2296,27 +2315,32 @@ impl<'a> Cursor<'a> {
         }
     }
 
-    fn parse_array(&mut self, depth: usize) -> Result<PdfValue, PdfReadError> {
+    fn parse_array(&mut self, depth: usize, retain: bool) -> Result<PdfValue, PdfReadError> {
         self.position += 1;
         let mut values = Vec::new();
+        let mut items = 0;
         loop {
             self.skip_space();
             if self.bytes.get(self.position) == Some(&b']') {
                 self.position += 1;
                 return Ok(PdfValue::Array(values));
             }
-            if values.len() >= self.limits.max_array_items {
+            if items >= self.limits.max_array_items {
                 return Err(PdfReadError::ObjectLimit);
             }
-            let value = self.parse_value(depth + 1)?;
-            self.reserve_scene_item(&mut values)?;
-            values.push(value);
+            let value = self.parse_value_with_storage(depth + 1, retain)?;
+            if retain {
+                self.reserve_scene_item(&mut values)?;
+                values.push(value);
+            }
+            items += 1;
         }
     }
 
     fn parse_dictionary(
         &mut self,
         depth: usize,
+        retain: bool,
     ) -> Result<BTreeMap<String, PdfValue>, PdfReadError> {
         if self.bytes.get(self.position) != Some(&b'<')
             || self.bytes.get(self.position + 1) != Some(&b'<')
@@ -2325,6 +2349,7 @@ impl<'a> Cursor<'a> {
         }
         self.position += 2;
         let mut dictionary = BTreeMap::new();
+        let mut entries = 0;
         loop {
             self.skip_space();
             if self.bytes.get(self.position) == Some(&b'>')
@@ -2333,11 +2358,16 @@ impl<'a> Cursor<'a> {
                 self.position += 2;
                 return Ok(dictionary);
             }
-            if dictionary.len() >= self.limits.max_dictionary_entries {
+            if entries >= self.limits.max_dictionary_entries {
                 return Err(PdfReadError::ObjectLimit);
             }
             let key = self.parse_name()?;
-            let value = self.parse_value(depth + 1)?;
+            let defer_resource = self.defer_page_resources && depth == 0 && key == "Resources";
+            let value = self.parse_value_with_storage(depth + 1, retain && !defer_resource)?;
+            entries += 1;
+            if !retain {
+                continue;
+            }
             // @invariant: Reserve a root node and one node per five additional dictionary entries.
             if self.scene && dictionary.len().is_multiple_of(5) {
                 self.charge(128 + 12 * std::mem::size_of::<(String, PdfValue)>())?;
@@ -2369,32 +2399,39 @@ impl<'a> Cursor<'a> {
         Ok(name)
     }
 
-    fn parse_literal_string(&mut self) -> Result<Vec<u8>, PdfReadError> {
+    fn parse_literal_string(&mut self, retain: bool) -> Result<Vec<u8>, PdfReadError> {
         self.position += 1;
         let mut output = Vec::new();
+        let mut length = 0;
         let mut nesting = 1_usize;
         while self.position < self.bytes.len() {
-            if self.scene {
+            if self.scene && retain {
                 self.reserve_scene_item(&mut output)?;
             } else {
                 self.charge(2)?;
             }
             let byte = self.bytes[self.position];
             self.position += 1;
+            let mut emit = |byte| {
+                length += 1;
+                if retain {
+                    output.push(byte);
+                }
+            };
             match byte {
                 b'(' => {
                     nesting = nesting.checked_add(1).ok_or(PdfReadError::NestingLimit)?;
                     if nesting > self.limits.max_nesting {
                         return Err(PdfReadError::NestingLimit);
                     }
-                    output.push(byte);
+                    emit(byte);
                 }
                 b')' => {
                     nesting = nesting.checked_sub(1).ok_or(PdfReadError::Syntax)?;
                     if nesting == 0 {
                         return Ok(output);
                     }
-                    output.push(byte);
+                    emit(byte);
                 }
                 b'\\' => {
                     let escaped = self
@@ -2404,11 +2441,11 @@ impl<'a> Cursor<'a> {
                         .ok_or(PdfReadError::Syntax)?;
                     self.position += 1;
                     match escaped {
-                        b'n' => output.push(b'\n'),
-                        b'r' => output.push(b'\r'),
-                        b't' => output.push(b'\t'),
-                        b'b' => output.push(8),
-                        b'f' => output.push(12),
+                        b'n' => emit(b'\n'),
+                        b'r' => emit(b'\r'),
+                        b't' => emit(b'\t'),
+                        b'b' => emit(8),
+                        b'f' => emit(12),
                         b'\r' => {
                             if self.bytes.get(self.position) == Some(&b'\n') {
                                 self.position += 1;
@@ -2427,29 +2464,30 @@ impl<'a> Cursor<'a> {
                                 self.position += 1;
                                 value = value.wrapping_mul(8).wrapping_add(next - b'0');
                             }
-                            output.push(value);
+                            emit(value);
                         }
-                        other => output.push(other),
+                        other => emit(other),
                     }
                 }
                 b'\r' => {
                     if self.bytes.get(self.position) == Some(&b'\n') {
                         self.position += 1;
                     }
-                    output.push(b'\n');
+                    emit(b'\n');
                 }
-                other => output.push(other),
+                other => emit(other),
             }
-            if output.len() > self.limits.max_string_bytes {
+            if length > self.limits.max_string_bytes {
                 return Err(PdfReadError::StreamLimit);
             }
         }
         Err(PdfReadError::Syntax)
     }
 
-    fn parse_hex_string(&mut self) -> Result<Vec<u8>, PdfReadError> {
+    fn parse_hex_string(&mut self, retain: bool) -> Result<Vec<u8>, PdfReadError> {
         self.position += 1;
         let mut output = Vec::new();
+        let mut length = 0;
         let mut high: Option<u8> = None;
         while self.position < self.bytes.len() {
             if !self.scene {
@@ -2462,22 +2500,28 @@ impl<'a> Cursor<'a> {
             }
             if byte == b'>' {
                 if let Some(high) = high {
-                    self.reserve_scene_item(&mut output)?;
-                    output.push(high << 4);
+                    length += 1;
+                    if retain {
+                        self.reserve_scene_item(&mut output)?;
+                        output.push(high << 4);
+                    }
                 }
-                if output.len() > self.limits.max_string_bytes {
+                if length > self.limits.max_string_bytes {
                     return Err(PdfReadError::StreamLimit);
                 }
                 return Ok(output);
             }
             let nibble = hex_nibble(byte).ok_or(PdfReadError::Syntax)?;
             if let Some(high) = high.take() {
-                self.reserve_scene_item(&mut output)?;
-                output.push((high << 4) | nibble);
+                length += 1;
+                if retain {
+                    self.reserve_scene_item(&mut output)?;
+                    output.push((high << 4) | nibble);
+                }
             } else {
                 high = Some(nibble);
             }
-            if output.len() > self.limits.max_string_bytes {
+            if length > self.limits.max_string_bytes {
                 return Err(PdfReadError::StreamLimit);
             }
         }
@@ -2531,6 +2575,30 @@ fn parse_signed_i64(bytes: &[u8]) -> Result<i64, PdfReadError> {
 #[cfg(test)]
 mod retained_reader_tests {
     use super::*;
+
+    #[test]
+    fn page_discovery_keeps_only_the_resource_locator() {
+        let limits = PdfReaderLimits::default();
+        let source = b"<< /Type /Pages /Resour#63es << /Properties [(label) <4142> << /Name /Example >>] >> /Kids [2 0 R] >>";
+        let mut cursor = Cursor::new(source, 0, limits.clone());
+        cursor.defer_page_resources = true;
+        let root = cursor.object_value().unwrap();
+        let dictionary = root.as_dictionary().unwrap();
+        assert!(dictionary["Resources"].as_dictionary().unwrap().is_empty());
+        assert_eq!(dictionary["Kids"].as_array().unwrap().len(), 1);
+        assert_eq!(cursor.position, source.len());
+
+        let mut cursor = Cursor::new(b"<< /Resources 9 0 R >>", 0, limits);
+        cursor.defer_page_resources = true;
+        let root = cursor.object_value().unwrap();
+        assert_eq!(
+            root.as_dictionary().unwrap()["Resources"].as_reference(),
+            Some(PdfObjectRef {
+                object_number: 9,
+                generation: 0
+            })
+        );
+    }
 
     #[test]
     fn retained_starts_require_budget_and_distinct_offsets_before_xref() {
@@ -2690,7 +2758,7 @@ mod retained_reader_tests {
             0,
             PdfReaderLimits::default(),
         );
-        let dictionary = cursor.parse_dictionary(0).unwrap();
+        let dictionary = cursor.parse_dictionary(0, true).unwrap();
         let byte_name = read_scene_name(b"#4Cogo#e9", &mut 0).unwrap();
         let utf8_name = read_scene_name("Logoé".as_bytes(), &mut 0).unwrap();
         assert_eq!(dictionary[&byte_name].as_integer(), Some(1));
