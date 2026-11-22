@@ -466,12 +466,13 @@ function familyCommand(op, request, snapshot, outcome) {
 
 function redact(session, operation) {
   const { order } = session.current().pageState
-  const markedPages = new Set()
-  for (const { page, rectPt } of operation.request.marks) {
-    const pageId = order[page - 1]
-    const reply = session.redact({ kind: 'addMark', pageId, rect: milli(rectPt) })
+  const marks = operation.request.marks.map(({ page, rectPt }) => ({ pageId: order[page - 1], rect: milli(rectPt) }))
+  const expectedMarkCount = new Set(marks.map(({ pageId, rect }) => JSON.stringify([pageId, rect]))).size
+  const markedPages = new Set(marks.map(({ pageId }) => pageId))
+  const affectedPages = order.filter((id) => markedPages.has(id))
+  for (const mark of marks) {
+    const reply = session.redact({ kind: 'addMark', ...mark })
     if (reply.code) return reply
-    markedPages.add(pageId)
   }
   const staged = session.redact({ kind: 'stage' })
   if (staged.code) return staged
@@ -479,8 +480,12 @@ function redact(session, operation) {
   requireInput(candidate, 'native-redaction-candidate')
   let published
   return withCleanup(() => {
-    requireMatch(same(candidate.affectedPages, order.filter((id) => markedPages.has(id))), 'native-redaction-coverage')
+    requireMatch(same(candidate.affectedPages, affectedPages), 'native-redaction-coverage')
+    requireMatch(staged.redaction.markCount === expectedMarkCount, 'native-redaction-mark-count')
     const verified = session.redact({ kind: 'verify', candidate }, true)
+    if (verified.status !== 'failed') {
+      requireMatch(verified.redaction?.markCount === expectedMarkCount, 'native-redaction-mark-count')
+    }
     const verdict = verified.redaction?.verification?.status
     requireMatch(verdict !== 'failed', 'native-redaction-verification')
     requireInput(verdict === 'passed', 'native-redaction-verification')

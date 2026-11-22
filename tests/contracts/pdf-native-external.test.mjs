@@ -582,6 +582,8 @@ test('redaction refusal preserves the verifier classification through bounded cl
 
   for (const [verdict, cleanupFailure, status, exitCodes] of [
     ['wrong-coverage', 'none', 'fail', [1, 1]],
+    ['stage-mark-count', 'none', 'fail', [1, 1]],
+    ['verify-mark-count', 'close', 'fail', [1, 1]],
     ['failed', 'none', 'fail', [1, 1]],
     ['failed', 'close', 'fail', [1, 1]],
     ['failed', 'cancel', 'fail', [1, 1]],
@@ -596,12 +598,15 @@ test('redaction refusal preserves the verifier classification through bounded cl
     const label = `${verdict}, ${cleanupFailure} cleanup failure`
     const hasCandidate = verdict !== 'missing-candidate'
     const wrongCoverage = verdict === 'wrong-coverage'
+    const stageCountMismatch = verdict === 'stage-mark-count'
+    const verifyCountMismatch = verdict === 'verify-mark-count'
     const candidate = wrongCoverage ? { ...expectedCandidate, affectedPages: [42, 43] } : expectedCandidate
     const publishRefused = verdict === 'publish-refused'
     const directory = scratchDirectory(t, 'flowpdf-redaction-contract-')
     const requests = []
     const invocations = []
     let pending = false
+    let markCount = 0
     const respond = (reply) => nativeResponder((submitted) => {
       requests.push(submitted)
       return reply(submitted)
@@ -609,18 +614,23 @@ test('redaction refusal preserves the verifier classification through bounded cl
     const wasm = {
       native_pdf_open: respond(() => ({ status: 'opened', binding, snapshot })),
       native_pdf_redaction: respond(({ action, acceptedHash }) => {
-        const result = (details) => ({ status: 'redaction', redaction: { action: action.kind, acceptedHash, ...details } })
+        const result = (details) => ({ status: 'redaction',
+          redaction: { action: action.kind, acceptedHash, markCount, ...details } })
         switch (action.kind) {
-          case 'addMark': return result({ candidate: null, verification: null })
+          case 'addMark':
+            markCount++
+            return result({ candidate: null, verification: null })
           case 'stage':
             if (!hasCandidate) return result({ candidate: null, verification: null })
             pending = true
-            return result({ candidate, verification: { status: 'pending' } })
+            return result({ candidate, markCount: stageCountMismatch ? markCount - 1 : markCount,
+              verification: { status: 'pending' } })
           case 'verify':
             if (verdict === 'missing-verdict') {
               return { status: 'failed', code: 'FLOW_PDF_NATIVE_REDACTION_CANDIDATE_UNAVAILABLE' }
             }
-            return result({ candidate, verification: { status: publishRefused ? 'passed' : verdict } })
+            return result({ candidate, markCount: verifyCountMismatch ? markCount + 1 : markCount,
+              verification: { status: publishRefused || verifyCountMismatch ? 'passed' : verdict } })
           case 'publish':
             assert.ok(publishRefused)
             return { status: 'failed', code: 'FLOW_PDF_NATIVE_RECONCILIATION_REQUIRED' }
@@ -646,13 +656,15 @@ test('redaction refusal preserves the verifier classification through bounded cl
       ...operation.request.marks.map(({ rectPt }, index) =>
         redactRequest(index + 2, { kind: 'addMark', pageId: 42, rect: rectPt.map((point) => point * 1000) })),
       redactRequest(stageId, { kind: 'stage' }),
-      ...(hasCandidate && !wrongCoverage ? [redactRequest(stageId, { kind: 'verify', candidate })] : []),
+      ...(hasCandidate && !wrongCoverage && !stageCountMismatch ? [redactRequest(stageId, { kind: 'verify', candidate })] : []),
       ...(publishRefused ? [redactRequest(stageId, { kind: 'publish', candidate })] : []),
       ...(hasCandidate ? [redactRequest(stageId, { kind: 'cancel', candidate })] : []),
       { ...request('close', stageId + 1), binding },
     ], label)
     assert.equal(evidence.status, status, label)
-    const reason = wrongCoverage ? 'native-redaction-coverage' : publishRefused ? 'native-redaction-publication' :
+    const reason = wrongCoverage ? 'native-redaction-coverage' :
+      stageCountMismatch || verifyCountMismatch ? 'native-redaction-mark-count' :
+      publishRefused ? 'native-redaction-publication' :
       hasCandidate ? 'native-redaction-verification' : 'native-redaction-candidate'
     assert.equal(evidence.reason, reason, label)
     assert.deepEqual([externalExitCode(evidence.status, false), externalExitCode(evidence.status, true)], exitCodes, label)
@@ -667,29 +679,36 @@ test('redaction refusal preserves the verifier classification through bounded cl
 test('redaction replies match the accepted PDF, action and staged candidate before comparison', (t) => {
   const source = loadFixtures().find(({ id }) => id === 'redaction')
   const [fixtureOperation] = source.spec.operations
-  const [firstMark, ...remainingMarks] = fixtureOperation.request.marks
-  const operation = { ...fixtureOperation, request: { marks: [{ ...firstMark, page: 2 }, firstMark, ...remainingMarks] } }
-  const { json } = structuralReadback(operation.pages)
+  const { marks: fixtureMarks } = fixtureOperation.request
+  const [firstMark] = fixtureMarks
+  const multiPageMarks = [{ ...firstMark, page: 2 }, ...fixtureMarks]
+  const { json } = structuralReadback(fixtureOperation.pages)
   const output = fixture('notes-preservation.pdf')
-  const candidate = { hash: Array(32).fill(7), validatorVersion: 1,
+  const multiPageCandidate = { hash: Array(32).fill(7), validatorVersion: 1,
     validatorProfile: 'classic-xref-owned-144dpi-v1', affectedPages: [43, 42] }
+  const singlePageCandidate = { ...multiPageCandidate, affectedPages: [43] }
   const cases = [
     ['addMark', 'action', { action: 'removeMark' }],
-    ['stage', 'accepted hash', { acceptedHash: candidate.hash }],
-    ['verify', 'candidate hash', { candidate: { ...candidate, hash: Array(32).fill(8) } }],
-    ['verify', 'validator version', { candidate: { ...candidate, validatorVersion: 2 } }],
-    ['verify', 'validator profile', { candidate: { ...candidate, validatorProfile: 'other' } }],
-    ['verify', 'candidate page order', { candidate: { ...candidate, affectedPages: [42, 43] } }],
-    ['verify', 'live receipt', {}, 'native-response'],
-    ['publish', 'candidate hash', { candidate: { ...candidate, hash: Array(32).fill(8) } }],
-    ['publish', 'accepted hash', { acceptedHash: candidate.hash }],
-    ['publish', 'live receipt', {}, 'native-response'],
+    ['stage', 'accepted hash', { acceptedHash: multiPageCandidate.hash }],
+    ['verify', 'candidate hash', { candidate: { ...multiPageCandidate, hash: Array(32).fill(8) } }],
+    ['verify', 'validator version', { candidate: { ...multiPageCandidate, validatorVersion: 2 } }],
+    ['verify', 'validator profile', { candidate: { ...multiPageCandidate, validatorProfile: 'other' } }],
+    ['verify', 'candidate page order', { candidate: { ...multiPageCandidate, affectedPages: [42, 43] } }],
+    ['verify', 'live receipt', {}, { reason: 'native-response' }],
+    ['publish', 'candidate hash', { candidate: { ...multiPageCandidate, hash: Array(32).fill(8) } }],
+    ['publish', 'accepted hash', { acceptedHash: multiPageCandidate.hash }],
+    ['publish', 'live receipt', {}, { reason: 'native-response' }],
     ['cancel', 'missing candidate', { candidate: null }],
     ['publish', 'matching publication'],
+    ['publish', 'matching fixture marks', null, { marks: fixtureMarks, candidate: singlePageCandidate }],
+    ['publish', 'matching distinct marks', null, { marks: [...fixtureMarks, firstMark], candidate: singlePageCandidate }],
   ]
-  for (const [step, field, change, reason] of cases) {
+  for (const [step, field, change, options = {}] of cases) {
+    const { reason, marks = multiPageMarks, candidate = multiPageCandidate } = options
+    const operation = { ...fixtureOperation, request: { marks } }
     const label = `${step} ${field}`
     const calls = []
+    const addedMarks = new Set()
     let base
     const wasm = {
       native_pdf_open: nativeResponder((request) => {
@@ -702,8 +721,10 @@ test('redaction replies match the accepted PDF, action and staged candidate befo
         assert.deepEqual(binding, base.binding, label)
         if (Object.hasOwn(action, 'candidate')) assert.deepEqual(action.candidate, candidate, label)
         calls.push([action.kind, requestId])
+        if (action.kind === 'addMark') addedMarks.add(JSON.stringify(action))
         const redaction = {
           action: action.kind, acceptedHash, candidate: action.kind === 'addMark' ? null : candidate,
+          markCount: action.kind === 'publish' ? 0 : addedMarks.size,
           verification: action.kind === 'addMark' || action.kind === 'cancel' ? null :
             { status: action.kind === 'stage' ? 'pending' : 'passed' },
           ...(action.kind === step ? change : {}),
