@@ -1221,63 +1221,99 @@ fn shared_annotation_array_preserves_geometry_but_disables_note_writes() {
 }
 
 #[test]
-fn rewrite_work_boundary_preserves_accepted_session_state() {
-    let source = graph::fixture("", "");
+fn retained_stream_work_boundary_preserves_accepted_session_state() {
     let defaults = NativeEditLimits::default();
-    let open_at = |max_work| {
-        NativePdfSession::open_scoped(
-            &source,
-            NativeEditLimits {
-                max_work,
-                ..defaults
-            },
-            [1; 16],
-        )
-    };
-    let contents = "Ї".repeat(512);
-    let add = NativeNoteCommand::Add {
-        page: open_at(defaults.max_work).unwrap().snapshot().scene.pages[0].id,
-        rect: [20, 30, 40, 50],
-        contents: contents.clone(),
-    };
-    let mut lower = 1;
-    let mut upper = defaults.max_work;
-    while lower < upper {
-        let mid = lower + (upper - lower) / 2;
-        if open_at(mid)
-            .is_ok_and(|mut session| session.apply(session.snapshot().binding, 1, &add).is_ok())
-        {
-            upper = mid;
-        } else {
-            lower = mid + 1;
+    let boundary = |payload: &str| {
+        // @contract: A catalog stream is retained without being scanned as page content.
+        let stream = format!(
+            "<< /Length {} >>\nstream\n{payload}\nendstream",
+            payload.len()
+        );
+        let source = pdf_with_objects(&[
+            "<< /Type /Catalog /Pages 2 0 R /Retained 4 0 R >>",
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] >>",
+            &stream,
+        ]);
+        let with_first_note = |max_work| {
+            let mut session = NativePdfSession::open_scoped(
+                source.as_bytes(),
+                NativeEditLimits {
+                    max_work,
+                    ..defaults
+                },
+                [1; 16],
+            )?;
+            let initial = session.snapshot().binding;
+            let add = NativeNoteCommand::Add {
+                page: session.snapshot().scene.pages[0].id,
+                rect: [20, 30, 40, 50],
+                contents: "Review".into(),
+            };
+            let accepted = session.apply(initial, 1, &add)?;
+            Ok::<_, NativeSessionError>((session, initial, accepted))
+        };
+        let (_, _, first) = with_first_note(defaults.max_work).unwrap();
+        let edit = NativeNoteCommand::Edit {
+            note: first.note,
+            contents: "Ї".repeat(512),
+        };
+        let (mut lower, mut upper) = (1, defaults.max_work);
+        while lower < upper {
+            let mid = lower + (upper - lower) / 2;
+            if with_first_note(mid).is_ok_and(|(mut session, _, accepted)| {
+                session.apply(accepted.binding, 2, &edit).is_ok()
+            }) {
+                upper = mid;
+            } else {
+                lower = mid + 1;
+            }
         }
-    }
 
-    let mut exact = open_at(lower).unwrap();
-    let receipt = exact.apply(exact.snapshot().binding, 1, &add).unwrap();
-    assert_eq!(receipt.binding.revision, 1);
-    assert_eq!(exact.origin_bytes(), source);
-    assert_note(&exact, 0, receipt.note, [20, 30, 40, 50], &contents);
+        let (mut exact, _, accepted) = with_first_note(lower).unwrap();
+        let receipt = exact.apply(accepted.binding, 2, &edit).unwrap();
+        assert_eq!(receipt.binding.revision, 2);
+        let retained = format!("stream\n{payload}\nendstream");
+        assert!(
+            exact
+                .output_bytes()
+                .windows(retained.len())
+                .any(|bytes| bytes == retained.as_bytes())
+        );
 
-    let mut tight = open_at(lower - 1).unwrap();
-    let before = tight.snapshot().clone();
-    for _ in 0..2 {
+        let (mut tight, initial, accepted) = with_first_note(lower - 1).unwrap();
+        let before = tight.snapshot().clone();
+        let accepted_bytes = tight.output_bytes().to_vec();
+        assert_eq!(before.binding.revision, 1);
+        for _ in 0..2 {
+            assert_eq!(
+                tight.apply(before.binding, 2, &edit),
+                Err(NativeSessionError::Budget)
+            );
+            assert_eq!(
+                tight.lookup(before.binding, 2),
+                Ok(NativeRequestLookup::Unseen)
+            );
+        }
         assert_eq!(
-            tight.apply(before.binding, 1, &add),
-            Err(NativeSessionError::Budget)
+            tight.lookup(initial, 1),
+            Ok(NativeRequestLookup::Accepted(accepted))
         );
-        assert_eq!(
-            tight.lookup(before.binding, 1),
-            Ok(NativeRequestLookup::Unseen)
-        );
-    }
-    assert_eq!(tight.snapshot().binding, before.binding);
-    assert_eq!(tight.snapshot().consumed_request, before.consumed_request);
-    assert_eq!(tight.snapshot().scene, before.scene);
-    assert_eq!(tight.snapshot().page_state, before.page_state);
-    assert_eq!(tight.snapshot().output_hash, before.output_hash);
-    assert_eq!(tight.output_bytes(), source);
-    assert_eq!(tight.origin_bytes(), source);
+        assert_eq!(tight.snapshot().binding, before.binding);
+        assert_eq!(tight.snapshot().consumed_request, before.consumed_request);
+        assert_eq!(tight.snapshot().scene, before.scene);
+        assert_eq!(tight.snapshot().page_state, before.page_state);
+        assert_eq!(tight.snapshot().output_hash, before.output_hash);
+        assert_eq!(tight.output_bytes(), accepted_bytes);
+        assert_eq!(tight.origin_bytes(), source.as_bytes());
+        lower
+    };
+    let short = "x".repeat(1024);
+    let long = "x".repeat(9216);
+    assert_eq!(
+        boundary(&long),
+        boundary(&short) + 2 * ((long.len() - short.len()) / 16)
+    );
 }
 
 #[test]

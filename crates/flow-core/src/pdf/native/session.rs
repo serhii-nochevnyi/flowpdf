@@ -1884,15 +1884,10 @@ fn preserve_and_remap(
     {
         return Err(NativeSessionError::Postcondition);
     }
-    for (key, value) in &staged.trailer {
-        if key == "Size" {
-            continue;
-        }
-        let rhs = reopened
-            .trailer
-            .get(key)
-            .ok_or(NativeSessionError::Postcondition)?;
-        if !equivalent(value, rhs, mapping, &mut work)? {
+    for ((left, a), (right, b)) in staged.trailer.iter().zip(&reopened.trailer) {
+        if !same_bytes(left.as_bytes(), right.as_bytes(), &mut work)?
+            || (left != "Size" && !equivalent(a, b, mapping, &mut work)?)
+        {
             return Err(NativeSessionError::Postcondition);
         }
     }
@@ -1915,6 +1910,14 @@ fn preserve_and_remap(
     Ok(remapped)
 }
 
+fn same_bytes(lhs: &[u8], rhs: &[u8], work: &mut usize) -> Result<bool, NativeEditError> {
+    if lhs.len() != rhs.len() {
+        return Ok(false);
+    }
+    spend(work, lhs.len())?;
+    Ok(lhs == rhs)
+}
+
 fn same_dict(
     lhs: &BTreeMap<String, PdfValue>,
     rhs: &BTreeMap<String, PdfValue>,
@@ -1925,7 +1928,9 @@ fn same_dict(
         return Ok(false);
     }
     for ((left, a), (right, b)) in lhs.iter().zip(rhs) {
-        if left != right || !equivalent(a, b, mapping, work)? {
+        if !same_bytes(left.as_bytes(), right.as_bytes(), work)?
+            || !equivalent(a, b, mapping, work)?
+        {
             return Ok(false);
         }
     }
@@ -1944,8 +1949,8 @@ fn equivalent(
         (PdfValue::Boolean(a), PdfValue::Boolean(b)) => a == b,
         (PdfValue::Integer(a), PdfValue::Integer(b)) => a == b,
         (PdfValue::ExactReal(a), PdfValue::ExactReal(b))
-        | (PdfValue::Name(a), PdfValue::Name(b)) => a == b,
-        (PdfValue::String(a), PdfValue::String(b)) => a == b,
+        | (PdfValue::Name(a), PdfValue::Name(b)) => same_bytes(a.as_bytes(), b.as_bytes(), work)?,
+        (PdfValue::String(a), PdfValue::String(b)) => same_bytes(a, b, work)?,
         (PdfValue::Reference(a), PdfValue::Reference(b)) => mapping.get(a) == Some(b),
         (PdfValue::Array(a), PdfValue::Array(b)) => {
             if a.len() != b.len() {
@@ -1960,9 +1965,13 @@ fn equivalent(
         }
         (PdfValue::Dictionary(a), PdfValue::Dictionary(b)) => same_dict(a, b, mapping, work)?,
         (PdfValue::Stream(a), PdfValue::Stream(b)) => {
-            a.encoded == b.encoded
-                && a.data == b.data
-                && same_dict(&a.dict, &b.dict, mapping, work)?
+            // @invariant: Debit each stream buffer before its exact comparison.
+            spend(work, a.encoded.len().div_ceil(16))?;
+            if a.encoded != b.encoded {
+                return Ok(false);
+            }
+            spend(work, a.data.len().div_ceil(16))?;
+            a.data == b.data && same_dict(&a.dict, &b.dict, mapping, work)?
         }
         _ => false,
     })
