@@ -1253,11 +1253,13 @@ fn retained_stream_work_boundary_preserves_accepted_session_state() {
             let accepted = session.apply(initial, 1, &add)?;
             Ok::<_, NativeSessionError>((session, initial, accepted))
         };
-        let (_, _, first) = with_first_note(defaults.max_work).unwrap();
+        let (mut roomy, _, first) = with_first_note(defaults.max_work).unwrap();
+        let edited_contents = "Ї".repeat(512);
         let edit = NativeNoteCommand::Edit {
             note: first.note,
-            contents: "Ї".repeat(512),
+            contents: edited_contents.clone(),
         };
+        roomy.apply(first.binding, 2, &edit).unwrap();
         let (mut lower, mut upper) = (1, defaults.max_work);
         while lower < upper {
             let mid = lower + (upper - lower) / 2;
@@ -1273,6 +1275,12 @@ fn retained_stream_work_boundary_preserves_accepted_session_state() {
         let (mut exact, _, accepted) = with_first_note(lower).unwrap();
         let receipt = exact.apply(accepted.binding, 2, &edit).unwrap();
         assert_eq!(receipt.binding.revision, 2);
+        assert!(matches!(
+            exact.snapshot().scene.pages[0].annotations.as_slice(),
+            [NativePdfAnnotation::PlainNote(note)]
+                if note.id == accepted.note && note.contents == edited_contents
+        ));
+        assert_eq!(exact.output_bytes(), roomy.output_bytes());
         let retained = format!("stream\n{payload}\nendstream");
         assert!(
             exact
@@ -1309,10 +1317,12 @@ fn retained_stream_work_boundary_preserves_accepted_session_state() {
         lower
     };
     let short = "x".repeat(1024);
-    let long = "x".repeat(9216);
+    let long = "x".repeat(9217);
+    let serialization_work = long.len().div_ceil(16) - short.len().div_ceil(16);
+    let preservation_work = 2 * serialization_work;
     assert_eq!(
         boundary(&long),
-        boundary(&short) + 2 * ((long.len() - short.len()) / 16)
+        boundary(&short) + serialization_work + preservation_work
     );
 }
 

@@ -45,7 +45,13 @@ impl Output {
         Ok(())
     }
 
+    fn append_payload(&mut self, bytes: &[u8]) -> Result<(), NativeEditError> {
+        spend(&mut self.work, bytes.len().div_ceil(16))?;
+        self.append(bytes)
+    }
+
     fn name(&mut self, name: &str) -> Result<(), NativeEditError> {
+        spend(&mut self.work, name.len().div_ceil(16))?;
         self.append(b"/")?;
         for character in name.chars() {
             let byte =
@@ -93,10 +99,11 @@ impl Output {
             PdfValue::Boolean(true) => self.append(b"true"),
             PdfValue::Boolean(false) => self.append(b"false"),
             PdfValue::Integer(number) => self.append(number.to_string().as_bytes()),
-            PdfValue::ExactReal(token) => self.append(token.as_bytes()),
+            PdfValue::ExactReal(token) => self.append_payload(token.as_bytes()),
             PdfValue::Real(_) => Err(NativeEditError::Unsupported),
             PdfValue::Name(name) => self.name(name),
             PdfValue::String(bytes) => {
+                spend(&mut self.work, bytes.len())?;
                 self.append(b"<")?;
                 for &byte in bytes {
                     self.append(&hex_digits(byte))?;
@@ -122,7 +129,7 @@ impl Output {
                 }
                 self.dict(&stream.dict, map, depth, max_depth)?;
                 self.append(b"\nstream\n")?;
-                self.append(&stream.encoded)?;
+                self.append_payload(&stream.encoded)?;
                 self.append(b"\nendstream")
             }
         }
@@ -234,6 +241,41 @@ mod tests {
 
     use super::super::{NativeEditLimits, PlainTextNote};
     use super::*;
+
+    #[test]
+    fn payload_work_is_required_before_encoding_or_copying() {
+        let map = BTreeMap::new();
+        for (value, work, expected) in [
+            (
+                PdfValue::Name("NNNNNNNNNNNNNN é".into()),
+                3,
+                "/NNNNNNNNNNNNNN#20#E9",
+            ),
+            (PdfValue::String(vec![0, 255]), 3, "<00FF>"),
+            (
+                PdfValue::ExactReal("+.123456789012345".into()),
+                3,
+                "+.123456789012345",
+            ),
+        ] {
+            let mut output = Output {
+                bytes: Vec::new(),
+                limit: 64,
+                peak_limit: 128,
+                work: work - 1,
+            };
+            assert_eq!(
+                output.value(&value, &map, 0, 0),
+                Err(NativeEditError::Budget)
+            );
+            assert_eq!(output.bytes.capacity(), 0);
+
+            output.work = work;
+            output.value(&value, &map, 0, 0).unwrap();
+            assert_eq!(output.work, 0);
+            assert_eq!(output.bytes, expected.as_bytes());
+        }
+    }
 
     #[test]
     fn output_buffer_grows_geometrically_up_to_limit() {

@@ -1237,6 +1237,12 @@ fn redaction_rewrite_work_boundary_preserves_accepted_state_and_marks() {
         session.add_redaction_mark(binding, 1, target)?;
         Ok::<_, NativeSessionError>(session)
     };
+    let mut roomy = open_marked_at(defaults.max_work).unwrap();
+    let NativeRedactionStage::Pending(roomy_candidate) =
+        roomy.stage_redaction(roomy.snapshot().binding, 2).unwrap()
+    else {
+        panic!("expected pending redaction");
+    };
     let mut lower = 1;
     let mut upper = defaults.max_work;
     while lower < upper {
@@ -1254,9 +1260,15 @@ fn redaction_rewrite_work_boundary_preserves_accepted_state_and_marks() {
 
     let mut exact = open_marked_at(lower).unwrap();
     let binding = exact.snapshot().binding;
-    let pending = exact.stage_redaction(binding, 2).unwrap();
-    assert!(matches!(pending, NativeRedactionStage::Pending(_)));
-    assert_eq!(exact.stage_redaction(binding, 2), Ok(pending));
+    let NativeRedactionStage::Pending(candidate) = exact.stage_redaction(binding, 2).unwrap()
+    else {
+        panic!("expected pending redaction");
+    };
+    assert_eq!(candidate.candidate_hash, roomy_candidate.candidate_hash);
+    assert_eq!(
+        exact.stage_redaction(binding, 2),
+        Ok(NativeRedactionStage::Pending(candidate))
+    );
     assert_accepted(&exact, &source, 0, &source);
 
     let mut tight = open_marked_at(lower - 1).unwrap();
