@@ -95,58 +95,80 @@ impl NativePageGeometry {
     }
 }
 
-fn resolve<'a>(graph: &'a NativePdfGraph, mut value: &'a PdfValue) -> Option<&'a PdfValue> {
+fn resolve<'a>(
+    graph: &'a NativePdfGraph,
+    mut value: &'a PdfValue,
+    work: &mut usize,
+) -> Result<Option<&'a PdfValue>, NativeSessionError> {
     for _ in 0..=graph.limits.max_nesting {
-        match value {
-            PdfValue::Reference(reference) => value = graph.objects.get(reference)?,
-            _ => return Some(value),
-        }
+        spend(work, 1)?;
+        let PdfValue::Reference(reference) = value else {
+            return Ok(Some(value));
+        };
+        let Some(next) = graph.objects.get(reference) else {
+            return Ok(None);
+        };
+        value = next;
     }
-    None
+    Ok(None)
 }
 
-fn geometry(graph: &NativePdfGraph, mut page: PdfObjectRef) -> Option<NativePageGeometry> {
+fn geometry(
+    graph: &NativePdfGraph,
+    mut page: PdfObjectRef,
+    work: &mut usize,
+) -> Result<Option<NativePageGeometry>, NativeSessionError> {
     let mut media = None;
     let mut crop = None;
     let mut rotation = None;
     for _ in 0..=graph.limits.max_nesting {
-        let dict = graph.objects.get(&page)?.as_dictionary()?;
+        spend(work, 1)?;
+        let Some(dict) = graph.objects.get(&page).and_then(PdfValue::as_dictionary) else {
+            return Ok(None);
+        };
         if let Some(unit) = dict.get("UserUnit")
-            && !matches!(resolve(graph, unit)?, PdfValue::Integer(1))
+            && !matches!(resolve(graph, unit, work)?, Some(PdfValue::Integer(1)))
         {
-            return None;
+            return Ok(None);
         }
-        if media.is_none()
-            && let Some(value) = dict.get("MediaBox")
-        {
-            media = Some(box_bounds(resolve(graph, value)?)?);
-        }
-        if crop.is_none()
-            && let Some(value) = dict.get("CropBox")
-        {
-            crop = Some(box_bounds(resolve(graph, value)?)?);
+        for (bounds, key) in [(&mut media, "MediaBox"), (&mut crop, "CropBox")] {
+            if bounds.is_none()
+                && let Some(value) = dict.get(key)
+            {
+                *bounds = resolve(graph, value, work)?.and_then(box_bounds);
+                if bounds.is_none() {
+                    return Ok(None);
+                }
+            }
         }
         if rotation.is_none()
             && let Some(value) = dict.get("Rotate")
         {
-            let angle = resolve(graph, value)?.as_integer()?.rem_euclid(360);
+            let Some(angle) = resolve(graph, value, work)?.and_then(PdfValue::as_integer) else {
+                return Ok(None);
+            };
             if angle % 90 != 0 {
-                return None;
+                return Ok(None);
             }
-            rotation = Some(angle);
+            rotation = Some(angle.rem_euclid(360));
         }
         match dict.get("Parent") {
-            Some(value) => page = value.as_reference()?,
+            Some(PdfValue::Reference(parent)) => page = *parent,
+            Some(_) => return Ok(None),
             None => break,
         }
     }
-    let [ml, mb, mr, mt] = media?;
+    let Some([ml, mb, mr, mt]) = media else {
+        return Ok(None);
+    };
     let [cl, cb, cr, ct] = crop.unwrap_or([ml, mb, mr, mt]);
     let bounds = [ml.max(cl), mb.max(cb), mr.min(cr), mt.min(ct)];
-    (bounds[0] < bounds[2] && bounds[1] < bounds[3]).then_some(NativePageGeometry {
-        bounds,
-        rotation: rotation.unwrap_or(0),
-    })
+    Ok(
+        (bounds[0] < bounds[2] && bounds[1] < bounds[3]).then_some(NativePageGeometry {
+            bounds,
+            rotation: rotation.unwrap_or(0),
+        }),
+    )
 }
 
 fn box_bounds(value: &PdfValue) -> Option<[i64; 4]> {
@@ -188,17 +210,18 @@ fn inward(value: &PdfValue, lower: bool) -> Option<i64> {
     (point.unsigned_abs() <= MAX_POINT as u64).then_some(point)
 }
 
-fn page_annots(
-    graph: &NativePdfGraph,
+fn page_annots<'a>(
+    graph: &'a NativePdfGraph,
     page: PdfObjectRef,
-) -> Result<&[PdfValue], NativeSessionError> {
+    work: &mut usize,
+) -> Result<&'a [PdfValue], NativeSessionError> {
     let dict = graph
         .objects
         .get(&page)
         .and_then(PdfValue::as_dictionary)
         .ok_or(NativeSessionError::Postcondition)?;
     match dict.get("Annots") {
-        Some(value) => resolve(graph, value)
+        Some(value) => resolve(graph, value, work)?
             .and_then(PdfValue::as_array)
             .ok_or(NativeSessionError::Postcondition),
         None => Ok(&[]),
@@ -289,8 +312,7 @@ pub(super) fn project(
     let trailer_refs: BTreeSet<_> = refs.into_iter().collect();
     let mut pages = Vec::new();
     for (index, &page) in graph.pages.iter().enumerate() {
-        spend(&mut work, (graph.limits.max_nesting + 1) * 4)?;
-        let geometry = geometry(graph, page);
+        let geometry = geometry(graph, page, &mut work)?;
         let before_owner = *remaining;
         let mut owner_refs = RefMultiplicity::read(graph, page, &mut work, remaining)?;
         let dict = graph.objects[&page]
@@ -318,11 +340,10 @@ pub(super) fn project(
         let owner_cost = before_owner - *remaining;
         spend(remaining, 256)?;
         let mut annotations = Vec::new();
-        let values = page_annots(graph, page)?;
+        let values = page_annots(graph, page, &mut work)?;
         for value in values {
-            spend(&mut work, (graph.limits.max_nesting + 1) * 2)?;
             spend(remaining, 256)?;
-            let dict = resolve(graph, value)
+            let dict = resolve(graph, value, &mut work)?
                 .and_then(PdfValue::as_dictionary)
                 .ok_or(NativeSessionError::Postcondition)?;
             let object = value.as_reference();
@@ -367,7 +388,9 @@ pub(super) fn project(
             };
             let rect = dict
                 .get("Rect")
-                .and_then(|value| resolve(graph, value))
+                .map(|value| resolve(graph, value, &mut work))
+                .transpose()?
+                .flatten()
                 .and_then(PdfValue::as_array)
                 .and_then(|values| {
                     let [l, b, r, t] = values else { return None };
