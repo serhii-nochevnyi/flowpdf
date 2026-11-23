@@ -7,8 +7,10 @@
 
 use std::{
     borrow::Cow,
+    cell::Cell,
     collections::{BTreeMap, BTreeSet},
     io::Cursor as IoCursor,
+    ops::Deref,
 };
 
 use image::{ColorType, ImageDecoder, Limits, codecs::jpeg::JpegDecoder};
@@ -471,30 +473,97 @@ pub(super) fn decode_pdf_text_string(
     Ok(Some(text))
 }
 
-pub(super) fn resolve_annotation_value<'value, 'object: 'value>(
+pub(super) fn charge_scene_workspace(
+    workspace: &Cell<usize>,
+    bytes: usize,
+) -> Result<(), PdfReadError> {
+    workspace.set(
+        workspace
+            .get()
+            .checked_sub(bytes)
+            .ok_or(PdfReadError::StreamLimit)?,
+    );
+    Ok(())
+}
+
+struct SceneReservation<'a> {
+    remaining: &'a Cell<usize>,
+    bytes: usize,
+}
+
+impl<'a> SceneReservation<'a> {
+    fn new(remaining: &'a Cell<usize>) -> Self {
+        Self {
+            remaining,
+            bytes: 0,
+        }
+    }
+
+    fn charge(&mut self, bytes: usize) -> Result<(), PdfReadError> {
+        charge_scene_workspace(self.remaining, bytes)?;
+        self.bytes += bytes;
+        Ok(())
+    }
+}
+
+impl Drop for SceneReservation<'_> {
+    fn drop(&mut self) {
+        self.remaining.set(self.remaining.get() + self.bytes);
+    }
+}
+
+pub(super) struct AnnotationValue<'value, 'workspace> {
+    // @invariant: Drop the parsed value before returning its reservation.
+    value: Cow<'value, PdfValue>,
+    _reservation: Option<SceneReservation<'workspace>>,
+}
+
+impl<'value> AnnotationValue<'value, '_> {
+    pub(super) fn borrowed(value: &'value PdfValue) -> Self {
+        Self {
+            value: Cow::Borrowed(value),
+            _reservation: None,
+        }
+    }
+}
+
+impl Deref for AnnotationValue<'_, '_> {
+    type Target = PdfValue;
+
+    fn deref(&self) -> &Self::Target {
+        &self.value
+    }
+}
+
+pub(super) fn resolve_annotation_value<'value, 'object: 'value, 'workspace>(
     value: &'value PdfValue,
     max_nesting: usize,
     work: &mut usize,
-    object: &mut impl FnMut(PdfObjectRef) -> Result<Option<Cow<'object, PdfValue>>, PdfReadError>,
-) -> Result<Option<Cow<'value, PdfValue>>, PdfReadError> {
+    object: &mut impl FnMut(
+        PdfObjectRef,
+    ) -> Result<Option<AnnotationValue<'object, 'workspace>>, PdfReadError>,
+) -> Result<Option<AnnotationValue<'value, 'workspace>>, PdfReadError> {
     Ok(
         follow_annotation_references(value, max_nesting, work, object)?
             .filter(|value| value.as_reference().is_none()),
     )
 }
 
-fn follow_annotation_references<'value, 'object: 'value>(
+fn follow_annotation_references<'value, 'object: 'value, 'workspace>(
     value: &'value PdfValue,
     max_nesting: usize,
     work: &mut usize,
-    object: &mut impl FnMut(PdfObjectRef) -> Result<Option<Cow<'object, PdfValue>>, PdfReadError>,
-) -> Result<Option<Cow<'value, PdfValue>>, PdfReadError> {
-    let mut value = Cow::Borrowed(value);
+    object: &mut impl FnMut(
+        PdfObjectRef,
+    ) -> Result<Option<AnnotationValue<'object, 'workspace>>, PdfReadError>,
+) -> Result<Option<AnnotationValue<'value, 'workspace>>, PdfReadError> {
+    let mut value = AnnotationValue::borrowed(value);
     for _ in 0..max_nesting {
         let Some(reference) = value.as_reference() else {
             return Ok(Some(value));
         };
         *work = work.checked_sub(1).ok_or(PdfReadError::TokenLimit)?;
+        drop(value);
         let Some(resolved) = object(reference)? else {
             return Ok(None);
         };
@@ -517,12 +586,40 @@ pub(super) fn map_widget_label<'a, T>(
     limits: WidgetLabelLimits,
     work: &mut usize,
     mut object: impl FnMut(PdfObjectRef) -> Result<Option<Cow<'a, PdfValue>>, PdfReadError>,
+    root_count: impl FnMut(PdfObjectRef, &mut usize) -> Result<usize, PdfReadError>,
+    read: impl FnOnce(&[u8]) -> Result<T, PdfReadError>,
+) -> Result<Option<T>, PdfReadError> {
+    map_widget_label_with_workspace(
+        widget,
+        dictionary,
+        limits.max_nesting,
+        work,
+        &Cell::new(limits.scratch_bytes),
+        |reference| {
+            Ok(object(reference)?.map(|value| AnnotationValue {
+                value,
+                _reservation: None,
+            }))
+        },
+        root_count,
+        read,
+    )
+}
+
+pub(super) fn map_widget_label_with_workspace<'a, 'workspace, T>(
+    widget: PdfObjectRef,
+    dictionary: &'a BTreeMap<String, PdfValue>,
+    max_nesting: usize,
+    work: &mut usize,
+    workspace: &'workspace Cell<usize>,
+    mut object: impl FnMut(
+        PdfObjectRef,
+    ) -> Result<Option<AnnotationValue<'a, 'workspace>>, PdfReadError>,
     mut root_count: impl FnMut(PdfObjectRef, &mut usize) -> Result<usize, PdfReadError>,
     read: impl FnOnce(&[u8]) -> Result<T, PdfReadError>,
 ) -> Result<Option<T>, PdfReadError> {
     if let Some(label) = dictionary.get("T") {
-        let Some(label) = resolve_annotation_value(label, limits.max_nesting, work, &mut object)?
-        else {
+        let Some(label) = resolve_annotation_value(label, max_nesting, work, &mut object)? else {
             return Ok(None);
         };
         if !matches!(*label, PdfValue::Null) {
@@ -548,7 +645,7 @@ pub(super) fn map_widget_label<'a, T>(
         widget,
         parent,
         field,
-        limits.max_nesting,
+        max_nesting,
         work,
         &mut object,
         &mut root_count,
@@ -558,14 +655,14 @@ pub(super) fn map_widget_label<'a, T>(
     let Some(kids) = field.get("Kids") else {
         return Ok(None);
     };
-    let children = resolve_annotation_value(kids, limits.max_nesting, work, &mut object)?;
-    let Some(children) = children.as_deref().and_then(PdfValue::as_array) else {
+    let kids = resolve_annotation_value(kids, max_nesting, work, &mut object)?;
+    let Some(children) = kids.as_deref().and_then(PdfValue::as_array) else {
         return Ok(None);
     };
     *work = work
         .checked_sub(children.len())
         .ok_or(PdfReadError::TokenLimit)?;
-    let mut scratch = limits.scratch_bytes;
+    let mut scratch = SceneReservation::new(workspace);
     let mut seen = BTreeSet::new();
     for child in children {
         let Some(child) = child.as_reference() else {
@@ -574,9 +671,7 @@ pub(super) fn map_widget_label<'a, T>(
         if child == parent || seen.contains(&child) {
             return Ok(None);
         }
-        scratch = scratch
-            .checked_sub(WIDGET_LABEL_ENTRY_BYTES)
-            .ok_or(PdfReadError::StreamLimit)?;
+        scratch.charge(WIDGET_LABEL_ENTRY_BYTES)?;
         seen.insert(child);
         let entry = object(child)?;
         let Some(entry) = entry.as_deref().and_then(PdfValue::as_dictionary) else {
@@ -593,7 +688,7 @@ pub(super) fn map_widget_label<'a, T>(
         if child != widget
             && let Some(label) = entry.get("T")
             && !matches!(
-                resolve_annotation_value(label, limits.max_nesting, work, &mut object)?.as_deref(),
+                resolve_annotation_value(label, max_nesting, work, &mut object)?.as_deref(),
                 Some(PdfValue::Null)
             )
         {
@@ -604,23 +699,27 @@ pub(super) fn map_widget_label<'a, T>(
         return Ok(None);
     }
     drop(seen);
+    drop(scratch);
+    drop(kids);
     let Some(label) = field.get("T") else {
         return Ok(None);
     };
-    resolve_annotation_value(label, limits.max_nesting, work, &mut object)?
+    resolve_annotation_value(label, max_nesting, work, &mut object)?
         .as_deref()
         .and_then(PdfValue::as_bytes)
         .map(read)
         .transpose()
 }
 
-fn has_registered_field_ancestry<'a>(
+fn has_registered_field_ancestry<'a, 'workspace>(
     widget: PdfObjectRef,
     mut child: PdfObjectRef,
     field: &BTreeMap<String, PdfValue>,
     max_nesting: usize,
     work: &mut usize,
-    object: &mut impl FnMut(PdfObjectRef) -> Result<Option<Cow<'a, PdfValue>>, PdfReadError>,
+    object: &mut impl FnMut(
+        PdfObjectRef,
+    ) -> Result<Option<AnnotationValue<'a, 'workspace>>, PdfReadError>,
     root_count: &mut impl FnMut(PdfObjectRef, &mut usize) -> Result<usize, PdfReadError>,
 ) -> Result<bool, PdfReadError> {
     let parent_ref =
@@ -722,6 +821,13 @@ enum ObjectRead {
     Retained(usize, usize, usize),
 }
 
+fn scene_read_error(error: PdfReadError) -> PdfReadError {
+    match error {
+        PdfReadError::InputSizeLimit => PdfReadError::StreamLimit,
+        error => error,
+    }
+}
+
 impl PdfReader {
     #[must_use]
     pub fn source_hash(&self) -> &str {
@@ -767,23 +873,36 @@ impl PdfReader {
         self.object_with_depth(reference, 0)
     }
 
-    pub(super) fn non_stream_object(
+    pub(super) fn scene_non_stream_object<'workspace>(
         &self,
         reference: PdfObjectRef,
-    ) -> Result<PdfValue, PdfReadError> {
-        let (mut cursor, _) = self.object_cursor(reference, 0, ObjectRead::Preview)?;
-        let value = cursor.parse_value(0)?;
-        if !cursor.consume_keyword(b"endobj")? {
-            return Err(PdfReadError::Syntax);
-        }
-        Ok(value)
+        depth: usize,
+        workspace: &'workspace Cell<usize>,
+    ) -> Result<AnnotationValue<'static, 'workspace>, PdfReadError> {
+        let available = workspace.get();
+        let (value, bytes) = (|| {
+            let (mut cursor, _) =
+                self.object_cursor(reference, depth, ObjectRead::Scene(available))?;
+            let value = cursor.parse_value(0)?;
+            cursor.require_object_keyword(b"endobj")?;
+            Ok((value, available - cursor.remaining.unwrap_or(0)))
+        })()
+        .map_err(scene_read_error)?;
+        let mut reservation = SceneReservation::new(workspace);
+        reservation.charge(bytes)?;
+        Ok(AnnotationValue {
+            value: Cow::Owned(value),
+            _reservation: Some(reservation),
+        })
     }
 
-    pub(super) fn label_object(
+    pub(super) fn scene_label_object<'workspace>(
         &self,
         reference: PdfObjectRef,
-    ) -> Result<Option<PdfValue>, PdfReadError> {
-        match self.non_stream_object(reference) {
+        depth: usize,
+        workspace: &'workspace Cell<usize>,
+    ) -> Result<Option<AnnotationValue<'static, 'workspace>>, PdfReadError> {
+        match self.scene_non_stream_object(reference, depth, workspace) {
             Ok(value) => Ok(Some(value)),
             Err(
                 error @ (PdfReadError::TokenLimit
@@ -794,15 +913,16 @@ impl PdfReader {
         }
     }
 
-    pub(super) fn link_destination_value<'a>(
+    pub(super) fn link_destination_value<'a, 'workspace>(
         &self,
         value: &'a PdfValue,
         work: &mut usize,
-    ) -> Result<Option<Cow<'a, PdfValue>>, PdfReadError> {
+        workspace: &'workspace Cell<usize>,
+    ) -> Result<Option<AnnotationValue<'a, 'workspace>>, PdfReadError> {
         let destination =
             follow_annotation_references(value, self.limits.max_nesting, work, &mut |reference| {
-                match self.non_stream_object(reference) {
-                    Ok(value) => Ok(Some(Cow::Owned(value))),
+                match self.scene_non_stream_object(reference, 0, workspace) {
+                    Ok(value) => Ok(Some(value)),
                     Err(
                         PdfReadError::ObjectMissing
                         | PdfReadError::ReferenceInvalid
@@ -841,19 +961,27 @@ impl PdfReader {
         }
     }
 
-    pub(crate) fn page_records(&self) -> Result<Vec<PdfPageRecord>, PdfReadError> {
-        let pages_value = self
+    fn page_records(&self) -> Result<Vec<PdfPageRecord>, PdfReadError> {
+        let pages_ref = self
             .trailer
             .get("Root")
             .ok_or(PdfReadError::RootMissing)
-            .and_then(|_| self.object(self.root))?;
-        let catalog = pages_value
+            .and_then(|_| Self::page_tree_root(&self.object(self.root)?))?;
+        self.page_records_from_root(pages_ref)
+    }
+
+    pub(super) fn page_tree_root(catalog: &PdfValue) -> Result<PdfObjectRef, PdfReadError> {
+        catalog
             .as_dictionary()
-            .ok_or(PdfReadError::PageTreeInvalid)?;
-        let pages_ref = catalog
-            .get("Pages")
+            .and_then(|dictionary| dictionary.get("Pages"))
             .and_then(PdfValue::as_reference)
-            .ok_or(PdfReadError::PageTreeInvalid)?;
+            .ok_or(PdfReadError::PageTreeInvalid)
+    }
+
+    pub(super) fn page_records_from_root(
+        &self,
+        pages_ref: PdfObjectRef,
+    ) -> Result<Vec<PdfPageRecord>, PdfReadError> {
         let mut pages = Vec::new();
         let mut active = BTreeSet::new();
         self.collect_pages(pages_ref, (None, None), None, 0, &mut active, &mut pages)?;
@@ -887,10 +1015,7 @@ impl PdfReader {
     ) -> Result<(PdfValue, usize), PdfReadError> {
         self.read_object(reference, depth, ObjectRead::Scene(workspace))
             .map(|(value, bytes, _)| (value, bytes))
-            .map_err(|error| match error {
-                PdfReadError::InputSizeLimit => PdfReadError::StreamLimit,
-                error => error,
-            })
+            .map_err(scene_read_error)
     }
 
     fn object_with_depth(
