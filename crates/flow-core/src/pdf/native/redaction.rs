@@ -1720,12 +1720,12 @@ impl<'a, 'w> Scan<'a, 'w> {
                 .grow(object.data.len() + 512 + size_of::<Option<Digest>>())
                 .map_err(|_| Budget)?;
             spend(&mut self.work, scope.marks.len())?;
+            let digest_work = object.data.len().div_ceil(IMAGE_HASH_BYTES_PER_WORK) + 1;
+            spend(&mut self.work, digest_work)?;
             let mut data = object.data.clone();
             for mark in scope.marks {
                 image.scrub(&mut data, graphics.matrix, mark.rect, &mut self.work)?;
             }
-            let digest_work = data.len().div_ceil(IMAGE_HASH_BYTES_PER_WORK) + 1;
-            spend(&mut self.work, digest_work)?;
             let before = *blake3::hash(&object.data).as_bytes();
             spend(&mut self.work, digest_work)?;
             let after = *blake3::hash(&data).as_bytes();
