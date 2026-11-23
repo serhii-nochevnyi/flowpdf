@@ -2404,21 +2404,17 @@ mod tests {
 
         let (mut full, _, _) = setup();
         move_graphic(&mut full).unwrap();
+        let (mut limited, initial, note) = setup();
         let reopened = &full.graph;
-        let contents = reopened.objects[&reopened.pages[0]]
-            .as_dictionary()
-            .unwrap()["Contents"]
-            .as_reference()
-            .unwrap();
-        let PdfValue::Stream(stream) = &reopened.objects[&contents] else {
-            panic!("expected a single content stream");
+        let next_binding = NativeBinding {
+            revision: note.binding.revision + 1,
+            ..note.binding
         };
-        let snapshot = &full.snapshot;
         let (scene, mut remaining, mut work) = accepted_scene(
             reopened,
             &full.ids,
-            snapshot.output_hash,
-            snapshot.binding,
+            full.snapshot.output_hash,
+            next_binding,
             full.origin_bytes().len(),
             full.records.len(),
             reopened.remaining_retained(),
@@ -2427,42 +2423,42 @@ mod tests {
         forms::project(
             reopened,
             &scene.pages,
-            snapshot.binding,
+            next_binding,
             &mut remaining,
             &mut work,
         )
         .unwrap();
         let state =
             page_state(reopened, &full.ids, None, &scene, &mut remaining, &mut work).unwrap();
-        // @invariant: Exact verification repeats the content scan and checks the accepted order.
-        let exact_work = limits.max_work - work + 1 + stream.data.len() + state.order.len();
+        objects::charge_verification_scan(reopened, &scene.pages[0], remaining, &mut work).unwrap();
+        spend(&mut work, state.order.len()).unwrap();
+        let exact_work = limits.max_work - work;
 
-        let (mut exact, _, note) = setup();
-        exact.snapshot.limits.max_work = exact_work;
-        let receipt = move_graphic(&mut exact).unwrap();
-        assert_eq!(receipt.binding.revision, note.binding.revision + 1);
-        assert_eq!(exact.output_bytes(), full.output_bytes());
+        limited.snapshot.limits.max_work = exact_work - 1;
+        let accepted = limited.output_bytes().to_vec();
+        let before = limited.snapshot.clone();
+        assert_eq!(move_graphic(&mut limited), Err(NativeSessionError::Budget));
+        assert_eq!(limited.output_bytes(), accepted);
+        assert_eq!(limited.snapshot.binding, before.binding);
+        assert_eq!(limited.snapshot.output_hash, before.output_hash);
+        assert_eq!(limited.snapshot.scene, before.scene);
+        assert_eq!(limited.snapshot.consumed_request, before.consumed_request);
         assert_eq!(
-            exact.lookup(note.binding, 2),
-            Ok(NativeRequestLookup::Accepted(receipt))
-        );
-
-        let (mut tight, initial, note) = setup();
-        tight.snapshot.limits.max_work = exact_work - 1;
-        let accepted = tight.output_bytes().to_vec();
-        let scene = tight.snapshot.scene.clone();
-        assert_eq!(move_graphic(&mut tight), Err(NativeSessionError::Budget));
-        assert_eq!(tight.output_bytes(), accepted);
-        assert_eq!(tight.snapshot.binding, note.binding);
-        assert_eq!(tight.snapshot.scene, scene);
-        assert_eq!(tight.snapshot.consumed_request, note.request_id);
-        assert_eq!(
-            tight.lookup(initial, 1),
+            limited.lookup(initial, 1),
             Ok(NativeRequestLookup::Accepted(note))
         );
         assert_eq!(
-            tight.lookup(note.binding, 2),
+            limited.lookup(note.binding, 2),
             Ok(NativeRequestLookup::Unseen)
+        );
+
+        limited.snapshot.limits.max_work = exact_work;
+        let receipt = move_graphic(&mut limited).unwrap();
+        assert_eq!(receipt.binding, next_binding);
+        assert_eq!(limited.output_bytes(), full.output_bytes());
+        assert_eq!(
+            limited.lookup(note.binding, 2),
+            Ok(NativeRequestLookup::Accepted(receipt))
         );
     }
 
