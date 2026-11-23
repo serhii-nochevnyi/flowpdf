@@ -217,11 +217,19 @@ impl PdfReadReport {
         }
     }
 
-    pub(crate) fn extend(&mut self, other: &Self) {
+    pub(super) fn extend(
+        &mut self,
+        other: &Self,
+        mut reserve_operator: impl FnMut(usize) -> Result<(), PdfReadError>,
+    ) -> Result<(), PdfReadError> {
         for diagnostic in &other.diagnostics {
-            self.push(diagnostic.clone());
+            if !self.diagnostics.contains(diagnostic) {
+                reserve_operator(diagnostic.operator.as_deref().map_or(0, str::len))?;
+                self.push(diagnostic.clone());
+            }
         }
         self.partial |= other.partial;
+        Ok(())
     }
 }
 

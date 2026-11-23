@@ -1071,7 +1071,13 @@ impl<'a> SceneBuilder<'a> {
                             invocation_path: self.invocation_path.clone(),
                         };
                         let result = if operator == "Do" {
-                            self.paint_xobject(&operands, object_ref, provenance, depth, resources)
+                            self.paint_xobject(
+                                &operands,
+                                provenance,
+                                &mut provenance_bytes,
+                                depth,
+                                resources,
+                            )
                         } else {
                             self.dispatch_operator(
                                 &operator,
@@ -1939,8 +1945,8 @@ impl<'a> SceneBuilder<'a> {
     fn paint_xobject(
         &mut self,
         operands: &[ContentToken],
-        object_ref: PdfObjectRef,
         provenance: PdfSourceProvenance,
+        provenance_bytes: &mut usize,
         depth: usize,
         resources: Option<&PdfValue>,
     ) -> Result<(), ContentParseError> {
@@ -1971,6 +1977,7 @@ impl<'a> SceneBuilder<'a> {
                             stream,
                             xobject_ref,
                             provenance,
+                            provenance_bytes,
                             depth,
                             effective_resources,
                         )
@@ -1988,7 +1995,7 @@ impl<'a> SceneBuilder<'a> {
                         PdfReadDiagnostic::warning(
                             PdfReadDiagnosticCode::UnsupportedOperator,
                             Some(builder.page_index),
-                            Some(object_ref.object_number),
+                            Some(provenance.object_ref.object_number),
                         )
                         .with_operator("Do"),
                     );
@@ -2020,6 +2027,7 @@ impl<'a> SceneBuilder<'a> {
         stream: &PdfStream,
         xobject_ref: PdfObjectRef,
         provenance: PdfSourceProvenance,
+        provenance_bytes: &mut usize,
         depth: usize,
         effective_resources: Option<&PdfValue>,
     ) -> Result<(), PdfReadError> {
@@ -2095,20 +2103,19 @@ impl<'a> SceneBuilder<'a> {
         let subtype = "FormXObject";
         self.budget.remaining_after(subtype.len())?;
         let retained = provenance.heap_bytes() + subtype.len();
-        self.push_element_with_workspace(
-            PdfSceneElement::Annotation {
-                value: PdfAnnotationElement {
-                    subtype: Some(subtype.to_owned()),
-                    kind: PdfAnnotationKind::Supported,
-                    rect: form_bounds,
-                    provenance: PdfSourceProvenance {
-                        object_ref: xobject_ref,
-                        ..provenance
-                    },
+        let element = PdfSceneElement::Annotation {
+            value: PdfAnnotationElement {
+                subtype: Some(subtype.to_owned()),
+                kind: PdfAnnotationKind::Supported,
+                rect: form_bounds,
+                provenance: PdfSourceProvenance {
+                    object_ref: xobject_ref,
+                    ..provenance
                 },
             },
-            retained,
-        )?;
+        };
+        self.budget.release(std::mem::take(provenance_bytes));
+        self.push_element_with_workspace(element, retained)?;
         if clip.is_empty() && form_paint_clip.is_empty() {
             return Ok(());
         }
@@ -2810,7 +2817,7 @@ pub fn read_pdf_scene(
         {
             Ok((page, remaining_budget)) => {
                 budget = remaining_budget;
-                report.extend(&page.report);
+                report.extend(&page.report, |bytes| budget.charge(bytes))?;
                 scene_pages.push(page);
             }
             Err(PdfReadError::FilterUnsupported) => {
