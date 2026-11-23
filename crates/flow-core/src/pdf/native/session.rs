@@ -1820,11 +1820,8 @@ fn project_scene(
         &mut work,
         claimed_objects,
     )?;
-    Ok((
-        NativePdfNoteScene::new(output_hash, pages, text_pages, object_pages)?,
-        remaining,
-        work,
-    ))
+    let scene = NativePdfNoteScene::new(output_hash, pages, text_pages, object_pages, &mut work)?;
+    Ok((scene, remaining, work))
 }
 
 fn verify_note(
@@ -2724,7 +2721,7 @@ mod tests {
     }
 
     #[test]
-    fn combined_projections_refuse_without_changing_the_accepted_revision() {
+    fn combined_projections_and_hashing_refuse_without_changing_the_accepted_revision() {
         let limits = NativeEditLimits::default();
         let paint = format!("%{}\n10 10 10 10 re f", " ".repeat(4096));
         let source = super::super::tests::redaction_fixture(&paint);
@@ -2777,7 +2774,7 @@ mod tests {
         let binding = full.snapshot.binding;
         let hash = full.snapshot.output_hash;
         work = allowance;
-        text::project(
+        let text_pages = text::project(
             graph,
             &pages,
             hash,
@@ -2799,62 +2796,84 @@ mod tests {
         let forms_work = allowance - work;
         work = allowance;
         pages::restrictions(graph, &pages, &Workspace::new(retained), &mut work).unwrap();
+        let restrictions_work = allowance - work;
+        work = allowance;
+        let scene = NativePdfNoteScene::new(hash, pages, text_pages, objects, &mut work).unwrap();
+        let hash_work = allowance - work;
+        assert_eq!(scene, full.snapshot.scene);
+
+        let scene_work = notes_work + text_work + objects_work + hash_work;
+        let (_, _, projected_work) = project_scene(
+            graph,
+            &full.ids,
+            hash,
+            binding,
+            graph.remaining_retained(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(allowance - projected_work, scene_work);
         let costs = [
             notes_work,
             text_work,
             objects_work,
+            hash_work,
             forms_work,
-            allowance - work,
+            restrictions_work,
         ];
         let combined = costs.iter().sum::<usize>() - 1;
         assert!(costs.into_iter().all(|cost| (1..=combined).contains(&cost)));
 
-        let (mut tight, prior_binding, note) = setup();
-        tight.snapshot.limits.max_work = limits.max_work - allowance + combined;
-        let before = tight.snapshot.clone();
-        let accepted = tight.output_bytes().to_vec();
-        assert_eq!(
-            tight.apply(note.binding, 3, &edit),
-            Err(NativeSessionError::Budget)
-        );
-        assert_eq!(tight.output_bytes(), accepted);
-        assert_eq!(tight.snapshot.binding, before.binding);
-        assert_eq!(tight.snapshot.consumed_request, before.consumed_request);
-        assert_eq!(
-            tight.lookup(note.binding, 3),
-            Ok(NativeRequestLookup::Unseen)
-        );
-        assert_eq!(
-            tight.lookup(prior_binding, 2),
-            Ok(NativeRequestLookup::Accepted(note))
-        );
-
         let output = full.output_bytes();
         let detached = NativePdfGraph::open(output, limits).unwrap();
-        let limits = NativeEditLimits {
-            max_work: limits.max_work - detached.remaining_work() + combined,
-            ..limits
-        };
-        assert!(matches!(
-            NativePdfSession::open_scoped(output, limits, [7; 16]),
-            Err(NativeSessionError::Budget)
-        ));
         let snapshot = full.snapshot();
-        assert_eq!(
-            NativePdfSession::verify_page_and_field_projection_with_note_identities(
-                output,
-                limits,
-                binding,
-                snapshot.scene.scene_hash,
-                Some(&objects),
-                &snapshot.page_state,
-                &fields,
-                projected_notes(&snapshot.scene),
-                false,
-                None,
-            ),
-            Err(NativeSessionError::Budget)
-        );
+        for projection_allowance in [scene_work - 1, combined] {
+            let (mut tight, prior_binding, note) = setup();
+            tight.snapshot.limits.max_work = limits.max_work - allowance + projection_allowance;
+            let before = tight.snapshot.clone();
+            let accepted = tight.output_bytes().to_vec();
+            assert_eq!(
+                tight.apply(note.binding, 3, &edit),
+                Err(NativeSessionError::Budget)
+            );
+            assert_eq!(tight.output_bytes(), accepted);
+            assert_eq!(tight.snapshot.output_hash, before.output_hash);
+            assert_eq!(tight.snapshot.scene, before.scene);
+            assert_eq!(tight.snapshot.binding, before.binding);
+            assert_eq!(tight.snapshot.consumed_request, before.consumed_request);
+            assert_eq!(
+                tight.lookup(note.binding, 3),
+                Ok(NativeRequestLookup::Unseen)
+            );
+            assert_eq!(
+                tight.lookup(prior_binding, 2),
+                Ok(NativeRequestLookup::Accepted(note))
+            );
+
+            let limits = NativeEditLimits {
+                max_work: limits.max_work - detached.remaining_work() + projection_allowance,
+                ..limits
+            };
+            assert!(matches!(
+                NativePdfSession::open_scoped(output, limits, [7; 16]),
+                Err(NativeSessionError::Budget)
+            ));
+            assert_eq!(
+                NativePdfSession::verify_page_and_field_projection_with_note_identities(
+                    output,
+                    limits,
+                    binding,
+                    snapshot.scene.scene_hash,
+                    Some(&scene.object_pages),
+                    &snapshot.page_state,
+                    &fields,
+                    projected_notes(&snapshot.scene),
+                    false,
+                    None,
+                ),
+                Err(NativeSessionError::Budget)
+            );
+        }
     }
 
     #[test]
