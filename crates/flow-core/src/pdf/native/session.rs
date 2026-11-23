@@ -251,10 +251,10 @@ impl NativePdfSession {
             origin_hash,
             revision: 0,
         };
-        let (ids, scene, mut remaining_retained) =
-            initial_projection(&graph, origin_hash, binding)?;
-        let fields = forms::project(&graph, &scene.pages, binding, &mut remaining_retained)?;
-        let page_state = page_state(&graph, &ids, None, &scene, &mut remaining_retained)?;
+        let (ids, scene, mut remaining, mut work) =
+            initial_projection(&graph, origin_hash, binding, None)?;
+        let fields = forms::project(&graph, &scene.pages, binding, &mut remaining, &mut work)?;
+        let page_state = page_state(&graph, &ids, None, &scene, &mut remaining, &mut work)?;
         let snapshot = NativeSnapshot {
             binding,
             output_hash: origin_hash,
@@ -272,7 +272,7 @@ impl NativePdfSession {
             ids,
             snapshot,
             records: VecDeque::new(),
-            remaining_retained,
+            remaining_retained: remaining,
             next_page_object_id: FIRST_PAGE_OBJECT_ID,
             redaction_admission: OnceLock::new(),
             redaction_marks: Vec::new(),
@@ -798,7 +798,7 @@ impl NativePdfSession {
         limits.max_retained_bytes = remaining;
         let mut reopened = NativePdfGraph::open(bytes, limits)?;
         let record_count = (self.records.len() + 1).min(NATIVE_REQUEST_HISTORY);
-        let (scene, mut scene_remaining, _) = accepted_scene(
+        let (scene, mut scene_remaining, mut work) = accepted_scene(
             &reopened,
             candidate.ids(),
             output_hash,
@@ -807,15 +807,23 @@ impl NativePdfSession {
             record_count,
             reopened.remaining_retained(),
         )?;
-        let fields = forms::project(&reopened, &scene.pages, next_binding, &mut scene_remaining)?;
+        let fields = forms::project(
+            &reopened,
+            &scene.pages,
+            next_binding,
+            &mut scene_remaining,
+            &mut work,
+        )?;
         let state = page_state(
             &reopened,
             candidate.ids(),
             self.snapshot.page_state.selected,
             &scene,
             &mut scene_remaining,
+            &mut work,
         )?;
         // @invariant: Verified bytes preserve geometry and the accepted order proves unique IDs.
+        spend(&mut work, state.order.len())?;
         if !state.has_shape_for_count(scene.pages.len())
             || state.order != self.snapshot.page_state.order
         {
@@ -1087,19 +1095,18 @@ impl NativePdfSession {
         }
         let graph = NativePdfGraph::open(bytes, accepted_input_limits(limits, binding))
             .map_err(redaction_graph_error)?;
-        let (ids, scene, mut remaining) = initial_projection(&graph, hash, binding)?;
-        let Some(scene) = detached_scene_with_objects(&graph, binding, scene, claimed_objects)?
-        else {
-            return Ok(false);
-        };
-        if scene.scene_hash != claimed_scene
+        let (ids, scene, mut remaining, mut work) =
+            initial_projection(&graph, hash, binding, claimed_objects)?;
+        if claimed_objects.is_some_and(|rows| rows != scene.object_pages)
+            || scene.scene_hash != claimed_scene
             || !detached_notes_match(&scene, binding, claimed_notes, remaining)?
             || !state.valid_in_workspace(scene.pages.len(), &Workspace::new(remaining))?
-            || forms::project(&graph, &scene.pages, binding, &mut remaining)? != claimed_fields
+            || forms::project(&graph, &scene.pages, binding, &mut remaining, &mut work)?
+                != claimed_fields
         {
             return Ok(false);
         }
-        let projected = page_state(&graph, &ids, None, &scene, &mut remaining)?;
+        let projected = page_state(&graph, &ids, None, &scene, &mut remaining, &mut work)?;
         // @contract: A byte-only verifier cannot reconstruct live workspace reservations.
         Ok(state.restrictions == projected.restrictions
             && (binding.revision != 0 || *state == projected)
@@ -1134,12 +1141,12 @@ impl NativePdfSession {
     ) -> Result<bool, NativeSessionError> {
         let graph = NativePdfGraph::open(bytes, accepted_input_limits(limits, binding))?;
         let hash = *blake3::hash(bytes).as_bytes();
-        let (ids, scene, mut remaining) = initial_projection(&graph, hash, binding)?;
-        let Some(scene) = detached_scene_with_objects(&graph, binding, scene, claimed_objects)?
-        else {
+        let (ids, scene, mut remaining, mut work) =
+            initial_projection(&graph, hash, binding, claimed_objects)?;
+        if claimed_objects.is_some_and(|rows| rows != scene.object_pages) {
             return Ok(false);
-        };
-        let projected = page_state(&graph, &ids, None, &scene, &mut remaining)?;
+        }
+        let projected = page_state(&graph, &ids, None, &scene, &mut remaining, &mut work)?;
         Ok(scene.scene_hash == claimed_scene
             && state.valid_in_workspace(scene.pages.len(), &Workspace::new(remaining))?
             && state.restrictions == projected.restrictions
@@ -1155,9 +1162,8 @@ impl NativePdfSession {
     ) -> Result<bool, NativeSessionError> {
         let graph = NativePdfGraph::open(bytes, accepted_input_limits(limits, binding))?;
         let hash = *blake3::hash(bytes).as_bytes();
-        let (_, scene, _) = initial_projection(&graph, hash, binding)?;
-        Ok(scene.text_pages == claimed_text
-            && detached_object_projection_matches(&graph, binding, &scene, claimed_objects))
+        let (_, scene, _, _) = initial_projection(&graph, hash, binding, Some(claimed_objects))?;
+        Ok(scene.text_pages == claimed_text && scene.object_pages == claimed_objects)
     }
 
     pub fn verify_text_projection(
@@ -1168,7 +1174,7 @@ impl NativePdfSession {
     ) -> Result<bool, NativeSessionError> {
         let graph = NativePdfGraph::open(bytes, accepted_input_limits(limits, binding))?;
         let hash = *blake3::hash(bytes).as_bytes();
-        let (_, scene, _) = initial_projection(&graph, hash, binding)?;
+        let (_, scene, _, _) = initial_projection(&graph, hash, binding, None)?;
         Ok(scene.text_pages == claimed)
     }
 
@@ -1428,7 +1434,7 @@ impl NativePdfSession {
             revision,
             ..binding
         };
-        let (scene, mut scene_remaining, object_work) = accepted_scene(
+        let (scene, mut scene_remaining, mut work) = accepted_scene(
             &reopened,
             &ids,
             output_hash,
@@ -1437,15 +1443,29 @@ impl NativePdfSession {
             record_count,
             reopened.remaining_retained() + released,
         )?;
-        let fields = forms::project(&reopened, &scene.pages, next_binding, &mut scene_remaining)?;
+        let fields = forms::project(
+            &reopened,
+            &scene.pages,
+            next_binding,
+            &mut scene_remaining,
+            &mut work,
+        )?;
         let selected_page = match &expected {
             Expected::Page(id) => Some(*id),
             _ => None,
         };
+        let state = page_state(
+            &reopened,
+            &ids,
+            selected_page.or(self.snapshot.page_state.selected),
+            &scene,
+            &mut scene_remaining,
+            &mut work,
+        )?;
         let (note, text_island, object) = match expected {
             Expected::Page(_) => (NativeNoteId(0), None, None),
             Expected::Field(expected) => {
-                expected.verify(&fields)?;
+                expected.verify(&fields, &mut work)?;
                 let text_bytes = expected.retained_text_bytes();
                 drop(expected);
                 scene_limit += text_bytes;
@@ -1453,11 +1473,11 @@ impl NativePdfSession {
                 (NativeNoteId(0), None, None)
             }
             Expected::Note(expected) => {
-                verify_note(&scene, &expected)?;
+                verify_note(&scene, &expected, &mut work)?;
                 (expected.id, None, None)
             }
             Expected::Text(expected) => {
-                let island = text::verify(&scene.text_pages, &expected)?;
+                let island = text::verify(&scene.text_pages, &expected, &mut work)?;
                 (NativeNoteId(0), Some(island), None)
             }
             Expected::Object(expected) => {
@@ -1467,7 +1487,7 @@ impl NativePdfSession {
                     &scene.object_pages,
                     &expected,
                     scene_remaining,
-                    object_work,
+                    &mut work,
                 )?;
                 let expected_bytes = expected.retained_bytes();
                 drop(expected);
@@ -1486,13 +1506,7 @@ impl NativePdfSession {
             output_hash,
             scene_hash: scene.scene_hash,
         };
-        let state = page_state(
-            &reopened,
-            &ids,
-            selected_page.or(self.snapshot.page_state.selected),
-            &scene,
-            &mut scene_remaining,
-        )?;
+        spend(&mut work, state.order.len())?;
         if let Command::Page(command) = command {
             let workspace = Workspace::new(scene_remaining);
             #[cfg(test)]
@@ -1505,7 +1519,7 @@ impl NativePdfSession {
             if !state.valid_in_workspace(scene.pages.len(), &workspace)? {
                 return Err(NativeSessionError::Postcondition);
             }
-            self.verify_page_geometry(command, &scene, &state, &workspace)?;
+            self.verify_page_geometry(command, &scene, &state, &workspace, &mut work)?;
         } else if !state.has_shape_for_count(scene.pages.len())
             || state.order != self.snapshot.page_state.order
         {
@@ -1548,9 +1562,11 @@ impl NativePdfSession {
         scene: &NativePdfNoteScene,
         state: &NativePageState,
         workspace: &Workspace,
+        work: &mut usize,
     ) -> Result<(), NativeSessionError> {
         let target = command.target();
         let prior = &self.snapshot;
+        spend(work, prior.scene.pages.len() + scene.pages.len())?;
         let mut positions_bytes = workspace.scope();
         let mut positions = BTreeMap::new();
         for (&id, page) in prior.page_state.order.iter().zip(&prior.scene.pages) {
@@ -1654,12 +1670,13 @@ fn page_state(
     selected: Option<u64>,
     scene: &NativePdfNoteScene,
     remaining: &mut usize,
+    work: &mut usize,
 ) -> Result<NativePageState, NativeSessionError> {
     use pages::NativePageCapability;
     let capability_bytes = graph.pages.len() * std::mem::size_of::<NativePageCapability>();
     spend(remaining, capability_bytes)?;
     let workspace = Workspace::new(*remaining);
-    let restrictions = pages::restrictions(graph, &scene.pages, &workspace)?;
+    let restrictions = pages::restrictions(graph, &scene.pages, &workspace, work)?;
     if restrictions.is_none() {
         *remaining += capability_bytes;
     }
@@ -1695,10 +1712,12 @@ fn initial_projection(
     graph: &NativePdfGraph,
     output_hash: [u8; 32],
     binding: NativeBinding,
+    claimed_objects: Option<&[NativeObjectPage]>,
 ) -> Result<
     (
         BTreeMap<PdfObjectRef, NativeNoteId>,
         NativePdfNoteScene,
+        usize,
         usize,
     ),
     NativeSessionError,
@@ -1707,61 +1726,15 @@ fn initial_projection(
     // @invariant: Reserve the identity map before allocation and carry the charge through projection.
     spend(&mut remaining, graph.objects.len() * OBJECT_ID_BYTES)?;
     let ids = initial_ids(graph);
-    let (scene, remaining, _) = project_scene(graph, &ids, output_hash, binding, remaining)?;
-    Ok((ids, scene, remaining))
-}
-
-fn detached_object_projection_matches(
-    graph: &NativePdfGraph,
-    binding: NativeBinding,
-    scene: &NativePdfNoteScene,
-    claimed_objects: &[NativeObjectPage],
-) -> bool {
-    // @invariant: An accepted rewrite can exhaust work or workspace before a detached reopen does.
-    claimed_objects.len() == scene.object_pages.len()
-        && scene
-            .object_pages
-            .iter()
-            .zip(claimed_objects)
-            .zip(&scene.pages)
-            .all(|((row, claim), page)| {
-                row == claim
-                    || (binding.revision != 0
-                        && row.page == claim.page
-                        && claim.refusal.is_none()
-                        && !claim.can_add
-                        && claim.objects.is_empty()
-                        && (row.refusal.is_none()
-                            || objects::refusal_can_follow_budget_check(graph, page)))
-            })
-}
-
-fn detached_scene_with_objects(
-    graph: &NativePdfGraph,
-    binding: NativeBinding,
-    mut scene: NativePdfNoteScene,
-    claimed_objects: Option<&[NativeObjectPage]>,
-) -> Result<Option<NativePdfNoteScene>, NativeSessionError> {
-    let Some(rows) = claimed_objects.filter(|rows| *rows != scene.object_pages) else {
-        return Ok(Some(scene));
-    };
-    if !detached_object_projection_matches(graph, binding, &scene, rows) {
-        return Ok(None);
-    }
-    for (row, claim) in scene.object_pages.iter_mut().zip(rows) {
-        if row != claim {
-            row.can_add = false;
-            row.objects = Vec::new();
-            row.refusal = None;
-        }
-    }
-    NativePdfNoteScene::new(
-        scene.output_hash,
-        scene.pages,
-        scene.text_pages,
-        scene.object_pages,
-    )
-    .map(Some)
+    let (scene, remaining, work) = project_scene(
+        graph,
+        &ids,
+        output_hash,
+        binding,
+        remaining,
+        claimed_objects,
+    )?;
+    Ok((ids, scene, remaining, work))
 }
 
 fn accepted_input_limits(mut limits: NativeEditLimits, binding: NativeBinding) -> NativeEditLimits {
@@ -1805,7 +1778,7 @@ fn accepted_scene(
         &mut remaining,
         ids.len() * OBJECT_ID_BYTES + request_count * REQUEST_RECORD_BYTES,
     )?;
-    project_scene(graph, ids, output_hash, binding, remaining)
+    project_scene(graph, ids, output_hash, binding, remaining, None)
 }
 
 fn project_scene(
@@ -1814,12 +1787,15 @@ fn project_scene(
     output_hash: [u8; 32],
     binding: NativeBinding,
     mut remaining: usize,
+    claimed_objects: Option<&[NativeObjectPage]>,
 ) -> Result<(NativePdfNoteScene, usize, usize), NativeSessionError> {
     spend(
         &mut remaining,
         SESSION_BYTES + graph.pages.len() * std::mem::size_of::<u64>(),
     )?;
-    let pages = notes::project(graph, ids, &mut remaining)?;
+    // @invariant: Every projection and postcondition shares the work left by the exact-byte graph.
+    let mut work = graph.remaining_work();
+    let pages = notes::project(graph, ids, &mut remaining, &mut work)?;
     // @invariant: Revised text projections must agree with detached verification of the exact bytes.
     let work_exhaustion = if binding.revision == 0 {
         text::WorkExhaustion::PageRefusal
@@ -1832,29 +1808,37 @@ fn project_scene(
         output_hash,
         binding,
         &mut remaining,
+        &mut work,
         work_exhaustion,
     )?;
-    // @invariant: Exact signature verification can only use the work left by object projection.
-    let mut object_work = graph.remaining_work();
     let object_pages = objects::project(
         graph,
         &pages,
         output_hash,
         binding,
         &mut remaining,
-        &mut object_work,
+        &mut work,
+        claimed_objects,
     )?;
     Ok((
         NativePdfNoteScene::new(output_hash, pages, text_pages, object_pages)?,
         remaining,
-        object_work,
+        work,
     ))
 }
 
 fn verify_note(
     scene: &NativePdfNoteScene,
     expected: &ExpectedNote<'_>,
+    work: &mut usize,
 ) -> Result<(), NativeSessionError> {
+    spend(work, scene.pages.len())?;
+    for page in &scene.pages {
+        spend(work, page.annotations.len())?;
+    }
+    if let Some((_, _, contents)) = expected.location {
+        spend(work, contents.len())?;
+    }
     let mut matches = scene.pages.iter().flat_map(|page| {
         page.annotations
             .iter()
@@ -2190,14 +2174,17 @@ mod tests {
         let unique_bytes = 128 + 12 * std::mem::size_of::<u64>();
         for short in [0, 1] {
             let workspace = Workspace::new(positions_bytes - short);
+            let mut work = 2 * before.scene.pages.len();
             let result = session.verify_page_geometry(
                 command,
                 &before.scene,
                 &before.page_state,
                 &workspace,
+                &mut work,
             );
             if short == 0 {
                 assert_eq!(result, Ok(()));
+                assert_eq!(work, 0);
             } else {
                 assert_eq!(result, Err(NativeSessionError::Budget));
             }
@@ -2289,7 +2276,7 @@ mod tests {
         assert_eq!(session.snapshot.fields[0].value.as_deref(), Some(value));
 
         let fresh = NativePdfGraph::open(session.output_bytes(), limits).unwrap();
-        let (scene, mut remaining, _) = accepted_scene(
+        let (scene, mut remaining, mut work) = accepted_scene(
             &fresh,
             &session.ids,
             session.snapshot.output_hash,
@@ -2304,9 +2291,18 @@ mod tests {
             &scene.pages,
             session.snapshot.binding,
             &mut remaining,
+            &mut work,
         )
         .unwrap();
-        let state = page_state(&fresh, &session.ids, None, &scene, &mut remaining).unwrap();
+        let state = page_state(
+            &fresh,
+            &session.ids,
+            None,
+            &scene,
+            &mut remaining,
+            &mut work,
+        )
+        .unwrap();
         assert_eq!(fields, session.snapshot.fields);
         assert_eq!(state, session.snapshot.page_state);
         assert_eq!(session.remaining_retained, remaining);
@@ -2338,7 +2334,7 @@ mod tests {
         assert_eq!(objects[0].bounds, kept_bounds);
 
         let fresh = NativePdfGraph::open(session.output_bytes(), limits).unwrap();
-        let (scene, mut remaining, _) = accepted_scene(
+        let (scene, mut remaining, mut work) = accepted_scene(
             &fresh,
             &session.ids,
             receipt.output_hash,
@@ -2348,8 +2344,23 @@ mod tests {
             fresh.remaining_retained(),
         )
         .unwrap();
-        let fields = forms::project(&fresh, &scene.pages, receipt.binding, &mut remaining).unwrap();
-        let state = page_state(&fresh, &session.ids, None, &scene, &mut remaining).unwrap();
+        let fields = forms::project(
+            &fresh,
+            &scene.pages,
+            receipt.binding,
+            &mut remaining,
+            &mut work,
+        )
+        .unwrap();
+        let state = page_state(
+            &fresh,
+            &session.ids,
+            None,
+            &scene,
+            &mut remaining,
+            &mut work,
+        )
+        .unwrap();
         assert_eq!(scene.object_pages, session.snapshot.scene.object_pages);
         assert_eq!(fields, session.snapshot.fields);
         assert_eq!(state, session.snapshot.page_state);
@@ -2405,8 +2416,29 @@ mod tests {
         let PdfValue::Stream(stream) = &reopened.objects[&contents] else {
             panic!("expected a single content stream");
         };
-        // @invariant: Each scan of this page charges one unit plus its content length.
-        let exact_work = limits.max_work - reopened.remaining_work() + 2 * (1 + stream.data.len());
+        let snapshot = &full.snapshot;
+        let (scene, mut remaining, mut work) = accepted_scene(
+            reopened,
+            &full.ids,
+            snapshot.output_hash,
+            snapshot.binding,
+            full.origin_bytes().len(),
+            full.records.len(),
+            reopened.remaining_retained(),
+        )
+        .unwrap();
+        forms::project(
+            reopened,
+            &scene.pages,
+            snapshot.binding,
+            &mut remaining,
+            &mut work,
+        )
+        .unwrap();
+        let state =
+            page_state(reopened, &full.ids, None, &scene, &mut remaining, &mut work).unwrap();
+        // @invariant: Exact verification repeats the content scan and checks the accepted order.
+        let exact_work = limits.max_work - work + 1 + stream.data.len() + state.order.len();
 
         let (mut exact, _, note) = setup();
         exact.snapshot.limits.max_work = exact_work;
@@ -2689,6 +2721,140 @@ mod tests {
             NativePdfSession::open_scoped(output, limits, [1; 16]),
             Err(NativeSessionError::Budget)
         ));
+    }
+
+    #[test]
+    fn combined_projections_refuse_without_changing_the_accepted_revision() {
+        let limits = NativeEditLimits::default();
+        let paint = format!("%{}\n10 10 10 10 re f", " ".repeat(4096));
+        let source = super::super::tests::redaction_fixture(&paint);
+        let mut graph = NativePdfGraph::open(&source, limits).unwrap();
+        let page = graph.pages[0];
+        pages::dict_mut(&mut graph, page)
+            .unwrap()
+            .insert("Resources".into(), PdfValue::Dictionary(BTreeMap::new()));
+        let source = graph.rewrite().unwrap();
+        let setup = || {
+            let mut session = NativePdfSession::open_scoped(&source, limits, [7; 16]).unwrap();
+            let field = session
+                .apply_field(
+                    session.snapshot.binding,
+                    1,
+                    &NativeFieldCommand::AddCheckboxField {
+                        page: 0,
+                        rect: [30, 30, 45, 45],
+                        name: "approved".into(),
+                        checked: false,
+                    },
+                )
+                .unwrap();
+            let note = session
+                .apply(
+                    field.binding,
+                    2,
+                    &NativeNoteCommand::Add {
+                        page: NativePageId(0),
+                        rect: [60, 60, 80, 80],
+                        contents: "Review".into(),
+                    },
+                )
+                .unwrap();
+            (session, field.binding, note)
+        };
+        let (mut full, _, note) = setup();
+        let edit = NativeNoteCommand::Edit {
+            note: note.note,
+            contents: "Ї".repeat(1024),
+        };
+        full.apply(note.binding, 3, &edit).unwrap();
+
+        let graph = &full.graph;
+        let allowance = graph.remaining_work();
+        let mut retained = graph.remaining_retained();
+        let mut work = allowance;
+        let pages = notes::project(graph, &full.ids, &mut retained, &mut work).unwrap();
+        let notes_work = allowance - work;
+        let binding = full.snapshot.binding;
+        let hash = full.snapshot.output_hash;
+        work = allowance;
+        text::project(
+            graph,
+            &pages,
+            hash,
+            binding,
+            &mut retained,
+            &mut work,
+            text::WorkExhaustion::BudgetError,
+        )
+        .unwrap();
+        let text_work = allowance - work;
+        work = allowance;
+        let objects =
+            objects::project(graph, &pages, hash, binding, &mut retained, &mut work, None).unwrap();
+        assert_eq!(objects[0].objects.len(), 1);
+        let objects_work = allowance - work;
+        work = allowance;
+        let fields = forms::project(graph, &pages, binding, &mut retained, &mut work).unwrap();
+        assert_eq!(fields[0].checked, Some(false));
+        let forms_work = allowance - work;
+        work = allowance;
+        pages::restrictions(graph, &pages, &Workspace::new(retained), &mut work).unwrap();
+        let costs = [
+            notes_work,
+            text_work,
+            objects_work,
+            forms_work,
+            allowance - work,
+        ];
+        let combined = costs.iter().sum::<usize>() - 1;
+        assert!(costs.into_iter().all(|cost| (1..=combined).contains(&cost)));
+
+        let (mut tight, prior_binding, note) = setup();
+        tight.snapshot.limits.max_work = limits.max_work - allowance + combined;
+        let before = tight.snapshot.clone();
+        let accepted = tight.output_bytes().to_vec();
+        assert_eq!(
+            tight.apply(note.binding, 3, &edit),
+            Err(NativeSessionError::Budget)
+        );
+        assert_eq!(tight.output_bytes(), accepted);
+        assert_eq!(tight.snapshot.binding, before.binding);
+        assert_eq!(tight.snapshot.consumed_request, before.consumed_request);
+        assert_eq!(
+            tight.lookup(note.binding, 3),
+            Ok(NativeRequestLookup::Unseen)
+        );
+        assert_eq!(
+            tight.lookup(prior_binding, 2),
+            Ok(NativeRequestLookup::Accepted(note))
+        );
+
+        let output = full.output_bytes();
+        let detached = NativePdfGraph::open(output, limits).unwrap();
+        let limits = NativeEditLimits {
+            max_work: limits.max_work - detached.remaining_work() + combined,
+            ..limits
+        };
+        assert!(matches!(
+            NativePdfSession::open_scoped(output, limits, [7; 16]),
+            Err(NativeSessionError::Budget)
+        ));
+        let snapshot = full.snapshot();
+        assert_eq!(
+            NativePdfSession::verify_page_and_field_projection_with_note_identities(
+                output,
+                limits,
+                binding,
+                snapshot.scene.scene_hash,
+                Some(&objects),
+                &snapshot.page_state,
+                &fields,
+                projected_notes(&snapshot.scene),
+                false,
+                None,
+            ),
+            Err(NativeSessionError::Budget)
+        );
     }
 
     #[test]
