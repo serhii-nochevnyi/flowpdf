@@ -110,6 +110,7 @@ pub struct NativePdfGraph {
     pub(super) reverse: ReverseMap,
     reverse_bytes: usize,
     pub(super) pages: Vec<PdfObjectRef>,
+    pub(super) page_tree_depth: usize,
     pub(super) limits: NativeEditLimits,
     retained: usize,
     work: usize,
@@ -144,6 +145,7 @@ pub(super) enum Reachability<'a> {
 struct PageValidation<'a> {
     seen: BTreeSet<PdfObjectRef>,
     order: Vec<PdfObjectRef>,
+    max_depth: usize,
     seen_bytes: Reservation<'a>,
     order_bytes: Reservation<'a>,
     work: usize,
@@ -293,6 +295,7 @@ impl NativePdfGraph {
             reverse,
             reverse_bytes,
             pages: Vec::new(),
+            page_tree_depth: 0,
             limits,
             retained,
             work,
@@ -817,6 +820,7 @@ impl NativePdfGraph {
         let mut validation = PageValidation {
             seen: BTreeSet::new(),
             order: Vec::new(),
+            max_depth: 0,
             seen_bytes: workspace.scope(),
             order_bytes: workspace.scope(),
             work: self.work,
@@ -828,6 +832,7 @@ impl NativePdfGraph {
         let PageValidation {
             seen,
             order,
+            max_depth,
             seen_bytes,
             order_bytes,
             work,
@@ -844,6 +849,7 @@ impl NativePdfGraph {
             .checked_add(previous_order_bytes)
             .ok_or(NativeEditError::Budget)?;
         self.pages = order;
+        self.page_tree_depth = max_depth;
         self.retained = retained;
         self.work = work;
         drop(order_bytes);
@@ -868,6 +874,7 @@ impl NativePdfGraph {
         {
             return Err(NativeEditError::Malformed);
         }
+        validation.max_depth = validation.max_depth.max(depth);
         let dict = self
             .objects
             .get(&reference)

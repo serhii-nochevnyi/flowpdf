@@ -22,7 +22,7 @@ const MAX_RETAINED: usize = 80 * 1024 * 1024;
 const MAX_DECODED: usize = 32 * 1024 * 1024;
 const MAX_WORK: usize = 350_000;
 const MAX_OBJECTS: usize = 4096;
-const MAX_DEPTH: usize = 32;
+pub(super) const MAX_DEPTH: usize = 32;
 
 pub(super) type Dict = BTreeMap<String, PdfValue>;
 
@@ -226,7 +226,7 @@ impl Document {
         depth: usize,
         tree_bytes: &mut Reservation<'_>,
     ) -> VerifyResult<usize> {
-        if depth >= MAX_DEPTH || pages.len() >= MAX_PAGES {
+        if depth >= MAX_DEPTH {
             return Err(Budget);
         }
         if !tree_bytes.insert(visited, id)? {
@@ -238,14 +238,15 @@ impl Document {
         }
         match name(dict, "Type") {
             Some("Page") if parent.is_some() => {
+                if pages.len() >= MAX_PAGES {
+                    return Err(Budget);
+                }
                 tree_bytes.push(pages, id)?;
                 Ok(1)
             }
             Some("Pages") => {
                 let kids = get(dict, "Kids")?.as_array().ok_or(Structure)?;
-                if kids.is_empty() {
-                    return Err(Structure);
-                }
+                // @invariant: Count covers descendant pages, including zero for an empty subtree.
                 let mut count = 0;
                 for kid in kids {
                     count += self.collect_pages(
@@ -748,7 +749,11 @@ fn inspect(
     match role {
         Catalog => enqueue(get(dict, "Pages")?, Tree)?,
         Tree => {
-            for kid in get(dict, "Kids")?.as_array().ok_or(Structure)? {
+            let kids = get(dict, "Kids")?;
+            if kids.as_reference().is_some() {
+                return Err(UnsupportedProfile);
+            }
+            for kid in kids.as_array().ok_or(Structure)? {
                 enqueue(kid, Tree)?;
             }
         }
