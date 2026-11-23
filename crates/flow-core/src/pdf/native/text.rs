@@ -1203,7 +1203,7 @@ fn intersects(a: Bounds, b: Bounds) -> bool {
 
 impl Font {
     fn decode<'a>(&self, bytes: &'a [u8]) -> TextResult<impl Iterator<Item = u16> + use<'a>> {
-        if bytes.len() % self.code_width != 0 {
+        if !bytes.len().is_multiple_of(self.code_width) {
             return Err(NativeTextRefusal::Mapping);
         }
         Ok(bytes.chunks_exact(self.code_width).map(|chunk| {

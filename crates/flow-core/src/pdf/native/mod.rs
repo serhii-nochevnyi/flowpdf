@@ -10,8 +10,6 @@ mod pages;
 mod redaction;
 mod session;
 mod text {
-    include!("text.rs");
-
     pub(super) struct FieldFont(Font);
 
     pub(super) struct RedactionText<'a, 'w>(Recognition<'a, 'w>);
@@ -123,6 +121,8 @@ mod text {
             Ok(encoded)
         }
     }
+
+    include!("text.rs");
 }
 mod verifier;
 mod verify_raster;
@@ -201,11 +201,11 @@ mod tests {
 
     pub(super) fn fixture(extra: &str, stream: &[u8]) -> Vec<u8> {
         let mut bytes = b"%PDF-1.7\n".to_vec();
-        let mut objects = vec![
+        let mut objects = [
             b"<< /Type /Catalog /Pages 2 0 R /Custom 5 7 R >>".to_vec(),
             b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
             b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R >>".to_vec(),
-            format!("<< /Length 6 0 R /Filter /FlateDecode >>\nstream\n").into_bytes(),
+            b"<< /Length 6 0 R /Filter /FlateDecode >>\nstream\n".to_vec(),
             format!(
                 "<< /T true /F false /Decimal +0.1234567890123456789012345 /A#23B /N#FF {extra} >>"
             )

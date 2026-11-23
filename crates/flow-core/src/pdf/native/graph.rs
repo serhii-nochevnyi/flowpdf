@@ -910,14 +910,13 @@ impl NativePdfGraph {
         } else {
             inherited_box
         };
-        if let Some(resources) = dict.get("Resources") {
-            if self
+        if let Some(resources) = dict.get("Resources")
+            && self
                 .resolve_metered(resources, work)?
                 .as_dictionary()
                 .is_none()
-            {
-                return Err(NativeEditError::Malformed);
-            }
+        {
+            return Err(NativeEditError::Malformed);
         }
         match dict.get("Type").and_then(PdfValue::as_name) {
             Some("Page") => {

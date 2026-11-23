@@ -3557,7 +3557,7 @@ fn unicode_destination(
     token: HexToken<'_>,
     budget: &mut SceneBudget,
 ) -> Result<String, PdfReadError> {
-    if token.decoded_len() % 2 != 0 {
+    if !token.decoded_len().is_multiple_of(2) {
         return Err(PdfReadError::Syntax);
     }
     let capacity = token.utf16().try_fold(0_usize, |total, scalar| {

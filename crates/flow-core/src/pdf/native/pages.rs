@@ -1443,6 +1443,10 @@ impl<'a> PageParentReferences<'a> {
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Keep the borrowed reference indexes, shared work counter, and materialization mode explicit for projection and staging"
+)]
 fn deletion_preflight<'a>(
     graph: &NativePdfGraph,
     page: Ref,
