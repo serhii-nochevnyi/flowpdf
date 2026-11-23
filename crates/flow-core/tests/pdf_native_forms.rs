@@ -551,7 +551,7 @@ fn native_and_public_widget_labels_require_consistent_split_field_children() {
 }
 
 #[test]
-fn public_split_widget_labels_share_the_ownership_work_allowance() {
+fn public_split_widget_labels_share_the_ownership_allowance() {
     let count = 10;
     let widgets: String = (7..7 + count)
         .map(|index| format!("{index} 0 R "))
@@ -576,11 +576,12 @@ fn public_split_widget_labels_share_the_ownership_work_allowance() {
         );
     }
     let bytes = build_pdf(&objects);
-    let scene = |max_content_tokens| {
+    let scene = |max_content_tokens, max_scene_bytes| {
         let reader = open_pdf(
             &bytes,
             PdfReaderLimits {
                 max_content_tokens,
+                max_scene_bytes,
                 ..Default::default()
             },
         )
@@ -588,13 +589,18 @@ fn public_split_widget_labels_share_the_ownership_work_allowance() {
         read_pdf_scene(&reader, &PdfSceneRequest::default())
     };
     let fit = count * (count + 5);
-    let exact = scene(fit).unwrap();
+    let roomy = PdfReaderLimits::default().max_scene_bytes;
+    let exact = scene(fit, roomy).unwrap();
     assert_eq!(exact.pages[0].elements.len(), count);
     assert!(exact.pages[0].elements.iter().all(|element| {
         matches!(element, PdfSceneElement::Form { value } if
             value.name.as_deref() == Some("recipient") && value.value.is_none())
     }));
-    assert_eq!(scene(fit - 1), Err(PdfReadError::TokenLimit));
+    assert_eq!(scene(fit - 1, roomy), Err(PdfReadError::TokenLimit));
+    assert_eq!(scene(fit, 24 * 1024).unwrap(), exact);
+    let constrained = 6 * 1024;
+    assert!(serde_json::to_vec(&exact).unwrap().len() < constrained);
+    assert_eq!(scene(fit, constrained), Err(PdfReadError::StreamLimit));
 }
 
 #[test]

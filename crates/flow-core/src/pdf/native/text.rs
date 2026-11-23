@@ -1297,12 +1297,18 @@ struct Recognition<'a, 'w> {
 
 impl<'a, 'w> Recognition<'a, 'w> {
     fn new(graph: &'a NativePdfGraph, workspace: &'w Workspace) -> Self {
-        Self::with_work_exhaustion(graph, workspace, WorkExhaustion::PageRefusal)
+        Self::with_work_exhaustion(
+            graph,
+            workspace,
+            graph.remaining_work(),
+            WorkExhaustion::PageRefusal,
+        )
     }
 
     fn with_work_exhaustion(
         graph: &'a NativePdfGraph,
         workspace: &'w Workspace,
+        work: usize,
         work_exhaustion: WorkExhaustion,
     ) -> Self {
         Self {
@@ -1310,7 +1316,7 @@ impl<'a, 'w> Recognition<'a, 'w> {
             workspace,
             fonts: BTreeMap::new(),
             cache_memory: workspace.scope(),
-            work: graph.remaining_work(),
+            work,
             work_exhaustion,
         }
     }
@@ -1443,10 +1449,12 @@ pub(super) fn project(
     output_hash: [u8; 32],
     binding: NativeBinding,
     retained: &mut usize,
+    work: &mut usize,
     work_exhaustion: WorkExhaustion,
 ) -> RecognitionResult<Vec<NativeTextPage>> {
     let workspace = Workspace::new(*retained);
-    let mut recognition = Recognition::with_work_exhaustion(graph, &workspace, work_exhaustion);
+    let mut recognition =
+        Recognition::with_work_exhaustion(graph, &workspace, *work, work_exhaustion);
     let mut projected = workspace.scope();
     let mut result = Vec::new();
     for page in pages {
@@ -1480,6 +1488,7 @@ pub(super) fn project(
             )
             .map_err(|_| Budget)?;
     }
+    *work = recognition.work;
     drop(recognition);
     *retained = workspace.remaining();
     Ok(result)
@@ -1511,8 +1520,12 @@ pub(super) fn stage<'a>(
     let mut operand_memory = workspace.scope();
     let (index, span, size, original_reference, copy_on_write, original_bounds, operand, work) = {
         let mut memory = workspace.scope();
-        let mut recognition =
-            Recognition::with_work_exhaustion(graph, workspace, WorkExhaustion::BudgetError);
+        let mut recognition = Recognition::with_work_exhaustion(
+            graph,
+            workspace,
+            graph.remaining_work(),
+            WorkExhaustion::BudgetError,
+        );
         let recognized = recognition
             .page(page, output_hash, binding, &mut memory)?
             .ok_or(TargetUnavailable)?;
@@ -1632,7 +1645,9 @@ pub(super) fn stage<'a>(
 pub(super) fn verify(
     pages: &[NativeTextPage],
     expected: &ExpectedText<'_>,
+    work: &mut usize,
 ) -> Result<[u8; 32], super::NativeSessionError> {
+    spend(work, pages.len() + expected.text.len())?;
     let island = pages
         .iter()
         .find(|page| page.page == expected.page)
@@ -1687,15 +1702,18 @@ mod tests {
             .charge_page_work(graph.remaining_work() - recognition_work)
             .unwrap();
         let mut retained = graph.remaining_retained();
+        let mut work = graph.remaining_work();
         let projected = project(
             &graph,
             std::slice::from_ref(page),
             snapshot.output_hash,
             snapshot.binding,
             &mut retained,
+            &mut work,
             WorkExhaustion::PageRefusal,
         )
         .unwrap();
+        assert_eq!(work, 0);
         assert_eq!(projected, snapshot.scene.text_pages);
 
         for (work, refusal) in [
@@ -1709,12 +1727,14 @@ mod tests {
                 .charge_page_work(graph.remaining_work() - work)
                 .unwrap();
             let mut retained = graph.remaining_retained();
+            let mut work = graph.remaining_work();
             let projected = project(
                 &graph,
                 std::slice::from_ref(page),
                 snapshot.output_hash,
                 snapshot.binding,
                 &mut retained,
+                &mut work,
                 WorkExhaustion::PageRefusal,
             )
             .unwrap();
@@ -1742,8 +1762,13 @@ mod tests {
             NativePdfGraph::open(&bytes, super::super::NativeEditLimits::default()).unwrap();
         let ample = graph.remaining_retained();
         let mut notes_remaining = ample;
-        let pages =
-            super::super::notes::project(&graph, &BTreeMap::new(), &mut notes_remaining).unwrap();
+        let pages = super::super::notes::project(
+            &graph,
+            &BTreeMap::new(),
+            &mut notes_remaining,
+            &mut graph.remaining_work(),
+        )
+        .unwrap();
         let hash = *blake3::hash(&bytes).as_bytes();
         let binding = NativeBinding {
             epoch: [7; 16],
@@ -1769,6 +1794,7 @@ mod tests {
             hash,
             binding,
             &mut retained,
+            &mut graph.remaining_work(),
             WorkExhaustion::PageRefusal,
         )
         .unwrap();
@@ -1796,6 +1822,7 @@ mod tests {
                 hash,
                 binding,
                 &mut short,
+                &mut graph.remaining_work(),
                 WorkExhaustion::PageRefusal
             ),
             Err(Budget)

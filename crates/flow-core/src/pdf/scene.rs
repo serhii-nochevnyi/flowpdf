@@ -6,6 +6,7 @@
 
 use std::{
     borrow::Cow,
+    cell::Cell,
     collections::{BTreeMap, BTreeSet},
     rc::Rc,
 };
@@ -15,9 +16,9 @@ use serde::{Deserialize, Serialize};
 use crate::layout::{LayoutRect, LayoutUnit};
 
 use super::reader::{
-    PageResources, PdfObjectRef, PdfPageRecord, PdfReadDiagnostic, PdfReadDiagnosticCode,
-    PdfReadError, PdfReadReport, PdfReader, PdfReaderLimits, PdfStream, PdfValue,
-    WIDGET_LABEL_ENTRY_BYTES, WidgetLabelLimits, decode_pdf_text_string, map_widget_label,
+    AnnotationValue, PageResources, PdfObjectRef, PdfPageRecord, PdfReadDiagnostic,
+    PdfReadDiagnosticCode, PdfReadError, PdfReadReport, PdfReader, PdfReaderLimits, PdfStream,
+    PdfValue, charge_scene_workspace, decode_pdf_text_string, map_widget_label_with_workspace,
     read_scene_name, report_active_content, resolve_annotation_value, scene_name_label,
     single_filter,
 };
@@ -2201,14 +2202,14 @@ impl<'a> SceneBuilder<'a> {
 
     fn inspect_annotations(&mut self) -> Result<(), PdfReadError> {
         for annotation_ref in &self.page.annotations {
-            let value = self.reader.object(*annotation_ref)?;
+            let (value, annotation_bytes) =
+                self.reader
+                    .scene_object(*annotation_ref, 0, self.budget.remaining_scene_bytes)?;
+            self.budget.charge(annotation_bytes)?;
             let dictionary = value
                 .as_dictionary()
                 .ok_or(PdfReadError::ReferenceInvalid)?;
-            let subtype = dictionary
-                .get("Subtype")
-                .and_then(PdfValue::as_name)
-                .map(str::to_owned);
+            let subtype = dictionary.get("Subtype").and_then(PdfValue::as_name);
             let rect = dictionary
                 .get("Rect")
                 .and_then(|value| parse_bbox(value).ok())
@@ -2229,7 +2230,7 @@ impl<'a> SceneBuilder<'a> {
                 operand_span: None,
                 invocation_path: Vec::new(),
             };
-            if subtype.as_deref() == Some("Link") {
+            let (element, heap_bytes) = if subtype == Some("Link") {
                 let action = dictionary.get("A").and_then(PdfValue::as_dictionary);
                 let goto = action
                     .filter(|action| action.get("S").and_then(PdfValue::as_name) == Some("GoTo"));
@@ -2248,82 +2249,46 @@ impl<'a> SceneBuilder<'a> {
                 } else {
                     None
                 };
-                self.push_element(PdfSceneElement::Link {
-                    value: PdfLinkElement {
-                        destination_page: destination,
-                        rect,
-                        internal: destination.is_some(),
-                        provenance,
+                (
+                    PdfSceneElement::Link {
+                        value: PdfLinkElement {
+                            destination_page: destination,
+                            rect,
+                            internal: destination.is_some(),
+                            provenance,
+                        },
                     },
-                })?;
-            } else if subtype.as_deref() == Some("Widget") {
-                let owner = self.widget_field_owner(*annotation_ref, dictionary)?;
-                let field = owner.as_ref().unwrap_or(dictionary);
-                let field_type = field.get("FT").and_then(PdfValue::as_name);
-                let limit = self.limits.max_string_bytes;
-                let mut available = limit.saturating_mul(3);
-                let name = map_widget_label(
-                    *annotation_ref,
-                    dictionary,
-                    WidgetLabelLimits {
-                        max_nesting: self.limits.max_nesting,
-                        scratch_bytes: self
-                            .limits
-                            .max_array_items
-                            .saturating_mul(WIDGET_LABEL_ENTRY_BYTES),
-                    },
-                    &mut self.widget_work,
-                    |reference| {
-                        if reference == *annotation_ref {
-                            Ok(Some(Cow::Borrowed(&value)))
-                        } else {
-                            self.reader
-                                .label_object(reference)
-                                .map(|v| v.map(Cow::Owned))
-                        }
-                    },
-                    |field, _| Ok(self.field_root_counts.get(&field).copied().unwrap_or(0)),
-                    |bytes| decode_pdf_text_string(bytes, limit, &mut available),
-                )?
-                .flatten()
-                .filter(|name| !name.is_empty() && !name.chars().any(char::is_control));
-                let saved = field.get("V");
-                let value = if field_type == Some("Btn")
-                    && field
-                        .get("Ff")
-                        .is_none_or(|flags| matches!(flags.as_integer(), Some(0..=7)))
-                {
-                    saved.and_then(PdfValue::as_name).map(str::to_owned)
-                } else if let Some(bytes) = saved.and_then(PdfValue::as_bytes) {
-                    let mut available = limit.saturating_mul(3);
-                    decode_pdf_text_string(bytes, limit, &mut available)?
-                } else {
-                    None
-                };
-                self.push_element(PdfSceneElement::Form {
-                    value: PdfFormElement {
-                        field_type: field_type.map(str::to_owned),
-                        name,
-                        value,
-                        rect,
-                        provenance,
-                    },
-                })?;
+                    0,
+                )
+            } else if subtype == Some("Widget") {
+                let widget = self.read_widget(&value, dictionary, rect, provenance)?;
+                let heap_bytes = [&widget.field_type, &widget.name, &widget.value]
+                    .into_iter()
+                    .flatten()
+                    .map(String::capacity)
+                    .sum();
+                (PdfSceneElement::Form { value: widget }, heap_bytes)
             } else {
                 self.report.push(PdfReadDiagnostic::warning(
                     PdfReadDiagnosticCode::UnsupportedAnnotation,
                     Some(self.page_index),
                     Some(annotation_ref.object_number),
                 ));
-                self.push_element(PdfSceneElement::Annotation {
-                    value: PdfAnnotationElement {
-                        subtype,
-                        kind: PdfAnnotationKind::Unsupported,
-                        rect,
-                        provenance,
+                let mut remaining = self.budget.remaining_scene_bytes;
+                let subtype = copy_scene_string(subtype, &mut remaining)?;
+                let heap_bytes = subtype.as_ref().map_or(0, String::capacity);
+                (
+                    PdfSceneElement::Annotation {
+                        value: PdfAnnotationElement {
+                            subtype,
+                            kind: PdfAnnotationKind::Unsupported,
+                            rect,
+                            provenance,
+                        },
                     },
-                })?;
-            }
+                    heap_bytes,
+                )
+            };
             for key in ["AA", "JS", "JavaScript", "Launch", "GoToR", "URI", "FS"] {
                 if dictionary.contains_key(key) {
                     self.report.push(PdfReadDiagnostic::blocked(
@@ -2337,8 +2302,74 @@ impl<'a> SceneBuilder<'a> {
                     ));
                 }
             }
+            drop(value);
+            self.budget.release(annotation_bytes);
+            self.push_element_with_workspace(element, heap_bytes)?;
         }
         Ok(())
+    }
+
+    fn read_widget(
+        &mut self,
+        annotation: &PdfValue,
+        dictionary: &BTreeMap<String, PdfValue>,
+        rect: LayoutRect,
+        provenance: PdfSourceProvenance,
+    ) -> Result<PdfFormElement, PdfReadError> {
+        let widget = provenance.object_ref;
+        let workspace = Cell::new(self.budget.remaining_scene_bytes);
+        let owner = self.widget_field_owner(widget, dictionary, &workspace)?;
+        let field = owner
+            .as_deref()
+            .and_then(PdfValue::as_dictionary)
+            .unwrap_or(dictionary);
+        let limit = self.limits.max_string_bytes;
+        let name = map_widget_label_with_workspace(
+            widget,
+            dictionary,
+            self.limits.max_nesting,
+            &mut self.widget_work,
+            &workspace,
+            |reference| {
+                if reference == widget {
+                    Ok(Some(AnnotationValue::borrowed(annotation)))
+                } else {
+                    self.reader.scene_label_object(reference, 0, &workspace)
+                }
+            },
+            |field, _| Ok(self.field_root_counts.get(&field).copied().unwrap_or(0)),
+            |bytes| {
+                let mut remaining = workspace.get();
+                let name = decode_pdf_text_string(bytes, limit, &mut remaining)?
+                    .filter(|name| !name.is_empty() && !name.chars().any(char::is_control));
+                if name.is_some() {
+                    workspace.set(remaining);
+                }
+                Ok(name)
+            },
+        )?
+        .flatten();
+        let mut remaining = workspace.get();
+        let field_type = field.get("FT").and_then(PdfValue::as_name);
+        let saved = field.get("V");
+        let value = if field_type == Some("Btn")
+            && field
+                .get("Ff")
+                .is_none_or(|flags| matches!(flags.as_integer(), Some(0..=7)))
+        {
+            copy_scene_string(saved.and_then(PdfValue::as_name), &mut remaining)?
+        } else if let Some(bytes) = saved.and_then(PdfValue::as_bytes) {
+            decode_pdf_text_string(bytes, limit, &mut remaining)?
+        } else {
+            None
+        };
+        Ok(PdfFormElement {
+            field_type: copy_scene_string(field_type, &mut remaining)?,
+            name,
+            value,
+            rect,
+            provenance,
+        })
     }
 
     fn read_link_destination(
@@ -2346,10 +2377,12 @@ impl<'a> SceneBuilder<'a> {
         annotation_ref: PdfObjectRef,
         target: Option<&PdfValue>,
     ) -> Result<Option<u32>, PdfReadError> {
+        let workspace = Cell::new(self.budget.remaining_scene_bytes);
         let resolved = match target {
-            Some(value) => self
-                .reader
-                .link_destination_value(value, &mut self.link_work),
+            Some(value) => {
+                self.reader
+                    .link_destination_value(value, &mut self.link_work, &workspace)
+            }
             None => Ok(None),
         };
         let code = match resolved {
@@ -2380,11 +2413,12 @@ impl<'a> SceneBuilder<'a> {
         Ok(None)
     }
 
-    fn widget_field_owner(
+    fn widget_field_owner<'workspace>(
         &mut self,
         widget: PdfObjectRef,
         dictionary: &BTreeMap<String, PdfValue>,
-    ) -> Result<Option<BTreeMap<String, PdfValue>>, PdfReadError> {
+        workspace: &'workspace Cell<usize>,
+    ) -> Result<Option<AnnotationValue<'static, 'workspace>>, PdfReadError> {
         let Some(parent_ref) = dictionary.get("Parent").and_then(PdfValue::as_reference) else {
             return Ok(None);
         };
@@ -2401,11 +2435,7 @@ impl<'a> SceneBuilder<'a> {
                 label,
                 self.limits.max_nesting,
                 &mut self.widget_work,
-                &mut |reference| {
-                    self.reader
-                        .label_object(reference)
-                        .map(|v| v.map(Cow::Owned))
-                },
+                &mut |reference| self.reader.scene_label_object(reference, 0, workspace),
             )?;
             if !matches!(label.as_deref(), Some(PdfValue::Null)) {
                 return Ok(None);
@@ -2415,7 +2445,8 @@ impl<'a> SceneBuilder<'a> {
             .widget_work
             .checked_sub(1)
             .ok_or(PdfReadError::TokenLimit)?;
-        let Some(PdfValue::Dictionary(field)) = self.reader.label_object(parent_ref)? else {
+        let owner = self.reader.scene_label_object(parent_ref, 0, workspace)?;
+        let Some(field) = owner.as_deref().and_then(PdfValue::as_dictionary) else {
             return Ok(None);
         };
         if field.contains_key("Parent")
@@ -2433,11 +2464,7 @@ impl<'a> SceneBuilder<'a> {
             kids,
             self.limits.max_nesting,
             &mut self.widget_work,
-            &mut |reference| {
-                self.reader
-                    .label_object(reference)
-                    .map(|v| v.map(Cow::Owned))
-            },
+            &mut |reference| self.reader.scene_label_object(reference, 0, workspace),
         )?;
         if !matches!(children.as_deref().and_then(PdfValue::as_array), Some([PdfValue::Reference(child)]) if *child == widget)
         {
@@ -2448,7 +2475,7 @@ impl<'a> SceneBuilder<'a> {
             .widget_work
             .checked_sub(1)
             .ok_or(PdfReadError::TokenLimit)?;
-        Ok(Some(field))
+        Ok(owner)
     }
 
     fn push_element(&mut self, element: PdfSceneElement) -> Result<(), PdfReadError> {
@@ -2506,6 +2533,24 @@ impl<'a> SceneBuilder<'a> {
         self.elements.push(element);
         Ok(())
     }
+}
+
+fn copy_scene_string(
+    value: Option<&str>,
+    remaining: &mut usize,
+) -> Result<Option<String>, PdfReadError> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    *remaining = remaining
+        .checked_sub(value.len())
+        .ok_or(PdfReadError::StreamLimit)?;
+    let mut string = String::new();
+    string
+        .try_reserve_exact(value.len())
+        .map_err(|_| PdfReadError::StreamLimit)?;
+    string.push_str(value);
+    Ok(Some(string))
 }
 
 fn explicit_destination_target(destination: &[PdfValue]) -> Option<PdfObjectRef> {
@@ -2637,12 +2682,75 @@ impl<W: std::io::Write> std::io::Write for SceneJsonWriter<W> {
     }
 }
 
+fn scene_form_entry<'a, 'workspace>(
+    reader: &PdfReader,
+    value: &'a PdfValue,
+    depth: usize,
+    workspace: &'workspace Cell<usize>,
+) -> Result<Option<AnnotationValue<'a, 'workspace>>, PdfReadError> {
+    if depth > reader.limits().max_nesting {
+        return Err(PdfReadError::NestingLimit);
+    }
+    match value.as_reference() {
+        Some(reference) => reader.scene_label_object(reference, depth + 1, workspace),
+        None => Ok(Some(AnnotationValue::borrowed(value))),
+    }
+}
+
+fn read_field_root_counts(
+    reader: &PdfReader,
+    catalog: &PdfValue,
+    workspace: &Cell<usize>,
+    report: &mut PdfReadReport,
+) -> Result<BTreeMap<PdfObjectRef, usize>, PdfReadError> {
+    use std::collections::btree_map::Entry;
+
+    let mut counts = BTreeMap::new();
+    let dictionary = catalog
+        .as_dictionary()
+        .ok_or(PdfReadError::PageTreeInvalid)?;
+    report_active_content(
+        dictionary,
+        None,
+        Some(reader.root_for_scene().object_number),
+        report,
+    );
+    if let Some(form) = dictionary.get("AcroForm") {
+        let form = scene_form_entry(reader, form, 1, workspace)?;
+        if let Some(fields) = form
+            .as_deref()
+            .and_then(PdfValue::as_dictionary)
+            .and_then(|form| form.get("Fields"))
+        {
+            let fields = scene_form_entry(reader, fields, 2, workspace)?;
+            if let Some(fields) = fields.as_deref().and_then(PdfValue::as_array) {
+                for field in fields.iter().filter_map(PdfValue::as_reference) {
+                    match counts.entry(field) {
+                        Entry::Occupied(mut entry) => *entry.get_mut() += 1,
+                        Entry::Vacant(entry) => {
+                            charge_scene_workspace(
+                                workspace,
+                                scene_tree_entry_bytes::<(PdfObjectRef, usize)>(),
+                            )?;
+                            entry.insert(1);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(counts)
+}
+
 /// Reads a bounded page window and calculates a stable scene hash.
 pub fn read_pdf_scene(
     reader: &PdfReader,
     request: &PdfSceneRequest,
 ) -> Result<PdfScene, PdfReadError> {
-    let pages = reader.page_records()?;
+    let scene_byte_limit = reader.limits().max_scene_bytes;
+    let workspace = Cell::new(scene_byte_limit);
+    let catalog = reader.scene_non_stream_object(reader.root_for_scene(), 0, &workspace)?;
+    let pages = reader.page_records_from_root(PdfReader::page_tree_root(&catalog)?)?;
     let page_count = u32::try_from(pages.len()).map_err(|_| PdfReadError::PageCountLimit)?;
     let first = usize::try_from(request.first_page).map_err(|_| PdfReadError::PageCountLimit)?;
     let count = usize::try_from(request.page_count).map_err(|_| PdfReadError::PageCountLimit)?;
@@ -2654,33 +2762,14 @@ pub fn read_pdf_scene(
         .ok_or(PdfReadError::PageCountLimit)?
         .min(pages.len());
     let mut report = reader.preflight_report();
-    let mut field_root_counts = BTreeMap::new();
-    if let Ok(catalog) = reader.object(reader.root_for_scene())
-        && let Some(dictionary) = catalog.as_dictionary()
-    {
-        report_active_content(
-            dictionary,
-            None,
-            Some(reader.root_for_scene().object_number),
-            &mut report,
-        );
-        if let Some(form) = dictionary.get("AcroForm")
-            && let Ok(PdfValue::Dictionary(form)) = reader.resolve(form, 1)
-            && let Some(fields) = form.get("Fields")
-            && let Ok(PdfValue::Array(fields)) = reader.resolve(fields, 2)
-        {
-            for field in fields.iter().filter_map(PdfValue::as_reference) {
-                *field_root_counts.entry(field).or_insert(0) += 1;
-            }
-        }
-    }
-    let mut scene_pages = Vec::with_capacity(end.saturating_sub(first));
-    let scene_byte_limit = reader.limits().max_scene_bytes;
+    let field_root_counts = read_field_root_counts(reader, &catalog, &workspace, &mut report)?;
+    drop(catalog);
     // @invariant: Retained elements and image hex share allowances across the requested page window.
     let mut budget = SceneBudget {
-        remaining_scene_bytes: scene_byte_limit,
+        remaining_scene_bytes: workspace.into_inner(),
         remaining_image_hex_bytes: reader.limits().max_stream_bytes,
     };
+    let mut scene_pages = Vec::with_capacity(end.saturating_sub(first));
     for (index, page) in pages.iter().enumerate().take(end).skip(first) {
         let page_index = u32::try_from(index).map_err(|_| PdfReadError::PageCountLimit)?;
         match SceneBuilder::new(reader, &pages, page_index, page, &field_root_counts, budget).run()
@@ -2700,6 +2789,7 @@ pub fn read_pdf_scene(
             Err(error) => return Err(error),
         }
     }
+    drop(field_root_counts);
     let mut scene = PdfScene {
         schema_version: PDF_SCENE_SCHEMA_VERSION,
         source_hash: reader.source_hash().to_owned(),

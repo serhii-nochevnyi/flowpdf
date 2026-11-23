@@ -1092,13 +1092,6 @@ fn scan<'w>(
     })
 }
 
-pub(super) fn refusal_can_follow_budget_check(
-    graph: &NativePdfGraph,
-    page: &NativePdfNotePage,
-) -> bool {
-    matches!(scan(graph, page, &mut 0, &Workspace::new(0)), Err(Budget))
-}
-
 pub(super) fn project(
     graph: &NativePdfGraph,
     pages: &[NativePdfNotePage],
@@ -1106,13 +1099,33 @@ pub(super) fn project(
     binding: NativeBinding,
     remaining: &mut usize,
     work: &mut usize,
+    claimed: Option<&[NativeObjectPage]>,
 ) -> Result<Vec<NativeObjectPage>> {
     spend(remaining, pages.len() * 128)?;
     let workspace = Workspace::new(*remaining);
+    let empty_workspace = Workspace::new(0);
     let mut projected = workspace.scope();
     let mut result = Vec::with_capacity(pages.len());
     for page in pages {
-        let (can_add, objects, refusal) = match scan(graph, page, work, &workspace) {
+        let conservative = binding.revision != 0
+            && claimed
+                .and_then(|rows| rows.get(page.id.0 as usize))
+                .is_some_and(|row| {
+                    row.page == page.id
+                        && !row.can_add
+                        && row.objects.is_empty()
+                        && row.refusal.is_none()
+                });
+        // @invariant: A detached downgrade may hide capabilities only after the budget gate.
+        let scanned = if conservative {
+            match scan(graph, page, &mut 0, &empty_workspace) {
+                Ok(_) => Err(Budget),
+                failure => failure,
+            }
+        } else {
+            scan(graph, page, work, &workspace)
+        };
+        let (can_add, objects, refusal) = match scanned {
             Ok(scanned) => {
                 projected
                     .grow(scanned.found.len() * 256)
@@ -1794,12 +1807,12 @@ pub(super) fn verify(
     views: &[NativeObjectPage],
     expected: &ExpectedObject,
     remaining: usize,
-    mut work: usize,
+    work: &mut usize,
 ) -> Result<Option<[u8; 32]>> {
     let index = expected.page.0 as usize;
     let page = pages.get(index).ok_or(NativeSessionError::Postcondition)?;
     let workspace = Workspace::new(remaining);
-    let scanned = scan(graph, page, &mut work, &workspace)?;
+    let scanned = scan(graph, page, work, &workspace)?;
     if scanned
         .found
         .iter()

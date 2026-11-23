@@ -301,20 +301,20 @@ pub(super) fn project(
     graph: &NativePdfGraph,
     ids: &BTreeMap<PdfObjectRef, NativeNoteId>,
     remaining: &mut usize,
+    work: &mut usize,
 ) -> Result<Vec<NativePdfNotePage>, NativeSessionError> {
-    let mut work = graph.remaining_work();
     let before_trailer = *remaining;
     let mut refs = Vec::new();
     for value in graph.trailer.values() {
-        collect_refs(value, &mut refs, &mut work, remaining)?;
+        collect_refs(value, &mut refs, work, remaining)?;
     }
     let trailer_cost = before_trailer - *remaining;
     let trailer_refs: BTreeSet<_> = refs.into_iter().collect();
     let mut pages = Vec::new();
     for (index, &page) in graph.pages.iter().enumerate() {
-        let geometry = geometry(graph, page, &mut work)?;
+        let geometry = geometry(graph, page, work)?;
         let before_owner = *remaining;
-        let mut owner_refs = RefMultiplicity::read(graph, page, &mut work, remaining)?;
+        let mut owner_refs = RefMultiplicity::read(graph, page, work, remaining)?;
         let dict = graph.objects[&page]
             .as_dictionary()
             .ok_or(NativeSessionError::Postcondition)?;
@@ -332,7 +332,7 @@ pub(super) fn project(
                 owner = reference;
                 drop(owner_refs);
                 *remaining = before_owner;
-                owner_refs = RefMultiplicity::read(graph, owner, &mut work, remaining)?;
+                owner_refs = RefMultiplicity::read(graph, owner, work, remaining)?;
             } else {
                 can_add_note = false;
             }
@@ -340,10 +340,10 @@ pub(super) fn project(
         let owner_cost = before_owner - *remaining;
         spend(remaining, 256)?;
         let mut annotations = Vec::new();
-        let values = page_annots(graph, page, &mut work)?;
+        let values = page_annots(graph, page, work)?;
         for value in values {
             spend(remaining, 256)?;
-            let dict = resolve(graph, value, &mut work)?
+            let dict = resolve(graph, value, work)?
                 .and_then(PdfValue::as_dictionary)
                 .ok_or(NativeSessionError::Postcondition)?;
             let object = value.as_reference();
@@ -360,7 +360,7 @@ pub(super) fn project(
                     .is_some()
                 && let Some((rect, bytes)) = plain_note(dict, page, geometry)
             {
-                spend(&mut work, bytes.len())?;
+                spend(work, bytes.len())?;
                 let decode_budget = bytes.len() * 8;
                 spend(remaining, decode_budget)?;
                 let contents = decode_contents(bytes);
@@ -388,7 +388,7 @@ pub(super) fn project(
             };
             let rect = dict
                 .get("Rect")
-                .map(|value| resolve(graph, value, &mut work))
+                .map(|value| resolve(graph, value, work))
                 .transpose()?
                 .flatten()
                 .and_then(PdfValue::as_array)
