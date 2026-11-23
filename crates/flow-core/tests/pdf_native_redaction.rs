@@ -1,6 +1,5 @@
 use std::fmt::Write as _;
 
-use flow_core::pdf::PdfReadError;
 use flow_core::pdf::native::{
     NativeEditError, NativeEditLimits, NativeNoteCommand, NativePageCommand, NativePageSide,
     NativePageTarget, NativePdfSession, NativeRedactionContext, NativeRedactionGeometry,
@@ -8,6 +7,7 @@ use flow_core::pdf::native::{
     NativeSessionError, NativeVerificationFailure, NativeVerificationStatus,
     verify_native_redaction,
 };
+use flow_core::pdf::{NativePdfAnnotation, PdfReadError};
 use miniz_oxide::deflate::compress_to_vec_zlib;
 
 const GEOMETRY: NativeRedactionGeometry = NativeRedactionGeometry {
@@ -102,6 +102,155 @@ fn assert_accepted(session: &NativePdfSession, bytes: &[u8], revision: u64, orig
         *blake3::hash(bytes).as_bytes()
     );
     assert!(session.redacted_output_bytes().is_none());
+}
+
+fn nested_deletion_fixture(indirect_kids: bool) -> Vec<u8> {
+    let surviving_kids = if indirect_kids { "11 0 R" } else { "[8 0 R]" };
+    let mut objects = vec![
+        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+        b"<< /Type /Pages /Kids [3 0 R 4 0 R 5 0 R] /Count 3 /MediaBox [0 0 100 100] >>".to_vec(),
+        b"<< /Type /Page /Parent 2 0 R >>".to_vec(),
+        b"<< /Type /Pages /Parent 2 0 R /Kids [6 0 R] /Count 1 >>".to_vec(),
+        format!("<< /Type /Pages /Parent 2 0 R /Kids {surviving_kids} /Count 1 >>").into_bytes(),
+        b"<< /Type /Pages /Parent 4 0 R /Kids [7 0 R] /Count 1 >>".to_vec(),
+        b"<< /Type /Page /Parent 6 0 R >>".to_vec(),
+        b"<< /Type /Page /Parent 5 0 R /Contents 9 0 R /Annots [10 0 R] >>".to_vec(),
+        flate("", b"1 0 0 rg 10 10 10 10 re f 0 0 1 rg 40 40 10 10 re f"),
+        b"<< /Type /Annot /Subtype /Text /P 8 0 R /Rect [60 60 65 65] /Contents (retained note) >>"
+            .to_vec(),
+    ];
+    if indirect_kids {
+        objects.push(b"[8 0 R]".to_vec());
+    }
+    pdf(objects, "")
+}
+
+#[test]
+fn nested_page_deletion_preserves_preview_and_verified_redaction() {
+    let source = nested_deletion_fixture(false);
+    let mut session = open(&source);
+    let before = session.snapshot();
+    let expected_order = [before.page_state.order[0], before.page_state.order[2]];
+    let [NativePdfAnnotation::PlainNote(note)] = before.scene.pages[2].annotations.as_slice()
+    else {
+        panic!("expected retained page note");
+    };
+    let note_id = note.id;
+    let target = NativePageTarget {
+        page: 1,
+        stable_id: before.page_state.order[1],
+    };
+    let original_raster = session
+        .accepted_page_raster(before.binding, before.output_hash, expected_order[1])
+        .unwrap();
+    let deletion = session
+        .apply_page(before.binding, 1, &NativePageCommand::DeletePage { target })
+        .unwrap();
+    assert_eq!(deletion.selected_page, Some(expected_order[1]));
+    assert_eq!(session.snapshot().page_state.order, expected_order);
+    assert_eq!(session.check_redaction_admission(), Ok(()));
+    let accepted = session.output_bytes().to_vec();
+    assert!(accepted.windows(8).any(|bytes| bytes == b"/Kids []"));
+    let raster = session
+        .accepted_page_raster(deletion.binding, deletion.output_hash, expected_order[1])
+        .unwrap();
+    assert_eq!((raster.width, raster.height), (200, 200));
+    assert_eq!(raster.rgb, original_raster.rgb);
+
+    add(&mut session, 2, 1, [9_000, 9_000, 21_000, 21_000]);
+    let NativeRedactionStage::Pending(candidate) =
+        session.stage_redaction(deletion.binding, 3).unwrap()
+    else {
+        panic!("expected pending redaction");
+    };
+    let evidence = session.verify_redaction(deletion.binding, 3).unwrap();
+    assert!(evidence.checks_passed(), "{evidence:?}");
+    assert_accepted(&session, &accepted, deletion.binding.revision, &source);
+    let published = session.publish_redaction(deletion.binding, 3).unwrap();
+    assert_eq!(published.output_hash, candidate.candidate_hash);
+    assert_eq!(session.snapshot().page_state.order, expected_order);
+    assert!(matches!(
+        session.snapshot().scene.pages[1].annotations.as_slice(),
+        [NativePdfAnnotation::PlainNote(note)] if note.id == note_id && note.contents == "retained note"
+    ));
+    let redacted = session
+        .accepted_page_raster(published.binding, published.output_hash, expected_order[1])
+        .unwrap();
+    let offset = |x, y| ((raster.height - 1 - y) * raster.width + x) * 3;
+    let red = offset(30, 30);
+    let blue = offset(90, 90);
+    assert_eq!(&raster.rgb[red..red + 3], &[255, 0, 0]);
+    assert_eq!(&redacted.rgb[red..red + 3], &[255, 255, 255]);
+    assert_eq!(&raster.rgb[blue..blue + 3], &[0, 0, 255]);
+    assert_eq!(&redacted.rgb[blue..blue + 3], &[0, 0, 255]);
+}
+
+#[test]
+fn nested_page_deletion_preserves_the_accepted_pdf_on_unsupported_admission() {
+    let source = nested_deletion_fixture(true);
+    let mut session = open(&source);
+    let before = session.snapshot();
+    let expected_order = [before.page_state.order[0], before.page_state.order[2]];
+    let target = NativePageTarget {
+        page: 1,
+        stable_id: before.page_state.order[1],
+    };
+    let deletion = session
+        .apply_page(before.binding, 1, &NativePageCommand::DeletePage { target })
+        .unwrap();
+    let accepted = session.output_bytes().to_vec();
+    let redaction = mark(&session, 1, [9_000, 9_000, 21_000, 21_000]);
+    let refusal = Err(NativeSessionError::Graph(NativeEditError::Unsupported));
+    assert_eq!(session.check_redaction_admission(), refusal);
+    assert_eq!(
+        session.add_redaction_mark(deletion.binding, 2, redaction),
+        refusal
+    );
+    assert_eq!(session.snapshot().binding, deletion.binding);
+    assert_eq!(session.snapshot().page_state.order, expected_order);
+    assert_eq!(session.snapshot().scene.scene_hash, deletion.scene_hash);
+    assert_eq!(
+        session.lookup(deletion.binding, 2),
+        Ok(NativeRequestLookup::Unseen)
+    );
+    assert!(session.redaction_marks().is_empty());
+    assert!(session.redaction_candidate_status().is_none());
+    assert_accepted(&session, &accepted, deletion.binding.revision, &source);
+}
+
+#[test]
+fn redaction_admission_counts_empty_branches_toward_the_depth_budget() {
+    const DEEPEST_BRANCH: usize = 35;
+    let mut objects = vec![
+        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+        b"<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 /MediaBox [0 0 100 100] >>".to_vec(),
+        b"<< /Type /Page /Parent 2 0 R >>".to_vec(),
+    ];
+    for branch in 4..=DEEPEST_BRANCH {
+        let parent = if branch == 4 { 2 } else { branch - 1 };
+        let child = branch + 1;
+        objects.push(
+            format!("<< /Type /Pages /Parent {parent} 0 R /Kids [{child} 0 R] /Count 1 >>")
+                .into_bytes(),
+        );
+    }
+    objects.push(format!("<< /Type /Page /Parent {DEEPEST_BRANCH} 0 R >>").into_bytes());
+    let source = pdf(objects, "");
+    let mut session = open(&source);
+    let before = session.snapshot();
+    let target = NativePageTarget {
+        page: 1,
+        stable_id: before.page_state.order[1],
+    };
+    let deletion = session
+        .apply_page(before.binding, 1, &NativePageCommand::DeletePage { target })
+        .unwrap();
+    let accepted = session.output_bytes().to_vec();
+    assert_eq!(
+        session.check_redaction_admission(),
+        Err(NativeSessionError::Budget)
+    );
+    assert_accepted(&session, &accepted, deletion.binding.revision, &source);
 }
 
 fn grayscale_jpeg() -> Vec<u8> {

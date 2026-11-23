@@ -1768,6 +1768,7 @@ fn stage_delete(
         *dict_mut(graph, owner)? = values;
     }
     drop((entry_bytes, value_bytes));
+    // @invariant: Deletion can leave zero-page branches reachable, preserving their owned references.
     change_count(graph, parent, -1)?;
     let refresh_scratch = allowance - workspace.remaining();
     graph.charge_page_retained(refresh_scratch)?;

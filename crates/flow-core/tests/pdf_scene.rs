@@ -620,6 +620,141 @@ fn page_streams_share_the_token_limit_and_preserve_graphics_state() {
 }
 
 #[test]
+fn nested_non_text_dispatch_shares_workspace_with_operator_storage() {
+    let read = |operator: &str, max_scene_bytes| {
+        let paint = format!("q {operator} 10 10 5 5 re f Q");
+        scene_with_nested_forms(
+            ["/Outer Do", ""],
+            ["/Inner Do", &paint],
+            PdfReaderLimits {
+                max_scene_bytes,
+                ..Default::default()
+            },
+        )
+    };
+    let operator = "VendorPaint".repeat(768);
+    let limited = 32 * 1024;
+    assert!(read("VendorPaint", limited).is_ok());
+    assert!(matches!(
+        read(&operator, limited),
+        Err(PdfReadError::StreamLimit)
+    ));
+    let expected = read(&operator, PdfReaderLimits::default().max_scene_bytes).unwrap();
+    assert_eq!(read(&operator, 96 * 1024).unwrap(), expected);
+    assert!(
+        expected.pages[0]
+            .report
+            .diagnostics
+            .iter()
+            .any(
+                |diagnostic| diagnostic.code == PdfReadDiagnosticCode::UnsupportedOperator
+                    && diagnostic.operator.as_deref() == Some(operator.as_str())
+            )
+    );
+    assert!(matches!(
+        expected.pages[0].elements.last(),
+        Some(PdfSceneElement::Path { value })
+            if value.provenance.object_ref.object_number == 7
+                && value.provenance.invocation_path.len() == 3
+    ));
+}
+
+#[test]
+fn aggregate_report_retains_operator_storage_across_two_pages() {
+    let later = format!("%{}\nVendorStroke 10 10 5 5 re f", " ".repeat(20 * 1024));
+    let bytes = pdf(vec![
+        (1, b"<< /Type /Catalog /Pages 2 0 R >>".to_vec()),
+        (
+            2,
+            b"<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 /MediaBox [0 0 100 100] >>".to_vec(),
+        ),
+        (
+            3,
+            b"<< /Type /Page /Parent 2 0 R /Contents 5 0 R >>".to_vec(),
+        ),
+        (
+            4,
+            b"<< /Type /Page /Parent 2 0 R /Contents 6 0 R >>".to_vec(),
+        ),
+        stream(5, "", b"VendorPaint VendorPaint 10 10 5 5 re f"),
+        stream(6, "", later.as_bytes()),
+    ]);
+    let read = |max_scene_bytes| {
+        let reader = open_pdf(
+            &bytes,
+            PdfReaderLimits {
+                max_scene_bytes,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        read_pdf_scene(
+            &reader,
+            &PdfSceneRequest {
+                first_page: 0,
+                page_count: 2,
+            },
+        )
+    };
+    let expected = read(PdfReaderLimits::default().max_scene_bytes).unwrap();
+    assert_eq!(expected.pages[0].report.diagnostics.len(), 1);
+    assert_eq!(expected.pages[1].report.diagnostics.len(), 1);
+    assert_eq!(
+        expected.report.diagnostics,
+        [
+            expected.pages[0].report.diagnostics[0].clone(),
+            expected.pages[1].report.diagnostics[0].clone()
+        ]
+    );
+    assert_eq!(
+        expected.report.diagnostics[0].operator.as_deref(),
+        Some("VendorPaint")
+    );
+    assert_eq!(
+        expected.report.diagnostics[1].operator.as_deref(),
+        Some("VendorStroke")
+    );
+    assert!(!expected.report.partial);
+    let mut hashed = expected.clone();
+    hashed.result_hash.clear();
+    assert_eq!(
+        expected.result_hash,
+        blake3::hash(&serde_json::to_vec(&hashed).unwrap())
+            .to_hex()
+            .as_str()
+    );
+    let exact = 24_070;
+    assert_eq!(read(exact).unwrap(), expected);
+    assert!(matches!(read(exact - 1), Err(PdfReadError::StreamLimit)));
+}
+
+#[test]
+fn nested_form_marker_transfers_its_provenance_at_the_workspace_boundary() {
+    let inner = format!("%{}\n10 10 5 5 re f", " ".repeat(20 * 1024));
+    let read = |max_scene_bytes| {
+        scene_with_nested_forms(
+            ["/Outer Do", ""],
+            ["1 0 0 1 300 0 cm /Inner Do", &inner],
+            PdfReaderLimits {
+                max_scene_bytes,
+                ..Default::default()
+            },
+        )
+    };
+    let expected = read(PdfReaderLimits::default().max_scene_bytes).unwrap();
+    assert!(matches!(
+        expected.pages[0].elements.as_slice(),
+        [PdfSceneElement::Annotation { value: outer }, PdfSceneElement::Annotation { value: inner }]
+            if outer.provenance.object_ref.object_number == 6
+                && inner.provenance.object_ref.object_number == 7
+                && inner.provenance.invocation_path == [0, outer.provenance.stream_offset]
+    ));
+    let exact = 31_977;
+    assert_eq!(read(exact).unwrap(), expected);
+    assert!(matches!(read(exact - 1), Err(PdfReadError::StreamLimit)));
+}
+
+#[test]
 fn repeated_nested_forms_spend_the_page_token_limit_including_array_entries() {
     let page = ["/Outer Do\n", "/Outer Do 10 10 5 5 re f"];
     let inner = format!("{}[1 2] 0 d 15 20 5 5 re f", "q Q ".repeat(10));
@@ -1160,7 +1295,7 @@ fn nested_forms_resolve_equivalent_names_and_report_uncertain_clipping() {
         (2, b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec()),
         (3, b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Resources << /XObject << /Outer 5 0 R /Later 9 0 R >> >> /Contents 4 0 R >>".to_vec()),
         stream(4, "", b"q 0 0 65 100 re W n /#4Futer Do Q /Later Do 90 5 5 5 re f"),
-        stream(5, "/Type /XObject /Subtype /Form /BBox [10 10 40 40] /Matrix [2 0 0 1 5 0] /Resources << /XObject << /In#6Eer 6 0 R >> >>", b"/Inner Do"),
+        stream(5, "/Type /XObject /Subtype /Form /BBox [10 10 40 40] /Matrix [2 0 0 1 5 0] /Resources << /XObject << /In#6Eer 6 0 R >> >>", b"/#49#6E#6E#65#72 Do"),
         stream(6, "/Type /XObject /Subtype /Form /BBox [0 0 100 100] /Resources << /Font << /F#E9 7 0 R >> >>", b"BT /#46#e9 10 Tf 15 25 Td (A) Tj ET 28 20 8 5 re f 35 30 2 2 re f 2 20 3 3 re f"),
         (7, b"<< /Type /Font /Subtype /Type1 /BaseFont /#D0#A8#D1#80#D0#B8#D1#84#D1#82 /MissingWidth 500 /ToUnicode 8 0 R >>".to_vec()),
         stream(8, "", b"begincmap\n1 beginbfchar\n<41> <0041>\nendbfchar\nendcmap\n"),
@@ -1168,6 +1303,18 @@ fn nested_forms_resolve_equivalent_names_and_report_uncertain_clipping() {
     ]);
     let reader = open_pdf(&bytes, Default::default()).unwrap();
     let scene = read_pdf_scene(&reader, &PdfSceneRequest::default()).unwrap();
+    let constrained = open_pdf(
+        &bytes,
+        PdfReaderLimits {
+            max_scene_bytes: 48 * 1024,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        read_pdf_scene(&constrained, &PdfSceneRequest::default()).unwrap(),
+        scene
+    );
     let page = &scene.pages[0];
     assert!(page.partial);
     assert!(

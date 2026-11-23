@@ -11,10 +11,11 @@ use super::super::scene::{ContentCursor, ContentToken, separated_content_streams
 use super::graph::{NativeEditError, NativePdfGraph, spend};
 use super::text::{RedactionText, redaction_number, reserve_content_tokens};
 use super::verifier::{
-    NativeRedactionGeometry, NativeRedactionMark, NativeVerificationFailure, Reservation, Workspace,
+    MAX_PAGES, NativeRedactionGeometry, NativeRedactionMark, NativeVerificationFailure,
+    Reservation, Workspace,
 };
 use super::verify_raster;
-use super::verify_structure::MAX_INPUT;
+use super::verify_structure::{MAX_DEPTH, MAX_INPUT};
 
 const POINT: i64 = 1_000;
 const MAX_COORD: i64 = 1_000_000 * POINT;
@@ -22,7 +23,6 @@ const MAX_STREAM: usize = 512 * 1024;
 // @invariant: miniz_oxide 0.8.9's fixed encoder buffers use under 320 KiB, leaving room for temporaries.
 pub(super) const ZLIB_ENCODER_SCRATCH: usize = 512 * 1024;
 const MAX_FORM_DEPTH: usize = 8;
-const MAX_PAGES: usize = 256;
 const ENTRY_BYTES: usize = 128;
 const IMAGE_HASH_BYTES_PER_WORK: usize = 32;
 const RESOURCE_ENTRY_BYTES: usize = 256;
@@ -342,7 +342,11 @@ impl<'a> Inventory<'a> {
                         ],
                     )?;
                     get(dict, "Count")?.as_integer().ok_or(Malformed)?;
-                    for kid in get(dict, "Kids")?.as_array().ok_or(Malformed)? {
+                    let kids = get(dict, "Kids")?;
+                    if kids.as_reference().is_some() {
+                        return Err(Unsupported);
+                    }
+                    for kid in kids.as_array().ok_or(Malformed)? {
                         self.link(kid, Node)?;
                     }
                 } else {
@@ -1907,7 +1911,7 @@ pub(super) fn check_input_budget(graph: &NativePdfGraph, origin_len: Option<usiz
         return Err(Budget);
     }
     let pages = graph.pages.len();
-    if pages > MAX_PAGES {
+    if pages > MAX_PAGES || graph.page_tree_depth >= MAX_DEPTH {
         return Err(Budget);
     }
     verify_raster::check_pixel_budget((0..pages).map(|index| geometry(graph, index)), |error| {
