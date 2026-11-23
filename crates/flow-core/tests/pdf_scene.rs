@@ -337,7 +337,7 @@ fn text_dispatch_shares_workspace_with_its_live_operand_array() {
     };
     let adjustments = "0 ".repeat(200);
     let text = "A".repeat(96);
-    let small_allowance = 22 * 1024;
+    let small_allowance = 23 * 1024;
     assert!(read(&adjustments, "A", small_allowance).is_ok());
     assert!(read("", &text, small_allowance).is_ok());
     assert_eq!(
@@ -723,7 +723,7 @@ fn aggregate_report_retains_operator_storage_across_two_pages() {
             .to_hex()
             .as_str()
     );
-    let exact = 24_070;
+    let exact = 24_534;
     assert_eq!(read(exact).unwrap(), expected);
     assert!(matches!(read(exact - 1), Err(PdfReadError::StreamLimit)));
 }
@@ -749,7 +749,7 @@ fn nested_form_marker_transfers_its_provenance_at_the_workspace_boundary() {
                 && inner.provenance.object_ref.object_number == 7
                 && inner.provenance.invocation_path == [0, outer.provenance.stream_offset]
     ));
-    let exact = 31_977;
+    let exact = 32_217;
     assert_eq!(read(exact).unwrap(), expected);
     assert!(matches!(read(exact - 1), Err(PdfReadError::StreamLimit)));
 }
@@ -892,7 +892,7 @@ fn nested_forms_share_the_inherited_page_resource_allowance() {
         .unwrap();
         read_pdf_scene(&reader, &PdfSceneRequest::default())
     };
-    let constrained = 26 * 1024;
+    let constrained = 27 * 1024;
     assert!(read(&document(0), constrained).is_ok());
     let bytes = document(12 * 1024);
     assert_eq!(read(&bytes, constrained), Err(PdfReadError::StreamLimit));
@@ -953,6 +953,85 @@ fn scene_page_window_defers_unused_direct_resources() {
             if value.provenance.object_ref.object_number == 8
                 && value.provenance.invocation_path.len() == 3
     ));
+}
+
+#[test]
+fn one_page_scene_charges_nested_discovery_and_resolves_links_outside_the_window() {
+    let kids = |ids: Vec<u32>| {
+        format!(
+            "[{}]",
+            ids.into_iter()
+                .map(|id| format!("{id} 0 R"))
+                .collect::<Vec<_>>()
+                .join(" ")
+        )
+        .into_bytes()
+    };
+    let mut objects = vec![
+        (1, b"<< /Type /Catalog /Pages 2 0 R >>".to_vec()),
+        (2, b"<< /Type /Pages /Kids 5 0 R /Count 96 /MediaBox 6 0 R /CropBox [10 10 230 230] /Resources 9 0 R >>".to_vec()),
+        (3, b"<< /Type /Pages /Parent 2 0 R /Kids 106 0 R /Count 48 >>".to_vec()),
+        (4, b"<< /Type /Pages /Parent 2 0 R /Kids 107 0 R /Count 48 >>".to_vec()),
+        (5, b"[3 0 R 4 0 R]".to_vec()),
+        (6, b"[0 0 240 240]".to_vec()),
+        (7, b"[108 0 R]".to_vec()),
+        (8, b"[109 0 R]".to_vec()),
+        (9, b"<< >>".to_vec()),
+        (106, kids((10..58).collect())),
+        (107, kids((59..106).chain([58]).collect())),
+        stream(108, "", b"20 20 30 30 re f"),
+        (109, b"<< /Type /Annot /Subtype /Link /Rect [15 15 50 50] /Dest 110 0 R >>".to_vec()),
+        (110, b"[58 0 R /Fit]".to_vec()),
+    ];
+    objects.extend((10..106).map(|id| {
+        let parent = if id < 58 { 3 } else { 4 };
+        let entries = if id == 11 {
+            "/Contents 7 0 R /Annots 8 0 R"
+        } else {
+            ""
+        };
+        (
+            id,
+            format!("<< /Type /Page /Parent {parent} 0 R {entries} >>").into_bytes(),
+        )
+    }));
+    let bytes = pdf(objects);
+    let request = PdfSceneRequest {
+        first_page: 1,
+        page_count: 1,
+    };
+    let read = |max_scene_bytes| {
+        let reader = open_pdf(
+            &bytes,
+            PdfReaderLimits {
+                max_scene_bytes,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(reader.summary().unwrap().page_count, 96);
+        read_pdf_scene(&reader, &request)
+    };
+    let expected = read(PdfReaderLimits::default().max_scene_bytes).unwrap();
+    assert_eq!(expected.page_count, 96);
+    let [page] = expected.pages.as_slice() else {
+        panic!("expected one scene page");
+    };
+    assert_eq!(page.page_index, 1);
+    assert!(!page.partial);
+    let [
+        PdfSceneElement::Link { value: link },
+        PdfSceneElement::Path { value: path },
+    ] = page.elements.as_slice()
+    else {
+        panic!("expected an internal link and a filled path");
+    };
+    assert!(link.internal);
+    assert_eq!(link.destination_page, Some(95));
+    assert!(path.fill);
+    assert_eq!(path.provenance.object_ref.object_number, 108);
+    assert_eq!(read(64 * 1024).unwrap(), expected);
+    assert_eq!(read(12 * 1024), Err(PdfReadError::StreamLimit));
 }
 
 #[test]
