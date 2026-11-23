@@ -316,24 +316,41 @@ fn page_space(raw: Bounds) -> [f64; 4] {
     raw.map(|n| n as f64 / UNIT)
 }
 
-fn resolve<'a>(graph: &'a NativePdfGraph, mut value: &'a PdfValue) -> Option<&'a PdfValue> {
+fn resolve<'a>(
+    graph: &'a NativePdfGraph,
+    mut value: &'a PdfValue,
+    work: &mut usize,
+) -> Result<&'a PdfValue> {
     for _ in 0..graph.limits.max_nesting {
         match value.as_reference() {
-            Some(reference) => value = graph.objects.get(&reference)?,
-            None => return Some(value),
+            Some(reference) => {
+                spend(work, 1)?;
+                value = graph.objects.get(&reference).ok_or(State)?;
+            }
+            None => return Ok(value),
         }
     }
-    None
+    Err(State.into())
 }
 
-fn stream(graph: &NativePdfGraph, reference: PdfObjectRef) -> Result<&PdfStream> {
+fn stream<'a>(
+    graph: &'a NativePdfGraph,
+    reference: PdfObjectRef,
+    work: &mut usize,
+) -> Result<&'a PdfStream> {
+    spend(work, 1)?;
     match graph.objects.get(&reference) {
         Some(PdfValue::Stream(stream)) => Ok(stream),
         _ => Err(State.into()),
     }
 }
 
-fn page_dict(graph: &NativePdfGraph, page: PdfObjectRef) -> Result<&Dict> {
+fn page_dict<'a>(
+    graph: &'a NativePdfGraph,
+    page: PdfObjectRef,
+    work: &mut usize,
+) -> Result<&'a Dict> {
+    spend(work, 1)?;
     graph
         .objects
         .get(&page)
@@ -341,15 +358,15 @@ fn page_dict(graph: &NativePdfGraph, page: PdfObjectRef) -> Result<&Dict> {
         .ok_or(State.into())
 }
 
-fn resources(graph: &NativePdfGraph, mut page: PdfObjectRef) -> Result<Option<&Dict>> {
+fn resources<'a>(
+    graph: &'a NativePdfGraph,
+    mut page: PdfObjectRef,
+    work: &mut usize,
+) -> Result<Option<&'a Dict>> {
     for _ in 0..graph.limits.max_nesting {
-        let dict = page_dict(graph, page)?;
-        if let Some(value) = dict.get("Resources") {
-            return Ok(Some(
-                resolve(graph, value)
-                    .and_then(PdfValue::as_dictionary)
-                    .ok_or(State)?,
-            ));
+        let dict = page_dict(graph, page, work)?;
+        if let Some(resources) = resource_dict(graph, Some(dict), "Resources", work)? {
+            return Ok(Some(resources));
         }
         match dict.get("Parent").and_then(PdfValue::as_reference) {
             Some(parent) => page = parent,
@@ -359,51 +376,87 @@ fn resources(graph: &NativePdfGraph, mut page: PdfObjectRef) -> Result<Option<&D
     Err(State.into())
 }
 
-fn xobjects<'a>(
+fn resource_dict<'a>(
     graph: &'a NativePdfGraph,
-    resources: Option<&'a Dict>,
+    dict: Option<&'a Dict>,
+    key: &str,
+    work: &mut usize,
 ) -> Result<Option<&'a Dict>> {
-    resources
-        .and_then(|dict| dict.get("XObject"))
+    let Some(dict) = dict else {
+        return Ok(None);
+    };
+    spend(work, 1)?;
+    dict.get(key)
         .map(|value| {
-            resolve(graph, value)
-                .and_then(PdfValue::as_dictionary)
+            resolve(graph, value, work)?
+                .as_dictionary()
                 .ok_or_else(|| State.into())
         })
         .transpose()
 }
 
-fn check_device_colors(graph: &NativePdfGraph, resources: Option<&Dict>) -> Result<()> {
-    if let Some(colors) = resources.and_then(|dict| dict.get("ColorSpace")) {
-        let colors = resolve(graph, colors)
-            .and_then(PdfValue::as_dictionary)
-            .ok_or(State)?;
-        if ["DefaultGray", "DefaultRGB", "DefaultCMYK"]
-            .iter()
-            .any(|key| colors.contains_key(*key))
-        {
-            return Err(State.into());
+fn check_device_colors(
+    graph: &NativePdfGraph,
+    resources: Option<&Dict>,
+    work: &mut usize,
+) -> Result<()> {
+    if let Some(colors) = resource_dict(graph, resources, "ColorSpace", work)? {
+        for key in ["DefaultGray", "DefaultRGB", "DefaultCMYK"] {
+            spend(work, 1)?;
+            if colors.contains_key(key) {
+                return Err(State.into());
+            }
         }
     }
     Ok(())
 }
 
-fn contents(graph: &NativePdfGraph, page: PdfObjectRef) -> Result<&[PdfValue]> {
-    let Some(value) = page_dict(graph, page)?.get("Contents") else {
+fn contents<'a>(
+    graph: &'a NativePdfGraph,
+    page: PdfObjectRef,
+    work: &mut usize,
+) -> Result<&'a [PdfValue]> {
+    let Some(value) = page_dict(graph, page, work)?.get("Contents") else {
         return Ok(&[]);
     };
-    let value_resolved = resolve(graph, value).ok_or(State)?;
+    let value_resolved = resolve(graph, value, work)?;
     match value_resolved {
         PdfValue::Null => Ok(&[]),
         PdfValue::Stream(_) if value.as_reference().is_some() => Ok(std::slice::from_ref(value)),
-        PdfValue::Array(items)
-            if items.len() <= MAX_OBJECTS_PER_PAGE
-                && items.iter().all(|item| item.as_reference().is_some()) =>
-        {
+        PdfValue::Array(items) if items.len() <= MAX_OBJECTS_PER_PAGE => {
+            for item in items {
+                spend(work, 1)?;
+                if item.as_reference().is_none() {
+                    return Err(State.into());
+                }
+            }
             Ok(items)
         }
         _ => Err(State.into()),
     }
+}
+
+fn check_content(
+    graph: &NativePdfGraph,
+    source: &PdfStream,
+    resources: Option<&Dict>,
+    work: &mut usize,
+) -> Result<()> {
+    if matches!(
+        source.dict.get("Filter").and_then(single_filter),
+        Some("DCTDecode" | "DCT")
+    ) {
+        return Err(State.into());
+    }
+    check_device_colors(graph, resources, work)?;
+    if source.data.len() > MAX_CONTENT_BYTES
+        || ["F", "FFilter", "FDecodeParms", "DecodeParms"]
+            .iter()
+            .any(|key| !matches!(source.dict.get(*key), None | Some(PdfValue::Null)))
+    {
+        return Err(State.into());
+    }
+    Ok(())
 }
 
 fn name<'a>(dict: &'a Dict, key: &str) -> Option<&'a str> {
@@ -754,27 +807,14 @@ impl<'a, 'w> Scan<'a, 'w> {
     fn interpret(
         &mut self,
         reference: PdfObjectRef,
+        source: &'a PdfStream,
         resources: Option<&'a Dict>,
         mut state: GraphicsState,
         stack: &mut GraphicsStack<'w>,
         clip: [f64; 4],
     ) -> Result<GraphicsState> {
-        let source = stream(self.graph, reference)?;
-        if matches!(
-            source.dict.get("Filter").and_then(single_filter),
-            Some("DCTDecode" | "DCT")
-        ) {
-            return Err(State.into());
-        }
-        check_device_colors(self.graph, resources)?;
-        if source.data.len() > MAX_CONTENT_BYTES
-            || ["F", "FFilter", "FDecodeParms", "DecodeParms"]
-                .iter()
-                .any(|key| !matches!(source.dict.get(*key), None | Some(PdfValue::Null)))
-        {
-            return Err(State.into());
-        }
-        spend(self.work, 1 + source.data.len())?;
+        check_content(self.graph, source, resources, self.work)?;
+        spend(self.work, source.data.len())?;
         const MAX_OPERANDS: usize = 8;
         let _parser = reserve_content_tokens(
             self.workspace,
@@ -945,14 +985,16 @@ impl<'a, 'w> Scan<'a, 'w> {
         mut state: GraphicsState,
         clip: [f64; 4],
     ) -> Result<()> {
-        let target = xobjects(self.graph, parent)?
-            .and_then(|dict| dict.get(resource))
+        let xobjects = resource_dict(self.graph, parent, "XObject", self.work)?.ok_or(State)?;
+        spend(self.work, 1)?;
+        let target = xobjects
+            .get(resource)
             .and_then(PdfValue::as_reference)
             .ok_or(State)?;
         if !self.graph.reverse.contains_key(&target) {
             return Err(State.into());
         }
-        let source = stream(self.graph, target)?;
+        let source = stream(self.graph, target, self.work)?;
         match name(&source.dict, "Subtype") {
             Some("Image") => {
                 let profile = image_profile(source)?;
@@ -1010,19 +1052,15 @@ impl<'a, 'w> Scan<'a, 'w> {
                     clip[2].min(form_clip[2]),
                     clip[3].min(form_clip[3]),
                 ];
-                let effective = match source.dict.get("Resources") {
-                    Some(value) => Some(
-                        resolve(self.graph, value)
-                            .and_then(PdfValue::as_dictionary)
-                            .ok_or(State)?,
-                    ),
-                    None => parent,
-                };
+                let effective =
+                    resource_dict(self.graph, Some(&source.dict), "Resources", self.work)?
+                        .or(parent);
                 self.path_memory
                     .push(&mut self.path, frame)
                     .map_err(|_| Budget)?;
                 let mut stack = GraphicsStack::new(self.workspace);
-                let result = self.interpret(target, effective, state, &mut stack, form_clip);
+                let result =
+                    self.interpret(target, source, effective, state, &mut stack, form_clip);
                 self.path.pop();
                 result?;
                 if !stack.saved.is_empty() {
@@ -1035,21 +1073,77 @@ impl<'a, 'w> Scan<'a, 'w> {
     }
 }
 
+struct PageContent<'a> {
+    rect: [f64; 4],
+    resources: Option<&'a Dict>,
+    slots: &'a [PdfValue],
+}
+
+fn page_content<'a>(
+    graph: &'a NativePdfGraph,
+    page: &NativePdfNotePage,
+    work: &mut usize,
+) -> Result<PageContent<'a>> {
+    let rect = page.geometry.ok_or(Geometry)?.bounds().map(|n| n as f64);
+    if !positive(rect) {
+        return Err(Geometry.into());
+    }
+    let resources = resources(graph, page.object, work)?;
+    check_device_colors(graph, resources, work)?;
+    if page_dict(graph, page.object, work)?.contains_key("Group") {
+        return Err(State.into());
+    }
+    let slots = contents(graph, page.object, work)?;
+    Ok(PageContent {
+        rect,
+        resources,
+        slots,
+    })
+}
+
+fn content_slot<'a>(
+    graph: &'a NativePdfGraph,
+    value: &PdfValue,
+    next: Option<&PdfValue>,
+    work: &mut usize,
+) -> Result<(PdfObjectRef, &'a PdfStream)> {
+    let reference = value.as_reference().ok_or(State)?;
+    let source = stream(graph, reference, work)?;
+    // @invariant: A preceding slot cannot swallow tokens or join them to the next slot.
+    if let Some(next) = next {
+        let next = stream(graph, next.as_reference().ok_or(State)?, work)?;
+        if !separated_content_streams(&source.data, &next.data) {
+            return Err(State.into());
+        }
+    }
+    Ok((reference, source))
+}
+
+fn conservative_preflight(
+    graph: &NativePdfGraph,
+    page: &NativePdfNotePage,
+    work: &mut usize,
+) -> Result<()> {
+    let content = page_content(graph, page, work)?;
+    // @invariant: A detached downgrade may hide capabilities only after the budget gate.
+    if let Some(first) = content.slots.first() {
+        let (_, source) = content_slot(graph, first, content.slots.get(1), work)?;
+        check_content(graph, source, content.resources, work)?;
+    }
+    Ok(())
+}
+
 fn scan<'w>(
     graph: &NativePdfGraph,
     page: &NativePdfNotePage,
     work: &mut usize,
     workspace: &'w Workspace,
 ) -> Result<ScannedPage<'w>> {
-    let rect = page.geometry.ok_or(Geometry)?.bounds().map(|n| n as f64);
-    if !positive(rect) {
-        return Err(Geometry.into());
-    }
-    let resources = resources(graph, page.object)?;
-    check_device_colors(graph, resources)?;
-    if page_dict(graph, page.object)?.contains_key("Group") {
-        return Err(State.into());
-    }
+    let PageContent {
+        rect,
+        resources,
+        slots,
+    } = page_content(graph, page, work)?;
     let mut scan = Scan {
         graph,
         work,
@@ -1065,20 +1159,10 @@ fn scan<'w>(
         stroke_width: 1.,
     };
     let mut stack = GraphicsStack::new(workspace);
-    let slots = contents(graph, page.object)?;
     for (slot, value) in slots.iter().enumerate() {
-        let reference = value.as_reference().ok_or(State)?;
-        // @invariant: A preceding slot cannot swallow tokens or join them to the next slot.
-        if let Some(next) = slots.get(slot + 1) {
-            if !separated_content_streams(
-                &stream(graph, reference)?.data,
-                &stream(graph, next.as_reference().ok_or(State)?)?.data,
-            ) {
-                return Err(State.into());
-            }
-        }
+        let (reference, source) = content_slot(graph, value, slots.get(slot + 1), scan.work)?;
         scan.slot = slot;
-        state = scan.interpret(reference, resources, state, &mut stack, rect)?;
+        state = scan.interpret(reference, source, resources, state, &mut stack, rect)?;
     }
     if !stack.saved.is_empty() {
         return Err(State.into());
@@ -1103,7 +1187,6 @@ pub(super) fn project(
 ) -> Result<Vec<NativeObjectPage>> {
     spend(remaining, pages.len() * 128)?;
     let workspace = Workspace::new(*remaining);
-    let empty_workspace = Workspace::new(0);
     let mut projected = workspace.scope();
     let mut result = Vec::with_capacity(pages.len());
     for page in pages {
@@ -1116,11 +1199,11 @@ pub(super) fn project(
                         && row.objects.is_empty()
                         && row.refusal.is_none()
                 });
-        // @invariant: A detached downgrade may hide capabilities only after the budget gate.
         let scanned = if conservative {
-            match scan(graph, page, &mut 0, &empty_workspace) {
-                Ok(_) => Err(Budget),
-                failure => failure,
+            match conservative_preflight(graph, page, work) {
+                Ok(()) => Err(Budget),
+                Err(Budget) => return Err(Budget),
+                Err(error) => Err(error),
             }
         } else {
             scan(graph, page, work, &workspace)
@@ -1415,8 +1498,9 @@ fn resource_override(
     effective: Option<&Dict>,
     reference: PdfObjectRef,
     remaining: &mut usize,
+    work: &mut usize,
 ) -> Result<(Dict, String)> {
-    let mut xobjects = match xobjects(graph, effective)? {
+    let mut xobjects = match resource_dict(graph, effective, "XObject", work)? {
         Some(dict) => {
             dict_cost(dict, remaining)?;
             dict.clone()
@@ -1462,8 +1546,11 @@ fn edited_stream(
     replacement: &[u8],
     resource_override: Option<Dict>,
     remaining: &mut usize,
+    work: &mut usize,
 ) -> Result<PdfStream> {
-    let source = frame.map(|frame| stream(graph, frame.stream)).transpose()?;
+    let source = frame
+        .map(|frame| stream(graph, frame.stream, work))
+        .transpose()?;
     let size = frame
         .zip(source)
         .map_or(0, |(frame, source)| source.data.len() - frame.span.len())
@@ -1508,8 +1595,9 @@ fn invocation_resources<'a>(
     graph: &'a NativePdfGraph,
     page: PdfObjectRef,
     found: Option<&Found>,
+    work: &mut usize,
 ) -> Result<Vec<Option<&'a Dict>>> {
-    let mut result = vec![resources(graph, page)?];
+    let mut result = vec![resources(graph, page, work)?];
     if let Some(found) = found {
         for form in found
             .forms
@@ -1519,14 +1607,8 @@ fn invocation_resources<'a>(
             .chain((!found.forms.is_empty()).then_some(found.leaf.stream))
         {
             let parent = result.last().copied().flatten();
-            let resources = match stream(graph, form)?.dict.get("Resources") {
-                Some(value) => Some(
-                    resolve(graph, value)
-                        .and_then(PdfValue::as_dictionary)
-                        .ok_or(State)?,
-                ),
-                None => parent,
-            };
+            let source = stream(graph, form, work)?;
+            let resources = resource_dict(graph, Some(&source.dict), "Resources", work)?.or(parent);
             result.push(resources);
         }
     }
@@ -1623,7 +1705,8 @@ pub(super) fn stage(
             let transform = Matrix(*transform).checked()?;
             let moved = matrix.then(transform)?;
             let local = moved.then(inverse.ok_or(Postcondition)?)?;
-            let original = &stream(graph, item.leaf.stream)?.data[item.leaf.span.clone()];
+            let original =
+                &stream(graph, item.leaf.stream, &mut work)?.data[item.leaf.span.clone()];
             spend(&mut remaining, original.len() + 256)?;
             let mut source = format!("q\n{}\n", local.operator()).into_bytes();
             source.extend_from_slice(original);
@@ -1647,8 +1730,14 @@ pub(super) fn stage(
     let depth = item.map_or(0, |item| item.forms.len());
     let mut override_resources = None;
     if let Some(reference) = resource {
-        let effective = invocation_resources(graph, page.object, item)?;
-        let (dict, name) = resource_override(graph, effective[depth], reference, &mut remaining)?;
+        let effective = invocation_resources(graph, page.object, item, &mut work)?;
+        let (dict, name) = resource_override(
+            graph,
+            effective[depth],
+            reference,
+            &mut remaining,
+            &mut work,
+        )?;
         override_resources = Some(dict);
         replacement = match command {
             AddImage { bounds, .. } => {
@@ -1669,6 +1758,7 @@ pub(super) fn stage(
             &replacement,
             None,
             &mut remaining,
+            &mut work,
         )?
     } else {
         let item = item.ok_or(TargetUnavailable)?;
@@ -1678,12 +1768,14 @@ pub(super) fn stage(
             &replacement,
             override_resources.take(),
             &mut remaining,
+            &mut work,
         )?;
         let mut child = allocate(graph, PdfValue::Stream(leaf))?;
         let mut root = None;
         for (level, frame) in item.forms.iter().enumerate().rev() {
-            let effective = invocation_resources(graph, page.object, Some(item))?;
-            let (dict, name) = resource_override(graph, effective[level], child, &mut remaining)?;
+            let effective = invocation_resources(graph, page.object, Some(item), &mut work)?;
+            let (dict, name) =
+                resource_override(graph, effective[level], child, &mut remaining, &mut work)?;
             let invocation = format!("/{name} Do");
             let stream = if level == 0 {
                 override_resources = Some(dict);
@@ -1693,6 +1785,7 @@ pub(super) fn stage(
                     invocation.as_bytes(),
                     None,
                     &mut remaining,
+                    &mut work,
                 )?
             } else {
                 edited_stream(
@@ -1701,6 +1794,7 @@ pub(super) fn stage(
                     invocation.as_bytes(),
                     Some(dict),
                     &mut remaining,
+                    &mut work,
                 )?
             };
             if level == 0 {
@@ -1711,7 +1805,7 @@ pub(super) fn stage(
         }
         root.ok_or(Postcondition)?
     };
-    let original_slots = contents(graph, page.object)?;
+    let original_slots = contents(graph, page.object, &mut work)?;
     let slot_count = original_slots.len() + usize::from(item.is_none()) + usize::from(restore_page);
     spend(&mut remaining, slot_count * size_of::<PdfValue>())?;
     let mut slots = Vec::with_capacity(slot_count);
@@ -1721,7 +1815,7 @@ pub(super) fn stage(
         slots[item.slot] = PdfValue::Reference(root);
     } else {
         if restore_page {
-            let save = edited_stream(graph, None, b"q", None, &mut remaining)?;
+            let save = edited_stream(graph, None, b"q", None, &mut remaining, &mut work)?;
             slots.insert(
                 0,
                 PdfValue::Reference(allocate(graph, PdfValue::Stream(save))?),
@@ -1799,6 +1893,17 @@ pub(super) fn stage(
     graph.charge_page_work(starting_work - work)?;
     // Keep the expected signatures charged through serialization and reopen verification.
     Ok((expected, workspace.remaining()))
+}
+
+#[cfg(test)]
+pub(super) fn charge_verification_scan(
+    graph: &NativePdfGraph,
+    page: &NativePdfNotePage,
+    remaining: usize,
+    work: &mut usize,
+) -> Result<()> {
+    let workspace = Workspace::new(remaining);
+    scan(graph, page, work, &workspace).map(drop)
 }
 
 pub(super) fn verify(
@@ -1902,7 +2007,8 @@ mod tests {
     fn object_staging_charges_scans_and_reachability_to_the_graph() {
         use super::{NativePdfGraph, NativeSessionError, Workspace, scan, stage};
 
-        let content = miniz_oxide::deflate::compress_to_vec_zlib(b"10 20 30 40 re f", 6);
+        let paint = b"10 20 30 40 re f";
+        let content = miniz_oxide::deflate::compress_to_vec_zlib(paint, 6);
         let source = super::super::tests::fixture("", &content);
         let limits = NativeEditLimits::default();
         let session = NativePdfSession::open_scoped(&source, limits, [4; 16]).unwrap();
@@ -1917,14 +2023,14 @@ mod tests {
         .unwrap();
         let graph = NativePdfGraph::open(&source, limits).unwrap();
         let starting = graph.remaining_work();
+        let workspace = Workspace::new(graph.remaining_retained());
+        let mut content_only = 1 + paint.len();
+        assert_eq!(
+            scan(&graph, page, &mut content_only, &workspace).err(),
+            Some(NativeSessionError::Budget)
+        );
         let mut scan_work = starting;
-        scan(
-            &graph,
-            page,
-            &mut scan_work,
-            &Workspace::new(graph.remaining_retained()),
-        )
-        .unwrap();
+        scan(&graph, page, &mut scan_work, &workspace).unwrap();
         let single_scan = starting - scan_work;
         let mut graph = graph;
         stage(

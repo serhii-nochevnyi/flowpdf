@@ -1,12 +1,12 @@
 use flow_core::layout::LayoutUnit;
 use flow_core::pdf::native::{
-    NativeEditLimits, NativeNoteCommand, NativeObjectCommand, NativeObjectPage,
+    NativeEditError, NativeEditLimits, NativeNoteCommand, NativeObjectCommand, NativeObjectPage,
     NativeObjectRefusal, NativePdfSession, NativeRedactionMark, NativeRequestLookup,
     NativeSessionError,
 };
 use flow_core::pdf::{
-    NativePdfAnnotation, PdfPathCommand, PdfReadDiagnosticCode, PdfReaderLimits, PdfSceneElement,
-    PdfSceneRequest, open_pdf, read_pdf_scene,
+    NativePdfAnnotation, PdfPathCommand, PdfReadDiagnosticCode, PdfReadError, PdfReaderLimits,
+    PdfSceneElement, PdfSceneRequest, open_pdf, read_pdf_scene,
 };
 use image::ImageDecoder;
 use serde_json::{Value, json};
@@ -50,6 +50,10 @@ fn fixture_with_media_box(
         stream("", contents),
     ];
     objects.extend_from_slice(extras);
+    pdf_fixture(&objects)
+}
+
+fn pdf_fixture(objects: &[Vec<u8>]) -> Vec<u8> {
     let mut bytes = b"%PDF-1.7\n".to_vec();
     let mut offsets = Vec::new();
     for (index, object) in objects.iter().enumerate() {
@@ -1926,4 +1930,86 @@ fn object_work_refusal_preserves_the_accepted_document() {
         json!([10000, 20000, 40000, 60000])
     );
     assert_eq!(roomy.snapshot().consumed_request, 1);
+}
+
+#[test]
+fn inherited_object_resources_require_work_and_refuse_atomically_at_the_boundary() {
+    let source = pdf_fixture(&[
+        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 /Resources 6 0 R >>".to_vec(),
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Contents [4 0 R 5 0 R] >>".to_vec(),
+        stream("", b"q 10 0 0 10 5 5 cm\n"),
+        stream("", b"/I Do Q"),
+        b"<< /XObject 7 0 R /ColorSpace 8 0 R >>".to_vec(),
+        b"<< /I 9 0 R >>".to_vec(),
+        b"<< >>".to_vec(),
+        stream(
+            "/Type /XObject /Subtype /Image /ColorSpace /DeviceGray /Width 1 /Height 1 /BitsPerComponent 8",
+            &[7],
+        ),
+    ]);
+    let open_with_work = |max_work| {
+        NativePdfSession::open_scoped(
+            &source,
+            NativeEditLimits {
+                max_work,
+                ..NativeEditLimits::default()
+            },
+            [7; 16],
+        )
+    };
+    let move_image = |session: &mut NativePdfSession| {
+        let selected = target(session, 0, 0);
+        apply(
+            session,
+            json!({"kind":"moveObject","target":selected,"transform":[1,0,0,1,5,0]}),
+        )
+    };
+
+    let mut first = 1;
+    let mut last = NativeEditLimits::default().max_work;
+    while first < last {
+        let middle = first + (last - first) / 2;
+        let result = match open_with_work(middle) {
+            Ok(mut session) if !session.snapshot().scene.object_pages[0].objects.is_empty() => {
+                move_image(&mut session)
+            }
+            Ok(_)
+            | Err(NativeSessionError::Graph(NativeEditError::Reader(PdfReadError::TokenLimit))) => {
+                Err(NativeSessionError::Budget)
+            }
+            Err(error) => Err(error),
+        };
+        match result {
+            Ok(()) => last = middle,
+            Err(NativeSessionError::Budget) => first = middle + 1,
+            Err(error) => panic!("unexpected refusal with {middle} units of work: {error:?}"),
+        }
+    }
+
+    // @invariant: Each projection hashes one 32-byte object ID. Its JSON digits vary by at most 64 bytes.
+    let hash_work_spread = (2 * size_of::<[u8; 32]>()).div_ceil(16);
+    let mut roomy = open_with_work(first + hash_work_spread).unwrap();
+    assert_eq!(roomy.snapshot().scene.object_pages[0].objects.len(), 1);
+    assert_eq!(objects(&roomy, 0)[0]["profile"], "rasterGray8");
+    move_image(&mut roomy).unwrap();
+    assert_eq!(
+        objects(&roomy, 0)[0]["bounds"],
+        json!([10000, 5000, 20000, 15000])
+    );
+
+    let mut short = open_with_work(first - hash_work_spread - 1).unwrap();
+    let before = short.snapshot().clone();
+    assert_eq!(before.scene.object_pages[0].objects.len(), 1);
+    assert_eq!(move_image(&mut short), Err(NativeSessionError::Budget));
+    assert_eq!(short.output_bytes(), source);
+    assert_eq!(short.origin_bytes(), source);
+    assert_eq!(short.snapshot().binding, before.binding);
+    assert_eq!(short.snapshot().output_hash, before.output_hash);
+    assert_eq!(short.snapshot().scene, before.scene);
+    assert_eq!(short.snapshot().consumed_request, before.consumed_request);
+    assert_eq!(
+        short.lookup(before.binding, 1),
+        Ok(NativeRequestLookup::Unseen)
+    );
 }
