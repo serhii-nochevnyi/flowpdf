@@ -1366,6 +1366,10 @@ fn allocate_appearance(
     Ok(Value::Reference(reference))
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Keep the widget, field owner, validated geometry, and initialization explicit at the bounded appearance write"
+)]
 fn apply_appearance(
     graph: &mut NativePdfGraph,
     widget: Ref,

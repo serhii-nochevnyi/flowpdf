@@ -614,6 +614,10 @@ pub(super) fn map_widget_label<'a, T>(
     )
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Keep the shared work and scratch budgets explicit alongside the borrowed widget ownership callbacks"
+)]
 pub(super) fn map_widget_label_with_workspace<'a, 'workspace, T>(
     widget: PdfObjectRef,
     dictionary: &'a BTreeMap<String, PdfValue>,
@@ -2996,7 +3000,7 @@ mod retained_reader_tests {
             Err(PdfReadError::Syntax)
         );
         assert_eq!(
-            read_scene_name(&vec![b'X'; MAX_PDF_IDENTITY_BYTES + 1], &mut 0, |_| Ok(())),
+            read_scene_name(&[b'X'; MAX_PDF_IDENTITY_BYTES + 1], &mut 0, |_| Ok(())),
             Err(PdfReadError::Syntax)
         );
     }

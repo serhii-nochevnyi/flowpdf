@@ -288,10 +288,10 @@ pub(super) fn verify_with_workspace(
             if !left.same_paint(right, &mut work)? {
                 return Err(RasterMismatch);
             }
-            if let (Some((source, _)), Some((result, _))) = (left.source, right.source) {
-                if expected.stream_hashes[&source] == actual.stream_hashes[&result] {
-                    retained.insert(&mut matching_sources, (source, result))?;
-                }
+            if let (Some((source, _)), Some((result, _))) = (left.source, right.source)
+                && expected.stream_hashes[&source] == actual.stream_hashes[&result]
+            {
+                retained.insert(&mut matching_sources, (source, result))?;
             }
             if let (PaintKind::Image(before), PaintKind::Image(after)) = (&left.kind, &right.kind) {
                 let source = before.data.digest;
@@ -2111,9 +2111,8 @@ impl PreviewCoverage {
 
     fn paint_note(&mut self, pixel: &mut Pixel, bounds: Rect, interior: Rect, rect: Rect) {
         let [l, b, r, t] = rect;
-        let overlap = |[x, y, u, v]: Rect| {
-            (r.min(u) - l.max(x)).max(0) * (t.min(v) - b.max(y)).max(0)
-        };
+        let overlap =
+            |[x, y, u, v]: Rect| (r.min(u) - l.max(x)).max(0) * (t.min(v) - b.max(y)).max(0);
         let area = (r - l) * (t - b);
         let covered = overlap(bounds);
         let background = area - covered;

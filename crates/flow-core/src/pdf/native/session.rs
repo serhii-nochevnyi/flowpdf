@@ -72,6 +72,10 @@ pub struct NativeSnapshot {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "Keep the accepted receipt inline so request lookup stays Copy and needs no heap allocation"
+)]
 pub enum NativeRequestLookup {
     Accepted(NativeEditReceipt),
     Unseen,
@@ -1013,6 +1017,10 @@ impl NativePdfSession {
         self.apply_command(binding, request_id, Command::Field(command))
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Preserve the public signature and its explicit binding and projection claims"
+    )]
     pub fn verify_page_and_field_projection(
         bytes: &[u8],
         limits: NativeEditLimits,
@@ -1038,6 +1046,10 @@ impl NativePdfSession {
         )
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Preserve the public signature and its explicit optional object claim"
+    )]
     pub fn verify_page_and_field_projection_with_objects(
         bytes: &[u8],
         limits: NativeEditLimits,
@@ -1065,6 +1077,10 @@ impl NativePdfSession {
     }
 
     #[doc(hidden)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Keep the exact-byte WASM verification claims and borrowed note iterator explicit"
+    )]
     pub fn verify_page_and_field_projection_with_note_identities(
         bytes: &[u8],
         limits: NativeEditLimits,
