@@ -2035,6 +2035,10 @@ fn apply(
             }
             continue;
         };
+        let size = replacement.as_ref().map_or(before.data.len(), Vec::len);
+        let payload_work = size.div_ceil(16) + 1;
+        graph.charge_page_work(payload_work)?;
+        let before = stream(graph, id)?;
         let bytes = replacement.as_deref().unwrap_or(&before.data);
         let digest = *blake3::hash(bytes).as_bytes();
         let forbidden = if name(&before.dict, "Subtype") == Some("Image") {
@@ -2045,8 +2049,7 @@ fn apply(
         if forbidden {
             return Err(Unsupported);
         }
-        let size = bytes.len();
-        graph.charge_page_work(size.div_ceil(16) + 1)?;
+        graph.charge_page_work(payload_work)?;
         if replacement.is_some() {
             // @invariant: The replacement reservation takes over the live data charge up to its length.
             graph.release_page_retained(size);
@@ -2215,6 +2218,40 @@ mod tests {
         assert_eq!(apply(&mut graph, roles, edits), Err(Budget));
         assert_eq!(graph.remaining_work(), work);
         assert_eq!(graph.remaining_retained(), available);
+    }
+
+    #[test]
+    fn sensitive_alias_check_reserves_payload_work_before_refusal() {
+        let sensitive = "10 10 10 10 re\nf\n1 0 0 1 30 30 cm\n";
+        let source = page_stream_pair(sensitive, "10 10 10 10 re f 1 0 0 1 30 30 cm");
+        let limits = NativeEditLimits::default();
+        let mut probe = NativePdfGraph::open(&source, limits).unwrap();
+        let mark = NativeRedactionMark {
+            page_id: 1,
+            geometry: geometry(&probe, 0).unwrap(),
+            rect: [12_000, 12_000, 13_000, 13_000],
+        };
+        let before = probe.remaining_work();
+        probe.refresh_page_graph(&BTreeSet::new()).unwrap();
+        let refresh_work = before - probe.remaining_work();
+
+        for (shortfall, refusal) in [(1, Budget), (0, Unsupported)] {
+            let mut graph = NativePdfGraph::open(&source, limits).unwrap();
+            let (roles, edits, _) =
+                scan_document(&graph, &[1], &[mark], graph.remaining_retained()).unwrap();
+            let mut payloads = edits.streams.values();
+            let first = payloads.next().unwrap();
+            let alias = payloads.next().unwrap();
+            assert_eq!(alias.as_slice(), sensitive.as_bytes());
+            let first_work = first.len().div_ceil(16) + 1;
+            let alias_work = alias.len().div_ceil(16) + 1;
+            let available = refresh_work + 2 * first_work + alias_work - shortfall;
+            graph
+                .charge_page_work(graph.remaining_work() - available)
+                .unwrap();
+            assert_eq!(apply(&mut graph, roles, edits), Err(refusal));
+            assert_eq!(graph.remaining_work(), shortfall * (alias_work - 1));
+        }
     }
 
     #[test]

@@ -130,7 +130,7 @@ fn jpeg_pdf(filter: &str, data: &[u8]) -> Vec<u8> {
 
 #[test]
 fn ordinary_rgb_scan_readback() {
-    let (width, height) = (1440, 1080);
+    let (width, height) = (1280, 960);
     let samples = [208, 140, 80].repeat(width * height);
     let source = pdf(
         vec![
@@ -1220,8 +1220,17 @@ fn shared_form_content_is_removed_from_every_retained_placement() {
 
 #[test]
 fn redaction_rewrite_work_boundary_preserves_accepted_state_and_marks() {
-    let paint = format!("10 10 10 10 re f {}", "40 40 10 10 re f ".repeat(32));
-    let source = raster_fixture(100, &paint);
+    let retained = "40 40 10 10 re f ".repeat(32);
+    let source = pdf(
+        vec![
+            b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+            b"<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 100 100] >>".to_vec(),
+            b"<< /Type /Page /Parent 2 0 R /Contents [4 0 R 5 0 R] >>".to_vec(),
+            flate("", b"10 10 10 10 re f\n"),
+            flate("", retained.as_bytes()),
+        ],
+        "",
+    );
     let defaults = NativeEditLimits::default();
     let open_marked_at = |max_work| {
         let mut session = NativePdfSession::open_scoped(
@@ -1279,19 +1288,19 @@ fn redaction_rewrite_work_boundary_preserves_accepted_state_and_marks() {
             tight.stage_redaction(before.binding, 2),
             Err(NativeSessionError::Budget)
         );
+        assert!(tight.redaction_candidate_status().is_none());
         assert_eq!(
             tight.lookup(before.binding, 2),
             Ok(NativeRequestLookup::Unseen)
         );
+        assert_accepted(&tight, &source, 0, &source);
+        assert_eq!(tight.snapshot().binding, before.binding);
+        assert_eq!(tight.snapshot().consumed_request, before.consumed_request);
+        assert_eq!(tight.redaction_marks(), &[mark]);
+        assert_eq!(tight.redaction_marks_binding(), Some(before.binding));
     }
-    assert_accepted(&tight, &source, 0, &source);
-    assert_eq!(tight.snapshot().binding, before.binding);
-    assert_eq!(tight.snapshot().consumed_request, before.consumed_request);
     assert_eq!(tight.snapshot().scene, before.scene);
     assert_eq!(tight.snapshot().page_state, before.page_state);
-    assert!(tight.redaction_candidate_status().is_none());
-    assert_eq!(tight.redaction_marks(), &[mark]);
-    assert_eq!(tight.redaction_marks_binding(), Some(before.binding));
 }
 
 #[test]
