@@ -24,6 +24,7 @@ pub(super) const ZLIB_ENCODER_SCRATCH: usize = 512 * 1024;
 const MAX_FORM_DEPTH: usize = 8;
 const MAX_PAGES: usize = 256;
 const ENTRY_BYTES: usize = 128;
+const IMAGE_HASH_BYTES_PER_WORK: usize = 32;
 const RESOURCE_ENTRY_BYTES: usize = 256;
 const PAGE_EDIT_BYTES: usize = 512;
 pub(super) const MAX_MARKS: usize = 1024;
@@ -1356,8 +1357,16 @@ impl PageEdit {
     }
 }
 
+#[derive(PartialEq)]
+struct StreamEdit {
+    data: Vec<u8>,
+    image_digest: Option<Digest>,
+}
+
+const STREAM_EDIT_ENTRY_BYTES: usize = ENTRY_BYTES + size_of::<Option<Digest>>();
+
 struct Edits {
-    streams: BTreeMap<Object, Vec<u8>>,
+    streams: BTreeMap<Object, StreamEdit>,
     forms: BTreeMap<Object, UsedResources>,
     pages: BTreeMap<Object, PageEdit>,
     sensitive_content: BTreeSet<Digest>,
@@ -1368,7 +1377,7 @@ impl Edits {
     fn retained(&self) -> usize {
         self.streams
             .values()
-            .map(|data| ENTRY_BYTES + data.capacity())
+            .map(|edit| STREAM_EDIT_ENTRY_BYTES + edit.data.capacity())
             .sum::<usize>()
             + self
                 .forms
@@ -1511,7 +1520,7 @@ impl<'a, 'w> Scan<'a, 'w> {
         }
         spend(&mut self.work, source.len() + 1)?;
         self.memory
-            .grow(source.len() * 6 + 512)
+            .grow(source.len() * 6 + 512 + size_of::<Option<Digest>>())
             .map_err(|_| Budget)?;
         let _parser = reserve_content_tokens(
             self.workspace,
@@ -1673,7 +1682,14 @@ impl<'a, 'w> Scan<'a, 'w> {
         if removed {
             self.edits.sensitive_content.insert(digest);
         }
-        same_use(&mut self.edits.streams, id, output)?;
+        same_use(
+            &mut self.edits.streams,
+            id,
+            StreamEdit {
+                data: output,
+                image_digest: None,
+            },
+        )?;
         Ok(graphics)
     }
 
@@ -1701,23 +1717,30 @@ impl<'a, 'w> Scan<'a, 'w> {
                 return Err(Unsupported);
             }
             self.memory
-                .grow(object.data.len() + 512)
+                .grow(object.data.len() + 512 + size_of::<Option<Digest>>())
                 .map_err(|_| Budget)?;
-            spend(
-                &mut self.work,
-                scope.marks.len() + object.data.len().div_ceil(16) + 1,
-            )?;
+            spend(&mut self.work, scope.marks.len())?;
+            let digest_work = object.data.len().div_ceil(IMAGE_HASH_BYTES_PER_WORK) + 1;
+            spend(&mut self.work, digest_work)?;
             let mut data = object.data.clone();
             for mark in scope.marks {
                 image.scrub(&mut data, graphics.matrix, mark.rect, &mut self.work)?;
             }
             let before = *blake3::hash(&object.data).as_bytes();
+            spend(&mut self.work, digest_work)?;
             let after = *blake3::hash(&data).as_bytes();
             same_use(&mut self.image_aliases, before, after)?;
             if before != after {
                 self.edits.sensitive_images.insert(before);
             }
-            return same_use(&mut self.edits.streams, id, data);
+            return same_use(
+                &mut self.edits.streams,
+                id,
+                StreamEdit {
+                    data,
+                    image_digest: Some(after),
+                },
+            );
         }
         if self.active_forms.len() >= MAX_FORM_DEPTH || !self.active_forms.insert(id) {
             return Err(Unsupported);
@@ -2025,18 +2048,33 @@ fn apply(
     for &id in roles.keys() {
         let replacement = edits.streams.remove(&id);
         if replacement.is_some() {
-            graph.release_page_retained(ENTRY_BYTES);
+            graph.release_page_retained(STREAM_EDIT_ENTRY_BYTES);
         }
         let Some(PdfValue::Stream(before)) = graph.objects.get(&id) else {
             if let Some(data) = replacement {
-                let capacity = data.capacity();
+                let capacity = data.data.capacity();
                 drop(data);
                 graph.release_page_retained(capacity);
             }
             continue;
         };
-        let bytes = replacement.as_deref().unwrap_or(&before.data);
-        let digest = *blake3::hash(bytes).as_bytes();
+        let size = replacement
+            .as_ref()
+            .map_or(before.data.len(), |edit| edit.data.len());
+        let payload_work = size.div_ceil(16) + 1;
+        let digest = match replacement.as_ref().and_then(|edit| edit.image_digest) {
+            Some(digest) => digest,
+            None => {
+                graph.charge_page_work(payload_work)?;
+                let bytes = replacement
+                    .as_ref()
+                    .map_or(stream(graph, id)?.data.as_slice(), |edit| {
+                        edit.data.as_slice()
+                    });
+                *blake3::hash(bytes).as_bytes()
+            }
+        };
+        let before = stream(graph, id)?;
         let forbidden = if name(&before.dict, "Subtype") == Some("Image") {
             edits.sensitive_images.contains(&digest)
         } else {
@@ -2045,8 +2083,7 @@ fn apply(
         if forbidden {
             return Err(Unsupported);
         }
-        let size = bytes.len();
-        graph.charge_page_work(size.div_ceil(16) + 1)?;
+        graph.charge_page_work(payload_work)?;
         if replacement.is_some() {
             // @invariant: The replacement reservation takes over the live data charge up to its length.
             graph.release_page_retained(size);
@@ -2058,7 +2095,7 @@ fn apply(
             return Err(Malformed);
         };
         if let Some(replacement) = replacement {
-            stream.data = replacement;
+            stream.data = replacement.data;
         }
         let compressed = if scratch_reserved {
             compress_rewritten_stream(&stream.data)
@@ -2215,6 +2252,40 @@ mod tests {
         assert_eq!(apply(&mut graph, roles, edits), Err(Budget));
         assert_eq!(graph.remaining_work(), work);
         assert_eq!(graph.remaining_retained(), available);
+    }
+
+    #[test]
+    fn sensitive_alias_check_reserves_payload_work_before_refusal() {
+        let sensitive = "10 10 10 10 re\nf\n1 0 0 1 30 30 cm\n";
+        let source = page_stream_pair(sensitive, "10 10 10 10 re f 1 0 0 1 30 30 cm");
+        let limits = NativeEditLimits::default();
+        let mut probe = NativePdfGraph::open(&source, limits).unwrap();
+        let mark = NativeRedactionMark {
+            page_id: 1,
+            geometry: geometry(&probe, 0).unwrap(),
+            rect: [12_000, 12_000, 13_000, 13_000],
+        };
+        let before = probe.remaining_work();
+        probe.refresh_page_graph(&BTreeSet::new()).unwrap();
+        let refresh_work = before - probe.remaining_work();
+
+        for (shortfall, refusal) in [(1, Budget), (0, Unsupported)] {
+            let mut graph = NativePdfGraph::open(&source, limits).unwrap();
+            let (roles, edits, _) =
+                scan_document(&graph, &[1], &[mark], graph.remaining_retained()).unwrap();
+            let mut payloads = edits.streams.values();
+            let first = payloads.next().unwrap();
+            let alias = payloads.next().unwrap();
+            assert_eq!(alias.data.as_slice(), sensitive.as_bytes());
+            let first_work = first.data.len().div_ceil(16) + 1;
+            let alias_work = alias.data.len().div_ceil(16) + 1;
+            let available = refresh_work + 2 * first_work + alias_work - shortfall;
+            graph
+                .charge_page_work(graph.remaining_work() - available)
+                .unwrap();
+            assert_eq!(apply(&mut graph, roles, edits), Err(refusal));
+            assert_eq!(graph.remaining_work(), shortfall * (alias_work - 1));
+        }
     }
 
     #[test]
