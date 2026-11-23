@@ -811,6 +811,7 @@ struct SceneBuilder<'a> {
     elements: Vec<PdfSceneElement>,
     emit_elements: bool,
     report: PdfReadReport,
+    operator_diagnostic_bytes: usize,
     fonts: BTreeMap<PdfObjectRef, Rc<FontMap>>,
     font_aliases: BTreeSet<Rc<str>>,
     font_cache_bytes: usize,
@@ -848,6 +849,7 @@ impl<'a> SceneBuilder<'a> {
             elements: Vec::new(),
             emit_elements: true,
             report: PdfReadReport::default(),
+            operator_diagnostic_bytes: 0,
             fonts: BTreeMap::new(),
             font_aliases: BTreeSet::new(),
             font_cache_bytes: 0,
@@ -903,8 +905,10 @@ impl<'a> SceneBuilder<'a> {
         let mut previous = None::<(PdfObjectRef, u8, bool)>;
         let mut unverified_boundary = None;
         for (index, content_ref) in self.page.contents.iter().enumerate() {
-            self.invocation_path =
-                vec![u32::try_from(index).map_err(|_| PdfReadError::NumericLimit)?];
+            self.invocation_path.clear();
+            self.budget.reserve_vec(&mut self.invocation_path, 1)?;
+            self.invocation_path
+                .push(u32::try_from(index).map_err(|_| PdfReadError::NumericLimit)?);
             match self
                 .reader
                 .scene_object(*content_ref, 0, self.budget.remaining_scene_bytes)
@@ -970,7 +974,9 @@ impl<'a> SceneBuilder<'a> {
             self.report_partial(object_ref);
         }
         drop(resource_owner);
-        self.budget.release(resource_bytes);
+        let invocation_bytes = self.invocation_path.capacity() * size_of::<u32>();
+        drop(std::mem::take(&mut self.invocation_path));
+        self.budget.release(resource_bytes + invocation_bytes);
         self.discard_saved_states(0);
         let stack_bytes = self.state_stack.capacity() * size_of::<GraphicsState>();
         drop(self.state_stack);
@@ -991,6 +997,7 @@ impl<'a> SceneBuilder<'a> {
             report: self.report,
         };
         // @invariant: Element JSON is charged before retention; this charges the rest of the page.
+        self.budget.release(self.operator_diagnostic_bytes);
         self.budget.encode(&page)?;
         page.elements = self.elements;
         Ok((page, self.budget))
@@ -1012,7 +1019,7 @@ impl<'a> SceneBuilder<'a> {
             ));
             return Ok(ContentStreamEnd::default());
         }
-        let mut cursor = ContentCursor::for_scene(&stream.data, self.limits.clone());
+        let mut cursor = ContentCursor::new(&stream.data, self.limits.clone());
         let stack_floor = if depth == 0 {
             0
         } else {
@@ -1020,82 +1027,101 @@ impl<'a> SceneBuilder<'a> {
         };
         let mut operands = Vec::new();
         let mut operand_span = None::<[u32; 2]>;
-        loop {
-            let (token, offset) = match cursor.next_token(&mut self.remaining_content_tokens) {
-                Err(ContentParseError::TruncatedOperand) if has_next_page_stream => {
-                    return Ok(ContentStreamEnd {
-                        pending_operands: true,
-                        open_comment: cursor.open_comment,
-                    });
-                }
-                result => match result? {
-                    Some(token) => token,
-                    None => break,
-                },
-            };
-            match token {
-                ContentToken::Word(operator) => {
-                    let stream_offset = stream
-                        .source_offset
-                        .checked_add(offset)
-                        .ok_or(PdfReadError::NumericLimit)?;
-                    let stream_end = stream
-                        .source_offset
-                        .checked_add(cursor.position())
-                        .ok_or(PdfReadError::NumericLimit)?;
-                    let text_source_bytes = if matches!(operator.as_str(), "Tj" | "TJ" | "'" | "\"")
-                    {
-                        operator.len() + self.invocation_path.len() * size_of::<u32>()
-                    } else {
-                        0
-                    };
-                    self.budget.charge(text_source_bytes)?;
-                    let provenance = PdfSourceProvenance {
-                        object_ref,
-                        stream_offset: u32::try_from(stream_offset)
-                            .map_err(|_| PdfReadError::NumericLimit)?,
-                        operator: Some(operator.clone()),
-                        stream_end: Some(
-                            u32::try_from(stream_end).map_err(|_| PdfReadError::NumericLimit)?,
-                        ),
-                        operand_span: operand_span.take(),
-                        invocation_path: self.invocation_path.clone(),
-                    };
-                    let result = if operator == "Do" {
-                        self.paint_xobject(&operands, object_ref, provenance, depth, resources)
-                    } else {
-                        self.dispatch_operator(
-                            &operator,
-                            &operands,
-                            provenance,
-                            resources,
-                            stack_floor,
-                        )
-                        .map_err(|error| match error {
-                            PdfReadError::Syntax => ContentParseError::OperatorSyntax,
-                            error => error.into(),
-                        })
-                    };
-                    self.budget.release(text_source_bytes);
-                    result?;
-                    operands.clear();
-                }
-                other => {
-                    let start = u32::try_from(offset).map_err(|_| PdfReadError::NumericLimit)?;
-                    let end =
-                        u32::try_from(cursor.position()).map_err(|_| PdfReadError::NumericLimit)?;
-                    operand_span.get_or_insert([start, end])[1] = end;
-                    operands.push(other);
-                    if operands.len() > self.limits.max_array_items {
-                        return Err(PdfReadError::TokenLimit.into());
+        let mut payload_bytes = 0;
+        let result = (|| {
+            loop {
+                let (token, offset, token_bytes) = match cursor
+                    .next_scene_token(&mut self.remaining_content_tokens, &mut self.budget)
+                {
+                    Err(ContentParseError::TruncatedOperand) if has_next_page_stream => {
+                        return Ok(ContentStreamEnd {
+                            pending_operands: true,
+                            open_comment: cursor.open_comment,
+                        });
+                    }
+                    result => match result? {
+                        Some(token) => token,
+                        None => break,
+                    },
+                };
+                payload_bytes += token_bytes;
+                match token {
+                    ContentToken::Word(operator) => {
+                        let stream_offset = stream
+                            .source_offset
+                            .checked_add(offset)
+                            .ok_or(PdfReadError::NumericLimit)?;
+                        let stream_end = stream
+                            .source_offset
+                            .checked_add(cursor.position())
+                            .ok_or(PdfReadError::NumericLimit)?;
+                        let mut provenance_bytes =
+                            operator.len() + size_of_val(self.invocation_path.as_slice());
+                        let stream_offset =
+                            u32::try_from(stream_offset).map_err(|_| PdfReadError::NumericLimit)?;
+                        let stream_end =
+                            u32::try_from(stream_end).map_err(|_| PdfReadError::NumericLimit)?;
+                        self.budget.charge(provenance_bytes)?;
+                        let provenance = PdfSourceProvenance {
+                            object_ref,
+                            stream_offset,
+                            operator: Some(operator.clone()),
+                            stream_end: Some(stream_end),
+                            operand_span: operand_span.take(),
+                            invocation_path: self.invocation_path.clone(),
+                        };
+                        let result = if operator == "Do" {
+                            self.paint_xobject(
+                                &operands,
+                                provenance,
+                                &mut provenance_bytes,
+                                depth,
+                                resources,
+                            )
+                        } else {
+                            self.dispatch_operator(
+                                &operator,
+                                &operands,
+                                provenance,
+                                &mut provenance_bytes,
+                                resources,
+                                stack_floor,
+                            )
+                            .map_err(|error| match error {
+                                PdfReadError::Syntax => ContentParseError::OperatorSyntax,
+                                error => error.into(),
+                            })
+                        };
+                        self.budget.release(provenance_bytes);
+                        result?;
+                        drop(operator);
+                        operands.clear();
+                        self.budget.release(std::mem::take(&mut payload_bytes));
+                    }
+                    other => {
+                        let start =
+                            u32::try_from(offset).map_err(|_| PdfReadError::NumericLimit)?;
+                        let end = u32::try_from(cursor.position())
+                            .map_err(|_| PdfReadError::NumericLimit)?;
+                        operand_span.get_or_insert([start, end])[1] = end;
+                        if operands.len() >= self.limits.max_array_items {
+                            return Err(PdfReadError::TokenLimit.into());
+                        }
+                        self.budget.reserve_vec(&mut operands, 1)?;
+                        operands.push(other);
                     }
                 }
             }
-        }
-        Ok(ContentStreamEnd {
-            pending_operands: !operands.is_empty(),
-            open_comment: cursor.open_comment,
-        })
+            Ok(ContentStreamEnd {
+                pending_operands: !operands.is_empty(),
+                open_comment: cursor.open_comment,
+            })
+        })();
+        let buffer_bytes = operands.capacity() * size_of::<ContentToken>();
+        // @invariant: The operand buffer and payloads stay charged through dispatch and Form reads.
+        drop(operands);
+        self.budget.release(buffer_bytes + payload_bytes);
+        result
     }
 
     fn dispatch_operator(
@@ -1103,6 +1129,7 @@ impl<'a> SceneBuilder<'a> {
         operator: &str,
         operands: &[ContentToken],
         provenance: PdfSourceProvenance,
+        provenance_bytes: &mut usize,
         resources: Option<&PdfValue>,
         stack_floor: usize,
     ) -> Result<(), PdfReadError> {
@@ -1335,23 +1362,32 @@ impl<'a> SceneBuilder<'a> {
                 self.state.line_width = None;
                 self.state.miter_limit = None;
             }
-            "BI" | "ID" | "EI" => self.report.push(
-                PdfReadDiagnostic::blocked(
-                    PdfReadDiagnosticCode::UnsupportedOperator,
-                    Some(self.page_index),
-                    Some(object_ref.object_number),
-                )
-                .with_operator(operator),
-            ),
             known if is_known_noop(known) => {}
-            _ => self.report.push(
-                PdfReadDiagnostic::warning(
-                    PdfReadDiagnosticCode::UnsupportedOperator,
-                    Some(self.page_index),
-                    Some(object_ref.object_number),
-                )
-                .with_operator(operator),
-            ),
+            unsupported => {
+                let diagnostic = if matches!(unsupported, "BI" | "ID" | "EI") {
+                    PdfReadDiagnostic::blocked(
+                        PdfReadDiagnosticCode::UnsupportedOperator,
+                        Some(self.page_index),
+                        Some(object_ref.object_number),
+                    )
+                } else {
+                    PdfReadDiagnostic::warning(
+                        PdfReadDiagnosticCode::UnsupportedOperator,
+                        Some(self.page_index),
+                        Some(object_ref.object_number),
+                    )
+                };
+                let diagnostic = PdfReadDiagnostic {
+                    operator: provenance.operator,
+                    ..diagnostic
+                };
+                if !self.report.diagnostics.contains(&diagnostic) {
+                    let bytes = diagnostic.operator.as_ref().map_or(0, String::capacity);
+                    *provenance_bytes -= bytes;
+                    self.operator_diagnostic_bytes += bytes;
+                }
+                self.report.push(diagnostic);
+            }
         }
         Ok(())
     }
@@ -1909,8 +1945,8 @@ impl<'a> SceneBuilder<'a> {
     fn paint_xobject(
         &mut self,
         operands: &[ContentToken],
-        object_ref: PdfObjectRef,
         provenance: PdfSourceProvenance,
+        provenance_bytes: &mut usize,
         depth: usize,
         resources: Option<&PdfValue>,
     ) -> Result<(), ContentParseError> {
@@ -1941,6 +1977,7 @@ impl<'a> SceneBuilder<'a> {
                             stream,
                             xobject_ref,
                             provenance,
+                            provenance_bytes,
                             depth,
                             effective_resources,
                         )
@@ -1958,7 +1995,7 @@ impl<'a> SceneBuilder<'a> {
                         PdfReadDiagnostic::warning(
                             PdfReadDiagnosticCode::UnsupportedOperator,
                             Some(builder.page_index),
-                            Some(object_ref.object_number),
+                            Some(provenance.object_ref.object_number),
                         )
                         .with_operator("Do"),
                     );
@@ -1990,6 +2027,7 @@ impl<'a> SceneBuilder<'a> {
         stream: &PdfStream,
         xobject_ref: PdfObjectRef,
         provenance: PdfSourceProvenance,
+        provenance_bytes: &mut usize,
         depth: usize,
         effective_resources: Option<&PdfValue>,
     ) -> Result<(), PdfReadError> {
@@ -2061,20 +2099,27 @@ impl<'a> SceneBuilder<'a> {
             && form_paint_bounds.is_some()
             && form_paint_ctm.is_some_and(PaintMatrix::is_axis_aligned);
         let clip = self.state.clip.intersect(form_bounds, rectangular)?;
-        self.push_element(PdfSceneElement::Annotation {
+        let stream_offset = provenance.stream_offset;
+        let subtype = "FormXObject";
+        self.budget.remaining_after(subtype.len())?;
+        let retained = provenance.heap_bytes() + subtype.len();
+        let element = PdfSceneElement::Annotation {
             value: PdfAnnotationElement {
-                subtype: Some("FormXObject".to_owned()),
+                subtype: Some(subtype.to_owned()),
                 kind: PdfAnnotationKind::Supported,
                 rect: form_bounds,
                 provenance: PdfSourceProvenance {
                     object_ref: xobject_ref,
-                    ..provenance.clone()
+                    ..provenance
                 },
             },
-        })?;
+        };
+        self.budget.release(std::mem::take(provenance_bytes));
+        self.push_element_with_workspace(element, retained)?;
         if clip.is_empty() && form_paint_clip.is_empty() {
             return Ok(());
         }
+        self.budget.reserve_vec(&mut self.invocation_path, 1)?;
         let caller_state_index = self.state_stack.len();
         self.save_form_caller()?;
         let caller_emit_elements = self.emit_elements;
@@ -2087,7 +2132,7 @@ impl<'a> SceneBuilder<'a> {
         self.state.current_point = None;
         self.state.subpath_start = None;
         self.state.path_ctm_changed = false;
-        self.invocation_path.push(provenance.stream_offset);
+        self.invocation_path.push(stream_offset);
         let result =
             self.interpret_stream(stream, xobject_ref, depth + 1, effective_resources, false);
         self.invocation_path.pop();
@@ -2478,10 +2523,6 @@ impl<'a> SceneBuilder<'a> {
         Ok(owner)
     }
 
-    fn push_element(&mut self, element: PdfSceneElement) -> Result<(), PdfReadError> {
-        self.push_element_with_workspace(element, 0)
-    }
-
     fn push_element_with_workspace(
         &mut self,
         element: PdfSceneElement,
@@ -2776,7 +2817,7 @@ pub fn read_pdf_scene(
         {
             Ok((page, remaining_budget)) => {
                 budget = remaining_budget;
-                report.extend(&page.report);
+                report.extend(&page.report, |bytes| budget.charge(bytes))?;
                 scene_pages.push(page);
             }
             Err(PdfReadError::FilterUnsupported) => {
@@ -3485,10 +3526,6 @@ impl<'a> HexToken<'a> {
     }
 }
 
-fn parse_hex_token(token: &str) -> Result<Vec<u8>, PdfReadError> {
-    Ok(HexToken::new(token)?.to_bytes())
-}
-
 fn unicode_destination(
     token: HexToken<'_>,
     budget: &mut SceneBudget,
@@ -3565,8 +3602,8 @@ pub(super) struct ContentCursor<'a> {
     limits: PdfReaderLimits,
     remaining_tokens: usize,
     array_depth: usize,
-    decode_names: bool,
     open_comment: bool,
+    workspace: Option<SceneBudget>,
 }
 
 impl<'a> ContentCursor<'a> {
@@ -3577,15 +3614,8 @@ impl<'a> ContentCursor<'a> {
             remaining_tokens: limits.max_content_tokens,
             limits,
             array_depth: 0,
-            decode_names: false,
             open_comment: false,
-        }
-    }
-
-    fn for_scene(bytes: &'a [u8], limits: PdfReaderLimits) -> Self {
-        Self {
-            decode_names: true,
-            ..Self::new(bytes, limits)
+            workspace: None,
         }
     }
 
@@ -3598,6 +3628,28 @@ impl<'a> ContentCursor<'a> {
         let result = self.next_token(&mut remaining);
         self.remaining_tokens = remaining;
         result.map_err(PdfReadError::from)
+    }
+
+    fn next_scene_token(
+        &mut self,
+        remaining: &mut usize,
+        budget: &mut SceneBudget,
+    ) -> Result<Option<(ContentToken, usize, usize)>, ContentParseError> {
+        self.workspace = Some(*budget);
+        let result = self.next_token(remaining);
+        let workspace = self.workspace.take().unwrap();
+        // @invariant: Only a successfully returned token transfers live storage to the caller.
+        let token = result?;
+        let bytes = budget.remaining_scene_bytes - workspace.remaining_scene_bytes;
+        *budget = workspace;
+        Ok(token.map(|(token, offset)| (token, offset, bytes)))
+    }
+
+    fn charge_payload(&mut self, bytes: usize) -> Result<(), PdfReadError> {
+        if let Some(workspace) = &mut self.workspace {
+            workspace.charge(bytes)?;
+        }
+        Ok(())
     }
 
     fn next_token(
@@ -3634,15 +3686,17 @@ impl<'a> ContentCursor<'a> {
                     .iter()
                     .all(|byte| byte.is_ascii_digit() || matches!(*byte, b'+' | b'-'))
                 {
-                    ContentToken::Integer(parse_signed_i64(&word)?)
+                    ContentToken::Integer(parse_signed_i64(word)?)
                 } else if word
                     .iter()
                     .all(|byte| byte.is_ascii_digit() || matches!(*byte, b'+' | b'-' | b'.'))
                     && word.contains(&b'.')
                 {
-                    ContentToken::Number(parse_decimal(&word)?)
+                    ContentToken::Number(parse_decimal(word)?)
                 } else {
-                    ContentToken::Word(String::from_utf8(word).map_err(|_| PdfReadError::Syntax)?)
+                    let word = std::str::from_utf8(word).map_err(|_| PdfReadError::Syntax)?;
+                    self.charge_payload(word.len())?;
+                    ContentToken::Word(word.to_owned())
                 }
             }
         };
@@ -3670,24 +3724,23 @@ impl<'a> ContentCursor<'a> {
         }
     }
 
-    fn word(&mut self) -> Vec<u8> {
+    fn word(&mut self) -> &'a [u8] {
         let start = self.position;
         while self.position < self.bytes.len() && !is_content_delimiter(self.bytes[self.position]) {
             self.position += 1;
         }
-        self.bytes[start..self.position].to_vec()
+        &self.bytes[start..self.position]
     }
 
     fn name(&mut self) -> Result<String, PdfReadError> {
         self.position += 1;
-        if self.decode_names {
-            return read_scene_name(self.bytes, &mut self.position);
+        if let Some(workspace) = &mut self.workspace {
+            return read_scene_name(self.bytes, &mut self.position, |bytes| {
+                workspace.charge(bytes)
+            });
         }
-        let start = self.position;
-        while self.position < self.bytes.len() && !is_content_delimiter(self.bytes[self.position]) {
-            self.position += 1;
-        }
-        String::from_utf8(self.bytes[start..self.position].to_vec())
+        std::str::from_utf8(self.word())
+            .map(str::to_owned)
             .map_err(|_| PdfReadError::Syntax)
     }
 
@@ -3698,17 +3751,17 @@ impl<'a> ContentCursor<'a> {
         while self.position < self.bytes.len() {
             let byte = self.bytes[self.position];
             self.position += 1;
-            match byte {
+            let decoded = match byte {
                 b'(' => {
                     nesting += 1;
-                    output.push(byte);
+                    Some(byte)
                 }
                 b')' => {
                     nesting = nesting.checked_sub(1).ok_or(PdfReadError::Syntax)?;
                     if nesting == 0 {
                         return Ok(output);
                     }
-                    output.push(byte);
+                    Some(byte)
                 }
                 b'\\' => {
                     let escaped = self
@@ -3718,17 +3771,18 @@ impl<'a> ContentCursor<'a> {
                         .ok_or(ContentParseError::TruncatedOperand)?;
                     self.position += 1;
                     match escaped {
-                        b'n' => output.push(b'\n'),
-                        b'r' => output.push(b'\r'),
-                        b't' => output.push(b'\t'),
-                        b'b' => output.push(8),
-                        b'f' => output.push(12),
+                        b'n' => Some(b'\n'),
+                        b'r' => Some(b'\r'),
+                        b't' => Some(b'\t'),
+                        b'b' => Some(8),
+                        b'f' => Some(12),
                         b'\r' => {
                             if self.bytes.get(self.position) == Some(&b'\n') {
                                 self.position += 1;
                             }
+                            None
                         }
-                        b'\n' => {}
+                        b'\n' => None,
                         b'0'..=b'7' => {
                             let mut value = escaped - b'0';
                             for _ in 0..2 {
@@ -3741,21 +3795,27 @@ impl<'a> ContentCursor<'a> {
                                 self.position += 1;
                                 value = value.wrapping_mul(8).wrapping_add(next - b'0');
                             }
-                            output.push(value);
+                            Some(value)
                         }
-                        other => output.push(other),
+                        other => Some(other),
                     }
                 }
                 b'\r' => {
                     if self.bytes.get(self.position) == Some(&b'\n') {
                         self.position += 1;
                     }
-                    output.push(b'\n');
+                    Some(b'\n')
                 }
-                other => output.push(other),
-            }
-            if output.len() > self.limits.max_string_bytes {
-                return Err(PdfReadError::StreamLimit.into());
+                other => Some(other),
+            };
+            if let Some(byte) = decoded {
+                if output.len() >= self.limits.max_string_bytes {
+                    return Err(PdfReadError::StreamLimit.into());
+                }
+                if let Some(workspace) = &mut self.workspace {
+                    workspace.reserve_vec(&mut output, 1)?;
+                }
+                output.push(byte);
             }
         }
         Err(ContentParseError::TruncatedOperand)
@@ -3769,7 +3829,9 @@ impl<'a> ContentCursor<'a> {
             if byte == b'>' {
                 let token = std::str::from_utf8(&self.bytes[start..self.position])
                     .map_err(|_| PdfReadError::Syntax)?;
-                return Ok(parse_hex_token(token)?);
+                let token = HexToken::new(token)?;
+                self.charge_payload(token.decoded_len())?;
+                return Ok(token.to_bytes());
             }
             if !byte.is_ascii_hexdigit() {
                 return Err(PdfReadError::Syntax.into());
@@ -3797,6 +3859,9 @@ impl<'a> ContentCursor<'a> {
             let (value, _) = self
                 .next_token(remaining)?
                 .ok_or(ContentParseError::TruncatedOperand)?;
+            if let Some(workspace) = &mut self.workspace {
+                workspace.reserve_vec(&mut values, 1)?;
+            }
             values.push(value);
         }
     }
