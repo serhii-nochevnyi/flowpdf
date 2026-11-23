@@ -298,6 +298,11 @@ fn core_refuses_replacement_when_recognition_workspace_is_exhausted() {
     assert_eq!(roomy.snapshot().scene.text_pages[0].islands[0].text, "ЇA");
 }
 
+fn text_island_hash_work_variation(island_count: usize) -> usize {
+    // @invariant: Each byte of a session-bound island ID takes one to three JSON digits.
+    (island_count * 32 * 2).div_ceil(16)
+}
+
 #[test]
 fn core_replacement_shares_work_with_rewrite_and_exact_byte_projection() {
     let content = format!(
@@ -344,7 +349,8 @@ fn core_replacement_shares_work_with_rewrite_and_exact_byte_projection() {
         }
     }
 
-    let (mut tight, origin_binding, note_receipt) = accept_note(low - 1).unwrap();
+    let variation = text_island_hash_work_variation(4);
+    let (mut tight, origin_binding, note_receipt) = accept_note(low - variation - 1).unwrap();
     let before = tight.snapshot().clone();
     let accepted_bytes = tight.output_bytes().to_vec();
     assert_eq!(replace(&mut tight), Err(NativeSessionError::Budget));
@@ -363,21 +369,21 @@ fn core_replacement_shares_work_with_rewrite_and_exact_byte_projection() {
         Ok(NativeRequestLookup::Accepted(note_receipt))
     );
 
-    let (mut exact, _, _) = accept_note(low).unwrap();
-    let binding = exact.snapshot().binding;
-    let receipt = replace(&mut exact).unwrap();
-    let snapshot = exact.snapshot();
+    let (mut fitting, _, _) = accept_note(low + variation).unwrap();
+    let binding = fitting.snapshot().binding;
+    let receipt = replace(&mut fitting).unwrap();
+    let snapshot = fitting.snapshot();
     let island = &snapshot.scene.text_pages[0].islands[0];
     assert_eq!(island.text, "ЇA");
     assert_eq!(receipt.binding.revision, 2);
     assert_eq!(receipt.text_island, Some(island.id));
     assert_eq!(
-        exact.lookup(binding, 2),
+        fitting.lookup(binding, 2),
         Ok(NativeRequestLookup::Accepted(receipt))
     );
     assert_eq!(
         NativePdfSession::verify_text_projection(
-            exact.output_bytes(),
+            fitting.output_bytes(),
             snapshot.limits,
             snapshot.binding,
             &snapshot.scene.text_pages,
@@ -395,8 +401,10 @@ fn inherited_text_ownership_work_shares_the_rewrite_budget() {
         objects.push(b"<< /Font << /F1 5 0 R >> >>".to_vec());
         write_fixture(objects)
     };
-    let early = source("[4 0 R << /Values [1 2 3] >>]");
-    let late = source("[<< /Values [1 2 3] >> 4 0 R]");
+    // @invariant: Traversing the private array costs more than the island ID hash variation.
+    let private_values = format!("<< /Values [{}] >>", "1 ".repeat(64));
+    let early = source(&format!("[4 0 R {private_values}]"));
+    let late = source(&format!("[{private_values} 4 0 R]"));
     let defaults = NativeEditLimits::default();
     let accept_note = |bytes: &[u8], max_work| {
         let limits = NativeEditLimits {
@@ -435,10 +443,11 @@ fn inherited_text_ownership_work_shares_the_rewrite_budget() {
             Err(error) => panic!("unexpected refusal at {mid} work units: {error:?}"),
         }
     }
-    let (mut exact, _, _) = accept_note(&early, low).unwrap();
-    replace(&mut exact).unwrap();
+    let work = low + text_island_hash_work_variation(2);
+    let (mut early_fit, _, _) = accept_note(&early, work).unwrap();
+    replace(&mut early_fit).unwrap();
 
-    let (mut tight, origin_binding, note_receipt) = accept_note(&late, low).unwrap();
+    let (mut tight, origin_binding, note_receipt) = accept_note(&late, work).unwrap();
     let before = tight.snapshot().clone();
     let accepted_bytes = tight.output_bytes().to_vec();
     assert_eq!(replace(&mut tight), Err(NativeSessionError::Budget));

@@ -82,11 +82,42 @@ impl NativePdfNoteScene {
         pages: Vec<NativePdfNotePage>,
         text_pages: Vec<NativeTextPage>,
         object_pages: Vec<super::native::NativeObjectPage>,
+        work: &mut usize,
     ) -> Result<Self, super::native::NativeSessionError> {
-        struct HashWriter(blake3::Hasher);
-        impl std::io::Write for HashWriter {
+        use super::native::NativeSessionError::{self, Budget, Postcondition};
+
+        struct HashWriter<'a> {
+            hash: blake3::Hasher,
+            work: &'a mut usize,
+            bytes_written: usize,
+        }
+
+        impl HashWriter<'_> {
+            fn update(&mut self, bytes: &[u8]) -> Result<(), NativeSessionError> {
+                let bytes_written = self.bytes_written.checked_add(bytes.len()).ok_or(Budget)?;
+                // @invariant: Meter the canonical byte stream independently of serializer write boundaries.
+                let cost = bytes_written.div_ceil(16) - self.bytes_written.div_ceil(16);
+                *self.work = self.work.checked_sub(cost).ok_or(Budget)?;
+                self.bytes_written = bytes_written;
+                self.hash.update(bytes);
+                Ok(())
+            }
+
+            fn encode(&mut self, value: &impl Serialize) -> Result<(), NativeSessionError> {
+                serde_json::to_writer(self, value).map_err(|error| {
+                    if error.io_error_kind() == Some(std::io::ErrorKind::FileTooLarge) {
+                        Budget
+                    } else {
+                        Postcondition
+                    }
+                })
+            }
+        }
+
+        impl std::io::Write for HashWriter<'_> {
             fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-                self.0.update(bytes);
+                self.update(bytes)
+                    .map_err(|_| std::io::ErrorKind::FileTooLarge)?;
                 Ok(bytes.len())
             }
 
@@ -95,41 +126,37 @@ impl NativePdfNoteScene {
             }
         }
 
-        let mut writer = HashWriter(blake3::Hasher::new());
-        writer.0.update(b"flowpdf:accepted-note-scene:v2");
-        writer.0.update(&output_hash);
+        let mut writer = HashWriter {
+            hash: blake3::Hasher::new(),
+            work,
+            bytes_written: 0,
+        };
+        writer.update(b"flowpdf:accepted-note-scene:v2")?;
+        writer.update(&output_hash)?;
         for page in &pages {
-            serde_json::to_writer(
-                &mut writer,
-                &(page.object, page.geometry, page.can_add_note),
-            )
-            .map_err(|_| super::native::NativeSessionError::Postcondition)?;
+            writer.encode(&(page.object, page.geometry, page.can_add_note))?;
             for annotation in &page.annotations {
                 match annotation {
-                    NativePdfAnnotation::PlainNote(note) => serde_json::to_writer(
-                        &mut writer,
-                        &(note.object, note.rect, &note.contents),
-                    ),
+                    NativePdfAnnotation::PlainNote(note) => {
+                        writer.encode(&(note.object, note.rect, &note.contents))?
+                    }
                     NativePdfAnnotation::ReadOnly {
                         object,
                         profile,
                         rect,
-                    } => serde_json::to_writer(&mut writer, &(object, profile, rect)),
+                    } => writer.encode(&(object, profile, rect))?,
                 }
-                .map_err(|_| super::native::NativeSessionError::Postcondition)?;
             }
         }
         if !text_pages.is_empty() {
-            writer.0.update(b"flowpdf:native-text-pages:v1");
-            serde_json::to_writer(&mut writer, &text_pages)
-                .map_err(|_| super::native::NativeSessionError::Postcondition)?;
+            writer.update(b"flowpdf:native-text-pages:v1")?;
+            writer.encode(&text_pages)?;
         }
-        writer.0.update(b"flowpdf:native-object-pages:v1");
-        serde_json::to_writer(&mut writer, &object_pages)
-            .map_err(|_| super::native::NativeSessionError::Postcondition)?;
+        writer.update(b"flowpdf:native-object-pages:v1")?;
+        writer.encode(&object_pages)?;
         Ok(Self {
             output_hash,
-            scene_hash: *writer.0.finalize().as_bytes(),
+            scene_hash: *writer.hash.finalize().as_bytes(),
             pages,
             text_pages,
             object_pages,
