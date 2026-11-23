@@ -3714,7 +3714,6 @@ impl<'a> ContentCursor<'a> {
                 .split(|&byte| is_content_delimiter(byte) || matches!(byte, b'{' | b'}'))
                 .next()
                 .unwrap_or_default();
-            // @invariant: A legacy name may allocate its identity while decoded bytes are live.
             let reserved = if !raw.contains(&b'#') && std::str::from_utf8(raw).is_ok() {
                 raw.len()
             } else {
