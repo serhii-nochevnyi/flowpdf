@@ -639,10 +639,10 @@ fn assert_detached_object_projection_after_work_exhaustion(unsupported_curve: bo
             &snapshot.page_state,
         )
     };
-    let verify_page_exact = |binding, claimed_scene, page_state| {
+    let verify_page_exact = |verification_limits, binding, claimed_scene, page_state| {
         NativePdfSession::verify_page_projection(
             session.output_bytes(),
-            limits,
+            verification_limits,
             binding,
             claimed_scene,
             page_state,
@@ -665,8 +665,10 @@ fn assert_detached_object_projection_after_work_exhaustion(unsupported_curve: bo
     let mut wrong_scene_hash = snapshot.scene.scene_hash;
     wrong_scene_hash[0] ^= 1;
     assert_eq!(verify_page(wrong_scene_hash, rows), Ok(false));
+    // @invariant: Mismatch rejection requires enough work to hash the full detached scene.
     assert_eq!(
         verify_page_exact(
+            defaults,
             snapshot.binding,
             snapshot.scene.scene_hash,
             &snapshot.page_state,
@@ -674,7 +676,12 @@ fn assert_detached_object_projection_after_work_exhaustion(unsupported_curve: bo
         Ok(false)
     );
     assert_eq!(
-        verify_page_exact(full.binding, full.scene.scene_hash, &full.page_state),
+        verify_page_exact(
+            limits,
+            full.binding,
+            full.scene.scene_hash,
+            &full.page_state
+        ),
         Ok(true)
     );
 
