@@ -811,6 +811,7 @@ struct SceneBuilder<'a> {
     elements: Vec<PdfSceneElement>,
     emit_elements: bool,
     report: PdfReadReport,
+    operator_diagnostic_bytes: usize,
     fonts: BTreeMap<PdfObjectRef, Rc<FontMap>>,
     font_aliases: BTreeSet<Rc<str>>,
     font_cache_bytes: usize,
@@ -848,6 +849,7 @@ impl<'a> SceneBuilder<'a> {
             elements: Vec::new(),
             emit_elements: true,
             report: PdfReadReport::default(),
+            operator_diagnostic_bytes: 0,
             fonts: BTreeMap::new(),
             font_aliases: BTreeSet::new(),
             font_cache_bytes: 0,
@@ -903,8 +905,10 @@ impl<'a> SceneBuilder<'a> {
         let mut previous = None::<(PdfObjectRef, u8, bool)>;
         let mut unverified_boundary = None;
         for (index, content_ref) in self.page.contents.iter().enumerate() {
-            self.invocation_path =
-                vec![u32::try_from(index).map_err(|_| PdfReadError::NumericLimit)?];
+            self.invocation_path.clear();
+            self.budget.reserve_vec(&mut self.invocation_path, 1)?;
+            self.invocation_path
+                .push(u32::try_from(index).map_err(|_| PdfReadError::NumericLimit)?);
             match self
                 .reader
                 .scene_object(*content_ref, 0, self.budget.remaining_scene_bytes)
@@ -970,7 +974,9 @@ impl<'a> SceneBuilder<'a> {
             self.report_partial(object_ref);
         }
         drop(resource_owner);
-        self.budget.release(resource_bytes);
+        let invocation_bytes = self.invocation_path.capacity() * size_of::<u32>();
+        drop(std::mem::take(&mut self.invocation_path));
+        self.budget.release(resource_bytes + invocation_bytes);
         self.discard_saved_states(0);
         let stack_bytes = self.state_stack.capacity() * size_of::<GraphicsState>();
         drop(self.state_stack);
@@ -991,6 +997,7 @@ impl<'a> SceneBuilder<'a> {
             report: self.report,
         };
         // @invariant: Element JSON is charged before retention; this charges the rest of the page.
+        self.budget.release(self.operator_diagnostic_bytes);
         self.budget.encode(&page)?;
         page.elements = self.elements;
         Ok((page, self.budget))
@@ -1048,17 +1055,13 @@ impl<'a> SceneBuilder<'a> {
                             .source_offset
                             .checked_add(cursor.position())
                             .ok_or(PdfReadError::NumericLimit)?;
-                        let text_source_bytes =
-                            if matches!(operator.as_str(), "Tj" | "TJ" | "'" | "\"") {
-                                operator.len() + self.invocation_path.len() * size_of::<u32>()
-                            } else {
-                                0
-                            };
+                        let mut provenance_bytes =
+                            operator.len() + size_of_val(self.invocation_path.as_slice());
                         let stream_offset =
                             u32::try_from(stream_offset).map_err(|_| PdfReadError::NumericLimit)?;
                         let stream_end =
                             u32::try_from(stream_end).map_err(|_| PdfReadError::NumericLimit)?;
-                        self.budget.charge(text_source_bytes)?;
+                        self.budget.charge(provenance_bytes)?;
                         let provenance = PdfSourceProvenance {
                             object_ref,
                             stream_offset,
@@ -1074,6 +1077,7 @@ impl<'a> SceneBuilder<'a> {
                                 &operator,
                                 &operands,
                                 provenance,
+                                &mut provenance_bytes,
                                 resources,
                                 stack_floor,
                             )
@@ -1082,7 +1086,7 @@ impl<'a> SceneBuilder<'a> {
                                 error => error.into(),
                             })
                         };
-                        self.budget.release(text_source_bytes);
+                        self.budget.release(provenance_bytes);
                         result?;
                         drop(operator);
                         operands.clear();
@@ -1119,6 +1123,7 @@ impl<'a> SceneBuilder<'a> {
         operator: &str,
         operands: &[ContentToken],
         provenance: PdfSourceProvenance,
+        provenance_bytes: &mut usize,
         resources: Option<&PdfValue>,
         stack_floor: usize,
     ) -> Result<(), PdfReadError> {
@@ -1351,23 +1356,32 @@ impl<'a> SceneBuilder<'a> {
                 self.state.line_width = None;
                 self.state.miter_limit = None;
             }
-            "BI" | "ID" | "EI" => self.report.push(
-                PdfReadDiagnostic::blocked(
-                    PdfReadDiagnosticCode::UnsupportedOperator,
-                    Some(self.page_index),
-                    Some(object_ref.object_number),
-                )
-                .with_operator(operator),
-            ),
             known if is_known_noop(known) => {}
-            _ => self.report.push(
-                PdfReadDiagnostic::warning(
-                    PdfReadDiagnosticCode::UnsupportedOperator,
-                    Some(self.page_index),
-                    Some(object_ref.object_number),
-                )
-                .with_operator(operator),
-            ),
+            unsupported => {
+                let diagnostic = if matches!(unsupported, "BI" | "ID" | "EI") {
+                    PdfReadDiagnostic::blocked(
+                        PdfReadDiagnosticCode::UnsupportedOperator,
+                        Some(self.page_index),
+                        Some(object_ref.object_number),
+                    )
+                } else {
+                    PdfReadDiagnostic::warning(
+                        PdfReadDiagnosticCode::UnsupportedOperator,
+                        Some(self.page_index),
+                        Some(object_ref.object_number),
+                    )
+                };
+                let diagnostic = PdfReadDiagnostic {
+                    operator: provenance.operator,
+                    ..diagnostic
+                };
+                if !self.report.diagnostics.contains(&diagnostic) {
+                    let bytes = diagnostic.operator.as_ref().map_or(0, String::capacity);
+                    *provenance_bytes -= bytes;
+                    self.operator_diagnostic_bytes += bytes;
+                }
+                self.report.push(diagnostic);
+            }
         }
         Ok(())
     }
@@ -2077,20 +2091,28 @@ impl<'a> SceneBuilder<'a> {
             && form_paint_bounds.is_some()
             && form_paint_ctm.is_some_and(PaintMatrix::is_axis_aligned);
         let clip = self.state.clip.intersect(form_bounds, rectangular)?;
-        self.push_element(PdfSceneElement::Annotation {
-            value: PdfAnnotationElement {
-                subtype: Some("FormXObject".to_owned()),
-                kind: PdfAnnotationKind::Supported,
-                rect: form_bounds,
-                provenance: PdfSourceProvenance {
-                    object_ref: xobject_ref,
-                    ..provenance.clone()
+        let stream_offset = provenance.stream_offset;
+        let subtype = "FormXObject";
+        self.budget.remaining_after(subtype.len())?;
+        let retained = provenance.heap_bytes() + subtype.len();
+        self.push_element_with_workspace(
+            PdfSceneElement::Annotation {
+                value: PdfAnnotationElement {
+                    subtype: Some(subtype.to_owned()),
+                    kind: PdfAnnotationKind::Supported,
+                    rect: form_bounds,
+                    provenance: PdfSourceProvenance {
+                        object_ref: xobject_ref,
+                        ..provenance
+                    },
                 },
             },
-        })?;
+            retained,
+        )?;
         if clip.is_empty() && form_paint_clip.is_empty() {
             return Ok(());
         }
+        self.budget.reserve_vec(&mut self.invocation_path, 1)?;
         let caller_state_index = self.state_stack.len();
         self.save_form_caller()?;
         let caller_emit_elements = self.emit_elements;
@@ -2103,7 +2125,7 @@ impl<'a> SceneBuilder<'a> {
         self.state.current_point = None;
         self.state.subpath_start = None;
         self.state.path_ctm_changed = false;
-        self.invocation_path.push(provenance.stream_offset);
+        self.invocation_path.push(stream_offset);
         let result =
             self.interpret_stream(stream, xobject_ref, depth + 1, effective_resources, false);
         self.invocation_path.pop();
@@ -2492,10 +2514,6 @@ impl<'a> SceneBuilder<'a> {
             .checked_sub(1)
             .ok_or(PdfReadError::TokenLimit)?;
         Ok(owner)
-    }
-
-    fn push_element(&mut self, element: PdfSceneElement) -> Result<(), PdfReadError> {
-        self.push_element_with_workspace(element, 0)
     }
 
     fn push_element_with_workspace(
@@ -3710,19 +3728,9 @@ impl<'a> ContentCursor<'a> {
     fn name(&mut self) -> Result<String, PdfReadError> {
         self.position += 1;
         if let Some(workspace) = &mut self.workspace {
-            let raw = self.bytes[self.position..]
-                .split(|&byte| is_content_delimiter(byte) || matches!(byte, b'{' | b'}'))
-                .next()
-                .unwrap_or_default();
-            let reserved = if !raw.contains(&b'#') && std::str::from_utf8(raw).is_ok() {
-                raw.len()
-            } else {
-                raw.len().saturating_mul(3).saturating_add(1)
-            };
-            workspace.charge(reserved)?;
-            let name = read_scene_name(self.bytes, &mut self.position)?;
-            workspace.release(reserved - name.capacity());
-            return Ok(name);
+            return read_scene_name(self.bytes, &mut self.position, |bytes| {
+                workspace.charge(bytes)
+            });
         }
         std::str::from_utf8(self.word())
             .map(str::to_owned)
