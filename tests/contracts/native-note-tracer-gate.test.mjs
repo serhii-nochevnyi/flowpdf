@@ -119,6 +119,19 @@ test('requires the configured workflow, current attempt, and exact Actions check
   })
 })
 
+test('accepts the reviewed historical and current provenance pairs and rejects mixed inputs', (t) => {
+  const paths = ['config/dependency-provenance.json', 'artifacts/provenance/phase1-dependencies.json']
+  assert.equal(requirePassedCi('HEAD', fixture().command).sha, sha)
+
+  const historical = harnessFilesFrom(t, baselineRevision, paths)
+  if (!historical) return
+  assert.equal(requirePassedCi('HEAD', fixture({ historicalFiles: historical }).command).sha, sha)
+  for (const path of paths) {
+    const mixed = fixture({ historicalFiles: new Map([[path, historical.get(path)]]) })
+    assert.throws(() => requirePassedCi('HEAD', mixed.command), /HARNESS_NOT_APPROVED/)
+  }
+})
+
 test('requires the expanded workflow and package for the current browser harness', () => {
   for (const options of [{ expanded: false, updatedPackage: false }, { updatedPackage: false }, { expanded: false }]) {
     assert.throws(() => requirePassedCi('HEAD', fixture(options).command), /HARNESS_NOT_APPROVED/)

@@ -18,8 +18,6 @@ const approvedHarness = [
   ['rust-toolchain.toml', '683619e182e9d4e060bf754a8385eed1a1220cbc3e5a09e8c2dd22520af25dc6'],
   ['tsconfig.json', '8b048c299a7d6e709b15625b92a2bc4969f6891ee2eeb8176e6f05379dbb8a75'],
   ['tsconfig.web.json', 'c8fdaf6db3e965a6bdd4157bb88de4edb9c6a8976bf1b4233d08de1c7690c38f'],
-  ['config/dependency-provenance.json', 'dbfb8e57d8f131f98b269729568e920b0e98a1d81379859cdd8d45091a5f45e0'],
-  ['artifacts/provenance/phase1-dependencies.json', '7f3c1e134e955d2bfae6e696a2419164d92f0e19938793a7a61ccd19f5a3ba10'],
   ['scripts/build-web.mjs', 'f7c8e5fb15b200bad752c4c9d771a6b14b099d129f06bb51e5794595b7d49467'],
   ['scripts/verify-wasm-bindgen-tool.mjs', 'b80611196dcf834dd5ff2042bc58659539ae616529f14720d220eb740384c6c4'],
   ['scripts/node-version.mjs', '012d4782d3bef70f1cf7b4fa38eac1a550b8cb0b08bf7b8ebdce4f7a6de1a1db'],
@@ -29,6 +27,13 @@ const approvedHarness = [
   ['web/editor.html', '1827eb7316907e5b0fabad0b7da31ea19172f65056d969ee05bbd9e01f8f5063'],
   ['scripts/check-native-note-built.mjs', 'aa9ae9e33f53a1ea00a92163ad9f2951d30705ce6892abd8f055b2877faed105'],
   ['scripts/serve-inspector.mjs', '07e3f482d39f79c3e4e3423e2627c5971477e492fc26855583ce37c77fe98376'],
+]
+const provenancePaths = ['config/dependency-provenance.json', 'artifacts/provenance/phase1-dependencies.json']
+const approvedProvenancePairs = [
+  ['dbfb8e57d8f131f98b269729568e920b0e98a1d81379859cdd8d45091a5f45e0',
+    '7f3c1e134e955d2bfae6e696a2419164d92f0e19938793a7a61ccd19f5a3ba10'],
+  ['f1aa7be706e71cc07255d57325b2bd24a5f0ee7c5c798024e88acdf81b589907',
+    'e3dd49039e373a7f61ca1436b37254b338b4422d80e8e92269a50e8dbf70a753'],
 ]
 const historicalWorkflow = '62f76deaa269fe69c7e44dcd54458f26ab4d65ea0b195fc1636a6c65788cd2d4'
 const expandedWorkflow = '8d8e9d50c10fc6f3bed4803254abf99ac5955b445a81d699b785710268354a80'
@@ -175,6 +180,9 @@ export function requirePassedCi(ref, command = execute) {
     requireEvidence(harnessDigest(path) === digest,
       'NATIVE_NOTE_TRACER_HARNESS_NOT_APPROVED')
   }
+  const provenanceDigests = provenancePaths.map(harnessDigest)
+  requireEvidence(approvedProvenancePairs.some((pair) => pair.every((digest, index) =>
+    digest === provenanceDigests[index])), 'NATIVE_NOTE_TRACER_HARNESS_NOT_APPROVED')
   const historicalBrowserHarness = expanded ? [historicalNote, ...expandedHarness] : [historicalNote]
   const observedBrowserHarness = new Map(historicalBrowserHarness.map(([path]) => [path, harnessDigest(path)]))
   const matchesBrowserHarness = (profile) => profile.every(([path, digest]) => observedBrowserHarness.get(path) === digest)
