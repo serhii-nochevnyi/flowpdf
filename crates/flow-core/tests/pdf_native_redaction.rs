@@ -130,7 +130,7 @@ fn jpeg_pdf(filter: &str, data: &[u8]) -> Vec<u8> {
 
 #[test]
 fn ordinary_rgb_scan_readback() {
-    let (width, height) = (1280, 960);
+    let (width, height) = (1440, 1080);
     let samples = [208, 140, 80].repeat(width * height);
     let source = pdf(
         vec![
