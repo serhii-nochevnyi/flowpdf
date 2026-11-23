@@ -890,8 +890,12 @@ fn topmost_insertion_keeps_redaction_admission_after_translation_and_scale() {
 #[test]
 fn nested_shared_image_invocations_are_isolated() {
     let resources = "/Resources << /XObject << /Fm 6 0 R >> >>";
+    let outer = stream(
+        "/Type /XObject /Subtype /Form /BBox [0 0 40 40] /Resources << /XObject << /Inner 7 0 R >> >>",
+        b"/Inner Do",
+    );
     let form = stream(
-        "/Type /XObject /Subtype /Form /BBox [0 0 40 40] /Resources << /XObject << /I 7 0 R >> >>",
+        "/Type /XObject /Subtype /Form /BBox [0 0 40 40] /Resources << /XObject << /I 8 0 R >> >>",
         b"q 10 0 0 10 10 10 cm /I Do Q",
     );
     let pixels = miniz_oxide::deflate::compress_to_vec_zlib(&[7], 6);
@@ -903,9 +907,13 @@ fn nested_shared_image_invocations_are_isolated() {
         b"/Fm Do q 1 0 0 1 60 0 cm /Fm Do Q",
         true,
         resources,
-        &[form, image],
+        &[outer, form, image],
     );
     let mut session = open(&source);
+    let binding = session.snapshot().binding;
+    let before = &session.snapshot().scene.object_pages[0].objects;
+    let untouched = before[0].bounds;
+    assert_ne!(before[0].id, before[1].id);
     let selected = target(&session, 0, 1);
     apply(
         &mut session,
@@ -916,6 +924,26 @@ fn nested_shared_image_invocations_are_isolated() {
         objects(&session, 0)[1]["bounds"],
         json!([75000, 10000, 85000, 20000])
     );
+    let snapshot = session.snapshot();
+    let mut claims = snapshot.scene.object_pages.clone();
+    assert_eq!(claims[0].objects[0].bounds, untouched);
+    let Ok(NativeRequestLookup::Accepted(receipt)) = session.lookup(binding, 1) else {
+        panic!("expected the accepted move receipt");
+    };
+    assert_eq!(receipt.object, Some(claims[0].objects[1].id));
+    let verify = |claims: &[NativeObjectPage]| {
+        NativePdfSession::verify_edit_projection(
+            session.output_bytes(),
+            snapshot.limits,
+            snapshot.binding,
+            &snapshot.scene.text_pages,
+            claims,
+        )
+    };
+    assert_eq!(verify(&claims), Ok(true));
+    claims[0].objects.swap(0, 1);
+    assert_eq!(verify(&claims), Ok(false));
+
     let selected = target(&session, 0, 0);
     apply(
         &mut session,
