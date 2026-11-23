@@ -19,8 +19,8 @@ use super::reader::{
     AnnotationValue, PageResources, PdfObjectRef, PdfPageRecord, PdfReadDiagnostic,
     PdfReadDiagnosticCode, PdfReadError, PdfReadReport, PdfReader, PdfReaderLimits, PdfStream,
     PdfValue, charge_scene_workspace, decode_pdf_text_string, map_widget_label_with_workspace,
-    read_scene_name, report_active_content, resolve_annotation_value, scene_name_label,
-    single_filter,
+    read_scene_name, report_active_content, reserve_scene_vec, resolve_annotation_value,
+    scene_name_label, single_filter,
 };
 
 use super::native::{NativeNoteId, NativePageGeometry, NativePageId, NativeTextPage};
@@ -842,7 +842,7 @@ struct SceneBuilder<'a> {
     fonts: BTreeMap<PdfObjectRef, Rc<FontMap>>,
     font_aliases: BTreeSet<Rc<str>>,
     font_cache_bytes: usize,
-    page_refs: BTreeMap<PdfObjectRef, u32>,
+    page_refs: &'a [(PdfObjectRef, u32)],
     state: GraphicsState,
     state_stack: Vec<GraphicsState>,
     invocation_path: Vec<u32>,
@@ -857,7 +857,7 @@ struct ContentStreamEnd {
 impl<'a> SceneBuilder<'a> {
     fn new(
         reader: &'a PdfReader,
-        pages: &'a [PdfPageRecord],
+        page_refs: &'a [(PdfObjectRef, u32)],
         page_index: u32,
         page: &'a PdfPageRecord,
         field_root_counts: &'a BTreeMap<PdfObjectRef, usize>,
@@ -880,15 +880,7 @@ impl<'a> SceneBuilder<'a> {
             fonts: BTreeMap::new(),
             font_aliases: BTreeSet::new(),
             font_cache_bytes: 0,
-            page_refs: pages
-                .iter()
-                .enumerate()
-                .filter_map(|(index, page)| {
-                    u32::try_from(index)
-                        .ok()
-                        .map(|index| (page.object_ref, index))
-                })
-                .collect(),
+            page_refs,
             state: GraphicsState::new(page.media_box, PaintBounds(page.media_edges)),
             state_stack: Vec::new(),
             invocation_path: Vec::new(),
@@ -2463,7 +2455,13 @@ impl<'a> SceneBuilder<'a> {
                     .as_deref()
                     .and_then(PdfValue::as_array)
                     .and_then(explicit_destination_target)
-                    .and_then(|reference| self.page_refs.get(&reference).copied())
+                    .and_then(|reference| {
+                        let index = self.page_refs.partition_point(|(key, _)| *key <= reference);
+                        self.page_refs[..index]
+                            .last()
+                            .filter(|(key, _)| *key == reference)
+                            .map(|(_, index)| *index)
+                    })
                 {
                     return Ok(Some(page_index));
                 }
@@ -2667,22 +2665,7 @@ impl SceneBudget {
         values: &mut Vec<T>,
         additional: usize,
     ) -> Result<(), PdfReadError> {
-        let old_capacity = values.capacity();
-        let needed = values.len() + additional;
-        if needed > old_capacity {
-            let capacity = needed.max(old_capacity.saturating_add(old_capacity / 2));
-            let bytes = capacity
-                .checked_mul(size_of::<T>())
-                .ok_or(PdfReadError::StreamLimit)?;
-            // @invariant: Growth reserves a new buffer while the old allocation is charged.
-            self.remaining_after(bytes)?;
-            values
-                .try_reserve_exact(capacity - values.len())
-                .map_err(|_| PdfReadError::StreamLimit)?;
-            self.charge(values.capacity() * size_of::<T>())?;
-            self.release(old_capacity * size_of::<T>());
-        }
-        Ok(())
+        reserve_scene_vec(values, additional, &mut self.remaining_scene_bytes)
     }
 
     fn encode(&mut self, value: &impl Serialize) -> Result<(), PdfReadError> {
@@ -2818,7 +2801,8 @@ pub fn read_pdf_scene(
     let scene_byte_limit = reader.limits().max_scene_bytes;
     let workspace = Cell::new(scene_byte_limit);
     let catalog = reader.scene_non_stream_object(reader.root_for_scene(), 0, &workspace)?;
-    let pages = reader.page_records_from_root(PdfReader::page_tree_root(&catalog)?)?;
+    let pages =
+        reader.page_records_from_root(PdfReader::page_tree_root(&catalog)?, Some(&workspace))?;
     let page_count = u32::try_from(pages.len()).map_err(|_| PdfReadError::PageCountLimit)?;
     let first = usize::try_from(request.first_page).map_err(|_| PdfReadError::PageCountLimit)?;
     let count = usize::try_from(request.page_count).map_err(|_| PdfReadError::PageCountLimit)?;
@@ -2837,10 +2821,27 @@ pub fn read_pdf_scene(
         remaining_scene_bytes: workspace.into_inner(),
         remaining_image_hex_bytes: reader.limits().max_stream_bytes,
     };
+    let mut page_refs = Vec::new();
+    if pages[first..end]
+        .iter()
+        .any(|page| !page.annotations.is_empty())
+    {
+        budget.reserve_vec(&mut page_refs, pages.len())?;
+        page_refs.extend(pages.iter().map(|page| page.object_ref).zip(0..page_count));
+        page_refs.sort_unstable();
+    }
     let mut scene_pages = Vec::with_capacity(end.saturating_sub(first));
     for (index, page) in pages.iter().enumerate().take(end).skip(first) {
         let page_index = u32::try_from(index).map_err(|_| PdfReadError::PageCountLimit)?;
-        match SceneBuilder::new(reader, &pages, page_index, page, &field_root_counts, budget).run()
+        match SceneBuilder::new(
+            reader,
+            &page_refs,
+            page_index,
+            page,
+            &field_root_counts,
+            budget,
+        )
+        .run()
         {
             Ok((page, remaining_budget)) => {
                 budget = remaining_budget;
@@ -2857,6 +2858,8 @@ pub fn read_pdf_scene(
             Err(error) => return Err(error),
         }
     }
+    drop(page_refs);
+    drop(pages);
     drop(field_root_counts);
     let mut scene = PdfScene {
         schema_version: PDF_SCENE_SCHEMA_VERSION,

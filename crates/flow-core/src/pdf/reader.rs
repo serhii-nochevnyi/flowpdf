@@ -494,6 +494,36 @@ pub(super) fn charge_scene_workspace(
     Ok(())
 }
 
+pub(super) fn reserve_scene_vec<T>(
+    values: &mut Vec<T>,
+    additional: usize,
+    remaining: &mut usize,
+) -> Result<(), PdfReadError> {
+    let old_capacity = values.capacity();
+    let needed = values
+        .len()
+        .checked_add(additional)
+        .ok_or(PdfReadError::StreamLimit)?;
+    if needed > old_capacity && size_of::<T>() != 0 {
+        let capacity = needed.max(old_capacity.saturating_add(old_capacity / 2));
+        let bytes = capacity
+            .checked_mul(size_of::<T>())
+            .ok_or(PdfReadError::StreamLimit)?;
+        // @invariant: The old allocation stays charged until replacement capacity is obtained.
+        remaining
+            .checked_sub(bytes)
+            .ok_or(PdfReadError::StreamLimit)?;
+        values
+            .try_reserve_exact(capacity - values.len())
+            .map_err(|_| PdfReadError::StreamLimit)?;
+        *remaining = remaining
+            .checked_sub(values.capacity() * size_of::<T>())
+            .ok_or(PdfReadError::StreamLimit)?
+            + old_capacity * size_of::<T>();
+    }
+    Ok(())
+}
+
 struct SceneReservation<'a> {
     remaining: &'a Cell<usize>,
     bytes: usize,
@@ -511,6 +541,23 @@ impl<'a> SceneReservation<'a> {
         charge_scene_workspace(self.remaining, bytes)?;
         self.bytes += bytes;
         Ok(())
+    }
+
+    fn reserve_vec<T>(
+        &mut self,
+        values: &mut Vec<T>,
+        additional: usize,
+    ) -> Result<(), PdfReadError> {
+        let before = self.remaining.get();
+        let mut remaining = before;
+        reserve_scene_vec(values, additional, &mut remaining)?;
+        self.remaining.set(remaining);
+        self.bytes += before - remaining;
+        Ok(())
+    }
+
+    fn keep_charge(mut self) {
+        self.bytes = 0;
     }
 }
 
@@ -826,6 +873,14 @@ pub struct PdfReader {
     limits: PdfReaderLimits,
 }
 
+struct PageDiscovery<'workspace> {
+    pages: Vec<PdfPageRecord>,
+    active: Vec<PdfObjectRef>,
+    active_storage: SceneReservation<'workspace>,
+    storage: SceneReservation<'workspace>,
+    workspace: Option<&'workspace Cell<usize>>,
+}
+
 #[derive(Clone, Copy)]
 enum ObjectRead {
     Preview,
@@ -838,6 +893,30 @@ fn scene_read_error(error: PdfReadError) -> PdfReadError {
         PdfReadError::InputSizeLimit => PdfReadError::StreamLimit,
         error => error,
     }
+}
+
+fn read_workspace_value(
+    workspace: Option<&Cell<usize>>,
+    read: impl FnOnce(ObjectRead) -> Result<(PdfValue, usize), PdfReadError>,
+) -> Result<AnnotationValue<'static, '_>, PdfReadError> {
+    let mode = workspace.map_or(ObjectRead::Preview, |workspace| {
+        ObjectRead::Scene(workspace.get())
+    });
+    let (value, bytes) = read(mode).map_err(|error| {
+        if workspace.is_some() {
+            scene_read_error(error)
+        } else {
+            error
+        }
+    })?;
+    let mut reservation = workspace.map(SceneReservation::new);
+    if let Some(reservation) = &mut reservation {
+        reservation.charge(bytes)?;
+    }
+    Ok(AnnotationValue {
+        value: Cow::Owned(value),
+        _reservation: reservation,
+    })
 }
 
 impl PdfReader {
@@ -891,21 +970,49 @@ impl PdfReader {
         depth: usize,
         workspace: &'workspace Cell<usize>,
     ) -> Result<AnnotationValue<'static, 'workspace>, PdfReadError> {
-        let available = workspace.get();
-        let (value, bytes) = (|| {
-            let (mut cursor, _) =
-                self.object_cursor(reference, depth, ObjectRead::Scene(available))?;
+        self.read_cursor_value(reference, depth, Some(workspace), |cursor| {
             let value = cursor.parse_value(0)?;
             cursor.require_object_keyword(b"endobj")?;
-            Ok((value, available - cursor.remaining.unwrap_or(0)))
-        })()
-        .map_err(scene_read_error)?;
-        let mut reservation = SceneReservation::new(workspace);
-        reservation.charge(bytes)?;
-        Ok(AnnotationValue {
-            value: Cow::Owned(value),
-            _reservation: Some(reservation),
+            Ok(value)
         })
+    }
+
+    fn read_cursor_value<'workspace>(
+        &self,
+        reference: PdfObjectRef,
+        depth: usize,
+        workspace: Option<&'workspace Cell<usize>>,
+        parse: impl FnOnce(&mut Cursor<'_>) -> Result<PdfValue, PdfReadError>,
+    ) -> Result<AnnotationValue<'static, 'workspace>, PdfReadError> {
+        read_workspace_value(workspace, |mode| {
+            let (mut cursor, _) = self.object_cursor(reference, depth, mode)?;
+            let value = parse(&mut cursor)?;
+            let bytes = workspace.map_or(0, |workspace| {
+                workspace.get() - cursor.remaining.unwrap_or(0)
+            });
+            Ok((value, bytes))
+        })
+    }
+
+    fn resolve_page_value<'value, 'workspace>(
+        &self,
+        value: &'value PdfValue,
+        depth: usize,
+        workspace: Option<&'workspace Cell<usize>>,
+    ) -> Result<AnnotationValue<'value, 'workspace>, PdfReadError> {
+        if depth > self.limits.max_nesting {
+            return Err(PdfReadError::NestingLimit);
+        }
+        match value {
+            PdfValue::Reference(reference) => {
+                let depth = depth.checked_add(1).ok_or(PdfReadError::NestingLimit)?;
+                read_workspace_value(workspace, |mode| {
+                    self.read_object(*reference, depth, mode)
+                        .map(|(value, bytes, _)| (value, bytes))
+                })
+            }
+            _ => Ok(AnnotationValue::borrowed(value)),
+        }
     }
 
     pub(super) fn scene_label_object<'workspace>(
@@ -960,26 +1067,13 @@ impl PdfReader {
             .map(|entry| entry.offset)
     }
 
-    pub(crate) fn resolve(&self, value: &PdfValue, depth: usize) -> Result<PdfValue, PdfReadError> {
-        if depth > self.limits.max_nesting {
-            return Err(PdfReadError::NestingLimit);
-        }
-        match value {
-            PdfValue::Reference(reference) => self.object_with_depth(
-                *reference,
-                depth.checked_add(1).ok_or(PdfReadError::NestingLimit)?,
-            ),
-            _ => Ok(value.clone()),
-        }
-    }
-
     fn page_records(&self) -> Result<Vec<PdfPageRecord>, PdfReadError> {
         let pages_ref = self
             .trailer
             .get("Root")
             .ok_or(PdfReadError::RootMissing)
             .and_then(|_| Self::page_tree_root(&self.object(self.root)?))?;
-        self.page_records_from_root(pages_ref)
+        self.page_records_from_root(pages_ref, None)
     }
 
     pub(super) fn page_tree_root(catalog: &PdfValue) -> Result<PdfObjectRef, PdfReadError> {
@@ -993,11 +1087,23 @@ impl PdfReader {
     pub(super) fn page_records_from_root(
         &self,
         pages_ref: PdfObjectRef,
+        workspace: Option<&Cell<usize>>,
     ) -> Result<Vec<PdfPageRecord>, PdfReadError> {
-        let mut pages = Vec::new();
-        let mut active = BTreeSet::new();
-        self.collect_pages(pages_ref, (None, None), None, 0, &mut active, &mut pages)?;
-        Ok(pages)
+        let unmetered = Cell::new(usize::MAX);
+        let remaining = workspace.unwrap_or(&unmetered);
+        let active_storage = SceneReservation::new(remaining);
+        let storage = SceneReservation::new(remaining);
+        let mut discovery = PageDiscovery {
+            pages: Vec::new(),
+            active: Vec::new(),
+            active_storage,
+            storage,
+            workspace,
+        };
+        self.collect_pages(pages_ref, (None, None), None, 0, &mut discovery)?;
+        // @invariant: Page records and their references stay charged in the scene caller.
+        discovery.storage.keep_charge();
+        Ok(discovery.pages)
     }
 
     pub(crate) fn into_retained_parts(self) -> (Vec<u8>, BTreeMap<String, PdfValue>) {
@@ -1256,19 +1362,26 @@ impl PdfReader {
         inherited_boxes: (Option<PageBox>, Option<PageBox>),
         inherited_resources: Option<PageResources>,
         depth: usize,
-        active: &mut BTreeSet<PdfObjectRef>,
-        pages: &mut Vec<PdfPageRecord>,
+        discovery: &mut PageDiscovery<'_>,
     ) -> Result<(), PdfReadError> {
         if depth > self.limits.max_nesting {
             return Err(PdfReadError::NestingLimit);
         }
-        if !active.insert(reference) {
+        if discovery.active.contains(&reference) {
             return Err(PdfReadError::PageTreeInvalid);
         }
-        let (mut cursor, _) = self.object_cursor(reference, 0, ObjectRead::Preview)?;
-        cursor.defer_page_resources = true;
-        let value = cursor.object_value()?;
-        cursor.require_object_keyword(b"endobj")?;
+        discovery
+            .active_storage
+            .reserve_vec(&mut discovery.active, 1)?;
+        discovery.active.push(reference);
+
+        let workspace = discovery.workspace;
+        let value = self.read_cursor_value(reference, 0, workspace, |cursor| {
+            cursor.defer_page_resources = true;
+            let value = cursor.object_value()?;
+            cursor.require_object_keyword(b"endobj")?;
+            Ok(value)
+        })?;
         let dictionary = value.as_dictionary().ok_or(PdfReadError::PageTreeInvalid)?;
         let type_name = dictionary
             .get("Type")
@@ -1277,17 +1390,19 @@ impl PdfReader {
         let (inherited_media_box, inherited_crop_box) = inherited_boxes;
         let media_box = dictionary
             .get("MediaBox")
-            .map(|value| self.resolve(value, depth + 1))
+            .map(|value| self.resolve_page_value(value, depth + 1, workspace))
             .transpose()?
             .map(|value| parse_page_box(&value, false))
-            .transpose()?;
+            .transpose()?
+            .or(inherited_media_box);
         let crop_box = dictionary
             .get("CropBox")
-            .map(|value| self.resolve(value, depth + 1))
+            .map(|value| self.resolve_page_value(value, depth + 1, workspace))
             .transpose()?
-            .filter(|value| !matches!(value, PdfValue::Null))
+            .filter(|value| !matches!(&**value, PdfValue::Null))
             .map(|value| parse_page_box(&value, true))
-            .transpose()?;
+            .transpose()?
+            .or(inherited_crop_box);
         let resources = match dictionary.get("Resources") {
             Some(PdfValue::Reference(resource)) => {
                 Some(PageResources::Indirect(*resource, depth + 2))
@@ -1295,74 +1410,54 @@ impl PdfReader {
             Some(_) => Some(PageResources::Direct(reference)),
             None => inherited_resources,
         };
-        let media_box = media_box.or(inherited_media_box);
-        let crop_box = crop_box.or(inherited_crop_box);
         match type_name {
             "Pages" => {
+                let mut storage = SceneReservation::new(discovery.storage.remaining);
                 let kids = dictionary
                     .get("Kids")
-                    .ok_or(PdfReadError::PageTreeInvalid)
-                    .and_then(|value| self.resolve(value, depth + 1))?
-                    .as_array()
-                    .ok_or(PdfReadError::PageTreeInvalid)?
-                    .to_vec();
-                if kids.len() > self.limits.max_pages {
+                    .ok_or(PdfReadError::PageTreeInvalid)?;
+                let kids = self.resolve_page_value(kids, depth + 1, workspace)?;
+                let values = kids.as_array().ok_or(PdfReadError::PageTreeInvalid)?;
+                if values.len() > self.limits.max_pages {
                     return Err(PdfReadError::PageCountLimit);
                 }
-                for kid in kids {
-                    let kid = kid.as_reference().ok_or(PdfReadError::PageTreeInvalid)?;
+                let mut children = Vec::new();
+                storage.reserve_vec(&mut children, values.len())?;
+                children.extend(values.iter().map(PdfValue::as_reference));
+                drop(kids);
+                drop(value);
+
+                for kid in children {
                     self.collect_pages(
-                        kid,
+                        kid.ok_or(PdfReadError::PageTreeInvalid)?,
                         (media_box, crop_box),
                         resources,
                         depth + 1,
-                        active,
-                        pages,
+                        discovery,
                     )?;
-                    if pages.len() > self.limits.max_pages {
-                        return Err(PdfReadError::PageCountLimit);
-                    }
                 }
             }
             "Page" => {
                 let media_box = media_box.ok_or(PdfReadError::PageTreeInvalid)?;
-                let contents = match dictionary.get("Contents") {
-                    None | Some(PdfValue::Null) => Vec::new(),
-                    Some(PdfValue::Reference(reference)) => {
-                        let (mut cursor, _) =
-                            self.object_cursor(*reference, 0, ObjectRead::Preview)?;
-                        cursor.skip_space();
-                        if cursor.bytes.get(cursor.position) == Some(&b'[')
-                            && depth + 2 > self.limits.max_nesting
-                        {
-                            return Err(PdfReadError::NestingLimit);
-                        }
-                        match cursor.parse_value(0)? {
-                            array @ PdfValue::Array(_) => {
-                                if !cursor.consume_keyword(b"endobj")? {
-                                    return Err(PdfReadError::Syntax);
-                                }
-                                refs_from_array(&array)?
-                            }
-                            PdfValue::Null => {
-                                if !cursor.consume_keyword(b"endobj")? {
-                                    return Err(PdfReadError::Syntax);
-                                }
-                                Vec::new()
-                            }
-                            PdfValue::Dictionary(_) if cursor.consume_keyword(b"stream")? => {
-                                vec![*reference]
-                            }
-                            _ => return Err(PdfReadError::ReferenceInvalid),
-                        }
-                    }
-                    Some(value) => refs_from_array(value)?,
-                };
+                if discovery.pages.len() >= self.limits.max_pages {
+                    return Err(PdfReadError::PageCountLimit);
+                }
+                let contents = self.page_contents(
+                    dictionary.get("Contents"),
+                    depth,
+                    workspace,
+                    &mut discovery.storage,
+                )?;
                 let annotations = match dictionary.get("Annots") {
                     None => Vec::new(),
-                    Some(value) => refs_from_array(&self.resolve(value, depth + 1)?)?,
+                    Some(value) => {
+                        let value = self.resolve_page_value(value, depth + 1, workspace)?;
+                        refs_from_array(&value, &mut discovery.storage)?
+                    }
                 };
-                pages.push(PdfPageRecord {
+                drop(value);
+                discovery.storage.reserve_vec(&mut discovery.pages, 1)?;
+                discovery.pages.push(PdfPageRecord {
                     object_ref: reference,
                     media_box: media_box.layout,
                     crop_box: crop_box.map(|bounds| bounds.layout),
@@ -1375,8 +1470,55 @@ impl PdfReader {
             }
             _ => return Err(PdfReadError::PageTreeInvalid),
         }
-        active.remove(&reference);
+        discovery.active.pop();
         Ok(())
+    }
+
+    fn page_contents(
+        &self,
+        contents: Option<&PdfValue>,
+        depth: usize,
+        workspace: Option<&Cell<usize>>,
+        storage: &mut SceneReservation<'_>,
+    ) -> Result<Vec<PdfObjectRef>, PdfReadError> {
+        let value = match contents {
+            None | Some(PdfValue::Null) => return Ok(Vec::new()),
+            Some(PdfValue::Reference(reference)) => {
+                self.read_cursor_value(*reference, 0, workspace, |cursor| {
+                    cursor.skip_space();
+                    if cursor.bytes.get(cursor.position) == Some(&b'[')
+                        && depth + 2 > self.limits.max_nesting
+                    {
+                        return Err(PdfReadError::NestingLimit);
+                    }
+                    match cursor.parse_value(0)? {
+                        value @ (PdfValue::Array(_) | PdfValue::Null) => {
+                            if !cursor.consume_keyword(b"endobj")? {
+                                return Err(PdfReadError::Syntax);
+                            }
+                            Ok(value)
+                        }
+                        PdfValue::Dictionary(_) if cursor.consume_keyword(b"stream")? => {
+                            Ok(PdfValue::Reference(*reference))
+                        }
+                        _ => Err(PdfReadError::ReferenceInvalid),
+                    }
+                })?
+            }
+            Some(value) => AnnotationValue::borrowed(value),
+        };
+        match &*value {
+            PdfValue::Null => Ok(Vec::new()),
+            PdfValue::Reference(reference) => {
+                let reference = *reference;
+                drop(value);
+                let mut contents = Vec::new();
+                storage.reserve_vec(&mut contents, 1)?;
+                contents.push(reference);
+                Ok(contents)
+            }
+            value => refs_from_array(value, storage),
+        }
     }
 }
 
@@ -1728,13 +1870,17 @@ pub(super) fn scene_name_label(name: &str) -> Option<&str> {
     (!name.starts_with('\0')).then_some(name)
 }
 
-fn refs_from_array(value: &PdfValue) -> Result<Vec<PdfObjectRef>, PdfReadError> {
-    value
-        .as_array()
-        .ok_or(PdfReadError::ReferenceInvalid)?
-        .iter()
-        .map(|value| value.as_reference().ok_or(PdfReadError::ReferenceInvalid))
-        .collect()
+fn refs_from_array(
+    value: &PdfValue,
+    storage: &mut SceneReservation<'_>,
+) -> Result<Vec<PdfObjectRef>, PdfReadError> {
+    let values = value.as_array().ok_or(PdfReadError::ReferenceInvalid)?;
+    let mut references = Vec::new();
+    storage.reserve_vec(&mut references, values.len())?;
+    for value in values {
+        references.push(value.as_reference().ok_or(PdfReadError::ReferenceInvalid)?);
+    }
+    Ok(references)
 }
 
 fn parse_page_box(value: &PdfValue, allow_precise_only: bool) -> Result<PageBox, PdfReadError> {
@@ -2539,7 +2685,15 @@ impl<'a> Cursor<'a> {
             }
             let key = self.parse_name()?;
             let defer_resource = self.defer_page_resources && depth == 0 && key == "Resources";
-            let value = self.parse_value_with_storage(depth + 1, !defer_resource)?;
+            let value = if defer_resource {
+                // @invariant: The deferred resource walk validates syntax without retaining heap storage.
+                let remaining = self.remaining.take();
+                let result = self.parse_value_with_storage(depth + 1, false);
+                self.remaining = remaining;
+                result?
+            } else {
+                self.parse_value(depth + 1)?
+            };
             // @invariant: Reserve a root node and one node per five additional dictionary entries.
             if self.scene && dictionary.len().is_multiple_of(5) {
                 self.charge(128 + 12 * std::mem::size_of::<(String, PdfValue)>())?;
@@ -2806,6 +2960,39 @@ mod retained_reader_tests {
                 object_number: 9,
                 generation: 0
             })
+        );
+    }
+
+    #[test]
+    fn page_discovery_releases_the_single_stream_dictionary_before_retaining_its_reference() {
+        let bytes = include_bytes!("../../../../fixtures/pdf-native/redaction.pdf");
+        let reader = open_pdf(bytes, PdfReaderLimits::default()).unwrap();
+        let reference = PdfObjectRef {
+            object_number: 5,
+            generation: 0,
+        };
+        let available = reader.limits().max_scene_bytes;
+        let (mut cursor, _) = reader
+            .object_cursor(reference, 0, ObjectRead::Scene(available))
+            .unwrap();
+        assert!(matches!(cursor.parse_value(0), Ok(PdfValue::Dictionary(_))));
+        assert!(cursor.consume_keyword(b"stream").unwrap());
+        let dictionary_bytes = available - cursor.remaining.unwrap();
+
+        let workspace = Cell::new(dictionary_bytes);
+        let mut retained = SceneReservation::new(&workspace);
+        let contents = reader
+            .page_contents(
+                Some(&PdfValue::Reference(reference)),
+                1,
+                Some(&workspace),
+                &mut retained,
+            )
+            .unwrap();
+        assert_eq!(contents, [reference]);
+        assert_eq!(
+            workspace.get(),
+            dictionary_bytes - size_of::<PdfObjectRef>()
         );
     }
 
