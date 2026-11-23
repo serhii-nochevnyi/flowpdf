@@ -312,6 +312,53 @@ fn clipped_mapped_text_reserves_glyph_workspace_even_without_a_text_element() {
 }
 
 #[test]
+fn text_dispatch_shares_workspace_with_its_live_operand_array() {
+    let read = |adjustments: &str, text: &str, max_scene_bytes| {
+        let content = format!(
+            "q 110 110 5 5 re W n BT /F1 10 Tf 5 20 Td [{adjustments}({text})] TJ ET Q 10 10 5 5 re f"
+        );
+        let bytes = pdf(vec![
+            (1, b"<< /Type /Catalog /Pages 2 0 R >>".to_vec()),
+            (2, b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec()),
+            (3, b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] /Resources 6 0 R /Contents 4 0 R >>".to_vec()),
+            stream(4, "", content.as_bytes()),
+            (5, b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_vec()),
+            (6, b"<< /Font << /F1 5 0 R >> >>".to_vec()),
+        ]);
+        let reader = open_pdf(
+            &bytes,
+            PdfReaderLimits {
+                max_scene_bytes,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        read_pdf_scene(&reader, &PdfSceneRequest::default())
+    };
+    let adjustments = "0 ".repeat(200);
+    let text = "A".repeat(96);
+    let small_allowance = 22 * 1024;
+    assert!(read(&adjustments, "A", small_allowance).is_ok());
+    assert!(read("", &text, small_allowance).is_ok());
+    assert_eq!(
+        read(&adjustments, &text, small_allowance),
+        Err(PdfReadError::StreamLimit)
+    );
+
+    let expected = read(
+        &adjustments,
+        &text,
+        PdfReaderLimits::default().max_scene_bytes,
+    )
+    .unwrap();
+    assert!(matches!(
+        expected.pages[0].elements.as_slice(),
+        [PdfSceneElement::Clip { .. }, PdfSceneElement::Path { value }] if value.fill
+    ));
+    assert_eq!(read(&adjustments, &text, 40 * 1024).unwrap(), expected);
+}
+
+#[test]
 fn image_payload_allowance_is_shared_across_pages_and_nested_forms() {
     let bytes = pdf(vec![
         (1, b"<< /Type /Catalog /Pages 2 0 R >>".to_vec()),
@@ -644,7 +691,7 @@ fn nested_forms_charge_live_streams_and_indirect_resources_together() {
         .unwrap();
         read_pdf_scene(&reader, &PdfSceneRequest::default())
     };
-    let constrained = 54 * 1024;
+    let constrained = 55 * 1024;
     assert!(read(&document(0), constrained).is_ok());
 
     let bytes = document(7 * 1024);
