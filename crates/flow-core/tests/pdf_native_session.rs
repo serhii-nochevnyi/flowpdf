@@ -798,13 +798,123 @@ fn note_edit_refuses_when_rewrite_leaves_too_little_work_for_text_projection() {
     );
 }
 
-#[test]
-fn detached_projections_exhaust_the_shared_identity_allowance() {
-    let source = pdf_with_objects(&[
+fn blank_page_pdf(width: u32) -> String {
+    pdf_with_objects(&[
         "<< /Type /Catalog /Pages 2 0 R >>",
         "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
-        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 400] >>",
-    ]);
+        &format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {width} 400] >>"),
+    ])
+}
+
+#[test]
+fn detached_projections_require_origin_identity_at_revision_zero() {
+    use flow_core::pdf::native::{NativeBinding, NativePageCommand, NativePageTarget};
+
+    let source = blank_page_pdf(300);
+    let limits = NativeEditLimits::default();
+    let mut session = NativePdfSession::open_scoped(source.as_bytes(), limits, [1; 16]).unwrap();
+    let initial = session.snapshot().binding;
+    assert_eq!(initial.revision, 0);
+    assert_eq!(initial.origin_hash, session.snapshot().output_hash);
+
+    let verify = |session: &NativePdfSession, binding: NativeBinding, expected| {
+        let bytes = session.output_bytes();
+        let snapshot = session.snapshot();
+        let scene = &snapshot.scene;
+        let combined = |live| {
+            NativePdfSession::verify_page_and_field_projection_with_objects(
+                bytes,
+                limits,
+                binding,
+                scene.scene_hash,
+                Some(&scene.object_pages),
+                &snapshot.page_state,
+                &snapshot.fields,
+                &[],
+                session.redaction_admitted(),
+                live,
+            )
+        };
+        for (verifier, result) in [
+            ("combined detached", combined(None)),
+            ("combined live", combined(Some(session))),
+            (
+                "page",
+                NativePdfSession::verify_page_projection(
+                    bytes,
+                    limits,
+                    binding,
+                    scene.scene_hash,
+                    &snapshot.page_state,
+                ),
+            ),
+            (
+                "page with objects",
+                NativePdfSession::verify_page_projection_with_objects(
+                    bytes,
+                    limits,
+                    binding,
+                    scene.scene_hash,
+                    Some(&scene.object_pages),
+                    &snapshot.page_state,
+                ),
+            ),
+            (
+                "edit",
+                NativePdfSession::verify_edit_projection(
+                    bytes,
+                    limits,
+                    binding,
+                    &scene.text_pages,
+                    &scene.object_pages,
+                ),
+            ),
+            (
+                "text",
+                NativePdfSession::verify_text_projection(bytes, limits, binding, &scene.text_pages),
+            ),
+        ] {
+            assert_eq!(
+                result,
+                Ok(expected),
+                "{verifier} at revision {}",
+                binding.revision
+            );
+        }
+    };
+
+    verify(&session, initial, true);
+    let other_source = blank_page_pdf(301);
+    let mismatched = NativeBinding {
+        origin_hash: *blake3::hash(other_source.as_bytes()).as_bytes(),
+        ..initial
+    };
+    assert_ne!(mismatched.origin_hash, initial.origin_hash);
+    verify(&session, mismatched, false);
+
+    let target = NativePageTarget {
+        page: 0,
+        stable_id: session.snapshot().page_state.order[0],
+    };
+    let revised = session
+        .apply_page(
+            initial,
+            1,
+            &NativePageCommand::RotatePage {
+                target,
+                degrees: 90,
+            },
+        )
+        .unwrap();
+    assert_eq!(revised.binding.revision, 1);
+    assert_eq!(revised.binding.origin_hash, initial.origin_hash);
+    assert_ne!(revised.output_hash, revised.binding.origin_hash);
+    verify(&session, revised.binding, true);
+}
+
+#[test]
+fn detached_projections_exhaust_the_shared_identity_allowance() {
+    let source = blank_page_pdf(300);
     let bytes = source.as_bytes();
     let limits = NativeEditLimits::default();
     let session = NativePdfSession::open_scoped(bytes, limits, [1; 16]).unwrap();
