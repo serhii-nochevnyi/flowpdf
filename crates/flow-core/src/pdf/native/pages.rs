@@ -310,26 +310,25 @@ pub(super) fn restrictions(
     graph: &NativePdfGraph,
     projected: &[NativePdfNotePage],
     workspace: &Workspace,
+    work: &mut usize,
 ) -> Result<Option<NativePageRestrictions>, NativeEditError> {
     use NativePageRefusal::{Geometry, Structure};
 
-    let mut work = graph.remaining_work();
-    let positions_locked = positions_locked(graph, &mut work)?;
+    let positions_locked = positions_locked(graph, work)?;
     let catalog = catalog(graph)?;
     let catalog_values = dict(graph, catalog)?;
     let mut page_bytes = workspace.scope();
-    let page_refs = page_reference_set(graph, &mut work, &mut page_bytes)?;
-    let named_targets =
-        named_destination_pages(graph, catalog_values, &page_refs, &mut work, workspace);
+    let page_refs = page_reference_set(graph, work, &mut page_bytes)?;
+    let named_targets = named_destination_pages(graph, catalog_values, &page_refs, work, workspace);
     if matches!(named_targets, Err(Budget)) {
         return Err(Budget);
     }
     let mut trailer_bytes = workspace.scope();
-    let trailer = graph.trailer_references(&mut work, &mut trailer_bytes)?;
-    let incoming_links = incoming_link_index(graph, &page_refs, &trailer, &mut work, workspace)?;
+    let trailer = graph.trailer_references(work, &mut trailer_bytes)?;
+    let incoming_links = incoming_link_index(graph, &page_refs, &trailer, work, workspace)?;
     drop(page_refs);
     drop(page_bytes);
-    let outlines = outline_index(graph, &mut work, workspace);
+    let outlines = outline_index(graph, work, workspace);
     if matches!(outlines, Err(Budget)) {
         return Err(Budget);
     }
@@ -342,13 +341,13 @@ pub(super) fn restrictions(
             let parent = reference(values, "Parent")?;
             let geometry = page.geometry.is_none().then_some(Geometry);
             let tagged = values.contains_key("StructParents");
-            let widgets = page_widget_count(graph, page.object, &mut work);
+            let widgets = page_widget_count(graph, page.object, work);
             let annotations_supported = widgets.is_ok();
             let duplicate_annotations = match widgets {
                 Ok(0) => true,
                 Ok(count) => {
                     if copyable_field_count.is_none() {
-                        copyable_field_count = Some(copyable_fields(graph, &mut work, workspace)?);
+                        copyable_field_count = Some(copyable_fields(graph, work, workspace)?);
                     }
                     copyable_field_count
                         .flatten()
@@ -378,7 +377,7 @@ pub(super) fn restrictions(
                             &incoming_links,
                             &trailer,
                             &mut parent_refs,
-                            &mut work,
+                            work,
                             false,
                         )
                     }) {
@@ -2297,13 +2296,10 @@ mod tests {
         let bytes = graph.rewrite().unwrap();
         let session = NativePdfSession::open_scoped(&bytes, limits, [3; 16]).unwrap();
         let projected = &session.snapshot().scene.pages;
-        let check = |work| {
-            let mut graph = NativePdfGraph::open(&bytes, limits).unwrap();
-            graph
-                .charge_page_work(graph.remaining_work() - work)
-                .unwrap();
+        let check = |mut work| {
+            let graph = NativePdfGraph::open(&bytes, limits).unwrap();
             let workspace = Workspace::new(graph.remaining_retained());
-            restrictions(&graph, projected, &workspace)
+            restrictions(&graph, projected, &workspace, &mut work)
         };
         for mut work in [0, 1] {
             assert_eq!(positions_locked(&graph, &mut work), Err(Budget));

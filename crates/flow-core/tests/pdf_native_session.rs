@@ -552,12 +552,13 @@ fn assert_detached_object_projection_after_work_exhaustion(unsupported_curve: bo
     }
 
     let detached_recovers_objects = |max_work| {
-        NativePdfSession::verify_edit_projection(
+        NativePdfSession::verify_page_projection_with_objects(
             roomy.output_bytes(),
             limits_at(max_work),
             full.binding,
-            &full.scene.text_pages,
-            &full.scene.object_pages,
+            full.scene.scene_hash,
+            Some(&full.scene.object_pages),
+            &full.page_state,
         ) == Ok(true)
     };
     let (mut low, mut high) = (0, defaults.max_work);

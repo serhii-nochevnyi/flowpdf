@@ -973,6 +973,7 @@ pub(super) fn project(
     pages: &[NativePdfNotePage],
     binding: NativeBinding,
     remaining: &mut usize,
+    work: &mut usize,
 ) -> Result<Vec<NativeFieldView>, NativeSessionError> {
     let mut widgets = pages
         .iter()
@@ -1000,9 +1001,8 @@ pub(super) fn project(
     if widgets.peek().is_none() {
         return Ok(Vec::new());
     }
-    let mut work = graph.remaining_work();
     let mut available = *remaining;
-    let (mut form, mut form_bytes) = match load_form(graph, &mut work, &mut available) {
+    let (mut form, mut form_bytes) = match load_form(graph, work, &mut available) {
         Ok(form) => (Ok(form), *remaining - available),
         Err(NativeSessionError::Field(reason)) => (Err(reason), 0),
         Err(error) => return Err(error),
@@ -1012,16 +1012,15 @@ pub(super) fn project(
     let mut result = Vec::new();
     for (page, object, data) in widgets {
         spend(remaining, std::mem::size_of::<NativeFieldView>() * 2)?;
-        spend(&mut work, 1)?;
+        spend(work, 1)?;
         if form.is_ok() {
-            spend(&mut work, data.get("AP").map_or(0, |_| MAX_TEXT))?;
+            spend(work, data.get("AP").map_or(0, |_| MAX_TEXT))?;
         }
         let admitted = form
             .as_mut()
             .map_err(|error| NativeSessionError::from(*error))
             .and_then(|form| {
-                let identity =
-                    recognize_identity(graph, form, page, object, &mut work, *remaining)?;
+                let identity = recognize_identity(graph, form, page, object, work, *remaining)?;
                 let mut available = *remaining;
                 let admitted =
                     recognize_appearance(graph, form, page, object, identity, &mut available);
@@ -1072,7 +1071,7 @@ pub(super) fn project(
                     max_nesting: graph.limits.max_nesting,
                     scratch_bytes: *remaining,
                 },
-                &mut work,
+                work,
                 |reference| Ok(graph.objects.get(&reference).map(Cow::Borrowed)),
                 |field, work| {
                     *work = work
@@ -1127,7 +1126,16 @@ impl ExpectedField {
             .map_or(0, FieldValue::retained_value_bytes)
     }
 
-    pub(super) fn verify(&self, fields: &[NativeFieldView]) -> Result<(), NativeSessionError> {
+    pub(super) fn verify(
+        &self,
+        fields: &[NativeFieldView],
+        work: &mut usize,
+    ) -> Result<(), NativeSessionError> {
+        let value_bytes = match &self.value {
+            Some(FieldValue::Text(value)) => value.len(),
+            _ => 0,
+        };
+        spend(work, 2 * fields.len() + value_bytes)?;
         let mut matching = fields
             .iter()
             .filter(|field| field.can_edit_appearance && field.name.as_ref() == Some(&self.name));
@@ -1778,7 +1786,16 @@ mod tests {
         let allowance = inventory_bytes + view_bytes + label_bytes + peak;
         let binding = session.snapshot().binding;
         let mut remaining = allowance;
-        let fields = project(&graph, std::slice::from_ref(&page), binding, &mut remaining).unwrap();
+        let mut work = graph.remaining_work();
+        let fields = project(
+            &graph,
+            std::slice::from_ref(&page),
+            binding,
+            &mut remaining,
+            &mut work,
+        )
+        .unwrap();
+        assert_eq!(work, 0);
         assert_eq!(fields.len(), 2);
         for (field, object) in fields.iter().zip([widget, peer]) {
             assert_eq!(field.object, object);
@@ -1789,14 +1806,26 @@ mod tests {
 
         remaining = allowance - 1;
         assert_eq!(
-            project(&graph, std::slice::from_ref(&page), binding, &mut remaining),
+            project(
+                &graph,
+                std::slice::from_ref(&page),
+                binding,
+                &mut remaining,
+                &mut graph.remaining_work(),
+            ),
             Err(NativeSessionError::Budget)
         );
         assert_eq!(remaining, peak - 1);
         graph.charge_page_work(1).unwrap();
         remaining = allowance;
         assert_eq!(
-            project(&graph, &[page], binding, &mut remaining),
+            project(
+                &graph,
+                &[page],
+                binding,
+                &mut remaining,
+                &mut graph.remaining_work(),
+            ),
             Err(NativeSessionError::Budget)
         );
     }
@@ -1856,12 +1885,25 @@ mod tests {
         graph.charge_page_work(budget - projection_work).unwrap();
         let pages = std::slice::from_ref(&page);
         remaining = memory;
-        let fields = project(&graph, pages, binding, &mut remaining).unwrap();
+        let fields = project(
+            &graph,
+            pages,
+            binding,
+            &mut remaining,
+            &mut graph.remaining_work(),
+        )
+        .unwrap();
         assert_eq!(fields[0].checked, Some(false));
         graph.charge_page_work(1).unwrap();
         remaining = memory;
         assert_eq!(
-            project(&graph, pages, binding, &mut remaining),
+            project(
+                &graph,
+                pages,
+                binding,
+                &mut remaining,
+                &mut graph.remaining_work(),
+            ),
             Err(NativeSessionError::Budget)
         );
 
