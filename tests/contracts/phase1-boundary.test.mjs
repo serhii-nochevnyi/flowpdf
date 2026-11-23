@@ -16,6 +16,7 @@ import test from 'node:test'
 import ts from 'typescript'
 
 const projectRoot = resolve(import.meta.dirname, '../..')
+export const currentWorkspacePhase = 9
 const allowedWasmExports = new Set([
   'apply_command',
   'apply_editor_session',
@@ -55,6 +56,79 @@ const phaseEightWasmExports = new Set([
   'accept_pdf_reconstruction',
   'verify_pdf_reconstruction_accept_response',
 ])
+const phaseNineWasmCommands = new Set([
+  'native_pdf_open',
+  'native_pdf_command',
+  'native_pdf_snapshot',
+  'native_pdf_close',
+  'native_pdf_redaction',
+  'native_pdf_preview',
+])
+const phaseNineWasmVerifiers = new Set([
+  'verify_native_pdf_response',
+  'verify_native_pdf_worker_response',
+])
+const phaseNineNativePanel = 'web/src/pdf/pdf-native-edit-panel.tsx'
+const phaseNineNativeWorker = 'web/src/pdf/pdf-native-edit-worker.ts'
+const phaseNinePersistenceDigests = new Map([
+  ['web/persistence/pdf-source-store.ts', new Map([
+    ['hashPdfSourceBytes', 'digestInput'],
+  ])],
+  ['web/persistence/indexeddb-store.ts', new Map([
+    ['recordEnvelope', 'bytes'],
+    ['assetRecordEnvelope', 'new TextEncoder().encode(deterministicJson(logicalRecord))'],
+  ])],
+])
+const hashCapabilities = new Set(['crypto.subtle.digest', 'node:crypto.createHash', 'node:crypto.hash'])
+const phaseNineMembers = new Map([
+  ['crypto', new Map([['subtle', 'crypto.subtle']])],
+  ['crypto.subtle', new Map([['digest', 'crypto.subtle.digest']])],
+  ['document', new Map([['createElement', 'document.createElement']])],
+  ['node:crypto', new Map([
+    ['createHash', 'node:crypto.createHash'],
+    ['hash', 'node:crypto.hash'],
+    ['webcrypto', 'crypto'],
+    ['subtle', 'crypto.subtle'],
+  ])],
+])
+const nativeOpenBeforeTry = `
+  if (this.state.phase !== 'idle') throw new NativePdfWorkerError('FLOW_PDF_NATIVE_OPEN_BUSY')
+  if (!(input.bytes instanceof Uint8Array) || input.bytes.length === 0
+    || input.bytes.length > NATIVE_PDF_LIMITS.pdfBytes || !isNativeStoreHash(input.originStoreHash)) {
+    throw new NativePdfWorkerError(REQUEST_INVALID)
+  }
+  const bytes = new Uint8Array(input.bytes)
+  const originStoreHash = input.originStoreHash
+  const requestId = this.nextRequestId++
+  this.update('opening', requestId)
+  let dispatched = false
+`
+const nativeOpenThroughDispatch = `
+  const actual = nativeBytesHex(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes)))
+  this.requireLive(requestId)
+  if (actual !== originStoreHash) throw new NativePdfWorkerError(REQUEST_INVALID, requestId)
+  const request = freezeNativeDto({
+    protocolVersion: NATIVE_PDF_PROTOCOL_VERSION, operation: 'open', requestId,
+    epoch: Array.from(crypto.getRandomValues(new Uint8Array(16))),
+    originStoreHash, bytesHex: nativeBytesHex(bytes),
+  } as const)
+  this.original = { hex: request.bytesHex, hash: originStoreHash }
+  dispatched = true
+  const result = expectPhase(await this.send(request), 'opened')
+`
+const phaseNineCanvasAttributes = `
+  ref={canvasRef} width={raster.width} height={raster.height}
+  data-native-preview-page={raster.pageId} data-native-preview-revision={revision}
+  data-native-preview-hash={outputHash}
+  style={{ width: \`\${50 * raster.width / width}%\`, height: \`\${50 * raster.height / height}%\` }}
+`
+const phaseNineMarkFormAttributes = `
+  className="native-stack" onSubmit={(event) => {
+    event.preventDefault()
+    if (!markRect || duplicateMark) return
+    void runRedaction({ kind: 'addMark', pageId: stableId, rect: markRect }, document.getElementById(\`\${id}-redaction-add\`))
+  }}
+`
 const forbiddenDirectPackages = new Set([
   '@vitejs/plugin-react',
   'actix-web',
@@ -121,7 +195,7 @@ const semanticOwnerName = /^(?:apply|canonicalize|hash|migrate|mutate|recover|re
 
 test('the checked-in workspace preserves deferred scope and Rust semantic ownership', async () => {
   const snapshot = loadWorkspaceSnapshot(projectRoot)
-  assert.deepEqual(boundaryDiagnostics(snapshot, { phase: 8 }), [])
+  assert.deepEqual(boundaryDiagnostics(snapshot, { phase: currentWorkspacePhase }), [])
   assertPhaseTwoParityBoundary(projectRoot, snapshot)
 
   const gatePath = resolve(projectRoot, 'scripts/check-phase1.mjs')
@@ -412,6 +486,228 @@ test('Phase 4 admits only the owned PDF projection path and typed PDF WASM expor
   )
 })
 
+const nativeWasmFixtureSource = `
+  #[wasm_bindgen]
+  pub fn native_pdf_open(request_json: String) -> String { request_json }
+  #[wasm_bindgen]
+  pub fn native_pdf_command(request_json: String) -> String { request_json }
+  #[wasm_bindgen]
+  pub fn native_pdf_snapshot(request_json: String) -> String { request_json }
+  #[wasm_bindgen]
+  pub fn native_pdf_close(request_json: String) -> String { request_json }
+  #[wasm_bindgen]
+  pub fn native_pdf_redaction(request_json: String) -> String { request_json }
+  #[wasm_bindgen]
+  pub fn native_pdf_preview(request_json: String) -> String { request_json }
+  #[wasm_bindgen]
+  pub fn verify_native_pdf_response(response_json: String) -> bool { false }
+  #[wasm_bindgen]
+  pub fn verify_native_pdf_worker_response(response_json: String) -> bool { false }
+`
+
+test('Phase 9 requires the exact native PDF WASM exports and signatures', () => {
+  const fixture = phaseEightFixture()
+  const withExports = (wasmSource, phase = 9) =>
+    boundaryDiagnostics({ ...fixture, wasmSource: fixture.wasmSource + wasmSource }, { phase })
+  assert.deepEqual(withExports(nativeWasmFixtureSource), [])
+  assert.equal(withExports(nativeWasmFixtureSource, 8).filter((entry) => entry.includes('unexpected WASM export')).length, 8)
+  assert.equal(withExports('').filter((entry) => entry.includes('missing typed WASM export')).length, 8)
+
+  for (const [before, after, expected] of [
+    ['native_pdf_open(request_json: String)', 'native_pdf_open(request_json: JsValue)',
+      'native_pdf_open has an invalid typed WASM signature'],
+    ['verify_native_pdf_worker_response(response_json: String) -> bool',
+      'verify_native_pdf_worker_response(response_json: String) -> String',
+      'verify_native_pdf_worker_response has an invalid typed WASM signature'],
+    [/#\[wasm_bindgen\]\n\s+pub fn native_pdf_preview/, '#[wasm_bindgen(js_name = native_pdf_reset)]\n  pub fn native_pdf_preview',
+      'unexpected WASM export native_pdf_reset'],
+  ]) {
+    const diagnostics = withExports(nativeWasmFixtureSource.replace(before, after))
+    assert.ok(diagnostics.includes(`crates/flow-wasm/src/lib.rs: ${expected}`), diagnostics.join('\n'))
+  }
+  assert.deepEqual(withExports(nativeWasmFixtureSource + `
+    #[wasm_bindgen]
+    pub fn native_pdf_close(request_json: String) -> String { request_json }
+    #[wasm_bindgen]
+    pub struct MutableNativePdf { revision: u64 }
+  `), [
+    'crates/flow-wasm/src/lib.rs: duplicate WASM export native_pdf_close',
+    'crates/flow-wasm/src/lib.rs: mutable WASM struct export is forbidden',
+  ])
+})
+
+test('Phase 9 limits native canvas and form to the two approved JSX sites', () => {
+  const canvas = `<canvas ${phaseNineCanvasAttributes} />`
+  const form = `<form ${phaseNineMarkFormAttributes}><fieldset /></form>`
+  const panel = `
+    function NativePagePaper() { return ${canvas} }
+    function PdfNativeEditPanel() { return ${form} }
+  `
+  const check = nativeBoundaryDiagnostics
+  assert.deepEqual(check(phaseNineNativePanel, panel), [])
+  assert.deepEqual(check(phaseNineNativePanel, panel, 8), [
+    `${phaseNineNativePanel}: deferred canvas UI surface`,
+    `${phaseNineNativePanel}: deferred form UI surface`,
+  ])
+  const otherPanel = 'web/src/pdf/other-panel.tsx'
+  assert.deepEqual(check(otherPanel, panel), [
+    `${otherPanel}: deferred canvas UI surface`,
+    `${otherPanel}: deferred form UI surface`,
+  ])
+
+  for (const [contents, diagnostic] of [
+    [panel.replace('function NativePagePaper', 'function OtherPagePaper'), 'deferred canvas UI surface'],
+    [panel.replace('data-native-preview-page={raster.pageId}', 'data-native-preview-page={1}'), 'deferred canvas UI surface'],
+    [panel.replace(canvas, `<>${canvas}${canvas}</>`), 'deferred canvas UI surface'],
+    [panel.replace('function PdfNativeEditPanel', 'function OtherEditPanel'), 'deferred form UI surface'],
+    [panel.replace('<form', '<form action="/submit"'), 'deferred form UI surface'],
+    [panel.replace('event.preventDefault()', 'event.stopPropagation()'), 'deferred form UI surface'],
+    [panel.replace('<form', '<form contentEditable'), 'deferred contenteditable editor surface'],
+    [panel.replace('<canvas', '<canvas dangerouslySetInnerHTML={{ __html: html }}'), 'unsafe JSX dangerouslySetInnerHTML surface'],
+    [panel + "\ndocument.createElement('canvas')", 'deferred canvas UI surface'],
+    [panel + "\ndocument.createElement('form')", 'deferred form UI surface'],
+    [panel + "\nwindow.document['createElement']('canvas')", 'deferred canvas UI surface'],
+    [panel + "\nconst { createElement: create } = document; create('form')", 'deferred form UI surface'],
+    [panel + "\nfetch('/api')", 'deferred backend runtime surface'],
+  ]) {
+    const diagnostics = check(phaseNineNativePanel, contents)
+    assert.ok(diagnostics.includes(`${phaseNineNativePanel}: ${diagnostic}`), diagnostics.join('\n'))
+  }
+})
+
+test('Phase 9 requires the native open digest to guard dispatch of the original byte copy', () => {
+  const digest = "crypto.subtle.digest('SHA-256', bytes)"
+  const comparison = 'if (actual !== originStoreHash) throw new NativePdfWorkerError(REQUEST_INVALID, requestId)'
+  const worker = `
+    class NativePdfEditCoordinator {
+      async open(input) {
+        ${nativeOpenBeforeTry}
+        try {
+          ${nativeOpenThroughDispatch}
+          return result
+        } catch (error) {
+          throw error
+        }
+      }
+    }
+  `
+  const denied = (path) => `${path}: TypeScript owns canonical hashing`
+  assert.deepEqual(nativeBoundaryDiagnostics(phaseNineNativeWorker, worker), [])
+  assert.deepEqual(nativeBoundaryDiagnostics(phaseNineNativeWorker, worker, 8), [denied(phaseNineNativeWorker)])
+  const otherWorker = 'web/src/pdf/other-worker.ts'
+  assert.deepEqual(nativeBoundaryDiagnostics(otherWorker, worker), [denied(otherWorker)])
+
+  for (const contents of [
+    worker.replace('async open', 'async close'),
+    worker.replace('class NativePdfEditCoordinator', 'class OtherCoordinator'),
+    worker.replace("'SHA-256'", "'SHA-512'"),
+    worker.replace(digest, "crypto.subtle.digest('SHA-256', input.bytes)"),
+    worker.replace('const bytes', 'let bytes'),
+    worker.replace('new Uint8Array(input.bytes)', 'new Uint8Array(input.canonicalDocument)'),
+    worker.replace('const originStoreHash', 'bytes.fill(0); const originStoreHash'),
+    worker.replace('const actual', 'const copy = bytes; copy[0] = 0; const actual'),
+    worker.replace(`await ${digest}`, digest),
+    worker.replace(comparison, ''),
+    worker.replace(comparison, '').replace('return result', `${comparison}
+return result`),
+    worker.replace('actual !== originStoreHash', 'actual === originStoreHash'),
+    worker.replace('nativeBytesHex(bytes),', 'nativeBytesHex(input.bytes),'),
+    worker.replace(digest, "globalThis.crypto.subtle['digest']('SHA-256', bytes)"),
+    worker.replace(digest, "createHash('sha256')"),
+    "import { webcrypto as crypto } from 'node:crypto'\n" + worker,
+    worker.replace('return result', `await ${digest}; return result`),
+  ]) {
+    assert.deepEqual(nativeBoundaryDiagnostics(phaseNineNativeWorker, contents), [denied(phaseNineNativeWorker)], contents)
+  }
+})
+
+test('Phase 9 permits only the three persistence integrity digests in their owning functions', () => {
+  const sourceStore = 'web/persistence/pdf-source-store.ts'
+  const recordStore = 'web/persistence/indexeddb-store.ts'
+  const digest = "globalThis.crypto.subtle.digest('SHA-256', "
+  const original = `async function hashPdfSourceBytes(bytes) {
+    const digestInput = new Uint8Array(bytes)
+    const digest = await ${digest}digestInput)
+    return digest
+  }`
+  const records = `async function recordEnvelope(bytes) {
+    const digest = await ${digest}bytes)
+    return digest
+  }
+  async function assetRecordEnvelope(logicalRecord) {
+    const digest = await ${digest}new TextEncoder().encode(deterministicJson(logicalRecord)))
+    return digest
+  }`
+  assert.deepEqual(nativeBoundaryDiagnostics(sourceStore, original), [])
+  assert.deepEqual(nativeBoundaryDiagnostics(recordStore, records), [])
+  for (const [path, contents] of [
+    [recordStore, original],
+    [sourceStore, original.replace('hashPdfSourceBytes', 'hashOtherBytes')],
+    [sourceStore, original.replace('await ', '')],
+    [sourceStore, original.replace('digestInput)', 'bytes)')],
+    [recordStore, records.replace('deterministicJson(logicalRecord)', 'deterministicJson(document)')],
+    [recordStore, records + "\ncrypto.subtle.digest('SHA-256', bytes)"],
+    [recordStore, records.replace('return digest', `{ const digest = await ${digest}bytes) } return digest`)],
+  ]) {
+    assert.deepEqual(nativeBoundaryDiagnostics(path, contents), [`${path}: TypeScript owns canonical hashing`], contents)
+  }
+})
+
+test('Phase 9 detects hashing through receivers, destructuring, and imported helpers', () => {
+  const path = 'web/src/runtime/byte-helper.ts'
+  const denied = `${path}: TypeScript owns canonical hashing`
+  for (const contents of [
+    "const receiver = globalThis; receiver['crypto']['subtle']['digest']('SHA-256', bytes)",
+    "const provider = window.crypto; const { subtle } = provider; subtle.digest('SHA-256', bytes)",
+    "const { crypto: { subtle: { digest: hash } } } = self; hash('SHA-256', bytes)",
+    "const hash = crypto.subtle.digest.bind(crypto.subtle); hash('SHA-256', bytes)",
+    "const hash = crypto.subtle.digest; hash.call(crypto.subtle, 'SHA-256', bytes)",
+    "import { createHash as hash } from 'node:crypto'; hash('sha256')",
+    "import * as nodeCrypto from 'crypto'; const { createHash: hash } = nodeCrypto; hash('sha256')",
+    "import { webcrypto as provider } from 'node:crypto'; provider.subtle.digest('SHA-256', bytes)",
+    "import nodeCrypto from 'node:crypto'; nodeCrypto['hash']('sha256', bytes)",
+    "const { createHash: hash } = await import('node:crypto'); hash('sha256')",
+    "const hash = require('crypto').createHash; hash('sha256')",
+  ]) {
+    assert.deepEqual(nativeBoundaryDiagnostics(path, contents), [denied], contents)
+  }
+
+  const fixture = phaseEightFixture()
+  fixture.wasmSource += nativeWasmFixtureSource
+  fixture.typescript.set('web/src/runtime/hash-source.ts', `
+    export const digest = globalThis.crypto.subtle.digest.bind(globalThis.crypto.subtle)
+    export { createHash as makeHash } from 'node:crypto'
+  `)
+  fixture.typescript.set(path, `
+    import { digest as hash, makeHash } from './hash-source.js'
+    import * as helper from './hash-source.js'
+    hash('SHA-256', bytes)
+    helper.digest('SHA-256', bytes)
+    helper['digest']('SHA-256', bytes)
+    makeHash('sha256')
+  `)
+  assert.deepEqual(boundaryDiagnostics(fixture, { phase: 9 }), [denied, denied, denied, denied])
+})
+
+function nativeBoundaryDiagnostics(path, contents, phase = 9) {
+  const fixture = phaseEightFixture()
+  if (phase === 9) fixture.wasmSource += nativeWasmFixtureSource
+  fixture.typescript.set(path, contents)
+  return boundaryDiagnostics(fixture, { phase })
+}
+
+function phaseEightFixture() {
+  const fixture = validFixture()
+  fixture.wasmSource += '\n' + [
+    ...phaseThreeWasmExports,
+    ...phaseFourWasmExports,
+    ...phaseFiveWasmExports,
+    ...phaseSevenWasmExports,
+    ...phaseEightWasmExports,
+  ].map(wasmFixtureFunction).join('\n')
+  return fixture
+}
+
 test('WASM size report rejects forged measurements, stale inputs, and either exceeded budget', async () => {
   const { validateWasmSizeReport, WASM_SIZE_LIMITS } = await import('../../scripts/verify-wasm-size.mjs')
   const validReport = wasmSizeReportFixture(WASM_SIZE_LIMITS)
@@ -626,21 +922,25 @@ function wasmFixtureFunction(name) {
     name === 'layout_document' ||
     name === 'export_pdf' ||
     name === 'recover_owned_source' ||
-    name === 'read_pdf'
+    name === 'read_pdf' ||
+    name === 'font_catalog_identity' ||
+    name === 'hyphenation_data_identity' ||
+    name === 'resolve_voice_command' ||
+    name === 'apply_form_session_json' ||
+    name === 'project_form_widgets' ||
+    name === 'reconstruct_pdf' ||
+    name === 'accept_pdf_reconstruction'
   ) {
     return `#[wasm_bindgen]\npub fn ${name}(request_json: String) -> String { request_json }`
   }
   if (
     name === 'verify_layout_response' ||
     name === 'verify_pdf_export_response' ||
-    name === 'verify_pdf_reader_response'
+    name === 'verify_pdf_reader_response' ||
+    name === 'verify_form_projection_response' ||
+    name === 'verify_pdf_reconstruction_response' ||
+    name === 'verify_pdf_reconstruction_accept_response'
   ) {
-    return `#[wasm_bindgen]\npub fn ${name}(response_json: String) -> bool { !response_json.is_empty() }`
-  }
-  if (name === 'project_form_widgets') {
-    return `#[wasm_bindgen]\npub fn ${name}(request_json: String) -> String { request_json }`
-  }
-  if (name === 'verify_form_projection_response') {
     return `#[wasm_bindgen]\npub fn ${name}(response_json: String) -> bool { !response_json.is_empty() }`
   }
   return `#[wasm_bindgen]\npub fn ${name}(request: JsValue) -> JsValue { request }`
@@ -661,6 +961,7 @@ export function boundaryDiagnostics(snapshot, options = {}) {
   const capabilities = createCapabilityResolver(
     [...typescriptProgram.sources.values()],
     typescriptProgram.checker,
+    policy.phase === 9,
   )
   for (const [path] of snapshot.typescript) {
     if (
@@ -766,7 +1067,7 @@ function boundaryPolicy(options) {
       allowsSemanticForm: (path) => phaseFiveFormEditorSource.test(path),
     }
   }
-  if (phase === 8) {
+  if (phase === 8 || phase === 9) {
     return {
       phase,
       forbiddenWebPathSegment:
@@ -909,6 +1210,14 @@ function validateTypeScript(path, source, diagnostics, capabilities, policy) {
     return
   }
 
+  const nativeSurfaces = new Set()
+
+  function admitSurfaceOnce(surface) {
+    if (nativeSurfaces.has(surface)) return false
+    nativeSurfaces.add(surface)
+    return true
+  }
+
   function visit(node) {
     if (ts.isImportDeclaration(node) && ts.isStringLiteral(node.moduleSpecifier)) {
       const root = packageRoot(node.moduleSpecifier.text)
@@ -928,14 +1237,14 @@ function validateTypeScript(path, source, diagnostics, capabilities, policy) {
       if (policy.phase < 2 || !policy.allowsEditorSource(path)) {
         diagnostics.push(`${path}: JSX/React editor surface is deferred`)
       } else {
-        validateJsxElement(path, node, diagnostics, policy)
+        validateJsxElement(path, node, diagnostics, policy, admitSurfaceOnce)
       }
     }
     if (hasDeclarationName(node) && semanticOwnerName.test(node.name.text)) {
       diagnostics.push(`${path}: TypeScript semantic owner ${node.name.text}`)
     }
     if (ts.isCallExpression(node)) {
-      validateCall(path, source, node, diagnostics, capabilities, policy)
+      validateCall(path, source, node, diagnostics, capabilities, policy, admitSurfaceOnce)
     }
     if (ts.isNewExpression(node)) {
       const capability = capabilities.of(node.expression)
@@ -951,21 +1260,21 @@ function validateTypeScript(path, source, diagnostics, capabilities, policy) {
   visit(source)
 }
 
-function validateJsxElement(path, node, diagnostics, policy) {
-  const tagName = ts.isJsxElement(node)
-    ? node.openingElement.tagName
-    : ts.isJsxSelfClosingElement(node) ? node.tagName : undefined
+function validateJsxElement(path, node, diagnostics, policy, admitSurfaceOnce) {
+  const opening = ts.isJsxElement(node)
+    ? node.openingElement
+    : ts.isJsxSelfClosingElement(node) ? node : undefined
+  if (opening === undefined) return
+  const tag = ts.isIdentifier(opening.tagName) ? opening.tagName.text : undefined
+  const attributes = opening.attributes.properties
   if (
-    tagName &&
-    ts.isIdentifier(tagName) &&
-    (tagName.text === 'canvas' || (tagName.text === 'form' && !policy.allowsSemanticForm(path)))
+    (tag === 'canvas' || (tag === 'form' && !policy.allowsSemanticForm(path))) &&
+    !(policy.phase === 9 && path === phaseNineNativePanel &&
+      isNativePanelSurface(opening, tag) && admitSurfaceOnce(tag))
   ) {
-    diagnostics.push(`${path}: deferred ${tagName.text} UI surface`)
+    diagnostics.push(`${path}: deferred ${tag} UI surface`)
   }
-  const attributes =
-    ts.isJsxElement(node) ? node.openingElement.attributes :
-      ts.isJsxSelfClosingElement(node) ? node.attributes : undefined
-  for (const attribute of attributes?.properties ?? []) {
+  for (const attribute of attributes) {
     if (!ts.isJsxAttribute(attribute)) continue
     const name = attribute.name.getText()
     if (name === 'dangerouslySetInnerHTML') {
@@ -975,6 +1284,40 @@ function validateJsxElement(path, node, diagnostics, policy) {
       diagnostics.push(`${path}: deferred contenteditable editor surface`)
     }
   }
+}
+
+function enclosingFunction(node) {
+  for (let parent = node.parent; parent; parent = parent.parent) {
+    if (ts.isFunctionLike(parent)) return parent
+  }
+  return undefined
+}
+
+function syntaxTokens(node) {
+  const children = node.getChildren()
+  return children.length === 0 ? [node.getText()] : children.flatMap(syntaxTokens)
+}
+
+function sameSyntax(node, reference) {
+  const expected = syntaxTokens(reference)
+  const actual = syntaxTokens(node)
+  return actual.length === expected.length && actual.every((token, index) => token === expected[index])
+}
+
+function matchesJsxAttributes(opening, expected) {
+  const fixture = ts.createSourceFile('contract.tsx', `<fixture ${expected} />`, ts.ScriptTarget.Latest, true)
+  return sameSyntax(opening.attributes, fixture.statements[0].expression.attributes)
+}
+
+function isNativePanelSurface(opening, tag) {
+  const owner = enclosingFunction(opening)
+  if (!owner || !ts.isFunctionDeclaration(owner) || !ts.isSourceFile(owner.parent)) return false
+  if (tag === 'canvas') {
+    return owner.name?.text === 'NativePagePaper' && ts.isJsxSelfClosingElement(opening) &&
+      matchesJsxAttributes(opening, phaseNineCanvasAttributes)
+  }
+  return owner.name?.text === 'PdfNativeEditPanel' && ts.isJsxOpeningElement(opening) &&
+    matchesJsxAttributes(opening, phaseNineMarkFormAttributes)
 }
 
 function jsxAttributeIsActive(attribute) {
@@ -987,12 +1330,13 @@ function jsxAttributeIsActive(attribute) {
   return expression?.kind !== ts.SyntaxKind.FalseKeyword
 }
 
-function validateCall(path, source, call, diagnostics, capabilities, policy) {
+function validateCall(path, source, call, diagnostics, capabilities, policy, admitSurfaceOnce) {
   const callee = call.expression.getText(source)
   const first = call.arguments[0]
   const second = call.arguments[1]
+  const capability = capabilities.of(call.expression)
   if (
-    /(?:^|\.)createElement$/.test(callee) &&
+    (/(?:^|\.)createElement$/.test(callee) || capability === 'document.createElement') &&
     first &&
     ts.isStringLiteral(first) &&
     /^(?:canvas|form)$/.test(first.text)
@@ -1009,13 +1353,13 @@ function validateCall(path, source, call, diagnostics, capabilities, policy) {
   ) {
     diagnostics.push(`${path}: deferred contenteditable editor surface`)
   }
-  const capability = capabilities.of(call.expression)
   if (capability === 'Object.assign') {
     if (first && isSemanticTarget(first)) {
       diagnostics.push(`${path}: Object.assign mutates semantic state ${first.getText(source)}`)
     }
   } else if (
-    capability !== undefined &&
+    capability !== undefined && capability !== 'document.createElement' &&
+    !hashCapabilities.has(capability) &&
     !(
       capability === 'fetch' &&
       path === 'web/src/runtime/font-catalog.ts' &&
@@ -1033,9 +1377,63 @@ function validateCall(path, source, call, diagnostics, capabilities, policy) {
   ) {
     diagnostics.push(`${path}: TypeScript interprets semantic JSON`)
   }
-  if (/^(?:crypto\.subtle\.digest|createHash)$/.test(callee)) {
-    diagnostics.push(`${path}: TypeScript owns canonical hashing`)
+  if (/^(?:crypto\.subtle\.digest|createHash)$/.test(callee) || hashCapabilities.has(capability)) {
+    const site = policy.phase === 9 && capability === 'crypto.subtle.digest'
+      ? permittedDigestSite(path, call, callee, capabilities)
+      : undefined
+    if (site === undefined || !admitSurfaceOnce(site)) {
+      diagnostics.push(`${path}: TypeScript owns canonical hashing`)
+    }
   }
+}
+
+function permittedDigestSite(path, call, callee, capabilities) {
+  const [algorithm, operand] = call.arguments
+  if (call.arguments.length !== 2 || !ts.isStringLiteral(algorithm) || algorithm.text !== 'SHA-256') return undefined
+  let receiver = call.expression
+  while (ts.isPropertyAccessExpression(receiver)) receiver = receiver.expression
+  if (!ts.isIdentifier(receiver) || capabilities.hasLocalBinding(receiver)) return undefined
+
+  if (path === phaseNineNativeWorker && callee === 'crypto.subtle.digest' &&
+      isNativeOpenDigest(call, operand, capabilities)) return 'native-open'
+
+  const owner = enclosingFunction(call)
+  if (callee !== 'globalThis.crypto.subtle.digest' || !owner ||
+      !ts.isFunctionDeclaration(owner) || !ts.isSourceFile(owner.parent) ||
+      !ts.isAwaitExpression(call.parent) || !ts.isVariableDeclaration(call.parent.parent) ||
+      call.parent.parent.name.getText() !== 'digest') return undefined
+
+  const name = owner.name?.text
+  const expected = phaseNinePersistenceDigests.get(path)?.get(name)
+  if (expected === undefined) return undefined
+  const reference = ts.createSourceFile('contract.ts', expected, ts.ScriptTarget.Latest, true)
+  return sameSyntax(operand, reference.statements[0].expression) ? name : undefined
+}
+
+function statementPrefixMatches(statements, expected, exact = false) {
+  const reference = ts.createSourceFile('contract.ts', expected, ts.ScriptTarget.Latest, true)
+  return (!exact || statements.length === reference.statements.length) &&
+    reference.statements.every((statement, index) => statements[index] && sameSyntax(statements[index], statement))
+}
+
+function isNativeOpenDigest(call, operand, capabilities) {
+  const owner = enclosingFunction(call)
+  if (!owner || !ts.isMethodDeclaration(owner) || owner.name.getText() !== 'open' ||
+      !ts.isClassDeclaration(owner.parent) || owner.parent.name?.text !== 'NativePdfEditCoordinator' ||
+      !ts.isSourceFile(owner.parent.parent) || owner.parameters.length !== 1 ||
+      owner.parameters[0].name.getText() !== 'input' || !owner.body) return false
+
+  const statements = owner.body.statements
+  const tryIndex = statements.findIndex(ts.isTryStatement)
+  if (tryIndex < 0 || !statementPrefixMatches(statements.slice(0, tryIndex), nativeOpenBeforeTry, true)) return false
+  const dispatch = statements[tryIndex].tryBlock.statements
+  const digest = dispatch[0]
+  if (!digest || call.getStart() < digest.getStart() || call.end > digest.end ||
+      !statementPrefixMatches(dispatch, nativeOpenThroughDispatch)) return false
+
+  const copy = capabilities.symbolOf(operand)?.valueDeclaration?.initializer
+  return copy !== undefined && ts.isNewExpression(copy) &&
+    !capabilities.hasLocalBinding(copy.expression)
 }
 
 function parseTypeScriptProgram(files) {
@@ -1099,7 +1497,7 @@ function resolveVirtualModule(specifier, containingFile, virtualFiles) {
   return undefined
 }
 
-function createCapabilityResolver(sources, checker) {
+function createCapabilityResolver(sources, checker, phaseNine) {
   const aliases = new Map()
   const globalAliases = new Set()
   const globalCapabilities = new Map([
@@ -1113,6 +1511,15 @@ function createCapabilityResolver(sources, checker) {
     ['fetch', 'fetch'],
     ['webkitSpeechRecognition', 'webkitSpeechRecognition'],
   ])
+  if (phaseNine) {
+    globalCapabilities.set('crypto', 'crypto')
+    globalCapabilities.set('createHash', 'node:crypto.createHash')
+    globalCapabilities.set('document', 'document')
+  }
+
+  function hasLocalBinding(identifier) {
+    return (checker.getSymbolAtLocation(identifier)?.declarations?.length ?? 0) > 0
+  }
 
   function symbolOf(identifier) {
     if (!ts.isIdentifier(identifier)) return undefined
@@ -1186,11 +1593,60 @@ function createCapabilityResolver(sources, checker) {
     return undefined
   }
 
+  function isCryptoModule(specifier) {
+    return specifier !== undefined && ts.isStringLiteral(specifier) && /^(?:node:)?crypto$/.test(specifier.text)
+  }
+
+  function importedCryptoCapability(declaration) {
+    let moduleSpecifier
+    let name
+    if (ts.isImportSpecifier(declaration)) {
+      moduleSpecifier = declaration.parent.parent.parent.moduleSpecifier
+      name = (declaration.propertyName ?? declaration.name).text
+    } else if (ts.isNamespaceImport(declaration)) {
+      moduleSpecifier = declaration.parent.parent.moduleSpecifier
+    } else if (ts.isImportClause(declaration)) {
+      moduleSpecifier = declaration.parent.moduleSpecifier
+    } else if (ts.isExportSpecifier(declaration)) {
+      moduleSpecifier = declaration.parent.parent.moduleSpecifier
+      name = (declaration.propertyName ?? declaration.name).text
+    }
+    if (!isCryptoModule(moduleSpecifier)) return undefined
+    return name === undefined ? 'node:crypto' : phaseNineMembers.get('node:crypto').get(name)
+  }
+
+  function referencedCapability(node) {
+    let symbol = checker.getSymbolAtLocation(node)
+    const visited = new Set()
+    while (symbol !== undefined && !visited.has(symbol)) {
+      const tracked = aliases.get(symbol)
+      if (tracked !== undefined) return tracked
+      if ((symbol.flags & ts.SymbolFlags.Alias) === 0) break
+      visited.add(symbol)
+      for (const declaration of symbol.declarations ?? []) {
+        const imported = importedCryptoCapability(declaration)
+        if (imported !== undefined) return imported
+      }
+      symbol = checker.getImmediateAliasedSymbol(symbol)
+    }
+    return undefined
+  }
+
+  function memberCapability(receiver, property) {
+    if (isGlobalObject(receiver)) return globalCapabilities.get(property)
+    if (property === 'assign' && isObjectConstructor(receiver)) return 'Object.assign'
+    if (!phaseNine) return undefined
+    const capability = of(receiver)
+    if ((property === 'call' || property === 'apply') && hashCapabilities.has(capability)) return capability
+    return phaseNineMembers.get(capability)?.get(property)
+  }
+
   function of(expression) {
     const current = unwrap(expression)
     if (ts.isIdentifier(current)) {
       const symbol = symbolOf(current)
-      if (symbol !== undefined && aliases.has(symbol)) return aliases.get(symbol)
+      const tracked = phaseNine ? referencedCapability(current) : aliases.get(symbol)
+      if (tracked !== undefined) return tracked
       if (symbol === undefined || (symbol.declarations?.length ?? 0) === 0) {
         return globalCapabilities.get(current.text)
       }
@@ -1198,11 +1654,13 @@ function createCapabilityResolver(sources, checker) {
     }
     if (ts.isPropertyAccessExpression(current) || ts.isElementAccessExpression(current)) {
       const property = propertyNameOf(current)
-      if (property !== undefined && isGlobalObject(current.expression)) {
-        return globalCapabilities.get(property)
-      }
-      if (property === 'assign' && isObjectConstructor(current.expression)) {
-        return 'Object.assign'
+      if (property === undefined) return undefined
+      const capability = memberCapability(current.expression, property)
+      if (capability !== undefined) return capability
+      if (phaseNine) {
+        const name = ts.isPropertyAccessExpression(current) ? current.name : current.argumentExpression
+        const tracked = referencedCapability(name)
+        if (tracked !== undefined) return tracked
       }
       if (
         property === 'getUserMedia' &&
@@ -1212,6 +1670,12 @@ function createCapabilityResolver(sources, checker) {
       }
       return undefined
     }
+    if (phaseNine && ts.isAwaitExpression(current)) return of(current.expression)
+    if (phaseNine && ts.isCallExpression(current) &&
+        (current.expression.kind === ts.SyntaxKind.ImportKeyword ||
+          (ts.isIdentifier(current.expression) && current.expression.text === 'require' &&
+            !hasLocalBinding(current.expression))) &&
+        isCryptoModule(current.arguments[0])) return 'node:crypto'
     if (
       ts.isCallExpression(current) &&
       (ts.isPropertyAccessExpression(current.expression) ||
@@ -1249,22 +1713,23 @@ function createCapabilityResolver(sources, checker) {
       if (isGlobalObject(initializer)) changed = recordGlobalAlias(name) || changed
       return changed
     }
-    if (!ts.isObjectBindingPattern(name)) return false
+    return recordMembers(name, (property) => memberCapability(initializer, property))
+  }
 
+  function recordMembers(pattern, select) {
+    if (!ts.isObjectBindingPattern(pattern)) return false
     let changed = false
-    for (const element of name.elements) {
-      if (!ts.isIdentifier(element.name)) continue
-      const property = element.propertyName
-        ? ts.isIdentifier(element.propertyName) || ts.isStringLiteral(element.propertyName)
-          ? element.propertyName.text
-          : undefined
-        : element.name.text
-      if (property === undefined) continue
-      let capability
-      if (isGlobalObject(initializer)) capability = globalCapabilities.get(property)
-      if (isObjectConstructor(initializer) && property === 'assign') capability = 'Object.assign'
-      if (capability !== undefined) {
+    for (const element of pattern.elements) {
+      if (element.dotDotDotToken) continue
+      const key = element.propertyName ?? element.name
+      if (!ts.isIdentifier(key) && !ts.isStringLiteral(key)) continue
+      const capability = select(key.text)
+      if (capability === undefined) continue
+      if (ts.isIdentifier(element.name)) {
         changed = recordIdentifier(element.name, capability) || changed
+      } else if (phaseNine) {
+        const members = phaseNineMembers.get(capability)
+        if (members) changed = recordMembers(element.name, (property) => members.get(property)) || changed
       }
     }
     return changed
@@ -1292,7 +1757,7 @@ function createCapabilityResolver(sources, checker) {
     for (const source of sources) collect(source)
   } while (changed)
 
-  return { of }
+  return { of, symbolOf, hasLocalBinding }
 }
 
 function capabilityLabel(capability) {
@@ -1338,6 +1803,10 @@ function validateWasmBoundary(source, diagnostics, policy) {
   if (policy.phase >= 8) {
     for (const exportName of phaseEightWasmExports) allowedExports.add(exportName)
   }
+  if (policy.phase === 9) {
+    for (const exportName of phaseNineWasmCommands) allowedExports.add(exportName)
+    for (const exportName of phaseNineWasmVerifiers) allowedExports.add(exportName)
+  }
   const items = rustWasmItems(source)
   const exports = []
   for (const item of items) {
@@ -1355,7 +1824,7 @@ function validateWasmBoundary(source, diagnostics, policy) {
     if (!allowedExports.has(item.exportName)) {
       diagnostics.push(`crates/flow-wasm/src/lib.rs: unexpected WASM export ${item.exportName}`)
     }
-    if (!hasTypedWasmSignature(item)) {
+    if (!hasTypedWasmSignature(item, policy.phase)) {
       diagnostics.push(
         `crates/flow-wasm/src/lib.rs: ${item.exportName} has an invalid typed WASM signature`,
       )
@@ -1462,7 +1931,7 @@ function wasmExportName(attributes, rustName) {
   return rustName
 }
 
-function hasTypedWasmSignature(item) {
+function hasTypedWasmSignature(item, phase) {
   const tokens = item.header
   if (
     tokens[0] !== 'pub' ||
@@ -1508,7 +1977,8 @@ function hasTypedWasmSignature(item) {
     item.exportName === 'resolve_voice_command' ||
     item.exportName === 'read_pdf' ||
     item.exportName === 'reconstruct_pdf' ||
-    item.exportName === 'accept_pdf_reconstruction'
+    item.exportName === 'accept_pdf_reconstruction' ||
+    (phase === 9 && phaseNineWasmCommands.has(item.exportName))
   ) {
     return (
       parameters.join('') === 'request_json:String' &&
@@ -1520,7 +1990,8 @@ function hasTypedWasmSignature(item) {
     item.exportName === 'verify_pdf_export_response' ||
     item.exportName === 'verify_pdf_reader_response' ||
     item.exportName === 'verify_pdf_reconstruction_response' ||
-    item.exportName === 'verify_pdf_reconstruction_accept_response'
+    item.exportName === 'verify_pdf_reconstruction_accept_response' ||
+    (phase === 9 && phaseNineWasmVerifiers.has(item.exportName))
   ) {
     return (
       parameters.join('') === 'response_json:String' &&
