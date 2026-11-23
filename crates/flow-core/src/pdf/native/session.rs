@@ -1105,10 +1105,9 @@ impl NativePdfSession {
                 && projected_notes(&snapshot.scene).eq(claimed_notes)
                 && redaction_admitted == session.redaction_admitted());
         }
-        let hash = *blake3::hash(bytes).as_bytes();
-        if binding.revision == 0 && binding.origin_hash != hash {
+        let Some(hash) = detached_output_hash(bytes, binding) else {
             return Ok(false);
-        }
+        };
         let graph = NativePdfGraph::open(bytes, accepted_input_limits(limits, binding))
             .map_err(redaction_graph_error)?;
         let (ids, scene, mut remaining, mut work) =
@@ -1156,7 +1155,9 @@ impl NativePdfSession {
         state: &NativePageState,
     ) -> Result<bool, NativeSessionError> {
         let graph = NativePdfGraph::open(bytes, accepted_input_limits(limits, binding))?;
-        let hash = *blake3::hash(bytes).as_bytes();
+        let Some(hash) = detached_output_hash(bytes, binding) else {
+            return Ok(false);
+        };
         let (ids, scene, mut remaining, mut work) =
             initial_projection(&graph, hash, binding, claimed_objects)?;
         if claimed_objects.is_some_and(|rows| rows != scene.object_pages) {
@@ -1177,7 +1178,9 @@ impl NativePdfSession {
         claimed_objects: &[NativeObjectPage],
     ) -> Result<bool, NativeSessionError> {
         let graph = NativePdfGraph::open(bytes, accepted_input_limits(limits, binding))?;
-        let hash = *blake3::hash(bytes).as_bytes();
+        let Some(hash) = detached_output_hash(bytes, binding) else {
+            return Ok(false);
+        };
         let (_, scene, _, _) = initial_projection(&graph, hash, binding, Some(claimed_objects))?;
         Ok(scene.text_pages == claimed_text && scene.object_pages == claimed_objects)
     }
@@ -1189,7 +1192,9 @@ impl NativePdfSession {
         claimed: &[NativeTextPage],
     ) -> Result<bool, NativeSessionError> {
         let graph = NativePdfGraph::open(bytes, accepted_input_limits(limits, binding))?;
-        let hash = *blake3::hash(bytes).as_bytes();
+        let Some(hash) = detached_output_hash(bytes, binding) else {
+            return Ok(false);
+        };
         let (_, scene, _, _) = initial_projection(&graph, hash, binding, None)?;
         Ok(scene.text_pages == claimed)
     }
@@ -1751,6 +1756,11 @@ fn initial_projection(
         claimed_objects,
     )?;
     Ok((ids, scene, remaining, work))
+}
+
+fn detached_output_hash(bytes: &[u8], binding: NativeBinding) -> Option<[u8; 32]> {
+    let hash = *blake3::hash(bytes).as_bytes();
+    (binding.revision != 0 || hash == binding.origin_hash).then_some(hash)
 }
 
 fn accepted_input_limits(mut limits: NativeEditLimits, binding: NativeBinding) -> NativeEditLimits {
