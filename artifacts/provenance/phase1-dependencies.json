@@ -44,6 +44,16 @@
     },
     {
       "ecosystem": "crates.io",
+      "name": "sha2",
+      "version": "0.10.9",
+      "kind": "dependency",
+      "repository": "https://github.com/RustCrypto/hashes",
+      "publishedAt": "2025-04-30T14:38:09.894118Z",
+      "checksum": "a7507d819769d01a365ab707794a4084392c824f54a7a6a7862f8c3d0892b283",
+      "source": "https://crates.io/api/v1/crates/sha2/0.10.9"
+    },
+    {
+      "ecosystem": "crates.io",
       "name": "thiserror",
       "version": "2.0.17",
       "kind": "dependency",
