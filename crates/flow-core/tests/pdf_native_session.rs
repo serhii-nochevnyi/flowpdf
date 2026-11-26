@@ -944,7 +944,6 @@ fn detached_redaction_admission_uses_work_left_after_projection() {
         max_work,
         ..defaults
     };
-    // This fixture needs 318 units for the graph, projections, and admission scan.
     let high = 318;
     let low = high - 1;
     assert_eq!(verify(&session, limits_at(low), false), Ok(true));
