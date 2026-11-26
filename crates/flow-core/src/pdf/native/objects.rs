@@ -657,6 +657,11 @@ struct Found {
 }
 
 impl Found {
+    fn charge_identity(&self, work: &mut usize) -> Result<()> {
+        // @invariant: Charge the fixed identity inputs and each invocation frame, including the leaf.
+        spend(work, self.forms.len() + 2).map_err(Into::into)
+    }
+
     fn id(&self, page: NativePageId, binding: NativeBinding, hash: [u8; 32]) -> [u8; 32] {
         let mut id = blake3::Hasher::new();
         id.update(b"flowpdf:native-object:v1");
@@ -1206,7 +1211,12 @@ pub(super) fn project(
                 Err(error) => Err(error),
             }
         } else {
-            scan(graph, page, work, &workspace)
+            scan(graph, page, work, &workspace).and_then(|scanned| {
+                for item in &scanned.found {
+                    item.charge_identity(work)?;
+                }
+                Ok(scanned)
+            })
         };
         let (can_add, objects, refusal) = match scanned {
             Ok(scanned) => {
@@ -1615,6 +1625,26 @@ fn invocation_resources<'a>(
     Ok(result)
 }
 
+fn verify_ordered_signatures<'a>(
+    actual: impl Iterator<Item = &'a Signature>,
+    mut expected: impl Iterator<Item = &'a Signature>,
+    work: &mut usize,
+) -> Result<()> {
+    use NativeSessionError::Postcondition;
+
+    for actual in actual {
+        let expected = expected.next().ok_or(Postcondition)?;
+        spend(work, 1)?;
+        if actual != expected {
+            return Err(Postcondition);
+        }
+    }
+    if expected.next().is_some() {
+        return Err(Postcondition);
+    }
+    Ok(())
+}
+
 pub(super) struct ExpectedObject {
     page: NativePageId,
     objects: Vec<Signature>,
@@ -1645,11 +1675,15 @@ pub(super) fn stage(
     let target = command
         .target()
         .map(|(target, operation)| -> Result<(usize, Option<Matrix>)> {
-            let index = found
-                .iter()
-                .position(|item| item.id(page.id, binding, output) == target.id)
-                .ok_or(TargetUnavailable)?;
-            let item = &found[index];
+            let mut selected = None;
+            for (index, item) in found.iter().enumerate() {
+                item.charge_identity(&mut work)?;
+                if item.id(page.id, binding, output) == target.id {
+                    selected = Some((index, item));
+                    break;
+                }
+            }
+            let (index, item) = selected.ok_or(TargetUnavailable)?;
             let kind = item.signature.profile.kind();
             if item.signature.profile != target.profile
                 || match command {
@@ -1852,6 +1886,7 @@ pub(super) fn stage(
             .get(changed.ok_or(Postcondition)?)
             .ok_or(Postcondition)?
             .signature;
+        spend(&mut work, 1)?;
         if actual.profile != profile || actual.bounds != rect {
             return Err(Postcondition);
         }
@@ -1861,20 +1896,20 @@ pub(super) fn stage(
             return Err(Postcondition);
         }
     }
-    if found
-        .iter()
-        .enumerate()
-        .filter(|(i, _)| Some(*i) != index)
-        .map(|(_, item)| &item.signature)
-        .ne(after
+    verify_ordered_signatures(
+        after
             .found
             .iter()
             .enumerate()
             .filter(|(i, _)| Some(*i) != changed)
-            .map(|(_, item)| &item.signature))
-    {
-        return Err(Postcondition);
-    }
+            .map(|(_, item)| &item.signature),
+        found
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| Some(*i) != index)
+            .map(|(_, item)| &item.signature),
+        &mut work,
+    )?;
     drop(before);
     let mut expected_memory = workspace.scope();
     expected_memory
@@ -1918,14 +1953,11 @@ pub(super) fn verify(
     let page = pages.get(index).ok_or(NativeSessionError::Postcondition)?;
     let workspace = Workspace::new(remaining);
     let scanned = scan(graph, page, work, &workspace)?;
-    if scanned
-        .found
-        .iter()
-        .map(|item| &item.signature)
-        .ne(&expected.objects)
-    {
-        return Err(NativeSessionError::Postcondition);
-    }
+    verify_ordered_signatures(
+        scanned.found.iter().map(|item| &item.signature),
+        expected.objects.iter(),
+        work,
+    )?;
     match expected.changed {
         Some(changed) => Ok(Some(
             views
@@ -2005,12 +2037,49 @@ mod tests {
 
     #[test]
     fn object_staging_charges_scans_and_reachability_to_the_graph() {
-        use super::{NativePdfGraph, NativeSessionError, Workspace, scan, stage};
+        use super::{
+            Dict, NativeObjectCommand, NativeObjectTarget, NativePdfGraph, NativeSessionError,
+            PdfStream, PdfValue, Workspace, allocate, project, scan, stage,
+        };
 
-        let paint = b"10 20 30 40 re f";
-        let content = miniz_oxide::deflate::compress_to_vec_zlib(paint, 6);
-        let source = super::super::tests::fixture("", &content);
+        let invocation = "/Fm Do";
         let limits = NativeEditLimits::default();
+        let mut graph =
+            NativePdfGraph::open(&super::super::tests::redaction_fixture(invocation), limits)
+                .unwrap();
+        let form = |data: &str, resources: Option<PdfValue>| {
+            let mut dict = Dict::from([
+                ("Type".into(), PdfValue::Name("XObject".into())),
+                ("Subtype".into(), PdfValue::Name("Form".into())),
+                (
+                    "BBox".into(),
+                    PdfValue::Array([0, 0, 100, 100].map(PdfValue::Integer).to_vec()),
+                ),
+                ("Length".into(), PdfValue::Integer(data.len() as i64)),
+            ]);
+            if let Some(resources) = resources {
+                dict.insert("Resources".into(), resources);
+            }
+            PdfValue::Stream(PdfStream {
+                dict,
+                data: data.as_bytes().to_vec(),
+                encoded: data.as_bytes().to_vec(),
+                source_offset: 0,
+            })
+        };
+        let resources = |reference| {
+            PdfValue::Dictionary(Dict::from([(
+                "XObject".into(),
+                PdfValue::Dictionary(Dict::from([("Fm".into(), PdfValue::Reference(reference))])),
+            )]))
+        };
+        let inner = allocate(&mut graph, form("10 20 30 40 re f", None)).unwrap();
+        let outer = allocate(&mut graph, form(invocation, Some(resources(inner)))).unwrap();
+        let page_ref = graph.pages[0];
+        super::super::pages::dict_mut(&mut graph, page_ref)
+            .unwrap()
+            .insert("Resources".into(), resources(outer));
+        let source = graph.rewrite().unwrap();
         let session = NativePdfSession::open_scoped(&source, limits, [4; 16]).unwrap();
         let before = session.snapshot();
         let page = &before.scene.pages[0];
@@ -2024,14 +2093,65 @@ mod tests {
         let graph = NativePdfGraph::open(&source, limits).unwrap();
         let starting = graph.remaining_work();
         let workspace = Workspace::new(graph.remaining_retained());
-        let mut content_only = 1 + paint.len();
+        let mut content_only = 1 + invocation.len();
         assert_eq!(
             scan(&graph, page, &mut content_only, &workspace).err(),
             Some(NativeSessionError::Budget)
         );
         let mut scan_work = starting;
-        scan(&graph, page, &mut scan_work, &workspace).unwrap();
+        let scanned = scan(&graph, page, &mut scan_work, &workspace).unwrap();
+        assert_eq!(scanned.found.len(), 1);
+        assert_eq!(scanned.found[0].forms.len(), 2);
         let single_scan = starting - scan_work;
+        let mut missing_id = view.id;
+        missing_id[0] ^= 1;
+        let missing_target = NativeObjectCommand::RemoveObject {
+            target: NativeObjectTarget {
+                page: page.id,
+                id: missing_id,
+                profile: view.profile,
+            },
+        };
+        for (identity_work, target_error) in [
+            (3, NativeSessionError::Budget),
+            (4, NativeSessionError::TargetUnavailable),
+        ] {
+            let mut work = single_scan + identity_work;
+            let mut lookup = NativePdfGraph::open(&source, limits).unwrap();
+            lookup.charge_page_work(starting - work).unwrap();
+            assert_eq!(
+                stage(
+                    &mut lookup,
+                    page,
+                    before.binding,
+                    before.output_hash,
+                    &missing_target,
+                )
+                .err(),
+                Some(target_error)
+            );
+
+            let mut retained = graph.remaining_retained();
+            let projected = project(
+                &graph,
+                &before.scene.pages,
+                before.output_hash,
+                before.binding,
+                &mut retained,
+                &mut work,
+                None,
+            )
+            .unwrap();
+            if identity_work == 3 {
+                assert!(!projected[0].can_add);
+                assert!(projected[0].objects.is_empty());
+                assert_eq!(projected[0].refusal, None);
+                assert_eq!(work, 3);
+            } else {
+                assert_eq!(projected, before.scene.object_pages);
+                assert_eq!(work, 0);
+            }
+        }
         let mut graph = graph;
         stage(
             &mut graph,

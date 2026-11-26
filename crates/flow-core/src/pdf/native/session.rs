@@ -2391,8 +2391,8 @@ mod tests {
     }
 
     #[test]
-    fn object_edit_requires_work_for_both_reopened_scans() {
-        let paint = format!("10 20 30 40 re f\n{}", " ".repeat(128));
+    fn object_edit_requires_work_for_reopened_scans_and_ordered_signatures() {
+        let paint = format!("10 20 30 40 re f\n55 65 8 9 re f\n{}", " ".repeat(128));
         let source = super::super::tests::redaction_fixture(&paint);
         let limits = NativeEditLimits::default();
         let setup = || {
@@ -2457,26 +2457,31 @@ mod tests {
         let state =
             page_state(reopened, &full.ids, None, &scene, &mut remaining, &mut work).unwrap();
         objects::charge_verification_scan(reopened, &scene.pages[0], remaining, &mut work).unwrap();
+        assert_eq!(scene.object_pages[0].objects.len(), 2);
+        spend(&mut work, scene.object_pages[0].objects.len()).unwrap();
+        let signatures_work = limits.max_work - work;
         spend(&mut work, state.order.len()).unwrap();
         let exact_work = limits.max_work - work;
 
-        limited.snapshot.limits.max_work = exact_work - 1;
         let accepted = limited.output_bytes().to_vec();
         let before = limited.snapshot.clone();
-        assert_eq!(move_graphic(&mut limited), Err(NativeSessionError::Budget));
-        assert_eq!(limited.output_bytes(), accepted);
-        assert_eq!(limited.snapshot.binding, before.binding);
-        assert_eq!(limited.snapshot.output_hash, before.output_hash);
-        assert_eq!(limited.snapshot.scene, before.scene);
-        assert_eq!(limited.snapshot.consumed_request, before.consumed_request);
-        assert_eq!(
-            limited.lookup(initial, 1),
-            Ok(NativeRequestLookup::Accepted(note))
-        );
-        assert_eq!(
-            limited.lookup(note.binding, 2),
-            Ok(NativeRequestLookup::Unseen)
-        );
+        for max_work in [signatures_work - 1, exact_work - 1] {
+            limited.snapshot.limits.max_work = max_work;
+            assert_eq!(move_graphic(&mut limited), Err(NativeSessionError::Budget));
+            assert_eq!(limited.output_bytes(), accepted);
+            assert_eq!(limited.snapshot.binding, before.binding);
+            assert_eq!(limited.snapshot.output_hash, before.output_hash);
+            assert_eq!(limited.snapshot.scene, before.scene);
+            assert_eq!(limited.snapshot.consumed_request, before.consumed_request);
+            assert_eq!(
+                limited.lookup(initial, 1),
+                Ok(NativeRequestLookup::Accepted(note))
+            );
+            assert_eq!(
+                limited.lookup(note.binding, 2),
+                Ok(NativeRequestLookup::Unseen)
+            );
+        }
 
         limited.snapshot.limits.max_work = exact_work;
         let receipt = move_graphic(&mut limited).unwrap();
@@ -2780,12 +2785,18 @@ mod tests {
                 .unwrap();
             (session, field.binding, note)
         };
-        let (mut full, _, note) = setup();
+        let (mut full, _, full_note) = setup();
         let edit = NativeNoteCommand::Edit {
-            note: note.note,
+            note: full_note.note,
             contents: "Ї".repeat(1024),
         };
-        full.apply(note.binding, 3, &edit).unwrap();
+        let edited = full.apply(full_note.binding, 3, &edit).unwrap();
+        let (mut tight, prior_binding, note) = setup();
+        assert_eq!(note.note, full_note.note);
+        let binding = NativeBinding {
+            revision: edited.binding.revision,
+            ..note.binding
+        };
 
         let graph = &full.graph;
         let allowance = graph.remaining_work();
@@ -2793,7 +2804,6 @@ mod tests {
         let mut work = allowance;
         let pages = notes::project(graph, &full.ids, &mut retained, &mut work).unwrap();
         let notes_work = allowance - work;
-        let binding = full.snapshot.binding;
         let hash = full.snapshot.output_hash;
         work = allowance;
         let text_pages = text::project(
@@ -2822,10 +2832,10 @@ mod tests {
         work = allowance;
         let scene = NativePdfNoteScene::new(hash, pages, text_pages, objects, &mut work).unwrap();
         let hash_work = allowance - work;
-        assert_eq!(scene, full.snapshot.scene);
+        assert!(scene.text_pages.iter().all(|page| page.islands.is_empty()));
 
         let scene_work = notes_work + text_work + objects_work + hash_work;
-        let (_, _, projected_work) = project_scene(
+        let (projected_scene, _, projected_work) = project_scene(
             graph,
             &full.ids,
             hash,
@@ -2834,6 +2844,7 @@ mod tests {
             None,
         )
         .unwrap();
+        assert_eq!(projected_scene, scene);
         assert_eq!(allowance - projected_work, scene_work);
         let costs = [
             notes_work,
@@ -2843,17 +2854,41 @@ mod tests {
             forms_work,
             restrictions_work,
         ];
-        let combined = costs.iter().sum::<usize>() - 1;
-        assert!(costs.into_iter().all(|cost| (1..=combined).contains(&cost)));
+        let combined = costs.iter().sum::<usize>();
+        assert!(costs.into_iter().all(|cost| (1..combined).contains(&cost)));
 
         let output = full.output_bytes();
         let detached = NativePdfGraph::open(output, limits).unwrap();
         let snapshot = full.snapshot();
-        for projection_allowance in [scene_work - 1, combined] {
-            let (mut tight, prior_binding, note) = setup();
+        let verify_detached = |limits| {
+            NativePdfSession::verify_page_and_field_projection_with_note_identities(
+                output,
+                limits,
+                binding,
+                scene.scene_hash,
+                Some(&scene.object_pages),
+                &snapshot.page_state,
+                &fields,
+                projected_notes(&scene),
+                false,
+                None,
+            )
+        };
+        assert_eq!(verify_detached(limits), Ok(true));
+        let detached_work = limits.max_work - detached.remaining_work();
+        assert_eq!(
+            verify_detached(NativeEditLimits {
+                max_work: detached_work + combined,
+                ..limits
+            }),
+            Ok(true)
+        );
+        let before = tight.snapshot.clone();
+        let accepted = tight.output_bytes().to_vec();
+        // @invariant: A fresh session's one 32-byte object ID may add or remove up to 64 JSON bytes.
+        let hash_work_spread = (2 * size_of::<[u8; 32]>()).div_ceil(16);
+        for projection_allowance in [scene_work - 1, combined - 1] {
             tight.snapshot.limits.max_work = limits.max_work - allowance + projection_allowance;
-            let before = tight.snapshot.clone();
-            let accepted = tight.output_bytes().to_vec();
             assert_eq!(
                 tight.apply(note.binding, 3, &edit),
                 Err(NativeSessionError::Budget)
@@ -2873,28 +2908,18 @@ mod tests {
             );
 
             let limits = NativeEditLimits {
-                max_work: limits.max_work - detached.remaining_work() + projection_allowance,
+                max_work: detached_work + projection_allowance,
+                ..limits
+            };
+            let fresh_limits = NativeEditLimits {
+                max_work: limits.max_work - hash_work_spread,
                 ..limits
             };
             assert!(matches!(
-                NativePdfSession::open_scoped(output, limits, [7; 16]),
+                NativePdfSession::open_scoped(output, fresh_limits, [7; 16]),
                 Err(NativeSessionError::Budget)
             ));
-            assert_eq!(
-                NativePdfSession::verify_page_and_field_projection_with_note_identities(
-                    output,
-                    limits,
-                    binding,
-                    snapshot.scene.scene_hash,
-                    Some(&scene.object_pages),
-                    &snapshot.page_state,
-                    &fields,
-                    projected_notes(&snapshot.scene),
-                    false,
-                    None,
-                ),
-                Err(NativeSessionError::Budget)
-            );
+            assert_eq!(verify_detached(limits), Err(NativeSessionError::Budget));
         }
     }
 
