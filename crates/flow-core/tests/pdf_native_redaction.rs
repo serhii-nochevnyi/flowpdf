@@ -1369,14 +1369,17 @@ fn shared_form_content_is_removed_from_every_retained_placement() {
 
 #[test]
 fn redaction_rewrite_work_boundary_preserves_accepted_state_and_marks() {
-    let retained = "40 40 10 10 re f ".repeat(32);
+    let pixels: Vec<u8> = (0..128 * 128).map(|index| (index % 256) as u8).collect();
     let source = pdf(
         vec![
             b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
             b"<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 100 100] >>".to_vec(),
-            b"<< /Type /Page /Parent 2 0 R /Contents [4 0 R 5 0 R] >>".to_vec(),
-            flate("", b"10 10 10 10 re f\n"),
-            flate("", retained.as_bytes()),
+            b"<< /Type /Page /Parent 2 0 R /Contents 4 0 R /Resources << /XObject << /Im0 5 0 R >> >> >>".to_vec(),
+            stream("", b"q 80 0 0 80 10 10 cm /Im0 Do Q"),
+            flate(
+                "/Type /XObject /Subtype /Image /Width 128 /Height 128 /ColorSpace /DeviceGray /BitsPerComponent 8",
+                &pixels,
+            ),
         ],
         "",
     );

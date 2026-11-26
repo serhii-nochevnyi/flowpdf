@@ -222,6 +222,8 @@ pub struct NativePdfSession {
     snapshot: NativeSnapshot,
     records: VecDeque<RequestRecord>,
     remaining_retained: usize,
+    // @invariant: Capture the projection balance before transaction-only postconditions.
+    projection_work_left: usize,
     next_page_object_id: u64,
     redaction_admission: OnceLock<Result<(), NativeSessionError>>,
     redaction_marks: Vec<NativeRedactionMark>,
@@ -277,6 +279,7 @@ impl NativePdfSession {
             snapshot,
             records: VecDeque::new(),
             remaining_retained: remaining,
+            projection_work_left: work,
             next_page_object_id: FIRST_PAGE_OBJECT_ID,
             redaction_admission: OnceLock::new(),
             redaction_marks: Vec::new(),
@@ -348,8 +351,9 @@ impl NativePdfSession {
                     &self.snapshot.page_state.order,
                     Some(self.origin_bytes().len()),
                     self.redaction_workspace()?,
+                    self.projection_work_left,
                 )
-                .map_err(redaction_graph_error)
+                .map_err(|error| redaction_graph_error(error.into()))
             })
             .clone()
     }
@@ -826,6 +830,7 @@ impl NativePdfSession {
             &mut scene_remaining,
             &mut work,
         )?;
+        let projection_work_left = work;
         // @invariant: Verified bytes preserve geometry and the accepted order proves unique IDs.
         spend(&mut work, state.order.len())?;
         if !state.has_shape_for_count(scene.pages.len())
@@ -879,6 +884,7 @@ impl NativePdfSession {
         self.snapshot.fields = fields;
         self.accepted_redaction_evidence = Some(verified.evidence);
         self.remaining_retained = retained_refund + scene_remaining;
+        self.projection_work_left = projection_work_left;
         self.reset_marks();
         if self.records.len() == NATIVE_REQUEST_HISTORY {
             self.records.pop_front();
@@ -1122,11 +1128,20 @@ impl NativePdfSession {
             return Ok(false);
         }
         let projected = page_state(&graph, &ids, None, &scene, &mut remaining, &mut work)?;
+        if state.restrictions != projected.restrictions
+            || (binding.revision == 0 && *state != projected)
+        {
+            return Ok(false);
+        }
         // @contract: A byte-only verifier cannot reconstruct live workspace reservations.
-        Ok(state.restrictions == projected.restrictions
-            && (binding.revision != 0 || *state == projected)
-            && (!redaction_admitted
-                || redaction::check_document(&graph, &state.order, None, remaining).is_ok()))
+        if !redaction_admitted {
+            return Ok(true);
+        }
+        match redaction::check_document(&graph, &state.order, None, remaining, work) {
+            Ok(()) => Ok(true),
+            Err(redaction::AdmissionRefusal::Work(_)) => Err(NativeSessionError::Budget),
+            Err(redaction::AdmissionRefusal::Scan(_)) => Ok(false),
+        }
     }
 
     pub fn verify_page_projection(
@@ -1483,6 +1498,7 @@ impl NativePdfSession {
             &mut scene_remaining,
             &mut work,
         )?;
+        let projection_work_left = work;
         let (note, text_island, object) = match expected {
             Expected::Page(_) => (NativeNoteId(0), None, None),
             Expected::Field(expected) => {
@@ -1556,6 +1572,7 @@ impl NativePdfSession {
         }
         self.remaining_retained =
             self.snapshot.limits.max_retained_bytes - scene_limit + scene_remaining;
+        self.projection_work_left = projection_work_left;
         self.ids = ids;
         self.next_page_object_id = next_page_object_id;
         self.snapshot.page_state = state;

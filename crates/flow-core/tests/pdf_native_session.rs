@@ -913,6 +913,55 @@ fn detached_projections_require_origin_identity_at_revision_zero() {
 }
 
 #[test]
+fn detached_redaction_admission_uses_work_left_after_projection() {
+    let source = pdf_with_objects(&[
+        "<< /Type /Catalog /Pages 2 0 R >>",
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Contents 4 0 R >>",
+        "<< /Length 17 >>\nstream\n10 20 10 10 re f\n\nendstream",
+    ]);
+    let bytes = source.as_bytes();
+    let defaults = NativeEditLimits::default();
+    let session = NativePdfSession::open_scoped(bytes, defaults, [1; 16]).unwrap();
+    assert_eq!(session.check_redaction_admission(), Ok(()));
+
+    let verify = |session: &NativePdfSession, limits, admitted| {
+        let snapshot = session.snapshot();
+        NativePdfSession::verify_page_and_field_projection_with_objects(
+            session.output_bytes(),
+            limits,
+            snapshot.binding,
+            snapshot.scene.scene_hash,
+            Some(&snapshot.scene.object_pages),
+            &snapshot.page_state,
+            &snapshot.fields,
+            &[],
+            admitted,
+            None,
+        )
+    };
+    let limits_at = |max_work| NativeEditLimits {
+        max_work,
+        ..defaults
+    };
+    let high = 318;
+    let low = high - 1;
+    assert_eq!(verify(&session, limits_at(low), false), Ok(true));
+    assert_eq!(
+        verify(&session, limits_at(low), true),
+        Err(NativeSessionError::Budget)
+    );
+    assert_eq!(verify(&session, limits_at(high), true), Ok(true));
+
+    for (max_work, admitted) in [(low, false), (high, true)] {
+        let limits = limits_at(max_work);
+        let live = NativePdfSession::open_scoped(bytes, limits, [1; 16]).unwrap();
+        assert_eq!(live.redaction_admitted(), admitted);
+        assert_eq!(verify(&live, limits, live.redaction_admitted()), Ok(true));
+    }
+}
+
+#[test]
 fn detached_projections_exhaust_the_shared_identity_allowance() {
     let source = blank_page_pdf(300);
     let bytes = source.as_bytes();

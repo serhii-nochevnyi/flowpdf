@@ -36,6 +36,37 @@ type Digest = [u8; 32];
 type Result<T> = std::result::Result<T, NativeEditError>;
 use NativeEditError::{Budget, Malformed, Unsupported};
 
+pub(super) struct ScanWork {
+    pub(super) remaining: usize,
+    pub(super) exhausted: bool,
+}
+
+impl ScanWork {
+    fn new(remaining: usize) -> Self {
+        Self {
+            remaining,
+            exhausted: false,
+        }
+    }
+
+    pub(super) fn charge(&mut self, amount: usize) -> Result<()> {
+        spend(&mut self.remaining, amount).inspect_err(|_| self.exhausted = true)
+    }
+}
+
+pub(super) enum AdmissionRefusal {
+    Work(NativeEditError),
+    Scan(NativeEditError),
+}
+
+impl From<AdmissionRefusal> for NativeEditError {
+    fn from(error: AdmissionRefusal) -> Self {
+        match error {
+            AdmissionRefusal::Work(error) | AdmissionRefusal::Scan(error) => error,
+        }
+    }
+}
+
 pub(super) fn valid_rect([l, b, r, t]: Rect) -> bool {
     l < r && b < t && [l, b, r, t].into_iter().all(in_range)
 }
@@ -120,7 +151,7 @@ struct Page<'a> {
     resources: Option<&'a Dict>,
 }
 
-fn page<'a>(graph: &'a NativePdfGraph, id: Object, work: &mut usize) -> Result<Page<'a>> {
+fn page<'a>(graph: &'a NativePdfGraph, id: Object, work: &mut ScanWork) -> Result<Page<'a>> {
     let (mut media, mut crop, mut rotation, mut resources) = (None, None, None, None);
     let mut current = Some(id);
     for _ in 0..=graph.limits.max_nesting {
@@ -139,7 +170,7 @@ fn page<'a>(graph: &'a NativePdfGraph, id: Object, work: &mut usize) -> Result<P
                 resources,
             });
         };
-        spend(work, 1)?;
+        work.charge(1)?;
         let node = dict(graph, id)?;
         if node
             .get("UserUnit")
@@ -181,7 +212,7 @@ fn page<'a>(graph: &'a NativePdfGraph, id: Object, work: &mut usize) -> Result<P
 
 pub(super) fn geometry(graph: &NativePdfGraph, index: usize) -> Result<NativeRedactionGeometry> {
     let id = *graph.pages.get(index).ok_or(Malformed)?;
-    let mut work = graph.limits.max_nesting + 1;
+    let mut work = ScanWork::new(graph.limits.max_nesting + 1);
     Ok(page(graph, id, &mut work)?.geometry)
 }
 
@@ -213,21 +244,19 @@ enum Role {
     Widths,
 }
 
-struct Inventory<'a> {
-    graph: &'a NativePdfGraph,
+struct Inventory<'b> {
     roles: BTreeMap<Object, Role>,
     pending: Vec<(Object, Role)>,
-    work: usize,
+    work: &'b mut ScanWork,
     memory: usize,
 }
 
-impl<'a> Inventory<'a> {
-    fn read(graph: &'a NativePdfGraph, memory: usize) -> Result<Self> {
+impl<'b> Inventory<'b> {
+    fn read(graph: &NativePdfGraph, memory: usize, work: &'b mut ScanWork) -> Result<Self> {
         let mut inventory = Self {
-            graph,
             roles: BTreeMap::new(),
             pending: Vec::new(),
-            work: graph.remaining_work(),
+            work,
             memory,
         };
         keys(&graph.trailer, &["Root", "Size", "Info", "ID"])?;
@@ -244,7 +273,7 @@ impl<'a> Inventory<'a> {
             }
         }
         while let Some((id, role)) = inventory.pending.pop() {
-            spend(&mut inventory.work, 1)?;
+            inventory.work.charge(1)?;
             let value = graph.objects.get(&id).ok_or(Malformed)?;
             let role = match (role, value.as_dictionary().and_then(|d| name(d, "Type"))) {
                 (Role::Node, Some("Page")) => Role::Page,
@@ -269,7 +298,7 @@ impl<'a> Inventory<'a> {
     }
 
     fn link(&mut self, value: &PdfValue, role: Role) -> Result<()> {
-        spend(&mut self.work, 1)?;
+        self.work.charge(1)?;
         spend(&mut self.memory, 2 * size_of::<(Object, Role)>())?;
         self.pending.push((reference(value)?, role));
         Ok(())
@@ -294,7 +323,7 @@ impl<'a> Inventory<'a> {
 
     fn inspect(&mut self, value: &PdfValue, role: Role) -> Result<()> {
         use Role::*;
-        spend(&mut self.work, 1)?;
+        self.work.charge(1)?;
         match role {
             Length => {
                 return value
@@ -304,7 +333,7 @@ impl<'a> Inventory<'a> {
                     .ok_or(Malformed);
             }
             Box => return rect(value).map(|_| ()),
-            Widths => return numeric(value, 0, &mut self.work),
+            Widths => return numeric(value, 0, self.work),
             Contents | Annots => {
                 let child = if role == Contents { Content } else { Note };
                 return value
@@ -319,7 +348,7 @@ impl<'a> Inventory<'a> {
             return self.inspect_stream(stream, role);
         }
         let dict = dictionary(value)?;
-        spend(&mut self.work, dict.len())?;
+        self.work.charge(dict.len())?;
         match role {
             Catalog => {
                 typed(dict, "Catalog", &["Pages", "Metadata", "FlowPDFSource"])?;
@@ -400,7 +429,7 @@ impl<'a> Inventory<'a> {
                 self.entries(dict, &[("Font", Fonts), ("XObject", XObjects)])?;
                 if let Some(value) = dict.get("ProcSet") {
                     for value in value.as_array().ok_or(Malformed)? {
-                        spend(&mut self.work, 1)?;
+                        self.work.charge(1)?;
                         if !matches!(
                             value.as_name(),
                             Some("PDF" | "Text" | "ImageB" | "ImageC" | "ImageI")
@@ -519,12 +548,12 @@ impl<'a> Inventory<'a> {
                     return Err(Unsupported);
                 }
             }
-            Unicode => check_cmap_metadata(&stream.data, &mut self.work)?,
+            Unicode => check_cmap_metadata(&stream.data, self.work)?,
             FontFile => {
                 if get(dict, "Length1")?.as_integer() != i64::try_from(stream.data.len()).ok() {
                     return Err(Malformed);
                 }
-                check_font_program(&stream.data, &mut self.work)?;
+                check_font_program(&stream.data, self.work)?;
             }
             XObject => {
                 if dict
@@ -701,8 +730,8 @@ fn typed(dict: &Dict, expected: &str, allowed: &[&str]) -> Result<()> {
     Ok(())
 }
 
-fn numeric(value: &PdfValue, depth: u8, work: &mut usize) -> Result<()> {
-    spend(work, 1)?;
+fn numeric(value: &PdfValue, depth: u8, work: &mut ScanWork) -> Result<()> {
+    work.charge(1)?;
     match value {
         PdfValue::Array(values) if depth < 2 => {
             values.iter().try_for_each(|v| numeric(v, depth + 1, work))
@@ -718,11 +747,11 @@ fn safe_name(name: &str) -> bool {
             .all(|byte| byte.is_ascii_graphic() && byte != b'#')
 }
 
-fn check_cmap_metadata(data: &[u8], work: &mut usize) -> Result<()> {
+fn check_cmap_metadata(data: &[u8], work: &mut ScanWork) -> Result<()> {
     if data.len() > 128 * 1024 || !data.is_ascii() || data.contains(&b'%') {
         return Err(Unsupported);
     }
-    spend(work, data.len() + 1)?;
+    work.charge(data.len() + 1)?;
     let mut words = data
         .split(|&b| b.is_ascii_whitespace() || b"\0<>()".contains(&b))
         .filter(|word| !word.is_empty());
@@ -776,12 +805,12 @@ fn check_cmap_metadata(data: &[u8], work: &mut usize) -> Result<()> {
     Ok(())
 }
 
-fn check_font_program(data: &[u8], work: &mut usize) -> Result<()> {
+fn check_font_program(data: &[u8], work: &mut ScanWork) -> Result<()> {
     let bundled = include_bytes!("../../../data/NotoSans-Regular.ttf");
     if data.len() != bundled.len() {
         return Err(Unsupported);
     }
-    spend(work, data.len().div_ceil(16) + 1)?;
+    work.charge(data.len().div_ceil(16) + 1)?;
     if data != bundled {
         return Err(Unsupported);
     }
@@ -915,7 +944,13 @@ impl Image {
     }
 
     // @contract: Version 1 covers every sample cell with positive-area intersection.
-    fn scrub(&self, data: &mut [u8], matrix: Matrix, mark: Rect, work: &mut usize) -> Result<()> {
+    fn scrub(
+        &self,
+        data: &mut [u8],
+        matrix: Matrix,
+        mark: Rect,
+        work: &mut ScanWork,
+    ) -> Result<()> {
         let [a, b, c, d, e, f] = matrix.0;
         let (x, y) = if a != 0 {
             (
@@ -929,10 +964,7 @@ impl Image {
             )
         };
         if let (Some((left, right)), Some((top, bottom))) = (x, y) {
-            spend(
-                work,
-                (bottom - top) + ((right - left) * (bottom - top)).div_ceil(16),
-            )?;
+            work.charge((bottom - top) + ((right - left) * (bottom - top)).div_ceil(16))?;
             for row in top..bottom {
                 let start = (row * self.width + left) * self.channels;
                 let end = (row * self.width + right) * self.channels;
@@ -1046,7 +1078,7 @@ impl Path {
         paint: &str,
         graphics: Graphics,
         scope: Scope<'_, '_>,
-        work: &mut usize,
+        work: &mut ScanWork,
     ) -> Result<bool> {
         let stroke = !matches!(paint, "f" | "F" | "f*");
         let fill = !matches!(paint, "S" | "s");
@@ -1067,7 +1099,7 @@ impl Path {
 
         let mut remove = false;
         if fill {
-            spend(work, self.points.len() * self.points.len())?;
+            work.charge(self.points.len() * self.points.len())?;
             if !strictly_convex(&self.points) {
                 return Err(Unsupported);
             }
@@ -1123,7 +1155,7 @@ fn polygon_hits(
     error: Point,
     matrix: Matrix,
     scope: Scope<'_, '_>,
-    work: &mut usize,
+    work: &mut ScanWork,
     stroke: bool,
 ) -> Result<bool> {
     let [l, b, r, t] = point_bounds(points);
@@ -1137,13 +1169,13 @@ fn polygon_hits(
         .iter()
         .map(|&point| matrix.numerator(point))
         .collect::<Vec<_>>();
-    spend(work, corners.len() * corners.len())?;
+    work.charge(corners.len() * corners.len())?;
     let segment = corners.len() == 2;
     let convex = !segment && strictly_convex(&corners);
     if !stroke && !convex {
         return Err(Unsupported);
     }
-    spend(work, scope.marks.len() * corners.len())?;
+    work.charge(scope.marks.len() * corners.len())?;
     let [min_x, min_y, max_x, max_y] = point_bounds(&corners);
     let [dx, dy] = matrix.margin(error);
     // @invariant: Expanding the mark tests the outer envelope of the nominal stroke polygon.
@@ -1283,7 +1315,7 @@ fn stroke_hits(
     closed: bool,
     graphics: Graphics,
     scope: Scope<'_, '_>,
-    work: &mut usize,
+    work: &mut ScanWork,
 ) -> Result<bool> {
     let count = if closed {
         points.len()
@@ -1393,7 +1425,7 @@ impl Edits {
     }
 }
 
-struct Scan<'a, 'w> {
+struct Scan<'a, 'w, 'b> {
     graph: &'a NativePdfGraph,
     workspace: &'w Workspace,
     text: RedactionText<'a, 'w>,
@@ -1402,13 +1434,12 @@ struct Scan<'a, 'w> {
     image_aliases: BTreeMap<Digest, Digest>,
     note_uses: BTreeMap<Object, bool>,
     active_forms: BTreeSet<Object>,
-    work: usize,
+    work: &'b mut ScanWork,
     memory: Reservation<'w>,
 }
 
-impl<'a, 'w> Scan<'a, 'w> {
-    fn new(inventory: &Inventory<'a>, workspace: &'w Workspace) -> Self {
-        let graph = inventory.graph;
+impl<'a, 'w, 'b> Scan<'a, 'w, 'b> {
+    fn new(graph: &'a NativePdfGraph, work: &'b mut ScanWork, workspace: &'w Workspace) -> Self {
         Self {
             graph,
             workspace,
@@ -1424,15 +1455,15 @@ impl<'a, 'w> Scan<'a, 'w> {
             image_aliases: BTreeMap::new(),
             note_uses: BTreeMap::new(),
             active_forms: BTreeSet::new(),
-            work: inventory.work,
+            work,
             memory: workspace.scope(),
         }
     }
 
     fn page(&mut self, id: Object, page_id: u64, marks: &[NativeRedactionMark]) -> Result<()> {
         let graph = self.graph;
-        let page = page(graph, id, &mut self.work)?;
-        spend(&mut self.work, 2 * marks.len())?;
+        let page = page(graph, id, self.work)?;
+        self.work.charge(2 * marks.len())?;
         let selected = || marks.iter().filter(|mark| mark.page_id == page_id);
         let mark_count = selected().count();
         let _selection = self
@@ -1493,7 +1524,7 @@ impl<'a, 'w> Scan<'a, 'w> {
                 {
                     return Err(Malformed);
                 }
-                let remove = scope.remove(rect(get(entries, "Rect")?)?, &mut self.work)?;
+                let remove = scope.remove(rect(get(entries, "Rect")?)?, self.work)?;
                 same_use(&mut self.note_uses, note, remove)?;
                 if !remove {
                     notes.push(note);
@@ -1522,7 +1553,7 @@ impl<'a, 'w> Scan<'a, 'w> {
         if source.len() > MAX_STREAM {
             return Err(Budget);
         }
-        spend(&mut self.work, source.len() + 1)?;
+        self.work.charge(source.len() + 1)?;
         self.memory
             .grow(source.len() * 6 + 512 + size_of::<Option<Digest>>())
             .map_err(|_| Budget)?;
@@ -1549,7 +1580,7 @@ impl<'a, 'w> Scan<'a, 'w> {
         let mut path: Option<Path> = None;
         let mut text: Option<TextBlock> = None;
         while let Some((token, offset)) = cursor.next().map_err(|_| Unsupported)? {
-            spend(&mut self.work, 1)?;
+            self.work.charge(1)?;
             let end = cursor.position();
             let ContentToken::Word(op) = token else {
                 if args.len() == 8 {
@@ -1567,11 +1598,11 @@ impl<'a, 'w> Scan<'a, 'w> {
                         let measurement = self.text.measure(
                             scope.resources,
                             &source[block.start..end],
-                            &mut self.work,
+                            self.work,
                         )?;
                         let drop_text = if let Some((font, bounds, _memory)) = measurement {
                             let remove =
-                                scope.remove(graphics.matrix.bounds(bounds)?, &mut self.work)?;
+                                scope.remove(graphics.matrix.bounds(bounds)?, self.work)?;
                             if remove {
                                 record_removal(&mut removals, block.start, end);
                                 removed = true;
@@ -1606,7 +1637,7 @@ impl<'a, 'w> Scan<'a, 'w> {
                     "f" | "F" | "f*" | "S" | "s" | "B" | "B*" | "b" | "b*" if args.is_empty() => {
                         let paint = path.take().ok_or(Malformed)?;
                         let (paint_start, paint_output) = (paint.start, paint.output);
-                        if paint.should_remove(op, graphics, scope, &mut self.work)? {
+                        if paint.should_remove(op, graphics, scope, self.work)? {
                             output.truncate(paint_output);
                             record_removal(&mut removals, paint_start, end);
                             removed = true;
@@ -1723,15 +1754,15 @@ impl<'a, 'w> Scan<'a, 'w> {
             self.memory
                 .grow(object.data.len() + 512 + size_of::<Option<Digest>>())
                 .map_err(|_| Budget)?;
-            spend(&mut self.work, scope.marks.len())?;
+            self.work.charge(scope.marks.len())?;
             let digest_work = object.data.len().div_ceil(IMAGE_HASH_BYTES_PER_WORK) + 1;
-            spend(&mut self.work, digest_work)?;
+            self.work.charge(digest_work)?;
             let mut data = object.data.clone();
             for mark in scope.marks {
-                image.scrub(&mut data, graphics.matrix, mark.rect, &mut self.work)?;
+                image.scrub(&mut data, graphics.matrix, mark.rect, self.work)?;
             }
             let before = *blake3::hash(&object.data).as_bytes();
-            spend(&mut self.work, digest_work)?;
+            self.work.charge(digest_work)?;
             let after = *blake3::hash(&data).as_bytes();
             same_use(&mut self.image_aliases, before, after)?;
             if before != after {
@@ -1794,11 +1825,11 @@ struct Scope<'a, 'b> {
 }
 
 impl Scope<'_, '_> {
-    fn remove(self, bounds: Rect, work: &mut usize) -> Result<bool> {
+    fn remove(self, bounds: Rect, work: &mut ScanWork) -> Result<bool> {
         if !contains(self.clip, bounds) {
             return Err(Unsupported);
         }
-        spend(work, self.marks.len())?;
+        work.charge(self.marks.len())?;
         Ok(self.marks.iter().any(|mark| intersects(mark.rect, bounds)))
     }
 }
@@ -1898,9 +1929,9 @@ pub(super) fn scrub(
     {
         return Err(Unsupported);
     }
-    let (roles, edits, remaining_work) =
-        scan_document(graph, order, marks, graph.remaining_retained())?;
-    graph.charge_page_work(graph.remaining_work() - remaining_work)?;
+    let mut work = ScanWork::new(graph.remaining_work());
+    let (roles, edits) = scan_document(graph, order, marks, graph.remaining_retained(), &mut work)?;
+    graph.charge_page_work(graph.remaining_work() - work.remaining)?;
     apply(graph, roles, edits)
 }
 
@@ -1927,9 +1958,19 @@ pub(super) fn check_document(
     order: &[u64],
     origin_len: Option<usize>,
     workspace: usize,
-) -> Result<()> {
-    check_input_budget(graph, origin_len)?;
-    scan_document(graph, order, &[], workspace).map(|_| ())
+    work: usize,
+) -> std::result::Result<(), AdmissionRefusal> {
+    check_input_budget(graph, origin_len).map_err(AdmissionRefusal::Scan)?;
+    let mut work = ScanWork::new(work);
+    scan_document(graph, order, &[], workspace, &mut work)
+        .map(|_| ())
+        .map_err(|error| {
+            if work.exhausted {
+                AdmissionRefusal::Work(error)
+            } else {
+                AdmissionRefusal::Scan(error)
+            }
+        })
 }
 
 fn scan_document(
@@ -1937,19 +1978,20 @@ fn scan_document(
     order: &[u64],
     marks: &[NativeRedactionMark],
     workspace: usize,
-) -> Result<(BTreeMap<Object, Role>, Edits, usize)> {
+    work: &mut ScanWork,
+) -> Result<(BTreeMap<Object, Role>, Edits)> {
     if order.len() != graph.pages.len() || order.is_empty() || order.len() > MAX_PAGES {
         return Err(Unsupported);
     }
-    let inventory = Inventory::read(graph, workspace / 4)?;
+    let roles = Inventory::read(graph, workspace / 4, work)?.roles;
     let scan_workspace = Workspace::new(workspace / 2);
-    let mut scan = Scan::new(&inventory, &scan_workspace);
+    let mut scan = Scan::new(graph, work, &scan_workspace);
     for (&page, &page_id) in graph.pages.iter().zip(order) {
         scan.page(page, page_id, marks)?;
     }
-    for (&id, &role) in &inventory.roles {
+    for (&id, &role) in &roles {
         if role == Role::XObject {
-            spend(&mut scan.work, 1)?;
+            scan.work.charge(1)?;
             if name(&stream(graph, id)?.dict, "Subtype") == Some("Form")
                 && !scan.edits.forms.contains_key(&id)
             {
@@ -1957,7 +1999,7 @@ fn scan_document(
             }
         }
     }
-    Ok((inventory.roles, scan.edits, scan.work))
+    Ok((roles, scan.edits))
 }
 
 fn apply(
@@ -2246,8 +2288,14 @@ mod tests {
             geometry: geometry(&graph, 0).unwrap(),
             rect: [12_000, 12_000, 13_000, 13_000],
         };
-        let (roles, edits, _) =
-            scan_document(&graph, &[1], &[mark], graph.remaining_retained()).unwrap();
+        let (roles, edits) = scan_document(
+            &graph,
+            &[1],
+            &[mark],
+            graph.remaining_retained(),
+            &mut ScanWork::new(graph.remaining_work()),
+        )
+        .unwrap();
         let available = roles.len() * ENTRY_BYTES + edits.retained() - 1;
         graph
             .charge_page_retained(graph.remaining_retained() - available)
@@ -2275,8 +2323,14 @@ mod tests {
 
         for (shortfall, refusal) in [(1, Budget), (0, Unsupported)] {
             let mut graph = NativePdfGraph::open(&source, limits).unwrap();
-            let (roles, edits, _) =
-                scan_document(&graph, &[1], &[mark], graph.remaining_retained()).unwrap();
+            let (roles, edits) = scan_document(
+                &graph,
+                &[1],
+                &[mark],
+                graph.remaining_retained(),
+                &mut ScanWork::new(graph.remaining_work()),
+            )
+            .unwrap();
             let mut payloads = edits.streams.values();
             let first = payloads.next().unwrap();
             let alias = payloads.next().unwrap();
@@ -2446,7 +2500,7 @@ mod tests {
     }
 
     #[test]
-    fn text_measurement_uses_the_scan_workspace() {
+    fn text_measurement_distinguishes_work_from_workspace_refusals() {
         let bytes = include_bytes!("../../../../../fixtures/pdf-native/redaction.pdf");
         let graph = NativePdfGraph::open(bytes, NativeEditLimits::default()).unwrap();
         let resources = dict(&graph, graph.pages[1])
@@ -2454,18 +2508,34 @@ mod tests {
             .get("Resources")
             .and_then(PdfValue::as_dictionary);
         let block = b"BT /F1 12 Tf 16 76 Td <0002> Tj ET";
-        let workspace = Workspace::new(128);
-        let mut work = graph.remaining_work();
-        assert!(matches!(
-            RedactionText::new(&graph, &workspace).measure(resources, block, &mut work),
-            Err(Budget)
-        ));
-        assert_eq!(workspace.remaining(), 128);
+        for (workspace_bytes, glyph_work) in [(128, 0), (4096, 9)] {
+            let workspace = Workspace::new(workspace_bytes);
+            let mut work = ScanWork::new(graph.remaining_work());
+            assert!(matches!(
+                RedactionText::new(&graph, &workspace).measure(resources, block, &mut work),
+                Err(Budget)
+            ));
+            assert!(!work.exhausted);
+            assert_eq!(work.remaining, graph.remaining_work() - glyph_work);
+            assert_eq!(workspace.remaining(), workspace_bytes);
+        }
 
         let workspace = Workspace::new(32 * 1024);
+        for (allowance, error) in [(8, Budget), (9, Unsupported)] {
+            let mut work = ScanWork::new(allowance);
+            assert!(matches!(
+                RedactionText::new(&graph, &workspace).measure(resources, block, &mut work),
+                Err(refusal) if refusal == error
+            ));
+            assert!(work.exhausted);
+            assert_eq!(workspace.remaining(), 32 * 1024);
+        }
+        let mut work = ScanWork::new(250_009);
         let mut text = RedactionText::new(&graph, &workspace);
         let (font, _, memory) = text.measure(resources, block, &mut work).unwrap().unwrap();
         assert_eq!(font, "F1");
+        assert_eq!(work.remaining, 0);
+        assert!(!work.exhausted);
         assert!(workspace.remaining() < 32 * 1024);
         drop((font, memory, text));
         assert_eq!(workspace.remaining(), 32 * 1024);
@@ -2597,7 +2667,8 @@ mod tests {
         let pdf = redaction_fixture("10 10 10 10 re f");
         let mut graph = NativePdfGraph::open(&pdf, NativeEditLimits::default()).unwrap();
         let inventory_budget = graph.remaining_retained() / 4;
-        assert!(Inventory::read(&graph, inventory_budget).is_ok());
+        let mut work = ScanWork::new(graph.remaining_work());
+        assert!(Inventory::read(&graph, inventory_budget, &mut work).is_ok());
         let root = reference(get(&graph.trailer, "Root").unwrap()).unwrap();
         let page = graph.pages[0];
         for (id, fields) in [
@@ -2621,7 +2692,10 @@ mod tests {
                 };
                 dict.insert(field.into(), PdfValue::Null);
                 assert!(
-                    matches!(Inventory::read(&graph, inventory_budget), Err(Unsupported)),
+                    matches!(
+                        Inventory::read(&graph, inventory_budget, &mut work),
+                        Err(Unsupported)
+                    ),
                     "{field}"
                 );
                 let Some(PdfValue::Dictionary(dict)) = graph.objects.get_mut(&id) else {
@@ -2633,7 +2707,10 @@ mod tests {
         for field in ["Prev", "Encrypt", "XRefStm"] {
             graph.trailer.insert(field.into(), PdfValue::Null);
             assert!(
-                matches!(Inventory::read(&graph, inventory_budget), Err(Unsupported)),
+                matches!(
+                    Inventory::read(&graph, inventory_budget, &mut work),
+                    Err(Unsupported)
+                ),
                 "{field}"
             );
             graph.trailer.remove(field);
@@ -2652,7 +2729,7 @@ mod tests {
             encoded: vec![127],
             source_offset: 0,
         };
-        let mut inventory = Inventory::read(&graph, inventory_budget).unwrap();
+        let mut inventory = Inventory::read(&graph, inventory_budget, &mut work).unwrap();
         assert!(inventory.inspect_stream(&image, Role::XObject).is_ok());
         for field in [
             "Mask",
