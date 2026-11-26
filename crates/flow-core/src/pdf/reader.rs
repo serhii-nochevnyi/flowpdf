@@ -948,8 +948,8 @@ impl PdfReader {
         report
     }
 
-    /// Discovers the page tree. Page content streams and resource objects are
-    /// not parsed here, so this remains cheaper than building a scene.
+    /// Discovers the page tree without loading form fields, page content
+    /// streams, or resource objects.
     pub fn summary(&self) -> Result<PdfDocumentSummary, PdfReadError> {
         let pages = self.page_records()?;
         Ok(PdfDocumentSummary {
@@ -960,10 +960,6 @@ impl PdfReader {
         })
     }
 
-    pub(crate) fn object(&self, reference: PdfObjectRef) -> Result<PdfValue, PdfReadError> {
-        self.object_with_depth(reference, 0)
-    }
-
     pub(super) fn scene_non_stream_object<'workspace>(
         &self,
         reference: PdfObjectRef,
@@ -971,6 +967,18 @@ impl PdfReader {
         workspace: &'workspace Cell<usize>,
     ) -> Result<AnnotationValue<'static, 'workspace>, PdfReadError> {
         self.read_cursor_value(reference, depth, Some(workspace), |cursor| {
+            let value = cursor.parse_value(0)?;
+            cursor.require_object_keyword(b"endobj")?;
+            Ok(value)
+        })
+    }
+
+    pub(super) fn catalog_without_form<'workspace>(
+        &self,
+        workspace: &'workspace Cell<usize>,
+    ) -> Result<AnnotationValue<'static, 'workspace>, PdfReadError> {
+        self.read_cursor_value(self.root, 0, Some(workspace), |cursor| {
+            cursor.deferred_root_entry = Some("AcroForm");
             let value = cursor.parse_value(0)?;
             cursor.require_object_keyword(b"endobj")?;
             Ok(value)
@@ -1068,11 +1076,13 @@ impl PdfReader {
     }
 
     fn page_records(&self) -> Result<Vec<PdfPageRecord>, PdfReadError> {
-        let pages_ref = self
-            .trailer
-            .get("Root")
-            .ok_or(PdfReadError::RootMissing)
-            .and_then(|_| Self::page_tree_root(&self.object(self.root)?))?;
+        if !self.trailer.contains_key("Root") {
+            return Err(PdfReadError::RootMissing);
+        }
+        let workspace = Cell::new(self.limits.max_scene_bytes);
+        let catalog = self.catalog_without_form(&workspace)?;
+        let pages_ref = Self::page_tree_root(&catalog)?;
+        drop(catalog);
         self.page_records_from_root(pages_ref, None)
     }
 
@@ -1134,15 +1144,6 @@ impl PdfReader {
         self.read_object(reference, depth, ObjectRead::Scene(workspace))
             .map(|(value, bytes, _)| (value, bytes))
             .map_err(scene_read_error)
-    }
-
-    fn object_with_depth(
-        &self,
-        reference: PdfObjectRef,
-        depth: usize,
-    ) -> Result<PdfValue, PdfReadError> {
-        self.read_object(reference, depth, ObjectRead::Preview)
-            .map(|result| result.0)
     }
 
     fn object_cursor(
@@ -1377,7 +1378,7 @@ impl PdfReader {
 
         let workspace = discovery.workspace;
         let value = self.read_cursor_value(reference, 0, workspace, |cursor| {
-            cursor.defer_page_resources = true;
+            cursor.deferred_root_entry = Some("Resources");
             let value = cursor.object_value()?;
             cursor.require_object_keyword(b"endobj")?;
             Ok(value)
@@ -2348,7 +2349,7 @@ struct Cursor<'a> {
     tokens: usize,
     exact: bool,
     scene: bool,
-    defer_page_resources: bool,
+    deferred_root_entry: Option<&'static str>,
     remaining: Option<usize>,
 }
 
@@ -2361,7 +2362,7 @@ impl<'a> Cursor<'a> {
             tokens: 0,
             exact: false,
             scene: false,
-            defer_page_resources: false,
+            deferred_root_entry: None,
             remaining: None,
         }
     }
@@ -2684,9 +2685,9 @@ impl<'a> Cursor<'a> {
                 continue;
             }
             let key = self.parse_name()?;
-            let defer_resource = self.defer_page_resources && depth == 0 && key == "Resources";
-            let value = if defer_resource {
-                // @invariant: The deferred resource walk validates syntax without retaining heap storage.
+            let defer_entry = depth == 0 && self.deferred_root_entry == Some(key.as_str());
+            let value = if defer_entry {
+                // @invariant: Validate the deferred entry without retaining its value storage.
                 let remaining = self.remaining.take();
                 let result = self.parse_value_with_storage(depth + 1, false);
                 self.remaining = remaining;
@@ -2918,7 +2919,7 @@ mod retained_reader_tests {
         for resource in ["<< /Na#GGme /Value >>", "<< /Name /Val#00ue >>", "/Value#2"] {
             let source = format!("<< /Resources {resource} >>");
             let mut cursor = Cursor::new(source.as_bytes(), 0, PdfReaderLimits::default());
-            cursor.defer_page_resources = true;
+            cursor.deferred_root_entry = Some("Resources");
             assert!(matches!(cursor.object_value(), Err(PdfReadError::Syntax)));
         }
 
@@ -2944,7 +2945,7 @@ mod retained_reader_tests {
         let limits = PdfReaderLimits::default();
         let source = b"<< /Type /Pages /Resour#63es << /Properties [(label) <4142> << /Name /Example >>] >> /Kids [2 0 R] >>";
         let mut cursor = Cursor::new(source, 0, limits.clone());
-        cursor.defer_page_resources = true;
+        cursor.deferred_root_entry = Some("Resources");
         let root = cursor.object_value().unwrap();
         let dictionary = root.as_dictionary().unwrap();
         assert!(dictionary["Resources"].as_dictionary().unwrap().is_empty());
@@ -2952,7 +2953,7 @@ mod retained_reader_tests {
         assert_eq!(cursor.position, source.len());
 
         let mut cursor = Cursor::new(b"<< /Resources 9 0 R >>", 0, limits);
-        cursor.defer_page_resources = true;
+        cursor.deferred_root_entry = Some("Resources");
         let root = cursor.object_value().unwrap();
         assert_eq!(
             root.as_dictionary().unwrap()["Resources"].as_reference(),
