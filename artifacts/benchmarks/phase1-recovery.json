@@ -113,7 +113,7 @@
       },
       {
         "path": "crates/flow-core/src/pdf/native/objects.rs",
-        "sha256": "sha256:4fe4a81773c892039b69946413aee6a12d0d0faedc737c027abd464eed7a16fb"
+        "sha256": "sha256:413a84f720a39c1ce07aa8d9fe51743c6c0b0fb26c5bde87b58be070b64f58e4"
       },
       {
         "path": "crates/flow-core/src/pdf/native/pages.rs",
@@ -125,7 +125,7 @@
       },
       {
         "path": "crates/flow-core/src/pdf/native/session.rs",
-        "sha256": "sha256:9ddef1d21068329a5865244a54d5cb4b154d1fec370192283a6bdd516e213868"
+        "sha256": "sha256:eb652aad8357cd40b778bf04193c1035558882d3f192bbbb6ae548834267a195"
       },
       {
         "path": "crates/flow-core/src/pdf/native/text.rs",
@@ -157,7 +157,7 @@
       },
       {
         "path": "crates/flow-core/src/pdf/reader.rs",
-        "sha256": "sha256:3a1389c64aa3f128d93c7386029a9fbf304acc2a82a6292a2fd1422005bffdf5"
+        "sha256": "sha256:a1f53df2348746d174bf764441a362262b02d5399be757c5badce4bd6d05ae58"
       },
       {
         "path": "crates/flow-core/src/pdf/reconstruction.rs",
@@ -169,7 +169,7 @@
       },
       {
         "path": "crates/flow-core/src/pdf/scene.rs",
-        "sha256": "sha256:d6d9d480ab0a2485769d8ac094ebcf47517efd9b149d3e72aeaef715447b6271"
+        "sha256": "sha256:965d4a9ace4c33c199b478c74a4ec3724a8fa59207abc009b04195d52d1235fb"
       },
       {
         "path": "crates/flow-core/src/provenance/mod.rs",
@@ -212,7 +212,7 @@
         "sha256": "sha256:9d50a6f28923fc94c0d56dccc9038a12a8ff040f764a8ff048fa6d5a9eba722c"
       }
     ],
-    "digest": "sha256:16d437b09de21279afe999630980d74f8c436a0dc9168fe6ff04714143760569"
+    "digest": "sha256:f61a0e5a66cb6e731b58b214256234cbbd11f74ffa81174c5a9c519a277fbdf1"
   },
   "toolchain": {
     "node": "v24.10.0",
@@ -257,37 +257,37 @@
         "plannedTransactionCount": 1000
       },
       "durationsMilliseconds": [
-        506.382667,
-        506.636459,
-        497.095542,
-        511.133583,
-        495.632792,
-        497.577833,
-        515.4945,
-        499.852458,
-        506.177584,
-        504.342209,
-        494.768875,
-        496.655417,
-        497.001125,
-        507.24870799999997,
-        497.982708,
-        494.967084,
-        500.38441600000004,
-        497.242208,
-        506.0335,
-        496.00483299999996
+        510.73004099999997,
+        588.935875,
+        518.1685,
+        517.635583,
+        517.1335,
+        513.846083,
+        517.621667,
+        519.468292,
+        517.642291,
+        519.017042,
+        514.855333,
+        516.968709,
+        523.870875,
+        516.2227499999999,
+        520.1638330000001,
+        520.5183330000001,
+        518.95375,
+        516.8473749999999,
+        510.178667,
+        513.993791
       ],
-      "p50Milliseconds": 497.982708,
-      "p95Milliseconds": 511.133583
+      "p50Milliseconds": 517.621667,
+      "p95Milliseconds": 523.870875
     }
   ],
   "selectedPolicy": {
     "transactionInterval": 100,
     "byteInterval": 4194304
   },
-  "p50Milliseconds": 497.982708,
-  "p95Milliseconds": 511.133583,
+  "p50Milliseconds": 517.621667,
+  "p95Milliseconds": 523.870875,
   "p95TargetMilliseconds": 2000,
   "passed": true,
   "blocked": false
