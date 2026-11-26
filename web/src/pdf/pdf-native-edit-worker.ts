@@ -824,7 +824,7 @@ export class NativePdfEditCoordinator {
     readonly status: 'accepted' | 'unseen'; readonly snapshot: NativePdfVerifiedSnapshot
   }> {
     const requestId = job.request.requestId
-    this.update('reconciling', requestId, null, job.previous, this.state.redaction, this.state.reopenOriginal ? 'original' : null)
+    this.update('reconciling', requestId, null, job.previous, this.state.redaction, this.state.reopenAccepted ? 'both' : null)
     try {
       if (job.request.action.kind !== 'stage') {
         const { snapshot } = await this.settleRedactionMark(job)
@@ -848,7 +848,7 @@ export class NativePdfEditCoordinator {
       const error = errorFor(cause, requestId)
       if (this.redactionJob === job) {
         if (error.code === REPLY_LOST) {
-          this.update('reconciliationRequired', requestId, error.code, job.previous, this.state.redaction, 'original')
+          this.update('reconciliationRequired', requestId, error.code, job.previous, this.state.redaction, 'both')
         } else {
           this.invalidate(error.code)
         }
@@ -1010,6 +1010,8 @@ export class NativePdfEditCoordinator {
 
   private invalidate(code: string, propagateCleanupError = false): void {
     if (this.state.phase === 'invalidated') return
+    const recoverRedaction = this.redactionJob !== null
+      && (this.redactionJob.publishing || this.state.phase === 'reconciling' || this.state.phase === 'reconciliationRequired')
     this.worker.onmessage = null
     this.worker.onerror = null
     this.worker.onmessageerror = null
@@ -1022,7 +1024,7 @@ export class NativePdfEditCoordinator {
       this.redactionJob = null
       for (const pending of this.pending.values()) pending.reject(new NativePdfWorkerError(code, pending.request.requestId))
       for (const queued of this.queue.splice(0)) queued.reject(new NativePdfWorkerError(code))
-      this.update('invalidated', null, code, this.state.accepted, null)
+      this.update('invalidated', null, code, this.state.accepted, null, recoverRedaction ? 'both' : 'original')
       this.listeners.clear()
     }
   }
@@ -1033,12 +1035,13 @@ export class NativePdfEditCoordinator {
     code: string | null = null,
     accepted = this.state.accepted,
     redaction = accepted === this.state.accepted ? this.state.redaction : null,
-    reopen: 'original' | 'accepted' | null = phase === 'invalidated' ? 'original' : null,
+    reopen: 'original' | 'accepted' | 'both' | null = phase === 'invalidated' ? 'original' : null,
   ): void {
     const showingPriorAccepted = accepted !== null && (phase === 'invalidated' || this.redactionJob?.request.action.kind === 'stage'
       || redaction?.action === 'cancel' || redaction?.verification != null && !redaction.published)
     this.state = Object.freeze({ phase, pendingRequestId, code, accepted, redaction, showingPriorAccepted,
-      reopenOriginal: reopen === 'original' && this.original !== null, reopenAccepted: reopen === 'accepted' })
+      reopenOriginal: (reopen === 'original' || reopen === 'both') && this.original !== null,
+      reopenAccepted: reopen === 'accepted' || reopen === 'both' })
     for (const listener of this.listeners) {
       try {
         listener()
