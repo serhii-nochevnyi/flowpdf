@@ -10,20 +10,24 @@ mod pages;
 mod redaction;
 mod session;
 mod text {
+    use super::redaction::ScanWork;
+
     pub(super) struct FieldFont(Font);
 
     pub(super) struct RedactionText<'a, 'w>(Recognition<'a, 'w>);
 
     impl<'a, 'w> RedactionText<'a, 'w> {
         pub(super) fn new(graph: &'a NativePdfGraph, workspace: &'w Workspace) -> Self {
-            Self(Recognition::new(graph, workspace))
+            let mut recognition = Recognition::new(graph, workspace);
+            recognition.work_exhaustion = WorkExhaustion::BudgetError;
+            Self(recognition)
         }
 
         pub(super) fn measure(
             &mut self,
             resources: Option<&Dict>,
             block: &[u8],
-            work: &mut usize,
+            work: &mut ScanWork,
         ) -> Result<Option<(String, Bounds, Reservation<'w>)>, super::NativeEditError> {
             use super::NativeEditError::Unsupported;
             let refusal = |error| match error {
@@ -38,18 +42,26 @@ mod text {
             if !shows.is_empty() || show.codes.len() > 8192 || show.size > 10_000 * SCALE {
                 return Err(Unsupported);
             }
-            super::graph::spend(work, show.codes.len() * 4 + 1)?;
-            self.0.work = *work;
-            let font = self
-                .0
-                .font(resources.ok_or(Unsupported)?, &show.font)
-                .map_err(refusal)?;
+            work.charge(show.codes.len() * 4 + 1)?;
+            self.0.work = work.remaining;
+            let font = self.0.font(resources.ok_or(Unsupported)?, &show.font);
+            let font = match font {
+                Ok(font) => font,
+                Err(error) => {
+                    // @invariant: Font lookup charges work before any workspace reservation that can fail.
+                    if error == NativeSessionError::Budget && self.0.work == work.remaining {
+                        work.exhausted = true;
+                        return Err(Unsupported);
+                    }
+                    return Err(refusal(error));
+                }
+            };
             let codes = font.decode(&show.codes).map_err(|_| Unsupported)?;
             let metrics = font
                 .measure(&show, codes, |_| {})
                 .map_err(|_| Unsupported)?;
             let bounds = metrics.wire_bounds().map_err(|_| Unsupported)?;
-            *work = self.0.work;
+            work.remaining = self.0.work;
             Ok(Some((show.font, bounds, memory)))
         }
     }

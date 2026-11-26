@@ -353,7 +353,7 @@ impl NativePdfSession {
                     self.redaction_workspace()?,
                     self.projection_work_left,
                 )
-                .map_err(redaction_graph_error)
+                .map_err(|error| redaction_graph_error(error.into()))
             })
             .clone()
     }
@@ -1137,12 +1137,10 @@ impl NativePdfSession {
         if !redaction_admitted {
             return Ok(true);
         }
-        match redaction::check_document(&graph, &state.order, None, remaining, work)
-            .map_err(redaction_graph_error)
-        {
+        match redaction::check_document(&graph, &state.order, None, remaining, work) {
             Ok(()) => Ok(true),
-            Err(NativeSessionError::Budget) => Err(NativeSessionError::Budget),
-            Err(_) => Ok(false),
+            Err(redaction::AdmissionRefusal::Work(_)) => Err(NativeSessionError::Budget),
+            Err(redaction::AdmissionRefusal::Scan(_)) => Ok(false),
         }
     }
 
