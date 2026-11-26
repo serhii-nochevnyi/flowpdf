@@ -830,7 +830,7 @@ struct SceneBuilder<'a> {
     limits: &'a PdfReaderLimits,
     page_index: u32,
     page: &'a PdfPageRecord,
-    field_root_counts: &'a BTreeMap<PdfObjectRef, usize>,
+    field_root_counts: &'a mut Option<BTreeMap<PdfObjectRef, usize>>,
     link_work: usize,
     widget_work: usize,
     remaining_content_tokens: usize,
@@ -860,7 +860,7 @@ impl<'a> SceneBuilder<'a> {
         page_refs: &'a [(PdfObjectRef, u32)],
         page_index: u32,
         page: &'a PdfPageRecord,
-        field_root_counts: &'a BTreeMap<PdfObjectRef, usize>,
+        field_root_counts: &'a mut Option<BTreeMap<PdfObjectRef, usize>>,
         budget: SceneBudget,
     ) -> Self {
         Self {
@@ -2325,6 +2325,12 @@ impl<'a> SceneBuilder<'a> {
                     0,
                 )
             } else if subtype == Some("Widget") {
+                if self.field_root_counts.is_none() {
+                    let workspace = Cell::new(self.budget.remaining_scene_bytes);
+                    let counts = read_field_root_counts(self.reader, &workspace)?;
+                    self.budget.remaining_scene_bytes = workspace.get();
+                    *self.field_root_counts = Some(counts);
+                }
                 let widget = self.read_widget(&value, dictionary, rect, provenance)?;
                 let heap_bytes = [&widget.field_type, &widget.name, &widget.value]
                     .into_iter()
@@ -2388,6 +2394,7 @@ impl<'a> SceneBuilder<'a> {
             .and_then(PdfValue::as_dictionary)
             .unwrap_or(dictionary);
         let limit = self.limits.max_string_bytes;
+        let field_root_counts = self.field_root_counts.as_ref();
         let name = map_widget_label_with_workspace(
             widget,
             dictionary,
@@ -2401,7 +2408,12 @@ impl<'a> SceneBuilder<'a> {
                     self.reader.scene_label_object(reference, 0, &workspace)
                 }
             },
-            |field, _| Ok(self.field_root_counts.get(&field).copied().unwrap_or(0)),
+            |field, _| {
+                Ok(field_root_counts
+                    .and_then(|counts| counts.get(&field))
+                    .copied()
+                    .unwrap_or(0))
+            },
             |bytes| {
                 let mut remaining = workspace.get();
                 let name = decode_pdf_text_string(bytes, limit, &mut remaining)?
@@ -2483,6 +2495,14 @@ impl<'a> SceneBuilder<'a> {
         Ok(None)
     }
 
+    fn field_root_count(&self, field: PdfObjectRef) -> usize {
+        self.field_root_counts
+            .as_ref()
+            .and_then(|counts| counts.get(&field))
+            .copied()
+            .unwrap_or(0)
+    }
+
     fn widget_field_owner<'workspace>(
         &mut self,
         widget: PdfObjectRef,
@@ -2493,7 +2513,7 @@ impl<'a> SceneBuilder<'a> {
             return Ok(None);
         };
         if parent_ref == widget
-            || self.field_root_counts.get(&parent_ref) != Some(&1)
+            || self.field_root_count(parent_ref) != 1
             || ["FT", "V", "Kids"]
                 .iter()
                 .any(|key| dictionary.contains_key(*key))
@@ -2750,22 +2770,15 @@ fn scene_form_entry<'a, 'workspace>(
 
 fn read_field_root_counts(
     reader: &PdfReader,
-    catalog: &PdfValue,
     workspace: &Cell<usize>,
-    report: &mut PdfReadReport,
 ) -> Result<BTreeMap<PdfObjectRef, usize>, PdfReadError> {
     use std::collections::btree_map::Entry;
 
     let mut counts = BTreeMap::new();
+    let catalog = reader.scene_non_stream_object(reader.root_for_scene(), 0, workspace)?;
     let dictionary = catalog
         .as_dictionary()
         .ok_or(PdfReadError::PageTreeInvalid)?;
-    report_active_content(
-        dictionary,
-        None,
-        Some(reader.root_for_scene().object_number),
-        report,
-    );
     if let Some(form) = dictionary.get("AcroForm") {
         let form = scene_form_entry(reader, form, 1, workspace)?;
         if let Some(fields) = form
@@ -2800,9 +2813,21 @@ pub fn read_pdf_scene(
 ) -> Result<PdfScene, PdfReadError> {
     let scene_byte_limit = reader.limits().max_scene_bytes;
     let workspace = Cell::new(scene_byte_limit);
-    let catalog = reader.scene_non_stream_object(reader.root_for_scene(), 0, &workspace)?;
-    let pages =
-        reader.page_records_from_root(PdfReader::page_tree_root(&catalog)?, Some(&workspace))?;
+    let catalog = reader.catalog_without_form(&workspace)?;
+    let pages_ref = PdfReader::page_tree_root(&catalog)?;
+    let dictionary = catalog
+        .as_dictionary()
+        .ok_or(PdfReadError::PageTreeInvalid)?;
+    let mut report = reader.preflight_report();
+    report_active_content(
+        dictionary,
+        None,
+        Some(reader.root_for_scene().object_number),
+        &mut report,
+    );
+    let mut field_root_counts = (!dictionary.contains_key("AcroForm")).then(BTreeMap::new);
+    drop(catalog);
+    let pages = reader.page_records_from_root(pages_ref, Some(&workspace))?;
     let page_count = u32::try_from(pages.len()).map_err(|_| PdfReadError::PageCountLimit)?;
     let first = usize::try_from(request.first_page).map_err(|_| PdfReadError::PageCountLimit)?;
     let count = usize::try_from(request.page_count).map_err(|_| PdfReadError::PageCountLimit)?;
@@ -2813,9 +2838,6 @@ pub fn read_pdf_scene(
         .checked_add(count)
         .ok_or(PdfReadError::PageCountLimit)?
         .min(pages.len());
-    let mut report = reader.preflight_report();
-    let field_root_counts = read_field_root_counts(reader, &catalog, &workspace, &mut report)?;
-    drop(catalog);
     // @invariant: Retained elements and image hex share allowances across the requested page window.
     let mut budget = SceneBudget {
         remaining_scene_bytes: workspace.into_inner(),
@@ -2833,12 +2855,13 @@ pub fn read_pdf_scene(
     let mut scene_pages = Vec::with_capacity(end.saturating_sub(first));
     for (index, page) in pages.iter().enumerate().take(end).skip(first) {
         let page_index = u32::try_from(index).map_err(|_| PdfReadError::PageCountLimit)?;
+        let had_field_root_counts = field_root_counts.is_some();
         match SceneBuilder::new(
             reader,
             &page_refs,
             page_index,
             page,
-            &field_root_counts,
+            &mut field_root_counts,
             budget,
         )
         .run()
@@ -2849,6 +2872,9 @@ pub fn read_pdf_scene(
                 scene_pages.push(page);
             }
             Err(PdfReadError::FilterUnsupported) => {
+                if !had_field_root_counts {
+                    field_root_counts = None;
+                }
                 report.push(PdfReadDiagnostic::blocked(
                     PdfReadDiagnosticCode::UnsupportedFilter,
                     Some(page_index),

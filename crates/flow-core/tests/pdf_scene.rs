@@ -2154,6 +2154,100 @@ fn page_discovery_requires_layout_area_for_media_and_positive_area_for_crop() {
 }
 
 #[test]
+fn scene_loads_field_roots_only_for_windows_with_widgets() {
+    for indirect_fields in [false, true] {
+        let mut objects = vec![
+            (
+                2,
+                b"<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 >>".to_vec(),
+            ),
+            (
+                3,
+                b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Annots [7 0 R] >>".to_vec(),
+            ),
+            (
+                4,
+                b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Annots [5 0 R] >>".to_vec(),
+            ),
+            (
+                5,
+                b"<< /Type /Annot /Subtype /Widget /Parent 6 0 R /Rect [10 10 40 30] >>".to_vec(),
+            ),
+            (
+                6,
+                b"<< /FT /Tx /T (recipient) /V (Olena) /Kids [5 0 R] >>".to_vec(),
+            ),
+            (
+                7,
+                b"<< /Type /Annot /Subtype /Link /Rect [10 10 40 30] /Dest [4 0 R /Fit] >>"
+                    .to_vec(),
+            ),
+        ];
+        let mut fields = String::from("[6 0 R");
+        for id in 9..89 {
+            use std::fmt::Write as _;
+            write!(fields, " {id} 0 R").unwrap();
+            objects.push((
+                id,
+                format!("<< /FT /Tx /T (entry-{id}) /V (pending) >>").into_bytes(),
+            ));
+        }
+        fields.push(']');
+        if indirect_fields {
+            objects.push((8, fields.into_bytes()));
+            fields = "8 0 R".to_owned();
+        }
+        objects.push((
+            1,
+            format!("<< /Type /Catalog /Pages 2 0 R /OpenAction [3 0 R /Fit] /AcroForm << /Fields {fields} >> >>").into_bytes(),
+        ));
+        let bytes = pdf(objects);
+        let roomy = open_pdf(&bytes, Default::default()).unwrap();
+        let constrained = open_pdf(
+            &bytes,
+            PdfReaderLimits {
+                max_scene_bytes: 6 * 1024,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let read = |reader, first_page| {
+            read_pdf_scene(
+                reader,
+                &PdfSceneRequest {
+                    first_page,
+                    page_count: 1,
+                },
+            )
+        };
+        let summary = constrained.summary().unwrap();
+        let widget_free = read(&constrained, 0).unwrap();
+        assert_eq!(summary, roomy.summary().unwrap());
+        assert_eq!(summary.page_count, 2);
+        assert_eq!(widget_free.page_count, summary.page_count);
+        assert_eq!(widget_free.source_hash, summary.source_hash);
+        assert_eq!(widget_free, read(&roomy, 0).unwrap());
+        assert!(widget_free.report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == PdfReadDiagnosticCode::ActiveContent
+                && diagnostic.object_number == Some(1)
+        }));
+        let [PdfSceneElement::Link { value }] = widget_free.pages[0].elements.as_slice() else {
+            panic!("expected a link");
+        };
+        assert_eq!(value.destination_page, Some(1));
+
+        let with_widget = read(&roomy, 1).unwrap();
+        let [PdfSceneElement::Form { value }] = with_widget.pages[0].elements.as_slice() else {
+            panic!("expected a widget");
+        };
+        assert_eq!(value.field_type.as_deref(), Some("Tx"));
+        assert_eq!(value.name.as_deref(), Some("recipient"));
+        assert_eq!(value.value.as_deref(), Some("Olena"));
+        assert_eq!(read(&constrained, 1), Err(PdfReadError::StreamLimit));
+    }
+}
+
+#[test]
 fn widget_readback_requires_a_registered_split_field_with_a_single_matching_child() {
     for (fields, children, widget_entries, field_entries, expected) in [
         ("[5 0 R]", "[4 0 R]", "", "", Some("Ї")),
