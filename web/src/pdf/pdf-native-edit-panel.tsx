@@ -1337,8 +1337,8 @@ export function PdfNativeEditPanel({
   }
 
   async function open(filename: string, read: () => Promise<Uint8Array>,
-    recovery?: { readonly expectedSourceHash: string; readonly originalStoreHash?: never }
-      | { readonly expectedSourceHash?: never; readonly originalStoreHash: string },
+    recovery?: { readonly expectedSourceHash: string; readonly originalStoreHash?: never; readonly expectedOutputHash?: never }
+      | { readonly expectedSourceHash?: never; readonly originalStoreHash: string; readonly expectedOutputHash: string },
   ) {
     if (locked.current) return
     locked.current = true
@@ -1364,6 +1364,10 @@ export function PdfNativeEditPanel({
       candidateRef.current = candidate
       const result = await candidate.open({ bytes, originStoreHash: hash })
       if (!mounted.current) return
+      if (recovery?.expectedOutputHash !== undefined
+        && nativeBytesHex(Uint8Array.from(result.outputHash)) !== recovery.expectedOutputHash) {
+        throw new PdfSourceStoreError('FLOW_PDF_SOURCE_IDENTITY_CONFLICT')
+      }
       const previous = coordinatorRef.current
       setSession({ coordinator: candidate, accepted: { filename, snapshot: result,
         ...(recovery?.originalStoreHash !== undefined ? { originalStoreHash: recovery.originalStoreHash } : {}),
@@ -2030,8 +2034,8 @@ export function PdfNativeEditPanel({
   }
   if (invalidated && !failure) failure = t('error.session')
   if (currentRefusal) failure = [t('redaction.noOutput', { reason: t(currentRefusal.reason) }), failure].filter(Boolean).join(' ')
-  if (canReopen && !invalidated && needsReconcile) {
-    failure = [failure, t(reopenAccepted ? 'session.commandRecovery' : 'session.redactionRecovery')].filter(Boolean).join(' ')
+  if (reopenAccepted && (needsReconcile || invalidated)) {
+    failure = [failure, t(service.reopenOriginal ? 'session.redactionRecovery' : 'session.commandRecovery')].filter(Boolean).join(' ')
   }
   const announcement = busy === 'opening' ? t('status.opening')
     : busy === 'mutating' ? t('status.pending')
@@ -2111,7 +2115,7 @@ export function PdfNativeEditPanel({
             disabled={busy !== null} onClick={() => {
               if (reopenAccepted) {
                 void open(accepted.filename, async () => nativeHexBytes(accepted.snapshot.outputHex),
-                  { originalStoreHash })
+                  { expectedOutputHash: outputHash, originalStoreHash })
               } else {
                 void open(accepted.filename, async () => {
                   const original = await sourceStore.get(originalStoreHash)

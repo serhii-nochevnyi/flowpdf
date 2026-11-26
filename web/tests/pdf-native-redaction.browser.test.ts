@@ -91,7 +91,7 @@ end end`, '')
 }
 
 type Action = NativePdfRedactionResult['action']
-type Fault = 'failed' | 'unavailable' | 'inconclusive' | 'hash' | 'version' | 'coverage' | 'missing' | 'lostPublish' | null
+type Fault = 'failed' | 'unavailable' | 'inconclusive' | 'hash' | 'version' | 'coverage' | 'missing' | 'lostPublish' | 'fatalPublish' | null
 const refusedLane = { failed: 'structure', unavailable: 'text', inconclusive: 'raster' } as const
 
 function controlledWorker() {
@@ -121,6 +121,7 @@ function controlledWorker() {
     fault: null as Fault,
     refusePreview: false,
     dropMarkReplies: 0,
+    dropStatusReply: false,
     hold: null as Action | null,
     resume: undefined as (() => void) | undefined,
     requests, previewPages, dispatched, rawReplies, readRaw,
@@ -166,7 +167,11 @@ function controlledWorker() {
         control.dropMarkReplies -= 1
         return
       }
-      if (result.action === 'verify' && control.fault && control.fault !== 'lostPublish') {
+      if (result.action === 'status' && control.dropStatusReply) {
+        control.dropStatusReply = false
+        return
+      }
+      if (result.action === 'verify' && control.fault && control.fault !== 'lostPublish' && control.fault !== 'fatalPublish') {
         const fault = control.fault
         control.fault = null
         if (fault === 'missing') return
@@ -187,8 +192,10 @@ function controlledWorker() {
         port.onmessage?.(new MessageEvent('message', { data: { ...data, json } }))
         return
       }
-      if (result.action === 'publish' && control.fault === 'lostPublish') {
+      if (result.action === 'publish' && (control.fault === 'lostPublish' || control.fault === 'fatalPublish')) {
+        const fault = control.fault
         control.fault = null
+        if (fault === 'fatalPublish') control.die()
         return
       }
     }
@@ -488,7 +495,7 @@ for (const locale of ['en', 'uk'] as const) {
       await assertPreviewRefusal()
       expect(lane.control.previewPages).toHaveLength(previewCount)
       await activate(checkResult.element())
-      await expect.element(button('session.reopen'), { timeout: 6_000 }).toBeEnabled()
+      await expect.element(button('session.reopenAccepted'), { timeout: 6_000 }).toBeEnabled()
       await expect.element(alert).toHaveTextContent(t('session.redactionRecovery'))
       expect(acceptedScope()).toBe(ordinary)
       expect(lane.coordinator.outputBytes()).toBeNull()
@@ -499,7 +506,7 @@ for (const locale of ['en', 'uk'] as const) {
       expect(visibleRaster()?.dataset.nativePreviewRevision).toBe('1')
       expect(visibleRaster()?.dataset.nativePreviewHash).toBe(ordinaryHash)
       expect(lane.control.previewPages.slice(previewCount)).toEqual([ordinary.pageState.order[1]])
-      expect(button('session.reopen').query()).toBeNull()
+      expect(button('session.reopenAccepted').query()).toBeNull()
       await expect.element(redactionButton('redaction.apply')).toBeEnabled()
       expect(paintAtMark()).toEqual([0, 0, 255, 255])
       await expect.element(status).toHaveAttribute('data-native-redaction-status', 'neutral')
@@ -770,6 +777,66 @@ for (const locale of ['en', 'uk'] as const) {
       await reopen.click()
       await expect.element(status).toHaveTextContent(t('status.reopened'))
       expect(marksOnPage()).toHaveLength(0)
+
+      await activate(button('note.add').element())
+      await notes.fill(ordinaryNote)
+      await panel.getByRole('spinbutton', { name: t('geometry.x'), exact: true }).fill('120')
+      await panel.getByRole('spinbutton', { name: t('geometry.y'), exact: true }).fill('10')
+      await activate(button('note.add').element())
+      await expect.element(status).toHaveTextContent(t('status.accepted', { revision: 1 }))
+      const ordinaryOutput = acceptedScope()!
+      const recoveryHash = nativeBytesHex(Uint8Array.from(ordinaryOutput.outputHash))
+      const recoveryBytes = nativeHexBytes(ordinaryOutput.outputHex)
+      const reopenAccepted = button('session.reopenAccepted')
+      for (const fault of ['lostPublish', 'fatalPublish'] as const) {
+        await fillMark(20, 20, 59, 80)
+        await addMark(1)
+        const beforeRecovery = acceptedScope()
+        const interruptedLane = lane
+        const beforePublication = checkpoint()
+        const sourceWrites = put.mock.calls.length
+        interruptedLane.control.fault = fault
+        interruptedLane.control.dropStatusReply = fault === 'lostPublish'
+        await activate((await openConfirmation('apply', '1', 1)).element())
+        if (fault === 'lostPublish') {
+          await expect.element(checkResult, { timeout: 6_000 }).toBeVisible()
+          await activate(checkResult.element())
+        }
+        await expect.element(reopenAccepted, { timeout: 6_000 }).toBeEnabled()
+        await expect.element(alert).toHaveTextContent(t('session.redactionRecovery'))
+
+        const replies = rawRedactionReplies(interruptedLane.control)
+        const published = replies.find(({ request }) => request.action.kind === 'publish')
+        if (published?.reply?.status !== 'published') throw Error('Missing worker publication')
+        expect(published.reply.snapshot.outputHex).not.toBe(ordinaryOutput.outputHex)
+        if (fault === 'lostPublish') {
+          const lostStatus = replies.at(-1)
+          expect(lostStatus?.reply).toMatchObject({ status: 'redaction', redaction: { action: 'status', published: true } })
+          expect(lostStatus?.request.requestId).toBe(published.request.requestId)
+        } else {
+          expect(interruptedLane.coordinator.snapshot().phase).toBe('invalidated')
+          expect(checkResult.query()).toBeNull()
+          expect(replies.at(-1)).toBe(published)
+        }
+        expect(interruptedLane.coordinator.snapshot().accepted).toBe(beforeRecovery)
+        expect(interruptedLane.coordinator.outputBytes()).toBeNull()
+        expect(newOutput()).toBeNull()
+        expect(checkpoint()).toEqual(beforePublication)
+        expect(put).toHaveBeenCalledTimes(sourceWrites)
+
+        lane = controlledWorker()
+        await activate(reopenAccepted.element())
+        await expect.element(status).toHaveTextContent(t('status.reopenedAccepted'))
+        await expect.element(panel.getByText(ordinaryNote, { exact: true })).toBeVisible()
+        await expect.poll(() => visibleRaster()?.dataset.nativePreviewHash).toBe(recoveryHash)
+        await expect.element(button('download.edited')).toHaveAttribute('data-output-hash', recoveryHash)
+        expect((await getDownload('download.edited')).bytes).toEqual(recoveryBytes)
+        expect((await getDownload('download.original')).bytes).toEqual(source)
+        expect(marksOnPage()).toHaveLength(0)
+        expect(checkResult.query()).toBeNull()
+        expect(reopenAccepted.query()).toBeNull()
+        expect(newOutput()).toBeNull()
+      }
       expect(clipboard).not.toHaveBeenCalled()
       expect(clipboardItems).not.toHaveBeenCalled()
     } finally {

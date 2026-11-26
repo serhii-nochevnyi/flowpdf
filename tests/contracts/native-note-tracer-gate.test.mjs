@@ -153,6 +153,7 @@ for (const [profile, revision, expanded] of [
   ['reviewed readback', readbackRevision, true],
   ['reviewed image replacement', 'ad75722669c534a081dceb3069b16f7b17b78a0c', true],
   ['reviewed image replacement and redaction feedback', redactionFeedbackRevision, true],
+  ['previous raw snapshot and preview readback', '46ed056b6366cf53d4a942ad9ee146cbb2a44575', true],
   ['previous reviewed six-suite redaction profile', '3850e46e18fa518133fb59ea71e41d19abe854c7', true],
 ]) {
   test(`accepts the exact ${profile} harness`, (t) => {
@@ -215,7 +216,7 @@ test('refuses the recovery note suite with a different reviewed redaction suite'
   assert.throws(() => requirePassedCi('HEAD', command), { message: 'NATIVE_NOTE_TRACER_HARNESS_NOT_APPROVED' })
 })
 
-test('binds the raw snapshot and preview readback suite to the exact reviewed browser profile', (t) => {
+test('binds the verified redaction recovery suite to the exact reviewed browser profile', (t) => {
   const { command, state } = fixture()
   assert.deepEqual(requirePassedCi('HEAD', command), { repository: repo, sha, run: 7, attempt: 3, job: 73 })
   state.changedPath = redactionSuite
