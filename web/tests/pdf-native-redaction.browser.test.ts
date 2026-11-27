@@ -750,6 +750,7 @@ for (const locale of ['en', 'uk'] as const) {
       const ordinaryOutput = acceptedScope()!
       const recoveryHash = nativeBytesHex(Uint8Array.from(ordinaryOutput.outputHash))
       const recoveryBytes = nativeHexBytes(ordinaryOutput.outputHex)
+      const recoverySourceHash = await hashPdfSourceBytes(recoveryBytes)
       const reopenAccepted = button('session.reopenAccepted')
       for (const fault of ['fatalStage', 'fatalVerify', 'lostPublish', 'fatalPublish'] as const) {
         await fillMark(20, 20, 59, 80)
@@ -833,9 +834,11 @@ for (const locale of ['en', 'uk'] as const) {
         expect(lane.coordinator.outputBytes()).toEqual(recoveryBytes)
         const recovered = await getDownload('download.edited')
         expect(recovered.bytes).toEqual(recoveryBytes)
-        expect(await hashPdfSourceBytes(recovered.bytes)).toBe(`sha256:v1:${recoveryHash}`)
+        const reopenedRecovery = await reopenOutput(recovered.bytes)
+        expect(reopenedRecovery.outputHash).toEqual(ordinaryOutput.outputHash)
+        expect(await hashPdfSourceBytes(recovered.bytes)).toBe(recoverySourceHash)
         expect(put).toHaveBeenCalledTimes(sourceWrites + 1)
-        expect(put).toHaveBeenLastCalledWith(recoveryHash, recoveryBytes)
+        expect(put).toHaveBeenLastCalledWith(recoverySourceHash.slice('sha256:v1:'.length), recoveryBytes)
         await expect.element(button('download.original')).toHaveAttribute('data-origin-hash', ordinaryOutput.originStoreHash)
         expect((await getDownload('download.original')).bytes).toEqual(source)
         expect(marksOnPage()).toHaveLength(0)
