@@ -18,6 +18,7 @@ use NativeSessionError::Budget;
 pub const NATIVE_MAX_TEXT_BYTES: usize = 16 * 1024;
 const SCALE: i64 = 1_000;
 const MAX_COORDINATE: i64 = 1_000_000 * SCALE;
+const FONT_RECOGNITION_WORK: usize = 250_000;
 const MAX_MAP_ENTRIES: usize = 4_096;
 const MAX_ISLANDS_PER_PAGE: usize = 128;
 const MAX_CONTENT_BYTES: usize = 256 * 1024;
@@ -1333,7 +1334,8 @@ impl<'a, 'w> Recognition<'a, 'w> {
         let cached = match self.fonts.entry(key) {
             std::collections::btree_map::Entry::Occupied(entry) => entry.into_mut(),
             std::collections::btree_map::Entry::Vacant(entry) => {
-                self.work_exhaustion.charge(&mut self.work, 250_000, Font)?;
+                self.work_exhaustion
+                    .charge(&mut self.work, FONT_RECOGNITION_WORK, Font)?;
                 self.cache_memory
                     .tree_entry::<(*const Dict, TextResult<ReservedFont<'w>>)>()
                     .map_err(|_| Budget)?;
