@@ -452,36 +452,20 @@ fn scale_text_advance(
     horizontal_percent: SceneDecimal,
     spacing_factor: SceneDecimal,
 ) -> Result<LayoutUnit, PdfReadError> {
-    const DIVISOR: i128 = 1_000 * 100;
-    let (
-        SceneDecimal::Exact {
-            coefficient: percent,
-            scale: percent_scale,
-        },
-        SceneDecimal::Exact {
-            coefficient: spacing,
-            scale: spacing_scale,
-        },
-    ) = (horizontal_percent, spacing_factor)
-    else {
-        let rounded = (advance_thousandths as f64 / DIVISOR as f64
-            * horizontal_percent.value()
-            * spacing_factor.value())
-        .round();
-        let limit = -(i64::MIN as f64);
-        if !(-limit..limit).contains(&rounded) {
-            return Err(PdfReadError::NumericLimit);
-        }
-        return Ok(LayoutUnit::from_raw(rounded as i64));
-    };
+    let (percent, percent_scale) = horizontal_percent
+        .exact_parts()
+        .ok_or(PdfReadError::NumericLimit)?;
+    let (spacing, spacing_scale) = spacing_factor
+        .exact_parts()
+        .ok_or(PdfReadError::NumericLimit)?;
     let decimal_places = percent_scale
         .checked_add(spacing_scale)
         .and_then(|scale| scale.checked_add(5))
         .ok_or(PdfReadError::NumericLimit)?;
     let divisor = 10_i128.checked_pow(decimal_places);
     let scaled = advance_thousandths
-        .checked_mul(i128::from(percent))
-        .and_then(|value| value.checked_mul(i128::from(spacing)));
+        .checked_mul(percent)
+        .and_then(|value| value.checked_mul(spacing));
     let (Some(divisor), Some(scaled)) = (divisor, scaled) else {
         return wide_decimal_advance(advance_thousandths, percent, spacing, decimal_places);
     };
@@ -499,25 +483,26 @@ fn scale_text_advance(
 
 fn wide_decimal_advance(
     advance: i128,
-    percent: i64,
-    spacing: i64,
+    percent: i128,
+    spacing: i128,
     decimal_places: u32,
 ) -> Result<LayoutUnit, PdfReadError> {
-    // @invariant: The product of one i128 and two i64 magnitudes needs at most 77 decimal digits.
-    let mut digits = [0_u8; 77];
+    // @invariant: Three i128 magnitudes need at most 117 decimal digits.
+    let mut digits = [0_u8; 117];
     let mut magnitude = advance.unsigned_abs();
     for digit in &mut digits {
         *digit = (magnitude % 10) as u8;
         magnitude /= 10;
     }
     for factor in [percent.unsigned_abs(), spacing.unsigned_abs()] {
-        let factor = u128::from(factor);
+        let (factor_tens, factor_ones) = (factor / 10, factor % 10);
         let mut carry = 0;
         for digit in &mut digits {
-            // @invariant: A single digit and carry stay below ten times the 64-bit factor.
-            let product = u128::from(*digit) * factor + carry;
-            *digit = (product % 10) as u8;
-            carry = product / 10;
+            let digit_value = u128::from(*digit);
+            // @invariant: Split before multiplying so the next carry stays below the factor.
+            let ones = digit_value * factor_ones + carry % 10;
+            *digit = (ones % 10) as u8;
+            carry = digit_value * factor_tens + carry / 10 + ones / 10;
         }
         debug_assert_eq!(carry, 0);
     }
@@ -744,10 +729,7 @@ impl GraphicsState {
             leading: LayoutUnit::from_raw(12 * 64),
             char_spacing: LayoutUnit::from_raw(0),
             word_spacing: LayoutUnit::from_raw(0),
-            horizontal_percent: SceneDecimal::Exact {
-                coefficient: 100,
-                scale: 0,
-            },
+            horizontal_percent: SceneDecimal::exact(100, 0),
             rise: LayoutUnit::from_raw(0),
             in_text: false,
             path: Vec::new(),
@@ -877,47 +859,56 @@ pub(super) enum ContentToken {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub(super) enum SceneDecimal {
-    Exact { coefficient: i64, scale: u32 },
-    Approximate(f64),
-}
+pub(super) struct SceneDecimal([u64; 2]);
 
 impl SceneDecimal {
-    const ONE: Self = Self::Exact {
-        coefficient: 1,
-        scale: 0,
-    };
+    const ONE: Self = Self::exact(1, 0);
+    const APPROXIMATE_TAG: u64 = 32;
+
+    const fn exact(coefficient: i128, scale: u32) -> Self {
+        // @invariant: A 32-byte decimal token fits a signed 122-bit coefficient and a 5-bit scale.
+        debug_assert!(scale <= 31 && coefficient.checked_mul(64).is_some());
+        let bits = (coefficient << 6) | scale as i128;
+        Self([bits as u64, (bits >> 64) as u64])
+    }
+
+    fn exact_parts(self) -> Option<(i128, u32)> {
+        let [low, high] = self.0;
+        if low & Self::APPROXIMATE_TAG != 0 {
+            return None;
+        }
+        let bits = (i128::from(high) << 64) | i128::from(low);
+        Some((bits >> 6, (low & 31) as u32))
+    }
 
     fn value(self) -> f64 {
-        match self {
-            Self::Exact { coefficient, scale } => coefficient as f64 / 10_i128.pow(scale) as f64,
-            Self::Approximate(value) => value,
+        match self.exact_parts() {
+            Some((coefficient, scale)) => coefficient as f64 / 10_i128.pow(scale) as f64,
+            None => f64::from_bits(self.0[1]),
         }
     }
 
     fn sum(self, other: Self) -> Self {
-        if let (
-            Self::Exact {
-                coefficient: left,
-                scale: left_scale,
-            },
-            Self::Exact {
-                coefficient: right,
-                scale: right_scale,
-            },
-        ) = (self, other)
+        if let (Some((left, left_scale)), Some((right, right_scale))) =
+            (self.exact_parts(), other.exact_parts())
         {
             let scale = left_scale.max(right_scale);
-            let left = i128::from(left).checked_mul(10_i128.pow(scale - left_scale));
-            let right = i128::from(right).checked_mul(10_i128.pow(scale - right_scale));
+            let left = left.checked_mul(10_i128.pow(scale - left_scale));
+            let right = right.checked_mul(10_i128.pow(scale - right_scale));
             if let Some(sum) = left.zip(right).and_then(|(a, b)| a.checked_add(b)) {
-                return i64::try_from(sum).map_or_else(
-                    |_| Self::Approximate(sum as f64 / 10_i128.pow(scale) as f64),
-                    |coefficient| Self::Exact { coefficient, scale },
-                );
+                if sum.checked_mul(64).is_some() {
+                    return Self::exact(sum, scale);
+                }
+                return Self([
+                    Self::APPROXIMATE_TAG,
+                    (sum as f64 / 10_i128.pow(scale) as f64).to_bits(),
+                ]);
             }
         }
-        Self::Approximate(self.value() + other.value())
+        Self([
+            Self::APPROXIMATE_TAG,
+            (self.value() + other.value()).to_bits(),
+        ])
     }
 }
 
@@ -3046,10 +3037,7 @@ impl ContentToken {
     fn scene_decimal(&self) -> SceneDecimal {
         match self {
             Self::Number((_, value)) => *value,
-            Self::Integer(value) => SceneDecimal::Exact {
-                coefficient: *value,
-                scale: 0,
-            },
+            Self::Integer(value) => SceneDecimal::exact(i128::from(*value), 0),
             _ => unreachable!("validated numeric operand"),
         }
     }
@@ -3200,22 +3188,12 @@ fn has_noncollinear_points<T: Copy>(
 fn align_decimal_axis<const N: usize>(axis: [SceneDecimal; N]) -> Option<[i128; N]> {
     let scale = axis
         .iter()
-        .filter_map(|value| match value {
-            SceneDecimal::Exact { scale, .. } => Some(*scale),
-            SceneDecimal::Approximate(_) => None,
-        })
+        .filter_map(|value| value.exact_parts().map(|(_, scale)| scale))
         .max()?;
     let mut aligned = [0; N];
     for (target, value) in aligned.iter_mut().zip(axis) {
-        let SceneDecimal::Exact {
-            coefficient,
-            scale: source_scale,
-        } = value
-        else {
-            return None;
-        };
-        *target =
-            i128::from(coefficient).checked_mul(10_i128.checked_pow(scale - source_scale)?)?;
+        let (coefficient, source_scale) = value.exact_parts()?;
+        *target = coefficient.checked_mul(10_i128.checked_pow(scale - source_scale)?)?;
     }
     Some(aligned)
 }
@@ -4125,11 +4103,10 @@ fn parse_decimal(bytes: &[u8]) -> Result<(LayoutUnit, SceneDecimal), PdfReadErro
         scale -= 1;
         coefficient /= 10;
     }
-    let precise = match i64::try_from(coefficient) {
-        Ok(coefficient) => SceneDecimal::Exact { coefficient, scale },
-        Err(_) => SceneDecimal::Approximate(coefficient as f64 / 10_i128.pow(scale) as f64),
-    };
-    Ok((LayoutUnit::from_raw(rounded), precise))
+    Ok((
+        LayoutUnit::from_raw(rounded),
+        SceneDecimal::exact(coefficient, scale),
+    ))
 }
 
 #[cfg(test)]
@@ -4137,7 +4114,7 @@ mod tests {
     #[test]
     fn wide_decimal_advance_refuses_an_out_of_range_result() {
         assert_eq!(
-            super::wide_decimal_advance(i128::MAX, i64::MAX, i64::MAX, 5),
+            super::wide_decimal_advance(i128::MAX, i128::MAX, i128::MAX, 5),
             Err(super::PdfReadError::NumericLimit)
         );
     }
@@ -4146,6 +4123,30 @@ mod tests {
         LayoutUnit, PaintBounds, PaintMatrix, RawPathCommand, SceneDecimal,
         lost_visible_fill_contour, separated_content_streams, transform_path,
     };
+
+    #[test]
+    fn decimal_advances_cover_parser_and_signed_magnitude_limits() {
+        use super::{PdfReadError, parse_decimal, scale_text_advance, wide_decimal_advance};
+
+        let (_, tiny) = parse_decimal(b".0000000000000000000000000000001").unwrap();
+        let (_, precise) = parse_decimal(b"9.999999999999999999999999999999").unwrap();
+        assert_eq!(tiny.exact_parts(), Some((1, 31)));
+        assert_eq!(
+            precise.exact_parts(),
+            Some((9_999_999_999_999_999_999_999_999_999_999, 30))
+        );
+        assert!(matches!(
+            parse_decimal(b".00000000000000000000000000000001"),
+            Err(PdfReadError::NumericLimit)
+        ));
+        assert_eq!(scale_text_advance(768, tiny, tiny).unwrap().raw(), 0);
+        assert_eq!(
+            wide_decimal_advance(i128::MIN, i128::MIN, i128::MIN, 96)
+                .unwrap()
+                .raw(),
+            -4_925_250_774_549_309_902
+        );
+    }
 
     #[test]
     fn path_bounds_preserves_empty_and_numeric_limit_results() {
@@ -4171,18 +4172,7 @@ mod tests {
 
     #[test]
     fn precise_clip_can_exclude_only_the_collapsed_contour() {
-        let point = |x, y| {
-            [
-                SceneDecimal::Exact {
-                    coefficient: x,
-                    scale: 3,
-                },
-                SceneDecimal::Exact {
-                    coefficient: y,
-                    scale: 3,
-                },
-            ]
-        };
+        let point = |x, y| [SceneDecimal::exact(x, 3), SceneDecimal::exact(y, 3)];
         let fixed = |v: i64| LayoutUnit::from_raw(v * 64);
         let source = [
             RawPathCommand::MoveTo(fixed(10), fixed(10), point(10000, 10000)),

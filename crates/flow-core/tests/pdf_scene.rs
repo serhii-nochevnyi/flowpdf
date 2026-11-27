@@ -298,6 +298,38 @@ fn mapped_tj_applies_real_and_integer_spacing_at_the_active_horizontal_scale() {
             1536,
             [(640, 2432), (2183, 2432), (3463, 2432)],
         ),
+        (
+            12,
+            "100",
+            "1 0 0 1 10 50",
+            "-0.65104166666666666666",
+            461,
+            [(640, 2432), (1101, 2432), (1485, 2432)],
+        ),
+        (
+            12,
+            "100",
+            "1 0 0 1 10 50",
+            "-0.65104166666666666667",
+            461,
+            [(640, 2432), (1102, 2432), (1486, 2432)],
+        ),
+        (
+            12,
+            "0.10850694444444444444",
+            "1 0 0 1 10 50",
+            "-125.5",
+            0,
+            [(640, 2432), (640, 2432), (640, 2432)],
+        ),
+        (
+            12,
+            "0.10850694444444444445",
+            "1 0 0 1 10 50",
+            "-125.5",
+            1,
+            [(640, 2432), (641, 2432), (642, 2432)],
+        ),
     ] {
         let paint = format!(
             "BT /F1 {font_size} Tf {percent} Tz {matrix} Tm [(A) {adjustment} (B) 100 (A)] TJ ET"
@@ -837,7 +869,7 @@ fn aggregate_report_retains_operator_storage_across_two_pages() {
             .to_hex()
             .as_str()
     );
-    let exact = 24_534 + 2 * size_of::<flow_core::pdf::PdfScenePage>();
+    let exact = 24_574 + 2 * size_of::<flow_core::pdf::PdfScenePage>();
     assert_eq!(read(exact).unwrap(), expected);
     assert!(matches!(read(exact - 1), Err(PdfReadError::StreamLimit)));
 }
