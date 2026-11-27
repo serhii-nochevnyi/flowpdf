@@ -474,15 +474,17 @@ fn scale_text_advance(
         }
         return Ok(LayoutUnit::from_raw(rounded as i64));
     };
-    let divisor = percent_scale
+    let decimal_places = percent_scale
         .checked_add(spacing_scale)
-        .and_then(|scale| 10_i128.checked_pow(scale))
-        .and_then(|decimal_units| decimal_units.checked_mul(DIVISOR))
+        .and_then(|scale| scale.checked_add(5))
         .ok_or(PdfReadError::NumericLimit)?;
+    let divisor = 10_i128.checked_pow(decimal_places);
     let scaled = advance_thousandths
         .checked_mul(i128::from(percent))
-        .and_then(|value| value.checked_mul(i128::from(spacing)))
-        .ok_or(PdfReadError::NumericLimit)?;
+        .and_then(|value| value.checked_mul(i128::from(spacing)));
+    let (Some(divisor), Some(scaled)) = (divisor, scaled) else {
+        return wide_decimal_advance(advance_thousandths, percent, spacing, decimal_places);
+    };
     let remainder = scaled % divisor;
     let rounded = scaled / divisor
         + if remainder.abs() >= divisor / 2 {
@@ -491,6 +493,49 @@ fn scale_text_advance(
             0
         };
     i64::try_from(rounded)
+        .map(LayoutUnit::from_raw)
+        .map_err(|_| PdfReadError::NumericLimit)
+}
+
+fn wide_decimal_advance(
+    advance: i128,
+    percent: i64,
+    spacing: i64,
+    decimal_places: u32,
+) -> Result<LayoutUnit, PdfReadError> {
+    // @invariant: The product of one i128 and two i64 magnitudes needs at most 77 decimal digits.
+    let mut digits = [0_u8; 77];
+    let mut magnitude = advance.unsigned_abs();
+    for digit in &mut digits {
+        *digit = (magnitude % 10) as u8;
+        magnitude /= 10;
+    }
+    for factor in [percent.unsigned_abs(), spacing.unsigned_abs()] {
+        let factor = u128::from(factor);
+        let mut carry = 0;
+        for digit in &mut digits {
+            // @invariant: A single digit and carry stay below ten times the 64-bit factor.
+            let product = u128::from(*digit) * factor + carry;
+            *digit = (product % 10) as u8;
+            carry = product / 10;
+        }
+        debug_assert_eq!(carry, 0);
+    }
+
+    let split = usize::try_from(decimal_places).map_err(|_| PdfReadError::NumericLimit)?;
+    let (discarded, retained) = digits.split_at(split.min(digits.len()));
+    let rounded_up = split <= digits.len() && discarded.last().is_some_and(|&digit| digit >= 5);
+    let rounded = retained
+        .iter()
+        .rev()
+        .try_fold(0_u64, |value, &digit| {
+            value.checked_mul(10)?.checked_add(u64::from(digit))
+        })
+        .and_then(|value| value.checked_add(u64::from(rounded_up)))
+        .ok_or(PdfReadError::NumericLimit)?;
+    let rounded = i128::from(rounded);
+    let negative = (advance < 0) ^ (percent < 0) ^ (spacing < 0);
+    i64::try_from(if negative { -rounded } else { rounded })
         .map(LayoutUnit::from_raw)
         .map_err(|_| PdfReadError::NumericLimit)
 }
@@ -4089,6 +4134,14 @@ fn parse_decimal(bytes: &[u8]) -> Result<(LayoutUnit, SceneDecimal), PdfReadErro
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn wide_decimal_advance_refuses_an_out_of_range_result() {
+        assert_eq!(
+            super::wide_decimal_advance(i128::MAX, i64::MAX, i64::MAX, 5),
+            Err(super::PdfReadError::NumericLimit)
+        );
+    }
+
     use super::{
         LayoutUnit, PaintBounds, PaintMatrix, RawPathCommand, SceneDecimal,
         lost_visible_fill_contour, separated_content_streams, transform_path,
