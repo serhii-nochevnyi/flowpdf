@@ -7,6 +7,7 @@
     { "name": "serde_json", "version": "1.0.149", "repository": "https://github.com/serde-rs/json" },
     { "name": "uuid", "version": "1.18.1", "repository": "https://github.com/uuid-rs/uuid" },
     { "name": "blake3", "version": "1.8.2", "repository": "https://github.com/BLAKE3-team/BLAKE3" },
+    { "name": "sha2", "version": "0.10.9", "repository": "https://github.com/RustCrypto/hashes" },
     { "name": "thiserror", "version": "2.0.17", "repository": "https://github.com/dtolnay/thiserror" },
     { "name": "wasm-bindgen", "version": "0.2.108", "repository": "https://github.com/wasm-bindgen/wasm-bindgen" },
     {
@@ -14,6 +15,10 @@
       "version": "0.2.108",
       "repository": "https://github.com/wasm-bindgen/wasm-bindgen",
       "kind": "tool",
+      "linuxRelease": {
+        "assetSha256": "d15d7e476feec78d0ec9edc27b8f77279ec7a3e6227756e7036e5cd2066800f4",
+        "binarySha256": "cc1c66ada99eb67a0d1518f1af95f47b870cbad9461de4db4a6ccc5e4aa2b2cc"
+      },
       "binarySha256": {
         "aarch64-apple-darwin": "a82196546fb05070608b5dc59997d38ebe0a01cc55ba25f1911a2bf44e597307"
       }

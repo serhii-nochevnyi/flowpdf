@@ -16,6 +16,7 @@ mod display_list;
 mod font;
 mod forms;
 mod metadata;
+pub mod native;
 mod provenance;
 mod reader;
 mod reconstruction;
@@ -37,6 +38,11 @@ pub use metadata::{
     MAX_PDF_LINK_ENTRIES, MAX_PDF_METADATA_FIELD_BYTES, MAX_PDF_OUTLINE_ENTRIES, PdfInternalLink,
     PdfMetadataError, PdfMetadataOptions, PdfOutlineEntry, PdfSupportReport, PdfSupportedFeature,
     PdfUnsupportedFeature,
+};
+pub use native::{
+    NATIVE_MAX_NOTE_BYTES, NATIVE_REQUEST_HISTORY, NativeBinding, NativeEditError,
+    NativeEditLimits, NativeEditReceipt, NativeNoteCommand, NativeNoteId, NativePageGeometry,
+    NativePageId, NativePdfSession, NativeRequestLookup, NativeSessionError, NativeSnapshot,
 };
 pub use provenance::{
     MAX_PDF_MANIFEST_BYTES, MAX_PDF_SOURCE_PAYLOAD_BYTES, MAX_PDF_SOURCE_STREAM_BYTES,
@@ -60,10 +66,11 @@ pub use recovery::{
     PdfRecoveredSource, PdfRecoveryError, PdfRecoveryExpectation, recover_owned_source,
 };
 pub use scene::{
-    PDF_SCENE_SCHEMA_VERSION, PdfAnnotationElement, PdfAnnotationKind, PdfClipElement,
-    PdfFormElement, PdfGlyph, PdfImageElement, PdfLinkElement, PdfPathCommand, PdfPathElement,
-    PdfScene, PdfSceneElement, PdfScenePage, PdfSceneRequest, PdfSourceProvenance, PdfTextElement,
-    PdfTextMapping, read_pdf_scene,
+    NativePdfAnnotation, NativePdfNote, NativePdfNotePage, NativePdfNoteScene,
+    NativeReadOnlyAnnotation, PDF_SCENE_SCHEMA_VERSION, PdfAnnotationElement, PdfAnnotationKind,
+    PdfClipElement, PdfFormElement, PdfGlyph, PdfImageElement, PdfLinkElement, PdfPathCommand,
+    PdfPathElement, PdfScene, PdfSceneElement, PdfScenePage, PdfSceneRequest, PdfSourceProvenance,
+    PdfTextElement, PdfTextMapping, read_pdf_scene,
 };
 
 /// Version of the owned PDF export envelope.

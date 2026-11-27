@@ -1,0 +1,303 @@
+{
+  "schemaVersion": 1,
+  "fixtureId": "notes-preservation",
+  "raster": {
+    "policy": "page-content-rgb8",
+    "version": 1,
+    "dpi": 144,
+    "origin": "top-left",
+    "annotationLayer": "excluded",
+    "evidence": "designed"
+  },
+  "operations": [
+    {
+      "operation": "preserve",
+      "outcome": "admitted",
+      "affectedPages": [],
+      "noteReadback": [],
+      "retained": [
+        "catalog-custom-scalars",
+        "trailer-info-and-id",
+        "shared-resources",
+        "indirect-length",
+        "encoded-content-streams",
+        "embedded-noto-sans",
+        "original-source",
+        "UnreachableDecoy"
+      ],
+      "removed": [],
+      "pages": [
+        {
+          "page": 1,
+          "text": "A",
+          "cropBoxPt": [
+            0,
+            0,
+            160,
+            100
+          ],
+          "rotation": 0,
+          "widthPx": 320,
+          "heightPx": 200,
+          "comparison": "equal-to-source",
+          "maxDifferentPixels": 0
+        },
+        {
+          "page": 2,
+          "text": "B",
+          "cropBoxPt": [
+            0,
+            0,
+            160,
+            100
+          ],
+          "rotation": 0,
+          "widthPx": 320,
+          "heightPx": 200,
+          "comparison": "equal-to-source",
+          "maxDifferentPixels": 0
+        }
+      ]
+    },
+    {
+      "operation": "addNote",
+      "outcome": "admitted",
+      "affectedPages": [
+        1
+      ],
+      "noteReadback": [
+        {
+          "page": 1,
+          "rectPt": [
+            96,
+            72,
+            112,
+            88
+          ],
+          "contents": "Review note"
+        }
+      ],
+      "retained": [
+        "catalog-custom-scalars",
+        "trailer-info-and-id",
+        "shared-resources",
+        "indirect-length",
+        "encoded-content-streams",
+        "embedded-noto-sans"
+      ],
+      "removed": [
+        "UnreachableDecoy"
+      ],
+      "pages": [
+        {
+          "page": 1,
+          "text": "A",
+          "cropBoxPt": [
+            0,
+            0,
+            160,
+            100
+          ],
+          "rotation": 0,
+          "widthPx": 320,
+          "heightPx": 200,
+          "comparison": "equal-to-source",
+          "maxDifferentPixels": 0
+        },
+        {
+          "page": 2,
+          "text": "B",
+          "cropBoxPt": [
+            0,
+            0,
+            160,
+            100
+          ],
+          "rotation": 0,
+          "widthPx": 320,
+          "heightPx": 200,
+          "comparison": "equal-to-source",
+          "maxDifferentPixels": 0
+        }
+      ]
+    },
+    {
+      "operation": "editNote",
+      "outcome": "admitted",
+      "affectedPages": [
+        1
+      ],
+      "noteReadback": [
+        {
+          "page": 1,
+          "rectPt": [
+            96,
+            72,
+            112,
+            88
+          ],
+          "contents": "Moved note"
+        }
+      ],
+      "retained": [
+        "catalog-custom-scalars",
+        "trailer-info-and-id",
+        "shared-resources",
+        "indirect-length",
+        "encoded-content-streams",
+        "embedded-noto-sans"
+      ],
+      "removed": [
+        "UnreachableDecoy",
+        "Review note"
+      ],
+      "pages": [
+        {
+          "page": 1,
+          "text": "A",
+          "cropBoxPt": [
+            0,
+            0,
+            160,
+            100
+          ],
+          "rotation": 0,
+          "widthPx": 320,
+          "heightPx": 200,
+          "comparison": "equal-to-source",
+          "maxDifferentPixels": 0
+        },
+        {
+          "page": 2,
+          "text": "B",
+          "cropBoxPt": [
+            0,
+            0,
+            160,
+            100
+          ],
+          "rotation": 0,
+          "widthPx": 320,
+          "heightPx": 200,
+          "comparison": "equal-to-source",
+          "maxDifferentPixels": 0
+        }
+      ]
+    },
+    {
+      "operation": "moveNote",
+      "outcome": "admitted",
+      "affectedPages": [
+        1,
+        2
+      ],
+      "noteReadback": [
+        {
+          "page": 2,
+          "rectPt": [
+            120,
+            56,
+            136,
+            72
+          ],
+          "contents": "Moved note"
+        }
+      ],
+      "retained": [
+        "catalog-custom-scalars",
+        "trailer-info-and-id",
+        "shared-resources",
+        "indirect-length",
+        "encoded-content-streams",
+        "embedded-noto-sans"
+      ],
+      "removed": [
+        "UnreachableDecoy"
+      ],
+      "pages": [
+        {
+          "page": 1,
+          "text": "A",
+          "cropBoxPt": [
+            0,
+            0,
+            160,
+            100
+          ],
+          "rotation": 0,
+          "widthPx": 320,
+          "heightPx": 200,
+          "comparison": "equal-to-source",
+          "maxDifferentPixels": 0
+        },
+        {
+          "page": 2,
+          "text": "B",
+          "cropBoxPt": [
+            0,
+            0,
+            160,
+            100
+          ],
+          "rotation": 0,
+          "widthPx": 320,
+          "heightPx": 200,
+          "comparison": "equal-to-source",
+          "maxDifferentPixels": 0
+        }
+      ]
+    },
+    {
+      "operation": "removeNote",
+      "outcome": "admitted",
+      "affectedPages": [
+        2
+      ],
+      "noteReadback": [],
+      "retained": [
+        "catalog-custom-scalars",
+        "trailer-info-and-id",
+        "shared-resources",
+        "indirect-length",
+        "encoded-content-streams",
+        "embedded-noto-sans"
+      ],
+      "removed": [
+        "UnreachableDecoy",
+        "Moved note"
+      ],
+      "pages": [
+        {
+          "page": 1,
+          "text": "A",
+          "cropBoxPt": [
+            0,
+            0,
+            160,
+            100
+          ],
+          "rotation": 0,
+          "widthPx": 320,
+          "heightPx": 200,
+          "comparison": "equal-to-source",
+          "maxDifferentPixels": 0
+        },
+        {
+          "page": 2,
+          "text": "B",
+          "cropBoxPt": [
+            0,
+            0,
+            160,
+            100
+          ],
+          "rotation": 0,
+          "widthPx": 320,
+          "heightPx": 200,
+          "comparison": "equal-to-source",
+          "maxDifferentPixels": 0
+        }
+      ]
+    }
+  ]
+}

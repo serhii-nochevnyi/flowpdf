@@ -1,0 +1,97 @@
+name: PDF native core
+
+on:
+  pull_request:
+    branches:
+      - feat/FLOWPDF-09-controlled-native-pdf-editing
+  push:
+    branches:
+      - feat/FLOWPDF-09-controlled-native-pdf-editing
+
+permissions:
+  contents: read
+
+jobs:
+  pdf-native-core:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Native PDF library tests
+        run: cargo test --locked -p flow-core --lib pdf::native -- --nocapture
+      - name: PDF reader, scene, and COS regressions
+        run: cargo test --locked -p flow-core --test pdf_reader --test pdf_scene --test pdf_cos -- --nocapture
+      - name: Serialized PDF native edit tests
+        run: cargo test --locked -p flow-wasm --test pdf_native_edit
+
+  pdf-native-full-local:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      RUSTUP_HOME: ${{ github.workspace }}/work/toolchains/rustup
+      CARGO_HOME: ${{ github.workspace }}/work/toolchains/cargo
+    steps:
+      - id: checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Set up pinned Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '24.10.0'
+      - name: Provision locked tools
+        run: |
+          npm install --global --no-audit --no-fund npm@11.9.0
+          rustup toolchain install 1.97.1 --profile minimal --component rustfmt --component clippy --target wasm32-unknown-unknown
+          mkdir -p "$CARGO_HOME/bin"
+          asset=wasm-bindgen-0.2.108-x86_64-unknown-linux-musl.tar.gz
+          archive="$RUNNER_TEMP/$asset"
+          curl --fail --silent --show-error --location --proto '=https' --output "$archive" "https://github.com/wasm-bindgen/wasm-bindgen/releases/download/0.2.108/$asset"
+          printf '%s  %s\n' d15d7e476feec78d0ec9edc27b8f77279ec7a3e6227756e7036e5cd2066800f4 "$archive" | sha256sum --check
+          tar -xOf "$archive" "${asset%.tar.gz}/wasm-bindgen" > "$CARGO_HOME/bin/wasm-bindgen"
+          printf '%s  %s\n' cc1c66ada99eb67a0d1518f1af95f47b870cbad9461de4db4a6ccc5e4aa2b2cc "$CARGO_HOME/bin/wasm-bindgen" | sha256sum --check
+          chmod 0755 "$CARGO_HOME/bin/wasm-bindgen"
+          cargo fetch --locked
+          npm ci --no-audit --no-fund
+      - name: Run full local validation
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: npm run check:phase9
+
+  pdf-native-strict-external:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      RUSTUP_HOME: ${{ github.workspace }}/work/toolchains/rustup
+      CARGO_HOME: ${{ github.workspace }}/work/toolchains/cargo
+    steps:
+      - id: checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Set up pinned Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '24.10.0'
+      - name: Provision locked tools
+        run: |
+          npm install --global --no-audit --no-fund npm@11.9.0
+          rustup toolchain install 1.97.1 --profile minimal --component rustfmt --component clippy --target wasm32-unknown-unknown
+          mkdir -p "$CARGO_HOME/bin"
+          asset=wasm-bindgen-0.2.108-x86_64-unknown-linux-musl.tar.gz
+          archive="$RUNNER_TEMP/$asset"
+          curl --fail --silent --show-error --location --proto '=https' --output "$archive" "https://github.com/wasm-bindgen/wasm-bindgen/releases/download/0.2.108/$asset"
+          printf '%s  %s\n' d15d7e476feec78d0ec9edc27b8f77279ec7a3e6227756e7036e5cd2066800f4 "$archive" | sha256sum --check
+          tar -xOf "$archive" "${asset%.tar.gz}/wasm-bindgen" > "$CARGO_HOME/bin/wasm-bindgen"
+          printf '%s  %s\n' cc1c66ada99eb67a0d1518f1af95f47b870cbad9461de4db4a6ccc5e4aa2b2cc "$CARGO_HOME/bin/wasm-bindgen" | sha256sum --check
+          chmod 0755 "$CARGO_HOME/bin/wasm-bindgen"
+          cargo fetch --locked
+      - name: Install qpdf and Poppler
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends qpdf poppler-utils
+      - name: Run strict external validation
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: npm run check:phase9:release

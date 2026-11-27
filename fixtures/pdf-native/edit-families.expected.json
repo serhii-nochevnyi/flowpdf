@@ -1,0 +1,3408 @@
+{
+  "schemaVersion": 2,
+  "fixtureId": "edit-families",
+  "raster": {
+    "policy": "page-content-rgb8",
+    "version": 2,
+    "dpi": 144,
+    "origin": "top-left",
+    "annotationLayer": "excluded",
+    "evidence": "designed",
+    "backgroundRgb": [
+      255,
+      255,
+      255
+    ],
+    "pixelCoverage": "positive-area image sample intersection; pixel centers for aligned flat fills",
+    "flatChannelTolerance": 0,
+    "edgeBandPx": 1,
+    "edgeChannelTolerance": 64
+  },
+  "widgetRaster": {
+    "version": 1,
+    "annotationLayer": "included",
+    "backgroundGray": 1,
+    "inkGray": 0,
+    "borderInset": 1,
+    "borderWidth": 1,
+    "checkmark": {
+      "inset": 2,
+      "width": 2
+    },
+    "text": {
+      "fixtureFontObject": 9,
+      "offsetPt": [2, 4],
+      "sizePt": 10,
+      "hexByValue": {
+        "": "",
+        "AB": "00010002",
+        "ЇA": "00030001"
+      }
+    }
+  },
+  "operations": [
+    {
+      "operation": "replaceText",
+      "request": {
+        "target": {
+          "page": 1,
+          "baselinePt": [
+            16,
+            76
+          ],
+          "sourceText": "ЇAA"
+        },
+        "text": "ЇA"
+      },
+      "outcome": "admitted",
+      "affectedSourcePages": [
+        1
+      ],
+      "affectedPages": [
+        1
+      ],
+      "output": "rewritten",
+      "removed": [
+        "page-1 original text island"
+      ],
+      "noteReadback": [
+        {
+          "page": 1,
+          "rectPt": [
+            128,
+            68,
+            144,
+            84
+          ],
+          "contents": "Control note"
+        }
+      ],
+      "fieldReadback": [
+        {
+          "page": 1,
+          "rectPt": [
+            16,
+            12,
+            64,
+            32
+          ],
+          "name": "recipient",
+          "value": "",
+          "defaultValue": ""
+        },
+        {
+          "page": 1,
+          "rectPt": [
+            80,
+            12,
+            100,
+            32
+          ],
+          "name": "accepted",
+          "value": "Off",
+          "defaultValue": "Off",
+          "appearanceState": "Off"
+        }
+      ],
+      "destinations": [
+        {
+          "kind": "outline",
+          "title": "First page",
+          "target": 1,
+          "view": [
+            "/Fit"
+          ]
+        },
+        {
+          "kind": "link",
+          "page": 2,
+          "rectPt": [
+            120,
+            12,
+            144,
+            32
+          ],
+          "target": 1,
+          "view": [
+            "/Fit"
+          ]
+        }
+      ],
+      "pages": [
+        {
+          "page": 1,
+          "sourcePage": 1,
+          "text": "ЇA B",
+          "cropBoxPt": [
+            0,
+            0,
+            160,
+            100
+          ],
+          "rotation": 0,
+          "widthPx": 320,
+          "heightPx": 200,
+          "raster": {
+            "comparison": "source-with-patches",
+            "patches": [
+              {
+                "rectPt": [
+                  12,
+                  70,
+                  40,
+                  92
+                ],
+                "rgb": [
+                  255,
+                  255,
+                  255
+                ],
+                "glyphRun": {
+                  "cids": [
+                    3,
+                    1
+                  ],
+                  "baselinePt": [
+                    16,
+                    76
+                  ],
+                  "sizePt": 12
+                }
+              }
+            ]
+          }
+        },
+        {
+          "page": 2,
+          "sourcePage": 2,
+          "text": "",
+          "cropBoxPt": [
+            4,
+            4,
+            156,
+            96
+          ],
+          "rotation": 90,
+          "widthPx": 184,
+          "heightPx": 304,
+          "raster": {
+            "comparison": "equal-to-source"
+          }
+        },
+        {
+          "page": 3,
+          "sourcePage": 3,
+          "text": "",
+          "cropBoxPt": [
+            0,
+            0,
+            160,
+            100
+          ],
+          "rotation": 0,
+          "widthPx": 320,
+          "heightPx": 200,
+          "raster": {
+            "comparison": "equal-to-source"
+          }
+        }
+      ]
+    },
+    {
+      "operation": "replaceTextAbsentCode",
+      "request": {
+        "target": {
+          "page": 1,
+          "baselinePt": [
+            16,
+            76
+          ],
+          "sourceText": "ЇAA"
+        },
+        "text": "Ж"
+      },
+      "outcome": "FLOW_PDF_NATIVE_TEXT_MAPPING",
+      "affectedSourcePages": [],
+      "affectedPages": [],
+      "output": "byte-identical-to-operation-base",
+      "removed": [],
+      "noteReadback": [
+        {
+          "page": 1,
+          "rectPt": [
+            128,
+            68,
+            144,
+            84
+          ],
+          "contents": "Control note"
+        }
+      ],
+      "fieldReadback": [
+        {
+          "page": 1,
+          "rectPt": [
+            16,
+            12,
+            64,
+            32
+          ],
+          "name": "recipient",
+          "value": "",
+          "defaultValue": ""
+        },
+        {
+          "page": 1,
+          "rectPt": [
+            80,
+            12,
+            100,
+            32
+          ],
+          "name": "accepted",
+          "value": "Off",
+          "defaultValue": "Off",
+          "appearanceState": "Off"
+        }
+      ],
+      "destinations": [
+        {
+          "kind": "outline",
+          "title": "First page",
+          "target": 1,
+          "view": [
+            "/Fit"
+          ]
+        },
+        {
+          "kind": "link",
+          "page": 2,
+          "rectPt": [
+            120,
+            12,
+            144,
+            32
+          ],
+          "target": 1,
+          "view": [
+            "/Fit"
+          ]
+        }
+      ],
+      "pages": [
+        {
+          "page": 1,
+          "sourcePage": 1,
+          "text": "ЇAA B",
+          "cropBoxPt": [
+            0,
+            0,
+            160,
+            100
+          ],
+          "rotation": 0,
+          "widthPx": 320,
+          "heightPx": 200,
+          "raster": {
+            "comparison": "equal-to-source"
+          }
+        },
+        {
+          "page": 2,
+          "sourcePage": 2,
+          "text": "",
+          "cropBoxPt": [
+            4,
+            4,
+            156,
+            96
+          ],
+          "rotation": 90,
+          "widthPx": 184,
+          "heightPx": 304,
+          "raster": {
+            "comparison": "equal-to-source"
+          }
+        },
+        {
+          "page": 3,
+          "sourcePage": 3,
+          "text": "",
+          "cropBoxPt": [
+            0,
+            0,
+            160,
+            100
+          ],
+          "rotation": 0,
+          "widthPx": 320,
+          "heightPx": 200,
+          "raster": {
+            "comparison": "equal-to-source"
+          }
+        }
+      ]
+    },
+    {
+      "operation": "replaceTextOverflow",
+      "request": {
+        "target": {
+          "page": 1,
+          "baselinePt": [
+            16,
+            76
+          ],
+          "sourceText": "ЇAA"
+        },
+        "text": "ЇAAAA"
+      },
+      "outcome": "FLOW_PDF_NATIVE_TEXT_OVERFLOW",
+      "affectedSourcePages": [],
+      "affectedPages": [],
+      "output": "byte-identical-to-operation-base",
+      "removed": [],
+      "noteReadback": [
+        {
+          "page": 1,
+          "rectPt": [
+            128,
+            68,
+            144,
+            84
+          ],
+          "contents": "Control note"
+        }
+      ],
+      "fieldReadback": [
+        {
+          "page": 1,
+          "rectPt": [
+            16,
+            12,
+            64,
+            32
+          ],
+          "name": "recipient",
+          "value": "",
+          "defaultValue": ""
+        },
+        {
+          "page": 1,
+          "rectPt": [
+            80,
+            12,
+            100,
+            32
+          ],
+          "name": "accepted",
+          "value": "Off",
+          "defaultValue": "Off",
+          "appearanceState": "Off"
+        }
+      ],
+      "destinations": [
+        {
+          "kind": "outline",
+          "title": "First page",
+          "target": 1,
+          "view": [
+            "/Fit"
+          ]
+        },
+        {
+          "kind": "link",
+          "page": 2,
+          "rectPt": [
+            120,
+            12,
+            144,
+            32
+          ],
+          "target": 1,
+          "view": [
+            "/Fit"
+          ]
+        }
+      ],
+      "pages": [
+        {
+          "page": 1,
+          "sourcePage": 1,
+          "text": "ЇAA B",
+          "cropBoxPt": [
+            0,
+            0,
+            160,
+            100
+          ],
+          "rotation": 0,
+          "widthPx": 320,
+          "heightPx": 200,
+          "raster": {
+            "comparison": "equal-to-source"
+          }
+        },
+        {
+          "page": 2,
+          "sourcePage": 2,
+          "text": "",
+          "cropBoxPt": [
+            4,
+            4,
+            156,
+            96
+          ],
+          "rotation": 90,
+          "widthPx": 184,
+          "heightPx": 304,
+          "raster": {
+            "comparison": "equal-to-source"
+          }
+        },
+        {
+          "page": 3,
+          "sourcePage": 3,
+          "text": "",
+          "cropBoxPt": [
+            0,
+            0,
+            160,
+            100
+          ],
+          "rotation": 0,
+          "widthPx": 320,
+          "heightPx": 200,
+          "raster": {
+            "comparison": "equal-to-source"
+          }
+        }
+      ]
+    },
+    {
+      "operation": "addGraphic",
+      "request": {
+        "page": 3,
+        "graphic": {
+          "shape": "rectangle",
+          "pointsPt": [
+            [
+              106,
+              44
+            ],
+            [
+              122,
+              56
+            ]
+          ],
+          "fill": [
+            0,
+            255,
+            0
+          ],
+          "stroke": null,
+          "strokeWidth": 0
+        }
+      },
+      "outcome": "admitted",
+      "affectedSourcePages": [
+        3
+      ],
+      "affectedPages": [
+        3
+      ],
+      "output": "rewritten",
+      "removed": [],
+      "noteReadback": [
+        {
+          "page": 1,
+          "rectPt": [
+            128,
+            68,
+            144,
+            84
+          ],
+          "contents": "Control note"
+        }
+      ],
+      "fieldReadback": [
+        {
+          "page": 1,
+          "rectPt": [
+            16,
+            12,
+            64,
+            32
+          ],
+          "name": "recipient",
+          "value": "",
+          "defaultValue": ""
+        },
+        {
+          "page": 1,
+          "rectPt": [
+            80,
+            12,
+            100,
+            32
+          ],
+          "name": "accepted",
+          "value": "Off",
+          "defaultValue": "Off",
+          "appearanceState": "Off"
+        }
+      ],
+      "destinations": [
+        {
+          "kind": "outline",
+          "title": "First page",
+          "target": 1,
+          "view": [
+            "/Fit"
+          ]
+        },
+        {
+          "kind": "link",
+          "page": 2,
+          "rectPt": [
+            120,
+            12,
+            144,
+            32
+          ],
+          "target": 1,
+          "view": [
+            "/Fit"
+          ]
+        }
+      ],
+      "pages": [
+        {
+          "page": 1,
+          "sourcePage": 1,
+          "text": "ЇAA B",
+          "cropBoxPt": [
+            0,
+            0,
+            160,
+            100
+          ],
+          "rotation": 0,
+          "widthPx": 320,
+          "heightPx": 200,
+          "raster": {
+            "comparison": "equal-to-source"
+          }
+        },
+        {
+          "page": 2,
+          "sourcePage": 2,
+          "text": "",
+          "cropBoxPt": [
+            4,
+            4,
+            156,
+            96
+          ],
+          "rotation": 90,
+          "widthPx": 184,
+          "heightPx": 304,
+          "raster": {
+            "comparison": "equal-to-source"
+          }
+        },
+        {
+          "page": 3,
+          "sourcePage": 3,
+          "text": "",
+          "cropBoxPt": [
+            0,
+            0,
+            160,
+            100
+          ],
+          "rotation": 0,
+          "widthPx": 320,
+          "heightPx": 200,
+          "raster": {
+            "comparison": "source-with-patches",
+            "patches": [
+              {
+                "rectPt": [
+                  106,
+                  44,
+                  122,
+                  56
+                ],
+                "rgb": [
+                  0,
+                  255,
+                  0
+                ]
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "operation": "replaceGraphic",
+      "request": {
+        "target": {
+          "page": 3,
+          "kind": "path",
+          "rectPt": [
+            16,
+            44,
+            28,
+            56
+          ]
+        },
+        "graphic": {
+          "shape": "rectangle",
+          "pointsPt": [
+            [
+              16,
+              44
+            ],
+            [
+              28,
+              56
+            ]
+          ],
+          "fill": [
+            0,
+            255,
+            0
+          ],
+          "stroke": null,
+          "strokeWidth": 0
+        }
+      },
+      "outcome": "admitted",
+      "affectedSourcePages": [
+        3
+      ],
+      "affectedPages": [
+        3
+      ],
+      "output": "rewritten",
+      "removed": [
+        "page-3 original red path"
+      ],
+      "noteReadback": [
+        {
+          "page": 1,
+          "rectPt": [
+            128,
+            68,
+            144,
+            84
+          ],
+          "contents": "Control note"
+        }
+      ],
+      "fieldReadback": [
+        {
+          "page": 1,
+          "rectPt": [
+            16,
+            12,
+            64,
+            32
+          ],
+          "name": "recipient",
+          "value": "",
+          "defaultValue": ""
+        },
+        {
+          "page": 1,
+          "rectPt": [
+            80,
+            12,
+            100,
+            32
+          ],
+          "name": "accepted",
+          "value": "Off",
+          "defaultValue": "Off",
+          "appearanceState": "Off"
+        }
+      ],
+      "destinations": [
+        {
+          "kind": "outline",
+          "title": "First page",
+          "target": 1,
+          "view": [
+            "/Fit"
+          ]
+        },
+        {
+          "kind": "link",
+          "page": 2,
+          "rectPt": [
+            120,
+            12,
+            144,
+            32
+          ],
+          "target": 1,
+          "view": [
+            "/Fit"
+          ]
+        }
+      ],
+      "pages": [
+        {
+          "page": 1,
+          "sourcePage": 1,
+          "text": "ЇAA B",
+          "cropBoxPt": [
+            0,
+            0,
+            160,
+            100
+          ],
+          "rotation": 0,
+          "widthPx": 320,
+          "heightPx": 200,
+          "raster": {
+            "comparison": "equal-to-source"
+          }
+        },
+        {
+          "page": 2,
+          "sourcePage": 2,
+          "text": "",
+          "cropBoxPt": [
+            4,
+            4,
+            156,
+            96
+          ],
+          "rotation": 90,
+          "widthPx": 184,
+          "heightPx": 304,
+          "raster": {
+            "comparison": "equal-to-source"
+          }
+        },
+        {
+          "page": 3,
+          "sourcePage": 3,
+          "text": "",
+          "cropBoxPt": [
+            0,
+            0,
+            160,
+            100
+          ],
+          "rotation": 0,
+          "widthPx": 320,
+          "heightPx": 200,
+          "raster": {
+            "comparison": "source-with-patches",
+            "patches": [
+              {
+                "rectPt": [
+                  16,
+                  44,
+                  28,
+                  56
+                ],
+                "rgb": [
+                  0,
+                  255,
+                  0
+                ]
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "operation": "addImage",
+      "request": {
+        "page": 3,
+        "rectPt": [
+          106,
+          44,
+          122,
+          56
+        ],
+        "assetPngHex": "89504e470d0a1a0a0000000d4948445200000001000000010802000000907753de0000000c49444154789c637070700000018400c1835f69940000000049454e44ae426082"
+      },
+      "outcome": "admitted",
+      "affectedSourcePages": [
+        3
+      ],
+      "affectedPages": [
+        3
+      ],
+      "output": "rewritten",
+      "removed": [],
+      "noteReadback": [
+        {
+          "page": 1,
+          "rectPt": [
+            128,
+            68,
+            144,
+            84
+          ],
+          "contents": "Control note"
+        }
+      ],
+      "fieldReadback": [
+        {
+          "page": 1,
+          "rectPt": [
+            16,
+            12,
+            64,
+            32
+          ],
+          "name": "recipient",
+          "value": "",
+          "defaultValue": ""
+        },
+        {
+          "page": 1,
+          "rectPt": [
+            80,
+            12,
+            100,
+            32
+          ],
+          "name": "accepted",
+          "value": "Off",
+          "defaultValue": "Off",
+          "appearanceState": "Off"
+        }
+      ],
+      "destinations": [
+        {
+          "kind": "outline",
+          "title": "First page",
+          "target": 1,
+          "view": [
+            "/Fit"
+          ]
+        },
+        {
+          "kind": "link",
+          "page": 2,
+          "rectPt": [
+            120,
+            12,
+            144,
+            32
+          ],
+          "target": 1,
+          "view": [
+            "/Fit"
+          ]
+        }
+      ],
+      "pages": [
+        {
+          "page": 1,
+          "sourcePage": 1,
+          "text": "ЇAA B",
+          "cropBoxPt": [
+            0,
+            0,
+            160,
+            100
+          ],
+          "rotation": 0,
+          "widthPx": 320,
+          "heightPx": 200,
+          "raster": {
+            "comparison": "equal-to-source"
+          }
+        },
+        {
+          "page": 2,
+          "sourcePage": 2,
+          "text": "",
+          "cropBoxPt": [
+            4,
+            4,
+            156,
+            96
+          ],
+          "rotation": 90,
+          "widthPx": 184,
+          "heightPx": 304,
+          "raster": {
+            "comparison": "equal-to-source"
+          }
+        },
+        {
+          "page": 3,
+          "sourcePage": 3,
+          "text": "",
+          "cropBoxPt": [
+            0,
+            0,
+            160,
+            100
+          ],
+          "rotation": 0,
+          "widthPx": 320,
+          "heightPx": 200,
+          "raster": {
+            "comparison": "source-with-patches",
+            "patches": [
+              {
+                "rectPt": [
+                  106,
+                  44,
+                  122,
+                  56
+                ],
+                "rgb": [
+                  64,
+                  64,
+                  64
+                ]
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "operation": "replaceImage",
+      "request": {
+        "target": {
+          "page": 3,
+          "kind": "image",
+          "rectPt": [
+            48,
+            44,
+            64,
+            56
+          ]
+        },
+        "assetPngHex": "89504e470d0a1a0a0000000d4948445200000001000000010802000000907753de0000000c49444154789c637070700000018400c1835f69940000000049454e44ae426082"
+      },
+      "outcome": "admitted",
+      "affectedSourcePages": [
+        3
+      ],
+      "affectedPages": [
+        3
+      ],
+      "output": "rewritten",
+      "removed": [
+        "page-3 first original image invocation"
+      ],
+      "noteReadback": [
+        {
+          "page": 1,
+          "rectPt": [
+            128,
+            68,
+            144,
+            84
+          ],
+          "contents": "Control note"
+        }
+      ],
+      "fieldReadback": [
+        {
+          "page": 1,
+          "rectPt": [
+            16,
+            12,
+            64,
+            32
+          ],
+          "name": "recipient",
+          "value": "",
+          "defaultValue": ""
+        },
+        {
+          "page": 1,
+          "rectPt": [
+            80,
+            12,
+            100,
+            32
+          ],
+          "name": "accepted",
+          "value": "Off",
+          "defaultValue": "Off",
+          "appearanceState": "Off"
+        }
+      ],
+      "destinations": [
+        {
+          "kind": "outline",
+          "title": "First page",
+          "target": 1,
+          "view": [
+            "/Fit"
+          ]
+        },
+        {
+          "kind": "link",
+          "page": 2,
+          "rectPt": [
+            120,
+            12,
+            144,
+            32
+          ],
+          "target": 1,
+          "view": [
+            "/Fit"
+          ]
+        }
+      ],
+      "pages": [
+        {
+          "page": 1,
+          "sourcePage": 1,
+          "text": "ЇAA B",
+          "cropBoxPt": [
+            0,
+            0,
+            160,
+            100
+          ],
+          "rotation": 0,
+          "widthPx": 320,
+          "heightPx": 200,
+          "raster": {
+            "comparison": "equal-to-source"
+          }
+        },
+        {
+          "page": 2,
+          "sourcePage": 2,
+          "text": "",
+          "cropBoxPt": [
+            4,
+            4,
+            156,
+            96
+          ],
+          "rotation": 90,
+          "widthPx": 184,
+          "heightPx": 304,
+          "raster": {
+            "comparison": "equal-to-source"
+          }
+        },
+        {
+          "page": 3,
+          "sourcePage": 3,
+          "text": "",
+          "cropBoxPt": [
+            0,
+            0,
+            160,
+            100
+          ],
+          "rotation": 0,
+          "widthPx": 320,
+          "heightPx": 200,
+          "raster": {
+            "comparison": "source-with-patches",
+            "patches": [
+              {
+                "rectPt": [
+                  48,
+                  44,
+                  64,
+                  56
+                ],
+                "rgb": [
+                  64,
+                  64,
+                  64
+                ]
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "operation": "moveObject",
+      "request": {
+        "target": {
+          "page": 3,
+          "kind": "image",
+          "rectPt": [
+            48,
+            44,
+            64,
+            56
+          ]
+        },
+        "transform": [
+          1,
+          0,
+          0,
+          1,
+          0,
+          -12
+        ]
+      },
+      "outcome": "admitted",
+      "affectedSourcePages": [
+        3
+      ],
+      "affectedPages": [
+        3
+      ],
+      "output": "rewritten",
+      "removed": [],
+      "noteReadback": [
+        {
+          "page": 1,
+          "rectPt": [
+            128,
+            68,
+            144,
+            84
+          ],
+          "contents": "Control note"
+        }
+      ],
+      "fieldReadback": [
+        {
+          "page": 1,
+          "rectPt": [
+            16,
+            12,
+            64,
+            32
+          ],
+          "name": "recipient",
+          "value": "",
+          "defaultValue": ""
+        },
+        {
+          "page": 1,
+          "rectPt": [
+            80,
+            12,
+            100,
+            32
+          ],
+          "name": "accepted",
+          "value": "Off",
+          "defaultValue": "Off",
+          "appearanceState": "Off"
+        }
+      ],
+      "destinations": [
+        {
+          "kind": "outline",
+          "title": "First page",
+          "target": 1,
+          "view": [
+            "/Fit"
+          ]
+        },
+        {
+          "kind": "link",
+          "page": 2,
+          "rectPt": [
+            120,
+            12,
+            144,
+            32
+          ],
+          "target": 1,
+          "view": [
+            "/Fit"
+          ]
+        }
+      ],
+      "pages": [
+        {
+          "page": 1,
+          "sourcePage": 1,
+          "text": "ЇAA B",
+          "cropBoxPt": [
+            0,
+            0,
+            160,
+            100
+          ],
+          "rotation": 0,
+          "widthPx": 320,
+          "heightPx": 200,
+          "raster": {
+            "comparison": "equal-to-source"
+          }
+        },
+        {
+          "page": 2,
+          "sourcePage": 2,
+          "text": "",
+          "cropBoxPt": [
+            4,
+            4,
+            156,
+            96
+          ],
+          "rotation": 90,
+          "widthPx": 184,
+          "heightPx": 304,
+          "raster": {
+            "comparison": "equal-to-source"
+          }
+        },
+        {
+          "page": 3,
+          "sourcePage": 3,
+          "text": "",
+          "cropBoxPt": [
+            0,
+            0,
+            160,
+            100
+          ],
+          "rotation": 0,
+          "widthPx": 320,
+          "heightPx": 200,
+          "raster": {
+            "comparison": "source-with-patches",
+            "patches": [
+              {
+                "rectPt": [
+                  48,
+                  44,
+                  64,
+                  56
+                ],
+                "rgb": [
+                  255,
+                  255,
+                  255
+                ]
+              },
+              {
+                "rectPt": [
+                  48,
+                  32,
+                  64,
+                  44
+                ],
+                "rgb": [
+                  160,
+                  160,
+                  160
+                ]
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "operation": "removeObject",
+      "request": {
+        "target": {
+          "page": 3,
+          "kind": "path",
+          "rectPt": [
+            16,
+            44,
+            28,
+            56
+          ]
+        }
+      },
+      "outcome": "admitted",
+      "affectedSourcePages": [
+        3
+      ],
+      "affectedPages": [
+        3
+      ],
+      "output": "rewritten",
+      "removed": [
+        "page-3 original red path"
+      ],
+      "noteReadback": [
+        {
+          "page": 1,
+          "rectPt": [
+            128,
+            68,
+            144,
+            84
+          ],
+          "contents": "Control note"
+        }
+      ],
+      "fieldReadback": [
+        {
+          "page": 1,
+          "rectPt": [
+            16,
+            12,
+            64,
+            32
+          ],
+          "name": "recipient",
+          "value": "",
+          "defaultValue": ""
+        },
+        {
+          "page": 1,
+          "rectPt": [
+            80,
+            12,
+            100,
+            32
+          ],
+          "name": "accepted",
+          "value": "Off",
+          "defaultValue": "Off",
+          "appearanceState": "Off"
+        }
+      ],
+      "destinations": [
+        {
+          "kind": "outline",
+          "title": "First page",
+          "target": 1,
+          "view": [
+            "/Fit"
+          ]
+        },
+        {
+          "kind": "link",
+          "page": 2,
+          "rectPt": [
+            120,
+            12,
+            144,
+            32
+          ],
+          "target": 1,
+          "view": [
+            "/Fit"
+          ]
+        }
+      ],
+      "pages": [
+        {
+          "page": 1,
+          "sourcePage": 1,
+          "text": "ЇAA B",
+          "cropBoxPt": [
+            0,
+            0,
+            160,
+            100
+          ],
+          "rotation": 0,
+          "widthPx": 320,
+          "heightPx": 200,
+          "raster": {
+            "comparison": "equal-to-source"
+          }
+        },
+        {
+          "page": 2,
+          "sourcePage": 2,
+          "text": "",
+          "cropBoxPt": [
+            4,
+            4,
+            156,
+            96
+          ],
+          "rotation": 90,
+          "widthPx": 184,
+          "heightPx": 304,
+          "raster": {
+            "comparison": "equal-to-source"
+          }
+        },
+        {
+          "page": 3,
+          "sourcePage": 3,
+          "text": "",
+          "cropBoxPt": [
+            0,
+            0,
+            160,
+            100
+          ],
+          "rotation": 0,
+          "widthPx": 320,
+          "heightPx": 200,
+          "raster": {
+            "comparison": "source-with-patches",
+            "patches": [
+              {
+                "rectPt": [
+                  16,
+                  44,
+                  28,
+                  56
+                ],
+                "rgb": [
+                  255,
+                  255,
+                  255
+                ]
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "operation": "moveObjectInvalidGeometry",
+      "request": {
+        "target": {
+          "page": 3,
+          "kind": "image",
+          "rectPt": [
+            48,
+            44,
+            64,
+            56
+          ]
+        },
+        "transform": [
+          1,
+          1,
+          0,
+          1,
+          0,
+          0
+        ]
+      },
+      "outcome": "FLOW_PDF_NATIVE_OBJECT_GEOMETRY",
+      "affectedSourcePages": [],
+      "affectedPages": [],
+      "output": "byte-identical-to-operation-base",
+      "removed": [],
+      "noteReadback": [
+        {
+          "page": 1,
+          "rectPt": [
+            128,
+            68,
+            144,
+            84
+          ],
+          "contents": "Control note"
+        }
+      ],
+      "fieldReadback": [
+        {
+          "page": 1,
+          "rectPt": [
+            16,
+            12,
+            64,
+            32
+          ],
+          "name": "recipient",
+          "value": "",
+          "defaultValue": ""
+        },
+        {
+          "page": 1,
+          "rectPt": [
+            80,
+            12,
+            100,
+            32
+          ],
+          "name": "accepted",
+          "value": "Off",
+          "defaultValue": "Off",
+          "appearanceState": "Off"
+        }
+      ],
+      "destinations": [
+        {
+          "kind": "outline",
+          "title": "First page",
+          "target": 1,
+          "view": [
+            "/Fit"
+          ]
+        },
+        {
+          "kind": "link",
+          "page": 2,
+          "rectPt": [
+            120,
+            12,
+            144,
+            32
+          ],
+          "target": 1,
+          "view": [
+            "/Fit"
+          ]
+        }
+      ],
+      "pages": [
+        {
+          "page": 1,
+          "sourcePage": 1,
+          "text": "ЇAA B",
+          "cropBoxPt": [
+            0,
+            0,
+            160,
+            100
+          ],
+          "rotation": 0,
+          "widthPx": 320,
+          "heightPx": 200,
+          "raster": {
+            "comparison": "equal-to-source"
+          }
+        },
+        {
+          "page": 2,
+          "sourcePage": 2,
+          "text": "",
+          "cropBoxPt": [
+            4,
+            4,
+            156,
+            96
+          ],
+          "rotation": 90,
+          "widthPx": 184,
+          "heightPx": 304,
+          "raster": {
+            "comparison": "equal-to-source"
+          }
+        },
+        {
+          "page": 3,
+          "sourcePage": 3,
+          "text": "",
+          "cropBoxPt": [
+            0,
+            0,
+            160,
+            100
+          ],
+          "rotation": 0,
+          "widthPx": 320,
+          "heightPx": 200,
+          "raster": {
+            "comparison": "equal-to-source"
+          }
+        }
+      ]
+    },
+    {
+      "operation": "insertBlankPage",
+      "request": {
+        "page": 2,
+        "side": "after"
+      },
+      "outcome": "admitted",
+      "affectedSourcePages": [],
+      "affectedPages": [
+        3
+      ],
+      "output": "rewritten",
+      "removed": [],
+      "noteReadback": [
+        {
+          "page": 1,
+          "rectPt": [
+            128,
+            68,
+            144,
+            84
+          ],
+          "contents": "Control note"
+        }
+      ],
+      "fieldReadback": [
+        {
+          "page": 1,
+          "rectPt": [
+            16,
+            12,
+            64,
+            32
+          ],
+          "name": "recipient",
+          "value": "",
+          "defaultValue": ""
+        },
+        {
+          "page": 1,
+          "rectPt": [
+            80,
+            12,
+            100,
+            32
+          ],
+          "name": "accepted",
+          "value": "Off",
+          "defaultValue": "Off",
+          "appearanceState": "Off"
+        }
+      ],
+      "destinations": [
+        {
+          "kind": "outline",
+          "title": "First page",
+          "target": 1,
+          "view": [
+            "/Fit"
+          ]
+        },
+        {
+          "kind": "link",
+          "page": 2,
+          "rectPt": [
+            120,
+            12,
+            144,
+            32
+          ],
+          "target": 1,
+          "view": [
+            "/Fit"
+          ]
+        }
+      ],
+      "pages": [
+        {
+          "page": 1,
+          "sourcePage": 1,
+          "text": "ЇAA B",
+          "cropBoxPt": [
+            0,
+            0,
+            160,
+            100
+          ],
+          "rotation": 0,
+          "widthPx": 320,
+          "heightPx": 200,
+          "raster": {
+            "comparison": "equal-to-source"
+          }
+        },
+        {
+          "page": 2,
+          "sourcePage": 2,
+          "text": "",
+          "cropBoxPt": [
+            4,
+            4,
+            156,
+            96
+          ],
+          "rotation": 90,
+          "widthPx": 184,
+          "heightPx": 304,
+          "raster": {
+            "comparison": "equal-to-source"
+          }
+        },
+        {
+          "page": 3,
+          "sourcePage": null,
+          "text": "",
+          "cropBoxPt": [
+            4,
+            4,
+            156,
+            96
+          ],
+          "rotation": 90,
+          "widthPx": 184,
+          "heightPx": 304,
+          "raster": {
+            "comparison": "analytic-full-page",
+            "fills": [],
+            "sha256Rgb8": "7f87ec14c2318434151a875cf2c00a4cc7aaf1b444501c5a17c6f4bb6177a625"
+          }
+        },
+        {
+          "page": 4,
+          "sourcePage": 3,
+          "text": "",
+          "cropBoxPt": [
+            0,
+            0,
+            160,
+            100
+          ],
+          "rotation": 0,
+          "widthPx": 320,
+          "heightPx": 200,
+          "raster": {
+            "comparison": "equal-to-source"
+          }
+        }
+      ]
+    },
+    {
+      "operation": "reorderPage",
+      "request": {
+        "page": 2,
+        "position": 1
+      },
+      "outcome": "admitted",
+      "affectedSourcePages": [
+        1,
+        2
+      ],
+      "affectedPages": [
+        1,
+        2
+      ],
+      "output": "rewritten",
+      "removed": [],
+      "noteReadback": [
+        {
+          "page": 2,
+          "rectPt": [
+            128,
+            68,
+            144,
+            84
+          ],
+          "contents": "Control note"
+        }
+      ],
+      "fieldReadback": [
+        {
+          "page": 2,
+          "rectPt": [
+            16,
+            12,
+            64,
+            32
+          ],
+          "name": "recipient",
+          "value": "",
+          "defaultValue": ""
+        },
+        {
+          "page": 2,
+          "rectPt": [
+            80,
+            12,
+            100,
+            32
+          ],
+          "name": "accepted",
+          "value": "Off",
+          "defaultValue": "Off",
+          "appearanceState": "Off"
+        }
+      ],
+      "destinations": [
+        {
+          "kind": "outline",
+          "title": "First page",
+          "target": 2,
+          "view": [
+            "/Fit"
+          ]
+        },
+        {
+          "kind": "link",
+          "page": 1,
+          "rectPt": [
+            120,
+            12,
+            144,
+            32
+          ],
+          "target": 2,
+          "view": [
+            "/Fit"
+          ]
+        }
+      ],
+      "pages": [
+        {
+          "page": 1,
+          "sourcePage": 2,
+          "text": "",
+          "cropBoxPt": [
+            4,
+            4,
+            156,
+            96
+          ],
+          "rotation": 90,
+          "widthPx": 184,
+          "heightPx": 304,
+          "raster": {
+            "comparison": "equal-to-source"
+          }
+        },
+        {
+          "page": 2,
+          "sourcePage": 1,
+          "text": "ЇAA B",
+          "cropBoxPt": [
+            0,
+            0,
+            160,
+            100
+          ],
+          "rotation": 0,
+          "widthPx": 320,
+          "heightPx": 200,
+          "raster": {
+            "comparison": "equal-to-source"
+          }
+        },
+        {
+          "page": 3,
+          "sourcePage": 3,
+          "text": "",
+          "cropBoxPt": [
+            0,
+            0,
+            160,
+            100
+          ],
+          "rotation": 0,
+          "widthPx": 320,
+          "heightPx": 200,
+          "raster": {
+            "comparison": "equal-to-source"
+          }
+        }
+      ]
+    },
+    {
+      "operation": "rotatePage",
+      "request": {
+        "page": 2,
+        "degrees": 90
+      },
+      "outcome": "admitted",
+      "affectedSourcePages": [
+        2
+      ],
+      "affectedPages": [
+        2
+      ],
+      "output": "rewritten",
+      "removed": [],
+      "noteReadback": [
+        {
+          "page": 1,
+          "rectPt": [
+            128,
+            68,
+            144,
+            84
+          ],
+          "contents": "Control note"
+        }
+      ],
+      "fieldReadback": [
+        {
+          "page": 1,
+          "rectPt": [
+            16,
+            12,
+            64,
+            32
+          ],
+          "name": "recipient",
+          "value": "",
+          "defaultValue": ""
+        },
+        {
+          "page": 1,
+          "rectPt": [
+            80,
+            12,
+            100,
+            32
+          ],
+          "name": "accepted",
+          "value": "Off",
+          "defaultValue": "Off",
+          "appearanceState": "Off"
+        }
+      ],
+      "destinations": [
+        {
+          "kind": "outline",
+          "title": "First page",
+          "target": 1,
+          "view": [
+            "/Fit"
+          ]
+        },
+        {
+          "kind": "link",
+          "page": 2,
+          "rectPt": [
+            120,
+            12,
+            144,
+            32
+          ],
+          "target": 1,
+          "view": [
+            "/Fit"
+          ]
+        }
+      ],
+      "pages": [
+        {
+          "page": 1,
+          "sourcePage": 1,
+          "text": "ЇAA B",
+          "cropBoxPt": [
+            0,
+            0,
+            160,
+            100
+          ],
+          "rotation": 0,
+          "widthPx": 320,
+          "heightPx": 200,
+          "raster": {
+            "comparison": "equal-to-source"
+          }
+        },
+        {
+          "page": 2,
+          "sourcePage": 2,
+          "text": "",
+          "cropBoxPt": [
+            4,
+            4,
+            156,
+            96
+          ],
+          "rotation": 180,
+          "widthPx": 304,
+          "heightPx": 184,
+          "raster": {
+            "comparison": "source-transformed"
+          }
+        },
+        {
+          "page": 3,
+          "sourcePage": 3,
+          "text": "",
+          "cropBoxPt": [
+            0,
+            0,
+            160,
+            100
+          ],
+          "rotation": 0,
+          "widthPx": 320,
+          "heightPx": 200,
+          "raster": {
+            "comparison": "equal-to-source"
+          }
+        }
+      ]
+    },
+    {
+      "operation": "duplicatePage",
+      "request": {
+        "page": 1
+      },
+      "outcome": "admitted",
+      "affectedSourcePages": [
+        1
+      ],
+      "affectedPages": [
+        1,
+        2
+      ],
+      "output": "rewritten",
+      "removed": [],
+      "noteReadback": [
+        {
+          "page": 1,
+          "rectPt": [
+            128,
+            68,
+            144,
+            84
+          ],
+          "contents": "Control note"
+        },
+        {
+          "page": 2,
+          "rectPt": [
+            128,
+            68,
+            144,
+            84
+          ],
+          "contents": "Control note"
+        }
+      ],
+      "fieldReadback": [
+        {
+          "page": 1,
+          "rectPt": [
+            16,
+            12,
+            64,
+            32
+          ],
+          "name": "recipient",
+          "value": "",
+          "defaultValue": ""
+        },
+        {
+          "page": 1,
+          "rectPt": [
+            80,
+            12,
+            100,
+            32
+          ],
+          "name": "accepted",
+          "value": "Off",
+          "defaultValue": "Off",
+          "appearanceState": "Off"
+        },
+        {
+          "page": 2,
+          "rectPt": [
+            16,
+            12,
+            64,
+            32
+          ],
+          "name": "FlowPDFCopy18_0",
+          "value": "",
+          "defaultValue": ""
+        },
+        {
+          "page": 2,
+          "rectPt": [
+            80,
+            12,
+            100,
+            32
+          ],
+          "name": "FlowPDFCopy19_0",
+          "value": "Off",
+          "defaultValue": "Off",
+          "appearanceState": "Off"
+        }
+      ],
+      "destinations": [
+        {
+          "kind": "outline",
+          "title": "First page",
+          "target": 1,
+          "view": [
+            "/Fit"
+          ]
+        },
+        {
+          "kind": "link",
+          "page": 3,
+          "rectPt": [
+            120,
+            12,
+            144,
+            32
+          ],
+          "target": 1,
+          "view": [
+            "/Fit"
+          ]
+        }
+      ],
+      "pages": [
+        {
+          "page": 1,
+          "sourcePage": 1,
+          "text": "ЇAA B",
+          "cropBoxPt": [
+            0,
+            0,
+            160,
+            100
+          ],
+          "rotation": 0,
+          "widthPx": 320,
+          "heightPx": 200,
+          "raster": {
+            "comparison": "equal-to-source"
+          }
+        },
+        {
+          "page": 2,
+          "sourcePage": 1,
+          "text": "ЇAA B",
+          "cropBoxPt": [
+            0,
+            0,
+            160,
+            100
+          ],
+          "rotation": 0,
+          "widthPx": 320,
+          "heightPx": 200,
+          "raster": {
+            "comparison": "equal-to-source"
+          }
+        },
+        {
+          "page": 3,
+          "sourcePage": 2,
+          "text": "",
+          "cropBoxPt": [
+            4,
+            4,
+            156,
+            96
+          ],
+          "rotation": 90,
+          "widthPx": 184,
+          "heightPx": 304,
+          "raster": {
+            "comparison": "equal-to-source"
+          }
+        },
+        {
+          "page": 4,
+          "sourcePage": 3,
+          "text": "",
+          "cropBoxPt": [
+            0,
+            0,
+            160,
+            100
+          ],
+          "rotation": 0,
+          "widthPx": 320,
+          "heightPx": 200,
+          "raster": {
+            "comparison": "equal-to-source"
+          }
+        }
+      ]
+    },
+    {
+      "operation": "deletePage",
+      "request": {
+        "page": 1
+      },
+      "outcome": "admitted",
+      "affectedSourcePages": [
+        1,
+        2
+      ],
+      "affectedPages": [
+        1
+      ],
+      "output": "rewritten",
+      "removed": [
+        "source page 1",
+        "page-1 note and widgets",
+        "inbound link and outline destination"
+      ],
+      "noteReadback": [],
+      "fieldReadback": [],
+      "destinations": [],
+      "pages": [
+        {
+          "page": 1,
+          "sourcePage": 2,
+          "text": "",
+          "cropBoxPt": [
+            4,
+            4,
+            156,
+            96
+          ],
+          "rotation": 90,
+          "widthPx": 184,
+          "heightPx": 304,
+          "raster": {
+            "comparison": "equal-to-source"
+          }
+        },
+        {
+          "page": 2,
+          "sourcePage": 3,
+          "text": "",
+          "cropBoxPt": [
+            0,
+            0,
+            160,
+            100
+          ],
+          "rotation": 0,
+          "widthPx": 320,
+          "heightPx": 200,
+          "raster": {
+            "comparison": "equal-to-source"
+          }
+        }
+      ]
+    },
+    {
+      "operation": "deleteFinalPage",
+      "request": {
+        "after": [
+          {
+            "operation": "deletePage",
+            "page": 1
+          },
+          {
+            "operation": "deletePage",
+            "page": 2
+          }
+        ],
+        "page": 1
+      },
+      "outcome": "FLOW_PDF_NATIVE_FINAL_PAGE",
+      "affectedSourcePages": [],
+      "affectedPages": [],
+      "output": "byte-identical-to-operation-base",
+      "removed": [],
+      "noteReadback": [],
+      "fieldReadback": [],
+      "destinations": [],
+      "pages": [
+        {
+          "page": 1,
+          "sourcePage": 2,
+          "text": "",
+          "cropBoxPt": [
+            4,
+            4,
+            156,
+            96
+          ],
+          "rotation": 90,
+          "widthPx": 184,
+          "heightPx": 304,
+          "raster": {
+            "comparison": "equal-to-source"
+          }
+        }
+      ]
+    },
+    {
+      "operation": "addTextField",
+      "request": {
+        "page": 1,
+        "rectPt": [
+          104,
+          12,
+          152,
+          32
+        ],
+        "name": "reviewer",
+        "value": "AB",
+        "defaultValue": "AB"
+      },
+      "outcome": "admitted",
+      "affectedSourcePages": [
+        1
+      ],
+      "affectedPages": [
+        1
+      ],
+      "output": "rewritten",
+      "removed": [],
+      "noteReadback": [
+        {
+          "page": 1,
+          "rectPt": [
+            128,
+            68,
+            144,
+            84
+          ],
+          "contents": "Control note"
+        }
+      ],
+      "fieldReadback": [
+        {
+          "page": 1,
+          "rectPt": [
+            16,
+            12,
+            64,
+            32
+          ],
+          "name": "recipient",
+          "value": "",
+          "defaultValue": ""
+        },
+        {
+          "page": 1,
+          "rectPt": [
+            80,
+            12,
+            100,
+            32
+          ],
+          "name": "accepted",
+          "value": "Off",
+          "defaultValue": "Off",
+          "appearanceState": "Off"
+        },
+        {
+          "page": 1,
+          "rectPt": [
+            104,
+            12,
+            152,
+            32
+          ],
+          "name": "reviewer",
+          "value": "AB",
+          "defaultValue": "AB"
+        }
+      ],
+      "destinations": [
+        {
+          "kind": "outline",
+          "title": "First page",
+          "target": 1,
+          "view": [
+            "/Fit"
+          ]
+        },
+        {
+          "kind": "link",
+          "page": 2,
+          "rectPt": [
+            120,
+            12,
+            144,
+            32
+          ],
+          "target": 1,
+          "view": [
+            "/Fit"
+          ]
+        }
+      ],
+      "pages": [
+        {
+          "page": 1,
+          "sourcePage": 1,
+          "text": "ЇAA B",
+          "cropBoxPt": [
+            0,
+            0,
+            160,
+            100
+          ],
+          "rotation": 0,
+          "widthPx": 320,
+          "heightPx": 200,
+          "raster": {
+            "comparison": "equal-to-source"
+          }
+        },
+        {
+          "page": 2,
+          "sourcePage": 2,
+          "text": "",
+          "cropBoxPt": [
+            4,
+            4,
+            156,
+            96
+          ],
+          "rotation": 90,
+          "widthPx": 184,
+          "heightPx": 304,
+          "raster": {
+            "comparison": "equal-to-source"
+          }
+        },
+        {
+          "page": 3,
+          "sourcePage": 3,
+          "text": "",
+          "cropBoxPt": [
+            0,
+            0,
+            160,
+            100
+          ],
+          "rotation": 0,
+          "widthPx": 320,
+          "heightPx": 200,
+          "raster": {
+            "comparison": "equal-to-source"
+          }
+        }
+      ]
+    },
+    {
+      "operation": "addCheckboxField",
+      "request": {
+        "page": 1,
+        "rectPt": [
+          104,
+          12,
+          124,
+          32
+        ],
+        "name": "approval",
+        "value": "Off",
+        "defaultValue": "Off",
+        "appearanceState": "Off"
+      },
+      "outcome": "admitted",
+      "affectedSourcePages": [
+        1
+      ],
+      "affectedPages": [
+        1
+      ],
+      "output": "rewritten",
+      "removed": [],
+      "noteReadback": [
+        {
+          "page": 1,
+          "rectPt": [
+            128,
+            68,
+            144,
+            84
+          ],
+          "contents": "Control note"
+        }
+      ],
+      "fieldReadback": [
+        {
+          "page": 1,
+          "rectPt": [
+            16,
+            12,
+            64,
+            32
+          ],
+          "name": "recipient",
+          "value": "",
+          "defaultValue": ""
+        },
+        {
+          "page": 1,
+          "rectPt": [
+            80,
+            12,
+            100,
+            32
+          ],
+          "name": "accepted",
+          "value": "Off",
+          "defaultValue": "Off",
+          "appearanceState": "Off"
+        },
+        {
+          "page": 1,
+          "rectPt": [
+            104,
+            12,
+            124,
+            32
+          ],
+          "name": "approval",
+          "value": "Off",
+          "defaultValue": "Off",
+          "appearanceState": "Off"
+        }
+      ],
+      "destinations": [
+        {
+          "kind": "outline",
+          "title": "First page",
+          "target": 1,
+          "view": [
+            "/Fit"
+          ]
+        },
+        {
+          "kind": "link",
+          "page": 2,
+          "rectPt": [
+            120,
+            12,
+            144,
+            32
+          ],
+          "target": 1,
+          "view": [
+            "/Fit"
+          ]
+        }
+      ],
+      "pages": [
+        {
+          "page": 1,
+          "sourcePage": 1,
+          "text": "ЇAA B",
+          "cropBoxPt": [
+            0,
+            0,
+            160,
+            100
+          ],
+          "rotation": 0,
+          "widthPx": 320,
+          "heightPx": 200,
+          "raster": {
+            "comparison": "equal-to-source"
+          }
+        },
+        {
+          "page": 2,
+          "sourcePage": 2,
+          "text": "",
+          "cropBoxPt": [
+            4,
+            4,
+            156,
+            96
+          ],
+          "rotation": 90,
+          "widthPx": 184,
+          "heightPx": 304,
+          "raster": {
+            "comparison": "equal-to-source"
+          }
+        },
+        {
+          "page": 3,
+          "sourcePage": 3,
+          "text": "",
+          "cropBoxPt": [
+            0,
+            0,
+            160,
+            100
+          ],
+          "rotation": 0,
+          "widthPx": 320,
+          "heightPx": 200,
+          "raster": {
+            "comparison": "equal-to-source"
+          }
+        }
+      ]
+    },
+    {
+      "operation": "setFieldText",
+      "request": {
+        "field": "recipient",
+        "value": "ЇA"
+      },
+      "outcome": "admitted",
+      "affectedSourcePages": [
+        1
+      ],
+      "affectedPages": [
+        1
+      ],
+      "output": "rewritten",
+      "removed": [],
+      "noteReadback": [
+        {
+          "page": 1,
+          "rectPt": [
+            128,
+            68,
+            144,
+            84
+          ],
+          "contents": "Control note"
+        }
+      ],
+      "fieldReadback": [
+        {
+          "page": 1,
+          "rectPt": [
+            16,
+            12,
+            64,
+            32
+          ],
+          "name": "recipient",
+          "value": "ЇA",
+          "defaultValue": ""
+        },
+        {
+          "page": 1,
+          "rectPt": [
+            80,
+            12,
+            100,
+            32
+          ],
+          "name": "accepted",
+          "value": "Off",
+          "defaultValue": "Off",
+          "appearanceState": "Off"
+        }
+      ],
+      "destinations": [
+        {
+          "kind": "outline",
+          "title": "First page",
+          "target": 1,
+          "view": [
+            "/Fit"
+          ]
+        },
+        {
+          "kind": "link",
+          "page": 2,
+          "rectPt": [
+            120,
+            12,
+            144,
+            32
+          ],
+          "target": 1,
+          "view": [
+            "/Fit"
+          ]
+        }
+      ],
+      "pages": [
+        {
+          "page": 1,
+          "sourcePage": 1,
+          "text": "ЇAA B",
+          "cropBoxPt": [
+            0,
+            0,
+            160,
+            100
+          ],
+          "rotation": 0,
+          "widthPx": 320,
+          "heightPx": 200,
+          "raster": {
+            "comparison": "equal-to-source"
+          }
+        },
+        {
+          "page": 2,
+          "sourcePage": 2,
+          "text": "",
+          "cropBoxPt": [
+            4,
+            4,
+            156,
+            96
+          ],
+          "rotation": 90,
+          "widthPx": 184,
+          "heightPx": 304,
+          "raster": {
+            "comparison": "equal-to-source"
+          }
+        },
+        {
+          "page": 3,
+          "sourcePage": 3,
+          "text": "",
+          "cropBoxPt": [
+            0,
+            0,
+            160,
+            100
+          ],
+          "rotation": 0,
+          "widthPx": 320,
+          "heightPx": 200,
+          "raster": {
+            "comparison": "equal-to-source"
+          }
+        }
+      ]
+    },
+    {
+      "operation": "setFieldChecked",
+      "request": {
+        "field": "accepted",
+        "checked": true
+      },
+      "outcome": "admitted",
+      "affectedSourcePages": [
+        1
+      ],
+      "affectedPages": [
+        1
+      ],
+      "output": "rewritten",
+      "removed": [],
+      "noteReadback": [
+        {
+          "page": 1,
+          "rectPt": [
+            128,
+            68,
+            144,
+            84
+          ],
+          "contents": "Control note"
+        }
+      ],
+      "fieldReadback": [
+        {
+          "page": 1,
+          "rectPt": [
+            16,
+            12,
+            64,
+            32
+          ],
+          "name": "recipient",
+          "value": "",
+          "defaultValue": ""
+        },
+        {
+          "page": 1,
+          "rectPt": [
+            80,
+            12,
+            100,
+            32
+          ],
+          "name": "accepted",
+          "value": "Yes",
+          "defaultValue": "Off",
+          "appearanceState": "Yes"
+        }
+      ],
+      "destinations": [
+        {
+          "kind": "outline",
+          "title": "First page",
+          "target": 1,
+          "view": [
+            "/Fit"
+          ]
+        },
+        {
+          "kind": "link",
+          "page": 2,
+          "rectPt": [
+            120,
+            12,
+            144,
+            32
+          ],
+          "target": 1,
+          "view": [
+            "/Fit"
+          ]
+        }
+      ],
+      "pages": [
+        {
+          "page": 1,
+          "sourcePage": 1,
+          "text": "ЇAA B",
+          "cropBoxPt": [
+            0,
+            0,
+            160,
+            100
+          ],
+          "rotation": 0,
+          "widthPx": 320,
+          "heightPx": 200,
+          "raster": {
+            "comparison": "equal-to-source"
+          }
+        },
+        {
+          "page": 2,
+          "sourcePage": 2,
+          "text": "",
+          "cropBoxPt": [
+            4,
+            4,
+            156,
+            96
+          ],
+          "rotation": 90,
+          "widthPx": 184,
+          "heightPx": 304,
+          "raster": {
+            "comparison": "equal-to-source"
+          }
+        },
+        {
+          "page": 3,
+          "sourcePage": 3,
+          "text": "",
+          "cropBoxPt": [
+            0,
+            0,
+            160,
+            100
+          ],
+          "rotation": 0,
+          "widthPx": 320,
+          "heightPx": 200,
+          "raster": {
+            "comparison": "equal-to-source"
+          }
+        }
+      ]
+    },
+    {
+      "operation": "moveField",
+      "request": {
+        "field": "accepted",
+        "page": 1,
+        "rectPt": [
+          104,
+          12,
+          124,
+          32
+        ]
+      },
+      "outcome": "admitted",
+      "affectedSourcePages": [
+        1
+      ],
+      "affectedPages": [
+        1
+      ],
+      "output": "rewritten",
+      "removed": [],
+      "noteReadback": [
+        {
+          "page": 1,
+          "rectPt": [
+            128,
+            68,
+            144,
+            84
+          ],
+          "contents": "Control note"
+        }
+      ],
+      "fieldReadback": [
+        {
+          "page": 1,
+          "rectPt": [
+            16,
+            12,
+            64,
+            32
+          ],
+          "name": "recipient",
+          "value": "",
+          "defaultValue": ""
+        },
+        {
+          "page": 1,
+          "rectPt": [
+            104,
+            12,
+            124,
+            32
+          ],
+          "name": "accepted",
+          "value": "Off",
+          "defaultValue": "Off",
+          "appearanceState": "Off"
+        }
+      ],
+      "destinations": [
+        {
+          "kind": "outline",
+          "title": "First page",
+          "target": 1,
+          "view": [
+            "/Fit"
+          ]
+        },
+        {
+          "kind": "link",
+          "page": 2,
+          "rectPt": [
+            120,
+            12,
+            144,
+            32
+          ],
+          "target": 1,
+          "view": [
+            "/Fit"
+          ]
+        }
+      ],
+      "pages": [
+        {
+          "page": 1,
+          "sourcePage": 1,
+          "text": "ЇAA B",
+          "cropBoxPt": [
+            0,
+            0,
+            160,
+            100
+          ],
+          "rotation": 0,
+          "widthPx": 320,
+          "heightPx": 200,
+          "raster": {
+            "comparison": "equal-to-source"
+          }
+        },
+        {
+          "page": 2,
+          "sourcePage": 2,
+          "text": "",
+          "cropBoxPt": [
+            4,
+            4,
+            156,
+            96
+          ],
+          "rotation": 90,
+          "widthPx": 184,
+          "heightPx": 304,
+          "raster": {
+            "comparison": "equal-to-source"
+          }
+        },
+        {
+          "page": 3,
+          "sourcePage": 3,
+          "text": "",
+          "cropBoxPt": [
+            0,
+            0,
+            160,
+            100
+          ],
+          "rotation": 0,
+          "widthPx": 320,
+          "heightPx": 200,
+          "raster": {
+            "comparison": "equal-to-source"
+          }
+        }
+      ]
+    },
+    {
+      "operation": "removeField",
+      "request": {
+        "field": "recipient"
+      },
+      "outcome": "admitted",
+      "affectedSourcePages": [
+        1
+      ],
+      "affectedPages": [
+        1
+      ],
+      "output": "rewritten",
+      "removed": [
+        "recipient field and widget"
+      ],
+      "noteReadback": [
+        {
+          "page": 1,
+          "rectPt": [
+            128,
+            68,
+            144,
+            84
+          ],
+          "contents": "Control note"
+        }
+      ],
+      "fieldReadback": [
+        {
+          "page": 1,
+          "rectPt": [
+            80,
+            12,
+            100,
+            32
+          ],
+          "name": "accepted",
+          "value": "Off",
+          "defaultValue": "Off",
+          "appearanceState": "Off"
+        }
+      ],
+      "destinations": [
+        {
+          "kind": "outline",
+          "title": "First page",
+          "target": 1,
+          "view": [
+            "/Fit"
+          ]
+        },
+        {
+          "kind": "link",
+          "page": 2,
+          "rectPt": [
+            120,
+            12,
+            144,
+            32
+          ],
+          "target": 1,
+          "view": [
+            "/Fit"
+          ]
+        }
+      ],
+      "pages": [
+        {
+          "page": 1,
+          "sourcePage": 1,
+          "text": "ЇAA B",
+          "cropBoxPt": [
+            0,
+            0,
+            160,
+            100
+          ],
+          "rotation": 0,
+          "widthPx": 320,
+          "heightPx": 200,
+          "raster": {
+            "comparison": "equal-to-source"
+          }
+        },
+        {
+          "page": 2,
+          "sourcePage": 2,
+          "text": "",
+          "cropBoxPt": [
+            4,
+            4,
+            156,
+            96
+          ],
+          "rotation": 90,
+          "widthPx": 184,
+          "heightPx": 304,
+          "raster": {
+            "comparison": "equal-to-source"
+          }
+        },
+        {
+          "page": 3,
+          "sourcePage": 3,
+          "text": "",
+          "cropBoxPt": [
+            0,
+            0,
+            160,
+            100
+          ],
+          "rotation": 0,
+          "widthPx": 320,
+          "heightPx": 200,
+          "raster": {
+            "comparison": "equal-to-source"
+          }
+        }
+      ]
+    },
+    {
+      "operation": "setFieldTextAbsentGlyph",
+      "request": {
+        "field": "recipient",
+        "value": "Ж"
+      },
+      "outcome": "FLOW_PDF_NATIVE_FIELD_GLYPH",
+      "affectedSourcePages": [],
+      "affectedPages": [],
+      "output": "byte-identical-to-operation-base",
+      "removed": [],
+      "noteReadback": [
+        {
+          "page": 1,
+          "rectPt": [
+            128,
+            68,
+            144,
+            84
+          ],
+          "contents": "Control note"
+        }
+      ],
+      "fieldReadback": [
+        {
+          "page": 1,
+          "rectPt": [
+            16,
+            12,
+            64,
+            32
+          ],
+          "name": "recipient",
+          "value": "",
+          "defaultValue": ""
+        },
+        {
+          "page": 1,
+          "rectPt": [
+            80,
+            12,
+            100,
+            32
+          ],
+          "name": "accepted",
+          "value": "Off",
+          "defaultValue": "Off",
+          "appearanceState": "Off"
+        }
+      ],
+      "destinations": [
+        {
+          "kind": "outline",
+          "title": "First page",
+          "target": 1,
+          "view": [
+            "/Fit"
+          ]
+        },
+        {
+          "kind": "link",
+          "page": 2,
+          "rectPt": [
+            120,
+            12,
+            144,
+            32
+          ],
+          "target": 1,
+          "view": [
+            "/Fit"
+          ]
+        }
+      ],
+      "pages": [
+        {
+          "page": 1,
+          "sourcePage": 1,
+          "text": "ЇAA B",
+          "cropBoxPt": [
+            0,
+            0,
+            160,
+            100
+          ],
+          "rotation": 0,
+          "widthPx": 320,
+          "heightPx": 200,
+          "raster": {
+            "comparison": "equal-to-source"
+          }
+        },
+        {
+          "page": 2,
+          "sourcePage": 2,
+          "text": "",
+          "cropBoxPt": [
+            4,
+            4,
+            156,
+            96
+          ],
+          "rotation": 90,
+          "widthPx": 184,
+          "heightPx": 304,
+          "raster": {
+            "comparison": "equal-to-source"
+          }
+        },
+        {
+          "page": 3,
+          "sourcePage": 3,
+          "text": "",
+          "cropBoxPt": [
+            0,
+            0,
+            160,
+            100
+          ],
+          "rotation": 0,
+          "widthPx": 320,
+          "heightPx": 200,
+          "raster": {
+            "comparison": "equal-to-source"
+          }
+        }
+      ]
+    },
+    {
+      "operation": "redactWithForms",
+      "request": {
+        "marks": [
+          {
+            "page": 1,
+            "rectPt": [
+              12,
+              70,
+              40,
+              92
+            ]
+          }
+        ]
+      },
+      "outcome": "FLOW_PDF_NATIVE_UNSUPPORTED",
+      "affectedSourcePages": [],
+      "affectedPages": [],
+      "output": "byte-identical-to-operation-base",
+      "removed": [],
+      "noteReadback": [
+        {
+          "page": 1,
+          "rectPt": [
+            128,
+            68,
+            144,
+            84
+          ],
+          "contents": "Control note"
+        }
+      ],
+      "fieldReadback": [
+        {
+          "page": 1,
+          "rectPt": [
+            16,
+            12,
+            64,
+            32
+          ],
+          "name": "recipient",
+          "value": "",
+          "defaultValue": ""
+        },
+        {
+          "page": 1,
+          "rectPt": [
+            80,
+            12,
+            100,
+            32
+          ],
+          "name": "accepted",
+          "value": "Off",
+          "defaultValue": "Off",
+          "appearanceState": "Off"
+        }
+      ],
+      "destinations": [
+        {
+          "kind": "outline",
+          "title": "First page",
+          "target": 1,
+          "view": [
+            "/Fit"
+          ]
+        },
+        {
+          "kind": "link",
+          "page": 2,
+          "rectPt": [
+            120,
+            12,
+            144,
+            32
+          ],
+          "target": 1,
+          "view": [
+            "/Fit"
+          ]
+        }
+      ],
+      "pages": [
+        {
+          "page": 1,
+          "sourcePage": 1,
+          "text": "ЇAA B",
+          "cropBoxPt": [
+            0,
+            0,
+            160,
+            100
+          ],
+          "rotation": 0,
+          "widthPx": 320,
+          "heightPx": 200,
+          "raster": {
+            "comparison": "equal-to-source"
+          }
+        },
+        {
+          "page": 2,
+          "sourcePage": 2,
+          "text": "",
+          "cropBoxPt": [
+            4,
+            4,
+            156,
+            96
+          ],
+          "rotation": 90,
+          "widthPx": 184,
+          "heightPx": 304,
+          "raster": {
+            "comparison": "equal-to-source"
+          }
+        },
+        {
+          "page": 3,
+          "sourcePage": 3,
+          "text": "",
+          "cropBoxPt": [
+            0,
+            0,
+            160,
+            100
+          ],
+          "rotation": 0,
+          "widthPx": 320,
+          "heightPx": 200,
+          "raster": {
+            "comparison": "equal-to-source"
+          }
+        }
+      ]
+    }
+  ]
+}

@@ -6,6 +6,7 @@ import test from 'node:test'
 import {
   assertPhaseTwoParityBoundary,
   boundaryDiagnostics,
+  currentWorkspacePhase,
   loadWorkspaceSnapshot,
 } from './phase1-boundary.test.mjs'
 
@@ -13,7 +14,7 @@ const projectRoot = resolve(import.meta.dirname, '../..')
 
 test('Phase 2 contract remains compatible with the current checked-in workspace', () => {
   const snapshot = loadWorkspaceSnapshot(projectRoot)
-  assert.deepEqual(boundaryDiagnostics(snapshot, { phase: 8 }), [])
+  assert.deepEqual(boundaryDiagnostics(snapshot, { phase: currentWorkspacePhase }), [])
   assertPhaseTwoParityBoundary(projectRoot, snapshot)
 })
 

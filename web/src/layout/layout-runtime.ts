@@ -1,3 +1,8 @@
+import * as generatedWasm from '../../generated/flow_wasm.js'
+import { PdfSourceStore } from '../../persistence/pdf-source-store.js'
+import type { EditorNativePdfRuntime } from '../editor/editor-app.js'
+import { nativeBytesHex, type NativePdfWasmBoundary } from '../pdf/pdf-native-edit-protocol.js'
+import { NativePdfEditCoordinator, NativePdfWorkerError, type NativePdfWorkerPort } from '../pdf/pdf-native-edit-worker.js'
 import type { EditorAcceptedSnapshot } from '../editor/editor-store.js'
 import type { EditorControllerDependencies } from '../editor/editor-controller.js'
 import {
@@ -17,7 +22,7 @@ import {
   type PdfWorkerPort,
   type RevisionAwarePdfExportScheduler,
 } from '../pdf/pdf-worker.js'
-import type { PdfExportRequestDto } from '../pdf/pdf-protocol.js'
+import { PDF_READER_PROTOCOL_VERSION, type PdfExportRequestDto } from '../pdf/pdf-protocol.js'
 import {
   createWorkerPdfReaderScheduler,
   type PdfReaderWorkerPort,
@@ -32,11 +37,175 @@ import type { RuntimeFontCatalog } from '../runtime/font-catalog.js'
 
 export type WorkerConstructor = typeof Worker
 
+function releaseAll(releases: Iterable<() => void>): void {
+  const failures: unknown[] = []
+  for (const release of releases) {
+    try {
+      release()
+    } catch (error) {
+      failures.push(error)
+    }
+  }
+  if (failures.length > 0) throw failures[0]
+}
+
+function releaseAfterStartupFailure(release: () => void): void {
+  try {
+    release()
+  } catch {
+    // @invariant: The caller reports the original startup failure.
+  }
+}
+
+export function createNativePdfRuntime(
+  workerConstructor?: WorkerConstructor,
+  sourceStore = new PdfSourceStore(),
+): EditorNativePdfRuntime & { dispose(): void } {
+  const coordinators = new Set<NativePdfEditCoordinator>()
+  const pageReads = new Set<() => void>()
+  let pageReadNumber = 0
+  let disposed = false
+  function createCoordinator() {
+    if (disposed) throw new NativePdfWorkerError('FLOW_PDF_NATIVE_WORKER_FAILED')
+    const { verify_native_pdf_response } = generatedWasm as Partial<NativePdfWasmBoundary>
+    if (typeof verify_native_pdf_response !== 'function') {
+      throw new NativePdfWorkerError('FLOW_PDF_NATIVE_WORKER_STARTUP')
+    }
+    let worker: Worker
+    try {
+      worker = workerConstructor === undefined
+        ? new Worker(new URL('../pdf/pdf-native-edit-worker-entry.ts', import.meta.url), { type: 'module' })
+        : new workerConstructor(new URL('../pdf/pdf-native-edit-worker-entry.ts', import.meta.url), { type: 'module' })
+    } catch {
+      throw new NativePdfWorkerError('FLOW_PDF_NATIVE_WORKER_STARTUP')
+    }
+    let coordinator: NativePdfEditCoordinator | undefined
+    try {
+      const acquired = new NativePdfEditCoordinator(
+        worker as unknown as NativePdfWorkerPort, verify_native_pdf_response,
+      )
+      coordinator = acquired
+      acquired.subscribe(() => {
+        if (acquired.snapshot().phase === 'invalidated') coordinators.delete(acquired)
+      })
+      coordinators.add(acquired)
+      return acquired
+    } catch (error) {
+      releaseAfterStartupFailure(() => {
+        if (coordinator === undefined) worker.terminate()
+        else coordinator.dispose()
+      })
+      throw error
+    }
+  }
+
+  let initial: NativePdfEditCoordinator | undefined
+  try {
+    initial = createCoordinator()
+  } catch (error) {
+    if (!(error instanceof NativePdfWorkerError)) {
+      releaseAfterStartupFailure(() => sourceStore.close())
+      throw error
+    }
+  }
+  return {
+    sourceStore,
+    createCoordinator() {
+      const coordinator = initial
+      initial = undefined
+      return coordinator?.snapshot().phase === 'idle' ? coordinator : createCoordinator()
+    },
+    async extractPageText(snapshot, pageId, signal) {
+      if (disposed || signal.aborted) return null
+      const firstPage = snapshot.scene.pages.findIndex((page) => page.id === pageId)
+      const page = snapshot.scene.pages[firstPage]
+      if (!page) return null
+      const outputHash = nativeBytesHex(Uint8Array.from(snapshot.outputHash))
+      // @security: A request-local worker can stop parsing immediately and drops its retained scene.
+      const worker = (
+        workerConstructor === undefined
+          ? new Worker(new URL('../pdf/pdf-reader-worker-entry.ts', import.meta.url), { type: 'module' })
+          : new workerConstructor(new URL('../pdf/pdf-reader-worker-entry.ts', import.meta.url), { type: 'module' })
+      ) as unknown as PdfReaderWorkerPort
+      let scheduler: RevisionAwarePdfReaderScheduler | undefined
+      let cancelRead!: (value: null) => void
+      const cancelled = new Promise<null>((resolve) => { cancelRead = resolve })
+      const stop = () => {
+        if (!pageReads.delete(stop)) return
+        cancelRead(null)
+        try {
+          signal.removeEventListener('abort', abort)
+          scheduler?.dispose()
+        } finally {
+          worker.terminate()
+        }
+      }
+      const abort = () => {
+        try {
+          stop()
+        } catch {
+          // @invariant: Cancellation settles the read even when cleanup fails.
+        }
+      }
+      pageReads.add(stop)
+      try {
+        scheduler = createWorkerPdfReaderScheduler(worker)
+        if (signal.aborted) {
+          abort()
+          return null
+        }
+        signal.addEventListener('abort', abort, { once: true })
+        const read = scheduler.request({
+          protocolVersion: PDF_READER_PROTOCOL_VERSION,
+          requestId: `native-page-text-${++pageReadNumber}`,
+          bytesHex: snapshot.outputHex,
+          firstPage,
+          pageCount: 1,
+        })
+        const outcome = await Promise.race([cancelled, read])
+        if (!pageReads.has(stop) || outcome?.kind !== 'published') return null
+        const { scene } = outcome.accepted.result
+        const readPage = scene.pages[0]
+        // @invariant: The reader hashes the input bytes and resolves the page from that PDF's page tree.
+        if (scene.sourceHash !== outputHash || scene.pageCount !== snapshot.scene.pages.length
+          || !readPage || readPage.pageIndex !== firstPage
+          || readPage.sourceObject.objectNumber !== page.object.objectNumber
+          || readPage.sourceObject.generation !== page.object.generation) return null
+        let partial = readPage.partial || scene.report.partial
+        const text: { value: string }[] = []
+        for (const element of readPage.elements) {
+          if (element.kind !== 'text') continue
+          const run = element.value
+          if (run.mapping === 'missing') partial = true
+          if (!run.text.trim()) continue
+          const value = run.mapping === 'missing'
+            ? run.glyphs.map((glyph) => glyph.unicode ?? '\uFFFD').join('')
+            : run.text
+          text.push({ value })
+        }
+        return { outputHash, pageId, text, partial }
+      } finally {
+        stop()
+      }
+    },
+    dispose() {
+      if (disposed) return
+      disposed = true
+      initial = undefined
+      const releaseCoordinators = Array.from(coordinators, (coordinator) => () => coordinator.dispose())
+      coordinators.clear()
+      releaseAll([...pageReads, ...releaseCoordinators, () => sourceStore.close()])
+    },
+  }
+}
+
 export interface DefaultWorkerRuntime {
+  readonly nativePdf: ReturnType<typeof createNativePdfRuntime>
   readonly fontCatalog: RuntimeFontCatalog
   readonly layoutScheduler: RevisionAwareLayoutScheduler
   readonly pdfExportScheduler: RevisionAwarePdfExportScheduler
   readonly pdfReaderScheduler: RevisionAwarePdfReaderScheduler
+  readonly pdfReconstructionReaderScheduler: RevisionAwarePdfReaderScheduler
   readonly pdfReconstructionScheduler: RevisionAwarePdfReconstructionScheduler
   readonly layoutRequestFactory: NonNullable<EditorControllerDependencies['layoutRequestFactory']>
   readonly pdfExportRequestFactory: NonNullable<EditorControllerDependencies['pdfExportRequestFactory']>
@@ -46,30 +215,8 @@ export interface DefaultWorkerRuntime {
 /** Composes the production workers after the Rust-owned font catalog is ready. */
 export function createDefaultWorkerRuntime(
   fontCatalog: RuntimeFontCatalog,
-  workerConstructor: WorkerConstructor = Worker,
+  workerConstructor?: WorkerConstructor,
 ): DefaultWorkerRuntime {
-  const layoutWorker = new workerConstructor(
-    new URL('./layout-worker-entry.ts', import.meta.url),
-    { type: 'module' },
-  ) as unknown as LayoutWorkerPort
-  const pdfWorker = new workerConstructor(
-    new URL('../pdf/pdf-worker-entry.ts', import.meta.url),
-    { type: 'module' },
-  ) as unknown as PdfWorkerPort
-  const pdfReaderWorker = new workerConstructor(
-    new URL('../pdf/pdf-reader-worker-entry.ts', import.meta.url),
-    { type: 'module' },
-  ) as unknown as PdfReaderWorkerPort
-  const pdfReconstructionWorker = new workerConstructor(
-    new URL('../pdf/pdf-reconstruction-worker-entry.ts', import.meta.url),
-    { type: 'module' },
-  ) as unknown as PdfReconstructionWorkerPort
-  const layoutScheduler = createWorkerLayoutScheduler(layoutWorker)
-  const pdfExportScheduler = createWorkerPdfExportScheduler(pdfWorker)
-  const pdfReaderScheduler = createWorkerPdfReaderScheduler(pdfReaderWorker)
-  const pdfReconstructionScheduler = createWorkerPdfReconstructionScheduler(
-    pdfReconstructionWorker,
-  )
   let layoutRequestNumber = 0
   const layoutRequestFactory = (accepted: EditorAcceptedSnapshot): LayoutRequestDto => {
     layoutRequestNumber += 1
@@ -120,23 +267,71 @@ export function createDefaultWorkerRuntime(
       fontFaces: fontCatalog.faces.map((face) => face.manifest),
     })
   }
-  return {
-    fontCatalog,
-    layoutScheduler,
-    pdfExportScheduler,
-    pdfReaderScheduler,
-    pdfReconstructionScheduler,
-    layoutRequestFactory,
-    pdfExportRequestFactory,
-    dispose() {
-      layoutScheduler.dispose()
-      pdfExportScheduler.dispose()
-      pdfReaderScheduler.dispose()
-      pdfReconstructionScheduler.dispose()
-      layoutWorker.terminate()
-      pdfWorker.terminate()
-      pdfReaderWorker.terminate()
-      pdfReconstructionWorker.terminate()
-    },
+
+  const cleanup: (() => void)[] = []
+  function dispose() {
+    releaseAll(cleanup.splice(0).reverse())
+  }
+
+  try {
+    const layoutWorker = (
+      workerConstructor === undefined
+        ? new Worker(new URL('./layout-worker-entry.ts', import.meta.url), { type: 'module' })
+        : new workerConstructor(new URL('./layout-worker-entry.ts', import.meta.url), { type: 'module' })
+    ) as unknown as LayoutWorkerPort
+    cleanup.push(() => layoutWorker.terminate())
+    const pdfWorker = (
+      workerConstructor === undefined
+        ? new Worker(new URL('../pdf/pdf-worker-entry.ts', import.meta.url), { type: 'module' })
+        : new workerConstructor(new URL('../pdf/pdf-worker-entry.ts', import.meta.url), { type: 'module' })
+    ) as unknown as PdfWorkerPort
+    cleanup.push(() => pdfWorker.terminate())
+    const pdfReaderWorker = (
+      workerConstructor === undefined
+        ? new Worker(new URL('../pdf/pdf-reader-worker-entry.ts', import.meta.url), { type: 'module' })
+        : new workerConstructor(new URL('../pdf/pdf-reader-worker-entry.ts', import.meta.url), { type: 'module' })
+    ) as unknown as PdfReaderWorkerPort
+    cleanup.push(() => pdfReaderWorker.terminate())
+    const pdfReconstructionReaderWorker = (
+      workerConstructor === undefined
+        ? new Worker(new URL('../pdf/pdf-reader-worker-entry.ts', import.meta.url), { type: 'module' })
+        : new workerConstructor(new URL('../pdf/pdf-reader-worker-entry.ts', import.meta.url), { type: 'module' })
+    ) as unknown as PdfReaderWorkerPort
+    cleanup.push(() => pdfReconstructionReaderWorker.terminate())
+    const pdfReconstructionWorker = (
+      workerConstructor === undefined
+        ? new Worker(new URL('../pdf/pdf-reconstruction-worker-entry.ts', import.meta.url), { type: 'module' })
+        : new workerConstructor(new URL('../pdf/pdf-reconstruction-worker-entry.ts', import.meta.url), { type: 'module' })
+    ) as unknown as PdfReconstructionWorkerPort
+    cleanup.push(() => pdfReconstructionWorker.terminate())
+    const layoutScheduler = createWorkerLayoutScheduler(layoutWorker)
+    cleanup.push(() => layoutScheduler.dispose())
+    const pdfExportScheduler = createWorkerPdfExportScheduler(pdfWorker)
+    cleanup.push(() => pdfExportScheduler.dispose())
+    const pdfReaderScheduler = createWorkerPdfReaderScheduler(pdfReaderWorker)
+    cleanup.push(() => pdfReaderScheduler.dispose())
+    const pdfReconstructionReaderScheduler = createWorkerPdfReaderScheduler(pdfReconstructionReaderWorker)
+    cleanup.push(() => pdfReconstructionReaderScheduler.dispose())
+    const pdfReconstructionScheduler = createWorkerPdfReconstructionScheduler(
+      pdfReconstructionWorker,
+    )
+    cleanup.push(() => pdfReconstructionScheduler.dispose())
+    const nativePdf = createNativePdfRuntime(workerConstructor)
+    cleanup.push(() => nativePdf.dispose())
+    return {
+      fontCatalog,
+      nativePdf,
+      layoutScheduler,
+      pdfExportScheduler,
+      pdfReaderScheduler,
+      pdfReconstructionReaderScheduler,
+      pdfReconstructionScheduler,
+      layoutRequestFactory,
+      pdfExportRequestFactory,
+      dispose,
+    }
+  } catch (error) {
+    releaseAfterStartupFailure(dispose)
+    throw error
   }
 }

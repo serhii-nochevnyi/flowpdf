@@ -1,0 +1,178 @@
+{
+  "schemaVersion": 2,
+  "fixtureId": "redaction",
+  "raster": {
+    "policy": "page-content-rgb8",
+    "version": 2,
+    "dpi": 144,
+    "origin": "top-left",
+    "annotationLayer": "excluded",
+    "evidence": "designed",
+    "backgroundRgb": [
+      255,
+      255,
+      255
+    ],
+    "pixelCoverage": "positive-area image sample intersection; pixel centers for aligned flat fills",
+    "flatChannelTolerance": 0,
+    "edgeBandPx": 1,
+    "edgeChannelTolerance": 64
+  },
+  "operations": [
+    {
+      "operation": "redact",
+      "request": {
+        "marks": [
+          {
+            "page": 1,
+            "rectPt": [
+              12,
+              70,
+              40,
+              92
+            ]
+          },
+          {
+            "page": 1,
+            "rectPt": [
+              16,
+              44,
+              28,
+              56
+            ]
+          },
+          {
+            "page": 1,
+            "rectPt": [
+              51,
+              46,
+              52,
+              47
+            ]
+          },
+          {
+            "page": 1,
+            "rectPt": [
+              96,
+              68,
+              112,
+              84
+            ]
+          }
+        ]
+      },
+      "outcome": "admitted",
+      "affectedSourcePages": [
+        1
+      ],
+      "affectedPages": [
+        1
+      ],
+      "output": "rewritten",
+      "removed": [
+        "page-1 text ЇAA",
+        "red vector fill",
+        "image sample 217",
+        "Sensitive note",
+        "Sensitive title",
+        "Sensitive author",
+        "Sensitive catalog metadata",
+        "Sensitive page metadata",
+        "Sensitive source envelope",
+        "trailer ID"
+      ],
+      "noteReadback": [
+        {
+          "page": 1,
+          "rectPt": [
+            128,
+            68,
+            144,
+            84
+          ],
+          "contents": "Control note"
+        }
+      ],
+      "fieldReadback": [],
+      "destinations": [],
+      "pages": [
+        {
+          "page": 1,
+          "sourcePage": 1,
+          "text": "",
+          "cropBoxPt": [
+            0,
+            0,
+            160,
+            100
+          ],
+          "rotation": 0,
+          "widthPx": 320,
+          "heightPx": 200,
+          "raster": {
+            "comparison": "analytic-full-page",
+            "fills": [
+              {
+                "rectPt": [
+                  48,
+                  44,
+                  64,
+                  56
+                ],
+                "rgb": [
+                  0,
+                  0,
+                  0
+                ]
+              },
+              {
+                "rectPt": [
+                  64,
+                  44,
+                  80,
+                  56
+                ],
+                "rgb": [
+                  83,
+                  83,
+                  83
+                ]
+              },
+              {
+                "rectPt": [
+                  112,
+                  20,
+                  128,
+                  32
+                ],
+                "rgb": [
+                  0,
+                  0,
+                  255
+                ]
+              }
+            ],
+            "sha256Rgb8": "a46954b30aa30c09e3d4976e6bcca4ad89936c3a5ff02137833a10fa0f97a214"
+          }
+        },
+        {
+          "page": 2,
+          "sourcePage": 2,
+          "text": "B",
+          "cropBoxPt": [
+            0,
+            0,
+            160,
+            100
+          ],
+          "rotation": 0,
+          "widthPx": 320,
+          "heightPx": 200,
+          "raster": {
+            "comparison": "equal-to-source"
+          }
+        }
+      ]
+    }
+  ]
+}
