@@ -806,13 +806,13 @@ fn nested_non_text_dispatch_shares_workspace_with_operator_storage() {
 }
 
 #[test]
-fn aggregate_report_retains_operator_storage_across_two_pages() {
+fn aggregate_report_retains_operator_storage_across_page_windows() {
     let later = format!("%{}\nVendorStroke 10 10 5 5 re f", " ".repeat(20 * 1024));
     let bytes = pdf(vec![
         (1, b"<< /Type /Catalog /Pages 2 0 R >>".to_vec()),
         (
             2,
-            b"<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 /MediaBox [0 0 100 100] >>".to_vec(),
+            b"<< /Type /Pages /Kids [3 0 R 4 0 R 7 0 R] /Count 3 /MediaBox [0 0 100 100] >>".to_vec(),
         ),
         (
             3,
@@ -824,6 +824,9 @@ fn aggregate_report_retains_operator_storage_across_two_pages() {
         ),
         stream(5, "", b"VendorPaint VendorPaint 10 10 5 5 re f"),
         stream(6, "", later.as_bytes()),
+        (7, b"<< /Type /Page /Parent 2 0 R /Contents 8 0 R /Resources << /XObject << /Chart 9 0 R >> >> >>".to_vec()),
+        stream(8, "", b"/Chart Do"),
+        stream(9, "/Type /XObject /Subtype /Form /BBox [0 0 20 20] /Filter /ASCII85Decode", b"z~>"),
     ]);
     let read = |max_scene_bytes| {
         let reader = open_pdf(
@@ -838,20 +841,28 @@ fn aggregate_report_retains_operator_storage_across_two_pages() {
             &reader,
             &PdfSceneRequest {
                 first_page: 0,
-                page_count: 2,
+                page_count: 3,
             },
         )
     };
     let expected = read(PdfReaderLimits::default().max_scene_bytes).unwrap();
+    assert_eq!(expected.page_count, 3);
+    assert_eq!(expected.pages.len(), 2);
     assert_eq!(expected.pages[0].report.diagnostics.len(), 1);
     assert_eq!(expected.pages[1].report.diagnostics.len(), 1);
+    assert_eq!(expected.report.diagnostics.len(), 3);
     assert_eq!(
-        expected.report.diagnostics,
-        [
-            expected.pages[0].report.diagnostics[0].clone(),
-            expected.pages[1].report.diagnostics[0].clone()
-        ]
+        expected.report.diagnostics[0],
+        expected.pages[0].report.diagnostics[0]
     );
+    assert_eq!(
+        expected.report.diagnostics[1],
+        expected.pages[1].report.diagnostics[0]
+    );
+    let filter = &expected.report.diagnostics[2];
+    assert_eq!(filter.code, PdfReadDiagnosticCode::UnsupportedFilter);
+    assert_eq!(filter.page_index, Some(2));
+    assert_eq!(filter.object_number, None);
     assert_eq!(
         expected.report.diagnostics[0].operator.as_deref(),
         Some("VendorPaint")
@@ -860,7 +871,7 @@ fn aggregate_report_retains_operator_storage_across_two_pages() {
         expected.report.diagnostics[1].operator.as_deref(),
         Some("VendorStroke")
     );
-    assert!(!expected.report.partial);
+    assert!(expected.report.partial);
     let mut hashed = expected.clone();
     hashed.result_hash.clear();
     assert_eq!(
@@ -869,9 +880,13 @@ fn aggregate_report_retains_operator_storage_across_two_pages() {
             .to_hex()
             .as_str()
     );
-    let exact = 24_574 + 2 * size_of::<flow_core::pdf::PdfScenePage>();
+    assert_eq!(
+        expected.result_hash,
+        "bc166dd15dffe52085a5e99deb41c5bc113236b6184ecd4d696f974725c35abe"
+    );
+    let exact = 25_214;
     assert_eq!(read(exact).unwrap(), expected);
-    assert!(matches!(read(exact - 1), Err(PdfReadError::StreamLimit)));
+    assert_eq!(read(exact - 1), Err(PdfReadError::StreamLimit));
 }
 
 #[test]

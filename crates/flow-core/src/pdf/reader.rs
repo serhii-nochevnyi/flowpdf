@@ -217,19 +217,67 @@ impl PdfReadReport {
         }
     }
 
-    pub(super) fn extend(
+    pub(super) fn push_scene(
+        &mut self,
+        diagnostic: PdfReadDiagnostic,
+        remaining: &mut usize,
+    ) -> Result<bool, PdfReadError> {
+        let added = !self.diagnostics.contains(&diagnostic);
+        if added {
+            reserve_scene_vec(&mut self.diagnostics, 1, remaining)?;
+            self.partial |= diagnostic.severity == PdfReadSeverity::Blocked;
+            self.diagnostics.push(diagnostic);
+        }
+        Ok(added)
+    }
+
+    pub(super) fn copy_scene_diagnostic(
+        &mut self,
+        diagnostic: &PdfReadDiagnostic,
+        operator: Option<&str>,
+        remaining: &mut usize,
+    ) -> Result<(), PdfReadError> {
+        if self.diagnostics.iter().any(|existing| {
+            existing.code == diagnostic.code
+                && existing.severity == diagnostic.severity
+                && existing.page_index == diagnostic.page_index
+                && existing.object_number == diagnostic.object_number
+                && existing.operator.as_deref() == operator
+        }) {
+            return Ok(());
+        }
+        *remaining = remaining
+            .checked_sub(operator.map_or(0, str::len))
+            .ok_or(PdfReadError::StreamLimit)?;
+        reserve_scene_vec(&mut self.diagnostics, 1, remaining)?;
+        self.partial |= diagnostic.severity == PdfReadSeverity::Blocked;
+        self.diagnostics.push(PdfReadDiagnostic {
+            operator: operator.map(str::to_owned),
+            ..*diagnostic
+        });
+        Ok(())
+    }
+
+    pub(super) fn extend_scene(
         &mut self,
         other: &Self,
-        mut reserve_operator: impl FnMut(usize) -> Result<(), PdfReadError>,
+        remaining: &mut usize,
     ) -> Result<(), PdfReadError> {
         for diagnostic in &other.diagnostics {
-            if !self.diagnostics.contains(diagnostic) {
-                reserve_operator(diagnostic.operator.as_deref().map_or(0, str::len))?;
-                self.push(diagnostic.clone());
-            }
+            self.copy_scene_diagnostic(diagnostic, diagnostic.operator.as_deref(), remaining)?;
         }
         self.partial |= other.partial;
         Ok(())
+    }
+
+    pub(super) fn scene_heap_bytes(&self) -> usize {
+        self.diagnostics.capacity() * size_of::<PdfReadDiagnostic>()
+            + self
+                .diagnostics
+                .iter()
+                .filter_map(|item| item.operator.as_ref())
+                .map(String::capacity)
+                .sum::<usize>()
     }
 }
 
@@ -944,8 +992,14 @@ impl PdfReader {
     #[must_use]
     pub fn preflight_report(&self) -> PdfReadReport {
         let mut report = PdfReadReport::default();
-        report_active_content(&self.trailer, None, None, &mut report);
+        for diagnostic in self.preflight_diagnostics() {
+            report.push(diagnostic);
+        }
         report
+    }
+
+    pub(super) fn preflight_diagnostics(&self) -> impl Iterator<Item = PdfReadDiagnostic> + '_ {
+        active_content_diagnostics(&self.trailer, None, None)
     }
 
     /// Discovers the page tree without loading form fields, page content
@@ -2208,31 +2262,25 @@ fn decode_ascii_hex(mut bytes: Vec<u8>, limit: usize) -> Result<Vec<u8>, PdfRead
     Ok(bytes)
 }
 
-pub(crate) fn report_active_content(
+pub(super) fn active_content_diagnostics(
     dictionary: &BTreeMap<String, PdfValue>,
     page_index: Option<u32>,
     object_number: Option<u32>,
-    report: &mut PdfReadReport,
-) {
-    for key in dictionary.keys() {
-        let diagnostic = match key.as_str() {
-            "JS" | "JavaScript" | "OpenAction" | "AA" | "Launch" | "SubmitForm" | "GoToR"
-            | "URI" | "RichMedia" | "Movie" | "Sound" => Some(PdfReadDiagnostic::blocked(
-                PdfReadDiagnosticCode::ActiveContent,
-                page_index,
-                object_number,
-            )),
-            "F" | "FS" | "EmbeddedFiles" | "EF" | "External" => Some(PdfReadDiagnostic::blocked(
-                PdfReadDiagnosticCode::ExternalResource,
-                page_index,
-                object_number,
-            )),
-            _ => None,
-        };
-        if let Some(diagnostic) = diagnostic {
-            report.push(diagnostic);
-        }
-    }
+) -> impl Iterator<Item = PdfReadDiagnostic> + '_ {
+    dictionary.keys().filter_map(move |key| match key.as_str() {
+        "JS" | "JavaScript" | "OpenAction" | "AA" | "Launch" | "SubmitForm" | "GoToR" | "URI"
+        | "RichMedia" | "Movie" | "Sound" => Some(PdfReadDiagnostic::blocked(
+            PdfReadDiagnosticCode::ActiveContent,
+            page_index,
+            object_number,
+        )),
+        "F" | "FS" | "EmbeddedFiles" | "EF" | "External" => Some(PdfReadDiagnostic::blocked(
+            PdfReadDiagnosticCode::ExternalResource,
+            page_index,
+            object_number,
+        )),
+        _ => None,
+    })
 }
 
 fn validate_decimal_token(bytes: &[u8]) -> Result<(), PdfReadError> {
