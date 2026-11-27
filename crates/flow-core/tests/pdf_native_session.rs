@@ -966,7 +966,6 @@ fn detached_redaction_admission_uses_work_left_after_projection() {
         max_work,
         ..defaults
     };
-    // One projected page visit for note matching and one entry for order validation.
     let high = 403;
     let low = high - 1;
     assert_eq!(verify(&session, limits_at(low), false), Ok(true));
