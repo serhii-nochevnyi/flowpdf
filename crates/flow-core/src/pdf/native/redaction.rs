@@ -1406,7 +1406,7 @@ struct Edits {
     streams: BTreeMap<Object, StreamEdit>,
     forms: BTreeMap<Object, UsedResources>,
     pages: BTreeMap<Object, PageEdit>,
-    sensitive_content: BTreeSet<Digest>,
+    sensitive_content: BTreeMap<Digest, bool>,
     sensitive_images: BTreeSet<Digest>,
 }
 
@@ -1426,12 +1426,20 @@ impl Edits {
     }
 }
 
+#[derive(Default)]
+struct ContentAliases {
+    removals: Option<Digest>,
+    retained: bool,
+    ambiguous: bool,
+}
+
 struct Scan<'a, 'w, 'b> {
     graph: &'a NativePdfGraph,
     workspace: &'w Workspace,
     text: RedactionText<'a, 'w>,
     edits: Edits,
-    content_aliases: BTreeMap<Digest, Digest>,
+    content_aliases: BTreeMap<Digest, ContentAliases>,
+    content_pages: BTreeMap<(Digest, u64), bool>,
     image_aliases: BTreeMap<Digest, Digest>,
     note_uses: BTreeMap<Object, bool>,
     active_forms: BTreeSet<Object>,
@@ -1449,10 +1457,11 @@ impl<'a, 'w, 'b> Scan<'a, 'w, 'b> {
                 streams: BTreeMap::new(),
                 forms: BTreeMap::new(),
                 pages: BTreeMap::new(),
-                sensitive_content: BTreeSet::new(),
+                sensitive_content: BTreeMap::new(),
                 sensitive_images: BTreeSet::new(),
             },
             content_aliases: BTreeMap::new(),
+            content_pages: BTreeMap::new(),
             image_aliases: BTreeMap::new(),
             note_uses: BTreeMap::new(),
             active_forms: BTreeSet::new(),
@@ -1492,13 +1501,16 @@ impl<'a, 'w, 'b> Scan<'a, 'w, 'b> {
             resources: page.resources,
             clip: page.geometry.crop_box,
             marks: &page_marks,
+            page_id,
         };
         let mut stack = GraphicsStack::new(self.workspace);
         if let Some(contents) = node.get("Contents")
             && let resolved = resolve(graph, contents)?
             && !matches!(resolved, PdfValue::Null)
         {
-            let list = resolved.as_array().unwrap_or(std::slice::from_ref(contents));
+            let list = resolved
+                .as_array()
+                .unwrap_or(std::slice::from_ref(contents));
             let mut previous = &[][..];
             for item in list {
                 let id = reference(item)?;
@@ -1557,7 +1569,7 @@ impl<'a, 'w, 'b> Scan<'a, 'w, 'b> {
         }
         self.work.charge(source.len() + 1)?;
         self.memory
-            .grow(source.len() * 6 + 512 + size_of::<Option<Digest>>())
+            .grow(source.len() * 6 + 512 + size_of::<Option<Digest>>() + ENTRY_BYTES)
             .map_err(|_| Budget)?;
         let _parser = reserve_content_tokens(
             self.workspace,
@@ -1711,14 +1723,8 @@ impl<'a, 'w, 'b> Scan<'a, 'w, 'b> {
             return Err(Unsupported);
         }
         let digest = *blake3::hash(source).as_bytes();
-        same_use(
-            &mut self.content_aliases,
-            digest,
-            *removals.finalize().as_bytes(),
-        )?;
-        if removed {
-            self.edits.sensitive_content.insert(digest);
-        }
+        let pattern = removed.then(|| *removals.finalize().as_bytes());
+        self.record_content_use(id, scope.page_id, digest, pattern)?;
         same_use(
             &mut self.edits.streams,
             id,
@@ -1728,6 +1734,45 @@ impl<'a, 'w, 'b> Scan<'a, 'w, 'b> {
             },
         )?;
         Ok(graphics)
+    }
+
+    fn record_content_use(
+        &mut self,
+        id: Object,
+        page_id: u64,
+        digest: Digest,
+        removals: Option<Digest>,
+    ) -> Result<()> {
+        let aliases = self.content_aliases.entry(digest).or_default();
+        if let Some(pattern) = removals {
+            if aliases
+                .removals
+                .replace(pattern)
+                .is_some_and(|prior| prior != pattern)
+            {
+                return Err(Unsupported);
+            }
+        } else {
+            aliases.retained = true;
+        }
+        // @invariant: Mixed retention requires single-use page streams with disjoint page owners.
+        aliases.ambiguous |= !self.active_forms.is_empty()
+            || self.edits.streams.contains_key(&id)
+            || same_use(
+                &mut self.content_pages,
+                (digest, page_id),
+                removals.is_some(),
+            )
+            .is_err();
+        if aliases.removals.is_some() {
+            if aliases.retained && aliases.ambiguous {
+                return Err(Unsupported);
+            }
+            self.edits
+                .sensitive_content
+                .insert(digest, aliases.retained);
+        }
+        Ok(())
     }
 
     fn use_resource(
@@ -1824,6 +1869,7 @@ struct Scope<'a, 'b> {
     resources: Option<&'a Dict>,
     clip: Rect,
     marks: &'b [&'b NativeRedactionMark],
+    page_id: u64,
 }
 
 impl Scope<'_, '_> {
@@ -2131,8 +2177,17 @@ fn apply(
         let before = stream(graph, id)?;
         let forbidden = if name(&before.dict, "Subtype") == Some("Image") {
             edits.sensitive_images.contains(&digest)
+        } else if let Some(&proven_retention) = edits.sensitive_content.get(&digest) {
+            // @security: A rewrite from different source bytes cannot inherit the retention proof.
+            match replacement.as_ref().filter(|_| proven_retention) {
+                Some(edit) => {
+                    graph.charge_page_work(payload_work)?;
+                    edit.data != stream(graph, id)?.data
+                }
+                None => true,
+            }
         } else {
-            edits.sensitive_content.contains(&digest)
+            false
         };
         if forbidden {
             return Err(Unsupported);

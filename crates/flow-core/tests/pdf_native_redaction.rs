@@ -650,6 +650,42 @@ fn marks_and_quarantine_keep_accepted_bytes_and_scene_until_exact_publication() 
 }
 
 #[test]
+fn shared_page_stream_refuses_conflicting_placements() {
+    let source = pdf(
+        vec![
+            b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+            b"<< /Type /Pages /Kids [3 0 R 5 0 R] /Count 2 /MediaBox [0 0 100 100] >>".to_vec(),
+            b"<< /Type /Page /Parent 2 0 R /Contents 4 0 R >>".to_vec(),
+            stream("", b"10 10 10 10 re\nf\n"),
+            b"<< /Type /Page /Parent 2 0 R /Contents [6 0 R 4 0 R] >>".to_vec(),
+            stream("", b"0 0 1 rg 1 0 0 1 45 45 cm\n"),
+        ],
+        "",
+    );
+    let mut session = open(&source);
+    let binding = session.snapshot().binding;
+    let first = mark(&session, 0, [9_000, 9_000, 12_000, 12_000]);
+    session.add_redaction_mark(binding, 1, first).unwrap();
+    assert_eq!(
+        session.stage_redaction(binding, 2),
+        Err(NativeSessionError::Graph(NativeEditError::Unsupported)),
+    );
+    assert_eq!(session.redaction_marks(), &[first]);
+    assert!(session.redaction_candidate_status().is_none());
+    assert_accepted(&session, &source, 0, &source);
+
+    add(&mut session, 3, 1, [54_000, 54_000, 57_000, 57_000]);
+    session.stage_redaction(binding, 4).unwrap();
+    assert!(
+        session
+            .verify_redaction(binding, 4)
+            .unwrap()
+            .checks_passed()
+    );
+    session.publish_redaction(binding, 4).unwrap();
+}
+
+#[test]
 fn shared_image_requires_equal_scrubbing_for_every_use() {
     for target in [7, 8] {
         let image = flate(

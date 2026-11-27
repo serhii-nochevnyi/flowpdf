@@ -214,14 +214,40 @@ fn independent_page_streams(
     pdf_objects(objects, "")
 }
 
+fn assert_live_redaction_publishes(accepted: &[u8], rect: [i64; 4]) {
+    let mut session =
+        NativePdfSession::open_scoped(accepted, NativeEditLimits::default(), [3; 16]).unwrap();
+    let binding = session.snapshot().binding;
+    let order = session.snapshot().page_state.order.clone();
+    session
+        .add_redaction_mark(binding, 1, mark(order[0], rect))
+        .unwrap();
+    let NativeRedactionStage::Pending(candidate) = session.stage_redaction(binding, 2).unwrap()
+    else {
+        panic!("expected pending redaction");
+    };
+    assert_eq!(session.output_bytes(), accepted);
+    let evidence = session.verify_redaction(binding, 2).unwrap();
+    assert!(evidence.checks_passed(), "{evidence:?}");
+    let receipt = session.publish_redaction(binding, 2).unwrap();
+    assert_eq!(receipt.output_hash, candidate.candidate_hash);
+    let output = session.redacted_output_bytes().unwrap();
+    assert_eq!(*blake3::hash(output).as_bytes(), receipt.output_hash);
+    assert_ne!(output, accepted);
+    assert_eq!(session.origin_bytes(), accepted);
+    assert_eq!(session.snapshot().page_state.order, order);
+}
+
 #[test]
 fn identical_vector_streams_can_have_independent_page_owners() {
-    let shape = "10 10 10 10 re f";
-    let accepted = independent_page_streams(shape, shape, "", vec![]);
-    let candidate = independent_page_streams("", shape, "", vec![]);
-    let marks = [mark(91, [9_000, 9_000, 12_000, 12_000])];
-    let evidence = verify(&accepted, &candidate, &[91, 92], &marks);
-    assert!(evidence.checks_passed(), "{evidence:?}");
+    let rect = [9_000, 9_000, 12_000, 12_000];
+    for shape in ["10 10 10 10 re f", "10 10 10 10 re\nf\n"] {
+        let accepted = independent_page_streams(shape, shape, "", vec![]);
+        let candidate = independent_page_streams("", shape, "", vec![]);
+        let evidence = verify(&accepted, &candidate, &[91, 92], &[mark(91, rect)]);
+        assert!(evidence.checks_passed(), "{evidence:?}");
+        assert_live_redaction_publishes(&accepted, rect);
+    }
 }
 
 #[test]
@@ -501,13 +527,18 @@ fn text_pdf(content: &str) -> Vec<u8> {
 
 #[test]
 fn identical_text_streams_can_have_independent_page_owners() {
-    let text = "BT /F 12 Tf 10 15 Td (AB) Tj ET";
+    let rect = [9_000, 16_000, 15_000, 20_000];
     let resources = "/Resources << /Font << /F 8 0 R >> >>";
-    let accepted = independent_page_streams(text, text, resources, test_font_objects(8));
-    let candidate = independent_page_streams("", text, resources, test_font_objects(8));
-    let marks = [mark(91, [9_000, 16_000, 15_000, 20_000])];
-    let evidence = verify(&accepted, &candidate, &[91, 92], &marks);
-    assert!(evidence.checks_passed(), "{evidence:?}");
+    for text in [
+        "BT /F 12 Tf 10 15 Td (AB) Tj ET",
+        "BT\n/F 12 Tf\n10 15 Td\n<4142> Tj\nET\n",
+    ] {
+        let accepted = independent_page_streams(text, text, resources, test_font_objects(8));
+        let candidate = independent_page_streams("", text, resources, test_font_objects(8));
+        let evidence = verify(&accepted, &candidate, &[91, 92], &[mark(91, rect)]);
+        assert!(evidence.checks_passed(), "{evidence:?}");
+        assert_live_redaction_publishes(&accepted, rect);
+    }
 }
 
 #[test]
