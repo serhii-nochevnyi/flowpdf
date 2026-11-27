@@ -75,6 +75,51 @@ fn reader_boundary_returns_verified_scene_window() {
 }
 
 #[test]
+fn reader_boundary_preserves_mapped_text_around_fractional_tj_spacing() {
+    let paint = "BT /F1 20 Tf 50 Tz 10 50 Td [(A) -125.5 (B) 100 (A)] TJ ET";
+    let cmap = "begincmap\n2 beginbfchar\n<41> <0410>\n<42> <0411>\nendbfchar\nendcmap";
+    let content = format!("<< /Length {} >>\nstream\n{paint}\nendstream", paint.len());
+    let to_unicode = format!("<< /Length {} >>\nstream\n{cmap}\nendstream", cmap.len());
+    let bytes = write_pdf(&[
+        "<< /Type /Catalog /Pages 2 0 R >>",
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>",
+        &content,
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /FirstChar 65 /Widths [600 600] /ToUnicode 6 0 R >>",
+        &to_unicode,
+    ]);
+    let request = json!({
+        "protocolVersion": 1,
+        "requestId": "mapped-tj-spacing",
+        "bytesHex": hex(&bytes),
+        "firstPage": 0,
+        "pageCount": 1
+    });
+    let serialized = flow_wasm::read_pdf(request.to_string());
+    let value = response(&serialized);
+    assert_eq!(value["ok"], true, "{value}");
+    let scene: flow_core::PdfScene =
+        serde_json::from_value(value["result"]["scene"].clone()).unwrap();
+    let page = &scene.pages[0];
+    assert!(page.partial);
+    assert_eq!(page.elements.len(), 3);
+    for (element, (text, x)) in page
+        .elements
+        .iter()
+        .zip([("А", 640), ("Б", 1104), ("А", 1424)])
+    {
+        let flow_core::PdfSceneElement::Text { value } = element else {
+            panic!("expected mapped text");
+        };
+        assert_eq!(value.text, text);
+        assert_eq!(value.rect.x.raw(), x);
+        assert_eq!(value.provenance.operator.as_deref(), Some("TJ"));
+        assert_eq!(value.provenance.object_ref.object_number, 4);
+    }
+    assert!(flow_wasm::verify_pdf_reader_response(serialized));
+}
+
+#[test]
 fn reader_boundary_budgets_nested_page_discovery_for_a_single_page_window() {
     let mut objects = [
         "<< /Type /Catalog /Pages 2 0 R >>",

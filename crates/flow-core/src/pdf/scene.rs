@@ -460,11 +460,23 @@ fn scale_font_width(
         .map_err(|_| PdfReadError::NumericLimit)
 }
 
-fn scale_percent(value: LayoutUnit) -> Result<LayoutUnit, PdfReadError> {
-    let product = i128::from(value.raw())
-        .checked_mul(i128::from(LayoutUnit::UNITS_PER_POINT))
+fn tj_advance(
+    operand: &ContentToken,
+    font_size: LayoutUnit,
+    horizontal_scale: LayoutUnit,
+) -> Result<LayoutUnit, PdfReadError> {
+    let units = i128::from(LayoutUnit::UNITS_PER_POINT);
+    let spacing = match operand {
+        ContentToken::Integer(value) => i128::from(*value) * units,
+        ContentToken::Number((value, _)) => i128::from(value.raw()),
+        _ => return Err(PdfReadError::Syntax),
+    };
+    // @invariant: TJ spacing is in thousandths of text space and uses the glyph horizontal scale.
+    let scaled = (-spacing)
+        .checked_mul(i128::from(font_size.raw()))
+        .and_then(|value| value.checked_mul(i128::from(horizontal_scale.raw())))
         .ok_or(PdfReadError::NumericLimit)?;
-    i64::try_from(product / 100)
+    i64::try_from(scaled / (1_000 * units * units))
         .map(LayoutUnit::from_raw)
         .map_err(|_| PdfReadError::NumericLimit)
 }
@@ -1348,7 +1360,7 @@ impl<'a> SceneBuilder<'a> {
             "Tw" => self.state.word_spacing = one_number(operands)?,
             "Tz" => {
                 let value = one_number(operands)?;
-                self.state.horizontal_scale = scale_percent(value)?;
+                self.state.horizontal_scale = LayoutUnit::from_raw(value.raw() / 100);
             }
             "Ts" => self.state.rise = one_number(operands)?,
             "Tj" | "'" | "\"" => {
@@ -1360,20 +1372,16 @@ impl<'a> SceneBuilder<'a> {
                 }
             }
             "TJ" => {
-                if let Some(ContentToken::Array(values)) = operands.last() {
-                    for value in values {
-                        match value {
-                            ContentToken::String(bytes) => self.show_text(bytes, &provenance)?,
-                            ContentToken::Integer(value) => {
-                                let adjustment = LayoutUnit::from_raw(
-                                    value.checked_mul(-1).ok_or(PdfReadError::NumericLimit)?,
-                                );
-                                let adjustment =
-                                    scale_font_width(adjustment, self.state.font_size)?;
-                                self.advance_text(adjustment)?;
-                            }
-                            _ => return Err(PdfReadError::Syntax),
-                        }
+                let [ContentToken::Array(values)] = operands else {
+                    return Err(PdfReadError::Syntax);
+                };
+                for value in values {
+                    if let ContentToken::String(bytes) = value {
+                        self.show_text(bytes, &provenance)?;
+                    } else {
+                        let adjustment =
+                            tj_advance(value, self.state.font_size, self.state.horizontal_scale)?;
+                        self.advance_text(adjustment)?;
                     }
                 }
             }
@@ -2860,7 +2868,8 @@ pub fn read_pdf_scene(
         page_refs.extend(pages.iter().map(|page| page.object_ref).zip(0..page_count));
         page_refs.sort_unstable();
     }
-    let mut scene_pages = Vec::with_capacity(end.saturating_sub(first));
+    let mut scene_pages = Vec::new();
+    budget.reserve_vec(&mut scene_pages, end - first)?;
     for (index, page) in pages.iter().enumerate().take(end).skip(first) {
         let page_index = u32::try_from(index).map_err(|_| PdfReadError::PageCountLimit)?;
         let had_field_root_counts = field_root_counts.is_some();
