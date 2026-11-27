@@ -42,7 +42,7 @@ pub(super) struct ScanWork {
 }
 
 impl ScanWork {
-    fn new(remaining: usize) -> Self {
+    pub(super) fn new(remaining: usize) -> Self {
         Self {
             remaining,
             exhausted: false,
@@ -334,6 +334,7 @@ impl<'b> Inventory<'b> {
             }
             Box => return rect(value).map(|_| ()),
             Widths => return numeric(value, 0, self.work),
+            Contents if matches!(value, PdfValue::Null) => return Ok(()),
             Contents | Annots => {
                 let child = if role == Contents { Content } else { Note };
                 return value
@@ -1493,10 +1494,11 @@ impl<'a, 'w, 'b> Scan<'a, 'w, 'b> {
             marks: &page_marks,
         };
         let mut stack = GraphicsStack::new(self.workspace);
-        if let Some(contents) = node.get("Contents") {
-            let list = resolve(graph, contents)?
-                .as_array()
-                .unwrap_or(std::slice::from_ref(contents));
+        if let Some(contents) = node.get("Contents")
+            && let resolved = resolve(graph, contents)?
+            && !matches!(resolved, PdfValue::Null)
+        {
+            let list = resolved.as_array().unwrap_or(std::slice::from_ref(contents));
             let mut previous = &[][..];
             for item in list {
                 let id = reference(item)?;
@@ -1935,21 +1937,27 @@ pub(super) fn scrub(
     apply(graph, roles, edits)
 }
 
-pub(super) fn check_input_budget(graph: &NativePdfGraph, origin_len: Option<usize>) -> Result<()> {
+pub(super) fn check_input_budget(
+    graph: &NativePdfGraph,
+    origin_len: Option<usize>,
+    work: &mut ScanWork,
+) -> Result<()> {
     if origin_len.is_some_and(|len| len > MAX_INPUT)
         || graph.original_bytes().len() > graph.limits.max_source_bytes.min(MAX_INPUT)
     {
         return Err(Budget);
     }
-    let pages = graph.pages.len();
-    if pages > MAX_PAGES || graph.page_tree_depth >= MAX_DEPTH {
+    if graph.pages.len() > MAX_PAGES || graph.page_tree_depth >= MAX_DEPTH {
         return Err(Budget);
     }
-    verify_raster::check_pixel_budget((0..pages).map(|index| geometry(graph, index)), |error| {
-        match error {
-            NativeVerificationFailure::Budget => Budget,
-            _ => Unsupported,
-        }
+    let pages = graph.pages.iter().map(|&id| {
+        let geometry = page(graph, id, work)?.geometry;
+        work.charge(1)?;
+        Ok(geometry)
+    });
+    verify_raster::check_pixel_budget(pages, |error| match error {
+        NativeVerificationFailure::Budget => Budget,
+        _ => Unsupported,
     })
 }
 
@@ -1960,9 +1968,9 @@ pub(super) fn check_document(
     workspace: usize,
     work: usize,
 ) -> std::result::Result<(), AdmissionRefusal> {
-    check_input_budget(graph, origin_len).map_err(AdmissionRefusal::Scan)?;
     let mut work = ScanWork::new(work);
-    scan_document(graph, order, &[], workspace, &mut work)
+    check_input_budget(graph, origin_len, &mut work)
+        .and_then(|()| scan_document(graph, order, &[], workspace, &mut work))
         .map(|_| ())
         .map_err(|error| {
             if work.exhausted {

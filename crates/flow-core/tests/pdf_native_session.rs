@@ -916,8 +916,9 @@ fn detached_projections_require_origin_identity_at_revision_zero() {
 fn detached_redaction_admission_uses_work_left_after_projection() {
     let source = pdf_with_objects(&[
         "<< /Type /Catalog /Pages 2 0 R >>",
-        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
-        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Contents 4 0 R >>",
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 200 200] >>",
+        "<< /Type /Pages /Parent 2 0 R /Kids [4 0 R] /Count 1 /CropBox [5 5 195 195] /Rotate 90 >>",
+        "<< /Type /Page /Parent 3 0 R /Contents 5 0 R >>",
         "<< /Length 17 >>\nstream\n10 20 10 10 re f\n\nendstream",
     ]);
     let bytes = source.as_bytes();
@@ -944,7 +945,7 @@ fn detached_redaction_admission_uses_work_left_after_projection() {
         max_work,
         ..defaults
     };
-    let high = 318;
+    let high = 401;
     let low = high - 1;
     assert_eq!(verify(&session, limits_at(low), false), Ok(true));
     assert_eq!(
@@ -956,8 +957,13 @@ fn detached_redaction_admission_uses_work_left_after_projection() {
     for (max_work, admitted) in [(low, false), (high, true)] {
         let limits = limits_at(max_work);
         let live = NativePdfSession::open_scoped(bytes, limits, [1; 16]).unwrap();
-        assert_eq!(live.redaction_admitted(), admitted);
-        assert_eq!(verify(&live, limits, live.redaction_admitted()), Ok(true));
+        let expected = if admitted {
+            Ok(())
+        } else {
+            Err(NativeSessionError::Budget)
+        };
+        assert_eq!(live.check_redaction_admission(), expected);
+        assert_eq!(verify(&live, limits, admitted), Ok(true));
     }
 }
 
