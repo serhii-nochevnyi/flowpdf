@@ -233,40 +233,61 @@ fn mapped_font_scene_reserves_decode_workspace_at_the_allowance_boundary() {
 
 #[test]
 fn mapped_tj_applies_real_and_integer_spacing_at_the_active_horizontal_scale() {
-    let content = b"BT /F1 20 Tf 50 Tz 10 50 Td [(A) -125.5 (B) 100 (A)] TJ ET";
-    let bytes = pdf(vec![
-        (1, b"<< /Type /Catalog /Pages 2 0 R >>".to_vec()),
-        (2, b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec()),
-        (3, b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>".to_vec()),
-        stream(4, "", content),
-        (5, b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /FirstChar 65 /Widths [600 600] /ToUnicode 6 0 R >>".to_vec()),
-        stream(6, "", b"begincmap\n2 beginbfchar\n<41> <0410>\n<42> <0411>\nendbfchar\nendcmap\n"),
-    ]);
-    let reader = open_pdf(&bytes, Default::default()).unwrap();
-    let scene = read_pdf_scene(&reader, &PdfSceneRequest::default()).unwrap();
-    let page = &scene.pages[0];
-    assert!(page.partial);
-    assert_eq!(page.elements.len(), 3);
-    let mut shared_provenance = None;
-    for (element, (text, x)) in page
-        .elements
-        .iter()
-        .zip([("А", 640), ("Б", 1104), ("А", 1424)])
-    {
-        let PdfSceneElement::Text { value } = element else {
-            panic!("expected mapped text");
-        };
-        assert_eq!(value.text, text);
-        assert_eq!(value.mapping, PdfTextMapping::ToUnicode);
-        assert_eq!(value.rect.x.raw(), x);
-        assert_eq!(value.glyphs[0].advance.raw(), 384);
-        assert_eq!(value.provenance.object_ref.object_number, 4);
-        assert_eq!(value.provenance.operator.as_deref(), Some("TJ"));
-        assert_eq!(value.glyphs[0].provenance, value.provenance);
-        assert_eq!(
-            *shared_provenance.get_or_insert(&value.provenance),
-            &value.provenance
-        );
+    for (percent, matrix, advance, positions) in [
+        (
+            50,
+            "1 0 0 1 10 50",
+            384,
+            [(640, 1920), (1104, 1920), (1424, 1920)],
+        ),
+        (
+            1,
+            "1 0 0 1 10 50",
+            8,
+            [(640, 1920), (650, 1920), (657, 1920)],
+        ),
+        (
+            50,
+            "0 1 -1 0 10 50",
+            384,
+            [(640, 1920), (640, 2384), (640, 2704)],
+        ),
+    ] {
+        let paint = format!("BT /F1 20 Tf {percent} Tz {matrix} Tm [(A) -125.5 (B) 100 (A)] TJ ET");
+        let bytes = pdf(vec![
+            (1, b"<< /Type /Catalog /Pages 2 0 R >>".to_vec()),
+            (2, b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec()),
+            (3, b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>".to_vec()),
+            stream(4, "", paint.as_bytes()),
+            (5, b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /FirstChar 65 /Widths [600 600] /ToUnicode 6 0 R >>".to_vec()),
+            stream(6, "", b"begincmap\n2 beginbfchar\n<41> <0410>\n<42> <0411>\nendbfchar\nendcmap\n"),
+        ]);
+        let reader = open_pdf(&bytes, Default::default()).unwrap();
+        let scene = read_pdf_scene(&reader, &PdfSceneRequest::default()).unwrap();
+        let page = &scene.pages[0];
+        assert!(page.partial);
+        assert_eq!(page.elements.len(), 3);
+        let mut shared_provenance = None;
+        for (element, (text, (x, y))) in page
+            .elements
+            .iter()
+            .zip(["А", "Б", "А"].into_iter().zip(positions))
+        {
+            let PdfSceneElement::Text { value } = element else {
+                panic!("expected mapped text");
+            };
+            assert_eq!(value.text, text);
+            assert_eq!(value.mapping, PdfTextMapping::ToUnicode);
+            assert_eq!((value.rect.x.raw(), value.rect.y.raw()), (x, y));
+            assert_eq!(value.glyphs[0].advance.raw(), advance);
+            assert_eq!(value.provenance.object_ref.object_number, 4);
+            assert_eq!(value.provenance.operator.as_deref(), Some("TJ"));
+            assert_eq!(value.glyphs[0].provenance, value.provenance);
+            assert_eq!(
+                *shared_provenance.get_or_insert(&value.provenance),
+                &value.provenance
+            );
+        }
     }
 }
 

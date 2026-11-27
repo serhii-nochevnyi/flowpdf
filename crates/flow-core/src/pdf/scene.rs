@@ -447,15 +447,23 @@ fn mul(left: LayoutUnit, right: LayoutUnit) -> Result<LayoutUnit, PdfReadError> 
         .map_err(|_| PdfReadError::NumericLimit)
 }
 
-fn scale_font_width(
-    width_thousandths: LayoutUnit,
-    font_size: LayoutUnit,
+fn scale_text_advance(
+    advance_thousandths: i128,
+    horizontal_percent: LayoutUnit,
+    operand_units: i128,
 ) -> Result<LayoutUnit, PdfReadError> {
-    let product = i128::from(width_thousandths.raw())
-        .checked_mul(i128::from(font_size.raw()))
+    let divisor = 1_000 * 100 * i128::from(LayoutUnit::UNITS_PER_POINT) * operand_units;
+    let scaled = advance_thousandths
+        .checked_mul(i128::from(horizontal_percent.raw()))
         .ok_or(PdfReadError::NumericLimit)?;
-    let value = product / 1_000;
-    i64::try_from(value)
+    let remainder = scaled % divisor;
+    let rounded = scaled / divisor
+        + if remainder.abs() >= divisor / 2 {
+            remainder.signum()
+        } else {
+            0
+        };
+    i64::try_from(rounded)
         .map(LayoutUnit::from_raw)
         .map_err(|_| PdfReadError::NumericLimit)
 }
@@ -463,7 +471,7 @@ fn scale_font_width(
 fn tj_advance(
     operand: &ContentToken,
     font_size: LayoutUnit,
-    horizontal_scale: LayoutUnit,
+    horizontal_percent: LayoutUnit,
 ) -> Result<LayoutUnit, PdfReadError> {
     let units = i128::from(LayoutUnit::UNITS_PER_POINT);
     let spacing = match operand {
@@ -472,13 +480,10 @@ fn tj_advance(
         _ => return Err(PdfReadError::Syntax),
     };
     // @invariant: TJ spacing is in thousandths of text space and uses the glyph horizontal scale.
-    let scaled = (-spacing)
+    let advance = (-spacing)
         .checked_mul(i128::from(font_size.raw()))
-        .and_then(|value| value.checked_mul(i128::from(horizontal_scale.raw())))
         .ok_or(PdfReadError::NumericLimit)?;
-    i64::try_from(scaled / (1_000 * units * units))
-        .map(LayoutUnit::from_raw)
-        .map_err(|_| PdfReadError::NumericLimit)
+    scale_text_advance(advance, horizontal_percent, units)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -641,7 +646,7 @@ struct GraphicsState {
     leading: LayoutUnit,
     char_spacing: LayoutUnit,
     word_spacing: LayoutUnit,
-    horizontal_scale: LayoutUnit,
+    horizontal_percent: LayoutUnit,
     rise: LayoutUnit,
     in_text: bool,
     path: Vec<RawPathCommand>,
@@ -669,7 +674,7 @@ impl GraphicsState {
             leading: LayoutUnit::from_raw(12 * 64),
             char_spacing: LayoutUnit::from_raw(0),
             word_spacing: LayoutUnit::from_raw(0),
-            horizontal_scale: Matrix::IDENTITY.a,
+            horizontal_percent: LayoutUnit::from_raw(100 * LayoutUnit::UNITS_PER_POINT),
             rise: LayoutUnit::from_raw(0),
             in_text: false,
             path: Vec::new(),
@@ -1358,10 +1363,7 @@ impl<'a> SceneBuilder<'a> {
             "TL" => self.state.leading = one_number(operands)?,
             "Tc" => self.state.char_spacing = one_number(operands)?,
             "Tw" => self.state.word_spacing = one_number(operands)?,
-            "Tz" => {
-                let value = one_number(operands)?;
-                self.state.horizontal_scale = LayoutUnit::from_raw(value.raw() / 100);
-            }
+            "Tz" => self.state.horizontal_percent = one_number(operands)?,
             "Ts" => self.state.rise = one_number(operands)?,
             "Tj" | "'" | "\"" => {
                 if operator == "'" {
@@ -1380,7 +1382,7 @@ impl<'a> SceneBuilder<'a> {
                         self.show_text(bytes, &provenance)?;
                     } else {
                         let adjustment =
-                            tj_advance(value, self.state.font_size, self.state.horizontal_scale)?;
+                            tj_advance(value, self.state.font_size, self.state.horizontal_percent)?;
                         self.advance_text(adjustment)?;
                     }
                 }
@@ -1894,17 +1896,15 @@ impl<'a> SceneBuilder<'a> {
                 .get(&code)
                 .copied()
                 .unwrap_or(font.default_width);
-            let advance = scale_font_width(width_units, self.state.font_size)?;
-            let advance = advance
-                .checked_add(self.state.char_spacing)
-                .and_then(|value| {
-                    if code == b' ' {
-                        value.checked_add(self.state.word_spacing)
-                    } else {
-                        Ok(value)
-                    }
-                })?;
-            let advance = mul(advance, self.state.horizontal_scale)?;
+            let mut spacing = i128::from(self.state.char_spacing.raw());
+            if code == b' ' {
+                spacing += i128::from(self.state.word_spacing.raw());
+            }
+            let advance = i128::from(width_units.raw())
+                .checked_mul(i128::from(self.state.font_size.raw()))
+                .and_then(|width| width.checked_add(spacing * 1_000))
+                .ok_or(PdfReadError::NumericLimit)?;
+            let advance = scale_text_advance(advance, self.state.horizontal_percent, 1)?;
             let transform = self.state.ctm.multiply(self.state.text_matrix)?;
             let zero = LayoutUnit::from_raw(0);
             let rect = if self.invocation_path.len() > 1 {
@@ -1973,7 +1973,12 @@ impl<'a> SceneBuilder<'a> {
     }
 
     fn advance_text(&mut self, advance: LayoutUnit) -> Result<(), PdfReadError> {
-        self.state.text_matrix.e = self.state.text_matrix.e.checked_add(advance)?;
+        let (x, y) = self
+            .state
+            .text_matrix
+            .point(advance, LayoutUnit::from_raw(0))?;
+        self.state.text_matrix.e = x;
+        self.state.text_matrix.f = y;
         Ok(())
     }
 
