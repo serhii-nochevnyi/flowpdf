@@ -102,6 +102,9 @@ const reviewedBrowserProfiles = [
     path === 'web/tests/pdf-native-redaction.browser.test.ts' ? '0743c393f4897a5edaf98f62962d1b445f88a141c4fc4c0453cb93f3a0da71c5' : digest,
   ]),
   reviewedVerifiedRecoveryBrowserSuites,
+  reviewedVerifiedRecoveryBrowserSuites.map(([path, digest]) => [path,
+    path === 'web/tests/pdf-native-redaction.browser.test.ts' ? '246dc1a59f0513d131a5ba7e6a0f309e8ad4bdda3486486238cf2460428ba843' : digest,
+  ]),
 ]
 const expandedSteps = [
   'Run bilingual Chromium text replacement tracer',

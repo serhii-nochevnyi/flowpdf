@@ -1113,15 +1113,13 @@ export function PdfNativeEditPanel({
 
   useLayoutEffect(() => {
     const element = dialog.current
-    if (invalidated && confirm && 'redaction' in confirm) {
-      setConfirm(null)
-      return
-    }
-    if (confirm !== null && element && !element.open) {
+    const interruptedRedaction = invalidated && confirm !== null && 'redaction' in confirm
+    if (interruptedRedaction) setConfirm(null)
+    if (!interruptedRedaction && confirm !== null && element && !element.open) {
       element.showModal()
       cancelConfirmation.current?.focus()
     }
-    if (confirm === null && element?.open) {
+    if ((confirm === null || interruptedRedaction) && element?.open) {
       element.close()
       const trigger = removeTrigger.current
       if (invalidated && reopenButton.current) reopenButton.current.focus()

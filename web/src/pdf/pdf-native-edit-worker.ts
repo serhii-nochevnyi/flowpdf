@@ -1010,7 +1010,7 @@ export class NativePdfEditCoordinator {
 
   private invalidate(code: string, propagateCleanupError = false): void {
     if (this.state.phase === 'invalidated') return
-    const recoverRedaction = this.redactionJob !== null
+    const recoverRedaction = this.redactionJob !== null || (this.state.redaction?.markCount ?? 0) > 0
     this.worker.onmessage = null
     this.worker.onerror = null
     this.worker.onmessageerror = null
