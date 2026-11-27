@@ -1117,12 +1117,12 @@ fn execute_pdf_reader(request: PdfReaderWireRequest) -> Result<PdfReaderWireResu
     )
     .map_err(|_| "FLOW_PDF_READER_BYTES_INVALID".to_owned())?;
     let reader = open_pdf(&bytes, limits).map_err(|error| error.code().to_owned())?;
-    let summary = reader.summary().map_err(|error| error.code().to_owned())?;
     let scene_request = PdfSceneRequest {
         first_page: request.first_page,
         page_count: request.page_count,
     };
     let scene = read_pdf_scene(&reader, &scene_request).map_err(|error| error.code().to_owned())?;
+    let summary = reader.summary_with_page_count(scene.page_count);
     let result_hash = scene.result_hash.clone();
     Ok(PdfReaderWireResult {
         summary,

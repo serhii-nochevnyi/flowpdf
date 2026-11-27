@@ -638,6 +638,7 @@ struct GraphicsState {
     clip: SceneClip,
     line_width: Option<f64>,
     miter_limit: Option<f64>,
+    solid_stroke: bool,
     path_ctm_changed: bool,
     pending_clip: Option<PendingClip>,
 }
@@ -668,6 +669,7 @@ impl GraphicsState {
             },
             line_width: Some(1.),
             miter_limit: Some(10.),
+            solid_stroke: true,
             path_ctm_changed: false,
             pending_clip: None,
         }
@@ -1377,7 +1379,12 @@ impl<'a> SceneBuilder<'a> {
             }
             "w" => self.state.line_width = precise_operand(operands),
             "M" => self.state.miter_limit = precise_operand(operands),
+            "d" => {
+                self.state.solid_stroke = matches!(operands, [ContentToken::Array(pattern), phase]
+                    if pattern.is_empty() && phase.number().is_some());
+            }
             "gs" => {
+                self.state.solid_stroke = false;
                 self.state.line_width = None;
                 self.state.miter_limit = None;
             }
@@ -1632,6 +1639,7 @@ impl<'a> SceneBuilder<'a> {
         // @contract: Stroke paint can extend beyond the scene's centerline bounds.
         if !clip.rectangular
             || !clip.contains(rect)?
+            || !self.state.solid_stroke
             || !stroke_bounds.is_some_and(|bounds| self.state.paint_clip.contains(bounds))
         {
             self.report_partial(provenance.object_ref);
@@ -2909,7 +2917,6 @@ fn is_known_noop(operator: &str) -> bool {
     matches!(
         operator,
         "J" | "j"
-            | "d"
             | "ri"
             | "i"
             | "CS"
@@ -3311,38 +3318,23 @@ fn path_bounds(commands: &[PdfPathCommand]) -> Result<LayoutRect, PdfReadError> 
     })
 }
 
-fn union_rect(rects: impl Iterator<Item = LayoutRect>) -> Result<LayoutRect, PdfReadError> {
-    let rects = rects.collect::<Vec<_>>();
-    if rects.is_empty() {
-        return Err(PdfReadError::NumericLimit);
+fn union_rect(mut rects: impl Iterator<Item = LayoutRect>) -> Result<LayoutRect, PdfReadError> {
+    let first = rects.next().ok_or(PdfReadError::NumericLimit)?;
+    let mut min_x = first.x;
+    let mut min_y = first.y;
+    let mut max_x = first.x.checked_add(first.width)?;
+    let mut max_y = first.y.checked_add(first.height)?;
+    for rect in rects {
+        min_x = min_x.min(rect.x);
+        min_y = min_y.min(rect.y);
+        max_x = max_x.max(rect.x.checked_add(rect.width)?);
+        max_y = max_y.max(rect.y.checked_add(rect.height)?);
     }
-    let min_x = rects
-        .iter()
-        .map(|rect| rect.x.raw())
-        .min()
-        .ok_or(PdfReadError::NumericLimit)?;
-    let min_y = rects
-        .iter()
-        .map(|rect| rect.y.raw())
-        .min()
-        .ok_or(PdfReadError::NumericLimit)?;
-    let max_x = rects
-        .iter()
-        .map(|rect| rect.x.raw().checked_add(rect.width.raw()))
-        .collect::<Option<Vec<_>>>()
-        .and_then(|values| values.into_iter().max())
-        .ok_or(PdfReadError::NumericLimit)?;
-    let max_y = rects
-        .iter()
-        .map(|rect| rect.y.raw().checked_add(rect.height.raw()))
-        .collect::<Option<Vec<_>>>()
-        .and_then(|values| values.into_iter().max())
-        .ok_or(PdfReadError::NumericLimit)?;
     Ok(LayoutRect {
-        x: LayoutUnit::from_raw(min_x),
-        y: LayoutUnit::from_raw(min_y),
-        width: LayoutUnit::from_raw(max_x.checked_sub(min_x).ok_or(PdfReadError::NumericLimit)?),
-        height: LayoutUnit::from_raw(max_y.checked_sub(min_y).ok_or(PdfReadError::NumericLimit)?),
+        x: min_x,
+        y: min_y,
+        width: max_x.checked_sub(min_x)?,
+        height: max_y.checked_sub(min_y)?,
     })
 }
 

@@ -952,12 +952,19 @@ impl PdfReader {
     /// streams, or resource objects.
     pub fn summary(&self) -> Result<PdfDocumentSummary, PdfReadError> {
         let pages = self.page_records()?;
-        Ok(PdfDocumentSummary {
+        let page_count = u32::try_from(pages.len()).map_err(|_| PdfReadError::PageCountLimit)?;
+        Ok(self.summary_with_page_count(page_count))
+    }
+
+    #[must_use]
+    pub fn summary_with_page_count(&self, page_count: u32) -> PdfDocumentSummary {
+        // @contract: The page count comes from discovery on this reader.
+        PdfDocumentSummary {
             schema_version: PDF_READER_SCHEMA_VERSION,
             pdf_version: self.version.clone(),
             source_hash: self.source_hash.clone(),
-            page_count: u32::try_from(pages.len()).map_err(|_| PdfReadError::PageCountLimit)?,
-        })
+            page_count,
+        }
     }
 
     pub(super) fn scene_non_stream_object<'workspace>(
