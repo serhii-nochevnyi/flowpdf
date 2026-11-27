@@ -799,6 +799,87 @@ fn raster_fixture(size: u32, paint: &str) -> Vec<u8> {
 }
 
 #[test]
+fn staging_charges_inherited_raster_preflight_to_the_work_allowance() {
+    let source = raster_fixture(100, "10 10 10 10 re f 40 40 10 10 re f");
+    let with_mark = |max_work| {
+        let mut session = NativePdfSession::open_scoped(
+            &source,
+            NativeEditLimits {
+                max_work,
+                ..NativeEditLimits::default()
+            },
+            [5; 16],
+        )
+        .unwrap();
+        let binding = session.snapshot().binding;
+        let mark = mark(&session, 0, [12_000, 12_000, 13_000, 13_000]);
+        session.add_redaction_mark(binding, 1, mark).unwrap();
+        (session, binding, mark)
+    };
+    let high = 662;
+    let (mut below, binding, mark) = with_mark(high - 1);
+    assert_eq!(
+        below.stage_redaction(binding, 2),
+        Err(NativeSessionError::Budget)
+    );
+    assert_eq!(below.lookup(binding, 2), Ok(NativeRequestLookup::Unseen));
+    assert!(below.redaction_candidate_status().is_none());
+    assert_eq!(below.redaction_marks(), &[mark]);
+    assert_eq!(below.redaction_marks_binding(), Some(binding));
+    assert_eq!(below.snapshot().binding, binding);
+    assert_accepted(&below, &source, 0, &source);
+
+    let (mut at_limit, binding, _) = with_mark(high);
+    assert!(matches!(
+        at_limit.stage_redaction(binding, 2),
+        Ok(NativeRedactionStage::Pending(_))
+    ));
+    assert_accepted(&at_limit, &source, 0, &source);
+}
+
+#[test]
+fn null_contents_pages_stay_blank_when_redacting_another_page() {
+    for contents in ["null", "6 0 R"] {
+        let source = pdf(
+            vec![
+                b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+                b"<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 /MediaBox [0 0 100 100] >>".to_vec(),
+                format!("<< /Type /Page /Parent 2 0 R /Contents {contents} >>").into_bytes(),
+                b"<< /Type /Page /Parent 2 0 R /Contents 5 0 R >>".to_vec(),
+                stream("", b"10 10 10 10 re f 40 40 10 10 re f"),
+                b"null".to_vec(),
+            ],
+            "",
+        );
+        let mut session = open(&source);
+        let binding = session.snapshot().binding;
+        let order = session.snapshot().page_state.order.clone();
+        assert_eq!(session.check_redaction_admission(), Ok(()), "{contents}");
+
+        add(&mut session, 1, 1, [12_000, 12_000, 13_000, 13_000]);
+        session.stage_redaction(binding, 2).unwrap();
+        let evidence = session.verify_redaction(binding, 2).unwrap();
+        assert!(evidence.checks_passed(), "{contents}: {evidence:?}");
+        let receipt = session.publish_redaction(binding, 2).unwrap();
+        assert_eq!(session.snapshot().page_state.order, order);
+        let blank = session
+            .accepted_page_raster(receipt.binding, receipt.output_hash, order[0])
+            .unwrap();
+        assert!(!blank.rgb.is_empty());
+        assert!(blank.rgb.iter().all(|&channel| channel == 255));
+        let redacted = session
+            .accepted_page_raster(receipt.binding, receipt.output_hash, order[1])
+            .unwrap();
+        let pixel = |x, y| {
+            let offset = ((redacted.height - 1 - y) * redacted.width + x) * 3;
+            &redacted.rgb[offset..offset + 3]
+        };
+        assert_eq!(pixel(30, 30), [255, 255, 255]);
+        assert_eq!(pixel(90, 90), [0, 0, 0]);
+    }
+}
+
+#[test]
 fn admission_tracks_the_workspace_left_by_the_live_session() {
     // @contract: An uncompressed stream isolates the scan allowance from decoder scratch space.
     let source = pdf(

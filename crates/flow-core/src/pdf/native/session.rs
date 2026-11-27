@@ -690,7 +690,13 @@ impl NativePdfSession {
         if request_id <= self.last_redaction_request {
             return Err(NativeSessionError::ReconciliationRequired);
         }
-        redaction::check_input_budget(&self.graph, Some(self.origin_bytes().len()))?;
+        let mut limits = accepted_input_limits(self.snapshot.limits, binding);
+        let mut preflight_work = redaction::ScanWork::new(limits.max_work);
+        redaction::check_input_budget(
+            &self.graph,
+            Some(self.origin_bytes().len()),
+            &mut preflight_work,
+        )?;
         if self.redaction_marks_binding != Some(binding) {
             return Err(NativeSessionError::InvalidRedactionMark);
         }
@@ -706,15 +712,18 @@ impl NativePdfSession {
             .collect_affected_pages(&self.snapshot.page_state.order, &self.redaction_marks)
             .map_err(|_| NativeSessionError::Budget)?;
         let remaining = workspace.remaining();
-        let mut limits = accepted_input_limits(self.snapshot.limits, binding);
         let output_budget = limits.max_output_bytes.min(max_input).min(remaining / 5);
-        if output_budget == 0 {
+        limits.max_work = preflight_work.remaining;
+        if output_budget == 0 || limits.max_work == 0 {
             return Err(NativeSessionError::Budget);
         }
         limits.max_output_bytes = output_budget;
         limits.max_retained_bytes = remaining - output_budget;
         let mut staged =
-            NativePdfGraph::open(self.output_bytes(), limits).map_err(redaction_graph_error)?;
+            NativePdfGraph::open(self.output_bytes(), limits).map_err(|error| match error {
+                NativeEditError::Reader(PdfReadError::TokenLimit) => NativeSessionError::Budget,
+                error => redaction_graph_error(error),
+            })?;
         redaction::scrub(
             &mut staged,
             &self.snapshot.page_state.order,
