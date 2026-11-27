@@ -76,27 +76,38 @@ fn reader_boundary_returns_verified_scene_window() {
 
 #[test]
 fn reader_boundary_preserves_mapped_text_around_fractional_tj_spacing() {
-    for (percent, matrix, advance, positions) in [
+    for (percent, matrix, adjustment, advance, positions) in [
         (
-            50,
+            "50",
             "1 0 0 1 10 50",
+            "-125.5",
             384,
             [(640, 1920), (1104, 1920), (1424, 1920)],
         ),
         (
-            1,
+            "1",
             "1 0 0 1 10 50",
+            "-125.5",
             8,
             [(640, 1920), (650, 1920), (657, 1920)],
         ),
         (
-            50,
+            "0.07",
+            "1 0 0 1 10 50",
+            "-562.5",
+            1,
+            [(640, 1920), (642, 1920), (643, 1920)],
+        ),
+        (
+            "50",
             "0 1 -1 0 10 50",
+            "-125.5",
             384,
             [(640, 1920), (640, 2384), (640, 2704)],
         ),
     ] {
-        let paint = format!("BT /F1 20 Tf {percent} Tz {matrix} Tm [(A) -125.5 (B) 100 (A)] TJ ET");
+        let paint =
+            format!("BT /F1 20 Tf {percent} Tz {matrix} Tm [(A) {adjustment} (B) 100 (A)] TJ ET");
         let cmap = "begincmap\n2 beginbfchar\n<41> <0410>\n<42> <0411>\nendbfchar\nendcmap";
         let content = format!("<< /Length {} >>\nstream\n{paint}\nendstream", paint.len());
         let to_unicode = format!("<< /Length {} >>\nstream\n{cmap}\nendstream", cmap.len());

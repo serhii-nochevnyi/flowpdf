@@ -449,12 +449,25 @@ fn mul(left: LayoutUnit, right: LayoutUnit) -> Result<LayoutUnit, PdfReadError> 
 
 fn scale_text_advance(
     advance_thousandths: i128,
-    horizontal_percent: LayoutUnit,
+    horizontal_percent: SceneDecimal,
     operand_units: i128,
 ) -> Result<LayoutUnit, PdfReadError> {
-    let divisor = 1_000 * 100 * i128::from(LayoutUnit::UNITS_PER_POINT) * operand_units;
+    let base_divisor = 1_000 * 100 * operand_units;
+    let SceneDecimal::Exact { coefficient, scale } = horizontal_percent else {
+        let rounded =
+            (advance_thousandths as f64 / base_divisor as f64 * horizontal_percent.value()).round();
+        let limit = -(i64::MIN as f64);
+        if !(-limit..limit).contains(&rounded) {
+            return Err(PdfReadError::NumericLimit);
+        }
+        return Ok(LayoutUnit::from_raw(rounded as i64));
+    };
+    let divisor = 10_i128
+        .checked_pow(scale)
+        .and_then(|decimal_units| decimal_units.checked_mul(base_divisor))
+        .ok_or(PdfReadError::NumericLimit)?;
     let scaled = advance_thousandths
-        .checked_mul(i128::from(horizontal_percent.raw()))
+        .checked_mul(i128::from(coefficient))
         .ok_or(PdfReadError::NumericLimit)?;
     let remainder = scaled % divisor;
     let rounded = scaled / divisor
@@ -471,7 +484,7 @@ fn scale_text_advance(
 fn tj_advance(
     operand: &ContentToken,
     font_size: LayoutUnit,
-    horizontal_percent: LayoutUnit,
+    horizontal_percent: SceneDecimal,
 ) -> Result<LayoutUnit, PdfReadError> {
     let units = i128::from(LayoutUnit::UNITS_PER_POINT);
     let spacing = match operand {
@@ -646,7 +659,7 @@ struct GraphicsState {
     leading: LayoutUnit,
     char_spacing: LayoutUnit,
     word_spacing: LayoutUnit,
-    horizontal_percent: LayoutUnit,
+    horizontal_percent: SceneDecimal,
     rise: LayoutUnit,
     in_text: bool,
     path: Vec<RawPathCommand>,
@@ -674,7 +687,10 @@ impl GraphicsState {
             leading: LayoutUnit::from_raw(12 * 64),
             char_spacing: LayoutUnit::from_raw(0),
             word_spacing: LayoutUnit::from_raw(0),
-            horizontal_percent: LayoutUnit::from_raw(100 * LayoutUnit::UNITS_PER_POINT),
+            horizontal_percent: SceneDecimal::Exact {
+                coefficient: 100,
+                scale: 0,
+            },
             rise: LayoutUnit::from_raw(0),
             in_text: false,
             path: Vec::new(),
@@ -1363,7 +1379,14 @@ impl<'a> SceneBuilder<'a> {
             "TL" => self.state.leading = one_number(operands)?,
             "Tc" => self.state.char_spacing = one_number(operands)?,
             "Tw" => self.state.word_spacing = one_number(operands)?,
-            "Tz" => self.state.horizontal_percent = one_number(operands)?,
+            "Tz" => {
+                let Some(percent @ (ContentToken::Integer(_) | ContentToken::Number(_))) =
+                    operands.last()
+                else {
+                    return Err(PdfReadError::Syntax);
+                };
+                self.state.horizontal_percent = percent.scene_decimal();
+            }
             "Ts" => self.state.rise = one_number(operands)?,
             "Tj" | "'" | "\"" => {
                 if operator == "'" {

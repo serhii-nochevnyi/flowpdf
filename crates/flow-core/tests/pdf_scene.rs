@@ -233,27 +233,38 @@ fn mapped_font_scene_reserves_decode_workspace_at_the_allowance_boundary() {
 
 #[test]
 fn mapped_tj_applies_real_and_integer_spacing_at_the_active_horizontal_scale() {
-    for (percent, matrix, advance, positions) in [
+    for (percent, matrix, adjustment, advance, positions) in [
         (
-            50,
+            "50",
             "1 0 0 1 10 50",
+            "-125.5",
             384,
             [(640, 1920), (1104, 1920), (1424, 1920)],
         ),
         (
-            1,
+            "1",
             "1 0 0 1 10 50",
+            "-125.5",
             8,
             [(640, 1920), (650, 1920), (657, 1920)],
         ),
         (
-            50,
+            "0.07",
+            "1 0 0 1 10 50",
+            "-562.5",
+            1,
+            [(640, 1920), (642, 1920), (643, 1920)],
+        ),
+        (
+            "50",
             "0 1 -1 0 10 50",
+            "-125.5",
             384,
             [(640, 1920), (640, 2384), (640, 2704)],
         ),
     ] {
-        let paint = format!("BT /F1 20 Tf {percent} Tz {matrix} Tm [(A) -125.5 (B) 100 (A)] TJ ET");
+        let paint =
+            format!("BT /F1 20 Tf {percent} Tz {matrix} Tm [(A) {adjustment} (B) 100 (A)] TJ ET");
         let bytes = pdf(vec![
             (1, b"<< /Type /Catalog /Pages 2 0 R >>".to_vec()),
             (2, b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec()),
@@ -815,7 +826,7 @@ fn nested_form_marker_transfers_its_provenance_at_the_workspace_boundary() {
                 && inner.provenance.object_ref.object_number == 7
                 && inner.provenance.invocation_path == [0, outer.provenance.stream_offset]
     ));
-    let exact = 32_217 + size_of::<flow_core::pdf::PdfScenePage>();
+    let exact = 32_225 + size_of::<flow_core::pdf::PdfScenePage>();
     assert_eq!(read(exact).unwrap(), expected);
     assert!(matches!(read(exact - 1), Err(PdfReadError::StreamLimit)));
 }
