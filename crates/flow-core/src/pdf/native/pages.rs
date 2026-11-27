@@ -134,11 +134,20 @@ impl NativePageState {
             && self.order.iter().copied().collect::<BTreeSet<_>>().len() == count
     }
 
+    pub(super) fn charge_order_validation(&self, work: &mut usize) -> Result<(), NativeEditError> {
+        spend(work, self.order.len())
+    }
+
     pub(super) fn valid_in_workspace(
         &self,
         count: usize,
         workspace: &Workspace,
+        work: &mut usize,
     ) -> Result<bool, NativeEditError> {
+        if self.order.len() != count {
+            return Ok(false);
+        }
+        self.charge_order_validation(work)?;
         if !self.has_shape_for_count(count) {
             return Ok(false);
         }

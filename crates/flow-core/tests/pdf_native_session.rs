@@ -662,6 +662,19 @@ fn assert_detached_object_projection_after_work_exhaustion(unsupported_curve: bo
     assert_eq!(verify(rows, Some(&session)), Ok(true));
     assert_eq!(verify_edit(rows), Ok(true));
     assert_eq!(verify_page(snapshot.scene.scene_hash, rows), Ok(true));
+    let mut duplicate_order = snapshot.page_state.clone();
+    duplicate_order.order[1] = duplicate_order.order[0];
+    assert_eq!(
+        NativePdfSession::verify_page_projection_with_objects(
+            session.output_bytes(),
+            limits,
+            snapshot.binding,
+            snapshot.scene.scene_hash,
+            Some(rows),
+            &duplicate_order,
+        ),
+        Ok(false)
+    );
     let mut wrong_scene_hash = snapshot.scene.scene_hash;
     wrong_scene_hash[0] ^= 1;
     assert_eq!(verify_page(wrong_scene_hash, rows), Ok(false));
@@ -945,7 +958,8 @@ fn detached_redaction_admission_uses_work_left_after_projection() {
         max_work,
         ..defaults
     };
-    let high = 401;
+    // One projected page visit for note matching and one entry for order validation.
+    let high = 403;
     let low = high - 1;
     assert_eq!(verify(&session, limits_at(low), false), Ok(true));
     assert_eq!(
