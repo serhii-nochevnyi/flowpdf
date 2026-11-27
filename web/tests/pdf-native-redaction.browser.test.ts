@@ -723,23 +723,6 @@ for (const locale of ['en', 'uk'] as const) {
 
       lane = controlledWorker()
       await putOriginal(source)
-      await fillMark(20, 20, 59, 80)
-      await addMark(1)
-      expect(panel.element().querySelector('[data-redaction-check]')).toBeNull()
-      const pendingConfirmation = await openConfirmation(locale === 'en' ? 'clear' : 'apply', '1', 1)
-      await expect.element(pendingConfirmation).toBeEnabled()
-      lane.control.die()
-      const reopen = button('session.reopen')
-      await expect.element(reopen).toHaveFocus()
-      expect(panel.element().querySelector('dialog[open]')).toBeNull()
-      expect(marksOnPage()).toHaveLength(1)
-      expect(visibleRaster()).not.toBeNull()
-      expect(lane.control.requests).toEqual(['addMark'])
-      assertUnpublishedReplies(rawRedactionReplies(lane.control))
-      lane = controlledWorker()
-      await reopen.click()
-      await expect.element(status).toHaveTextContent(t('status.reopened'))
-      expect(marksOnPage()).toHaveLength(0)
 
       await activate(button('note.add').element())
       await notes.fill(ordinaryNote)
@@ -752,18 +735,27 @@ for (const locale of ['en', 'uk'] as const) {
       const recoveryBytes = nativeHexBytes(ordinaryOutput.outputHex)
       const recoverySourceHash = await hashPdfSourceBytes(recoveryBytes)
       const reopenAccepted = button('session.reopenAccepted')
-      for (const fault of ['fatalStage', 'fatalVerify', 'lostPublish', 'fatalPublish'] as const) {
+      for (const fault of ['fatalConfirmation', 'fatalStage', 'fatalVerify', 'lostPublish', 'fatalPublish'] as const) {
         await fillMark(20, 20, 59, 80)
         await addMark(1)
         const beforeRecovery = acceptedScope()
         const interruptedLane = lane
         const beforeInterruption = checkpoint()
         const sourceWrites = put.mock.calls.length
+        const confirmationFailure = fault === 'fatalConfirmation'
         const held = fault === 'fatalStage' ? 'stage' : fault === 'fatalVerify' ? 'verify' : null
         interruptedLane.control.hold = held
-        interruptedLane.control.fault = fault === 'fatalStage' ? null : fault
+        interruptedLane.control.fault = fault === 'fatalStage' || confirmationFailure ? null : fault
         interruptedLane.control.dropStatusReply = fault === 'lostPublish'
-        await activate((await openConfirmation('apply', '1', 1)).element())
+        const confirmation = await openConfirmation(confirmationFailure && locale === 'en' ? 'clear' : 'apply', '1', 1)
+        if (confirmationFailure) {
+          await expect.element(confirmation).toBeEnabled()
+          interruptedLane.control.die()
+          await expect.element(reopenAccepted).toHaveFocus()
+          expect(panel.element().querySelector('dialog[open]')).toBeNull()
+        } else {
+          await activate(confirmation.element())
+        }
         if (held !== null) {
           await expect.poll(() => interruptedLane.control.resume).toBeTypeOf('function')
           await expect.element(status).toHaveTextContent(t(held === 'stage' ? 'redaction.staging' : 'redaction.pending'))
@@ -783,7 +775,11 @@ for (const locale of ['en', 'uk'] as const) {
         await expect.element(alert).toHaveTextContent(t('session.redactionRecovery'))
 
         const replies = rawRedactionReplies(interruptedLane.control)
-        if (held !== null) {
+        if (confirmationFailure) {
+          expect(interruptedLane.control.requests).toEqual(['addMark'])
+          expect(panel.element().querySelector('[data-redaction-check]')).toBeNull()
+          assertUnpublishedReplies(replies)
+        } else if (held !== null) {
           await expect.element(alert).toHaveTextContent(t('redaction.noOutput', {
             reason: t(held === 'stage' ? 'redaction.stageUnavailable' : 'redaction.inconclusive'),
           }))

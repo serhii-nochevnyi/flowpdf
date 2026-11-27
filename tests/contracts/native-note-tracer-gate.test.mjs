@@ -155,6 +155,7 @@ for (const [profile, revision, expanded] of [
   ['reviewed image replacement and redaction feedback', redactionFeedbackRevision, true],
   ['previous raw snapshot and preview readback', '46ed056b6366cf53d4a942ad9ee146cbb2a44575', true],
   ['previous reviewed six-suite redaction profile', '3850e46e18fa518133fb59ea71e41d19abe854c7', true],
+  ['previous prepublication recovery', 'd361916b99e700ca0ef2eeda437168f281113452', true],
   ['previous publication recovery', '62d8a33197cc29a5ac3328ab2bf3348ae2105195', true],
 ]) {
   test(`accepts the exact ${profile} harness`, (t) => {
@@ -217,7 +218,7 @@ test('refuses the recovery note suite with a different reviewed redaction suite'
   assert.throws(() => requirePassedCi('HEAD', command), { message: 'NATIVE_NOTE_TRACER_HARNESS_NOT_APPROVED' })
 })
 
-test('binds prepublication recovery to the exact six-suite browser profile', (t) => {
+test('binds confirmation recovery to the exact six-suite browser profile', (t) => {
   const { command, state } = fixture()
   assert.deepEqual(requirePassedCi('HEAD', command), { repository: repo, sha, run: 7, attempt: 3, job: 73 })
   for (const path of browserSuites) {
