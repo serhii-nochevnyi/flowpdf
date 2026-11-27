@@ -2970,19 +2970,27 @@ mod tests {
             }),
             Err(NativeSessionError::Budget)
         );
-        let verify_page = |max_work| {
+        let verify_page = |max_work, state: &NativePageState| {
             NativePdfSession::verify_page_projection_with_objects(
                 output,
                 NativeEditLimits { max_work, ..limits },
                 binding,
                 scene.scene_hash,
                 Some(&scene.object_pages),
-                &snapshot.page_state,
+                state,
             )
         };
         let page_work = detached_work + scene_work + restrictions_work + page_order_work;
-        assert_eq!(verify_page(page_work), Ok(true));
-        assert_eq!(verify_page(page_work - 1), Err(NativeSessionError::Budget));
+        assert_eq!(verify_page(page_work, &snapshot.page_state), Ok(true));
+        let mut selected = snapshot.page_state.clone();
+        selected.selected = Some(selected.order[0]);
+        assert_eq!(verify_page(page_work, &selected), Ok(true));
+        assert_eq!(
+            verify_page(page_work - 1, &selected),
+            Err(NativeSessionError::Budget)
+        );
+        selected.selected = Some(selected.order[0] + 1);
+        assert_eq!(verify_page(page_work, &selected), Ok(false));
         let before = tight.snapshot.clone();
         let accepted = tight.output_bytes().to_vec();
         // @invariant: A fresh session's one 32-byte object ID may add or remove up to 64 JSON bytes.
