@@ -447,26 +447,56 @@ fn mul(left: LayoutUnit, right: LayoutUnit) -> Result<LayoutUnit, PdfReadError> 
         .map_err(|_| PdfReadError::NumericLimit)
 }
 
-fn scale_font_width(
-    width_thousandths: LayoutUnit,
-    font_size: LayoutUnit,
+fn scale_text_advance(
+    advance_thousandths: i128,
+    horizontal_percent: SceneDecimal,
+    operand_units: i128,
 ) -> Result<LayoutUnit, PdfReadError> {
-    let product = i128::from(width_thousandths.raw())
-        .checked_mul(i128::from(font_size.raw()))
+    let base_divisor = 1_000 * 100 * operand_units;
+    let SceneDecimal::Exact { coefficient, scale } = horizontal_percent else {
+        let rounded =
+            (advance_thousandths as f64 / base_divisor as f64 * horizontal_percent.value()).round();
+        let limit = -(i64::MIN as f64);
+        if !(-limit..limit).contains(&rounded) {
+            return Err(PdfReadError::NumericLimit);
+        }
+        return Ok(LayoutUnit::from_raw(rounded as i64));
+    };
+    let divisor = 10_i128
+        .checked_pow(scale)
+        .and_then(|decimal_units| decimal_units.checked_mul(base_divisor))
         .ok_or(PdfReadError::NumericLimit)?;
-    let value = product / 1_000;
-    i64::try_from(value)
+    let scaled = advance_thousandths
+        .checked_mul(i128::from(coefficient))
+        .ok_or(PdfReadError::NumericLimit)?;
+    let remainder = scaled % divisor;
+    let rounded = scaled / divisor
+        + if remainder.abs() >= divisor / 2 {
+            remainder.signum()
+        } else {
+            0
+        };
+    i64::try_from(rounded)
         .map(LayoutUnit::from_raw)
         .map_err(|_| PdfReadError::NumericLimit)
 }
 
-fn scale_percent(value: LayoutUnit) -> Result<LayoutUnit, PdfReadError> {
-    let product = i128::from(value.raw())
-        .checked_mul(i128::from(LayoutUnit::UNITS_PER_POINT))
+fn tj_advance(
+    operand: &ContentToken,
+    font_size: LayoutUnit,
+    horizontal_percent: SceneDecimal,
+) -> Result<LayoutUnit, PdfReadError> {
+    let units = i128::from(LayoutUnit::UNITS_PER_POINT);
+    let spacing = match operand {
+        ContentToken::Integer(value) => i128::from(*value) * units,
+        ContentToken::Number((value, _)) => i128::from(value.raw()),
+        _ => return Err(PdfReadError::Syntax),
+    };
+    // @invariant: TJ spacing is in thousandths of text space and uses the glyph horizontal scale.
+    let advance = (-spacing)
+        .checked_mul(i128::from(font_size.raw()))
         .ok_or(PdfReadError::NumericLimit)?;
-    i64::try_from(product / 100)
-        .map(LayoutUnit::from_raw)
-        .map_err(|_| PdfReadError::NumericLimit)
+    scale_text_advance(advance, horizontal_percent, units)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -629,7 +659,7 @@ struct GraphicsState {
     leading: LayoutUnit,
     char_spacing: LayoutUnit,
     word_spacing: LayoutUnit,
-    horizontal_scale: LayoutUnit,
+    horizontal_percent: SceneDecimal,
     rise: LayoutUnit,
     in_text: bool,
     path: Vec<RawPathCommand>,
@@ -657,7 +687,10 @@ impl GraphicsState {
             leading: LayoutUnit::from_raw(12 * 64),
             char_spacing: LayoutUnit::from_raw(0),
             word_spacing: LayoutUnit::from_raw(0),
-            horizontal_scale: Matrix::IDENTITY.a,
+            horizontal_percent: SceneDecimal::Exact {
+                coefficient: 100,
+                scale: 0,
+            },
             rise: LayoutUnit::from_raw(0),
             in_text: false,
             path: Vec::new(),
@@ -1347,8 +1380,12 @@ impl<'a> SceneBuilder<'a> {
             "Tc" => self.state.char_spacing = one_number(operands)?,
             "Tw" => self.state.word_spacing = one_number(operands)?,
             "Tz" => {
-                let value = one_number(operands)?;
-                self.state.horizontal_scale = scale_percent(value)?;
+                let Some(percent @ (ContentToken::Integer(_) | ContentToken::Number(_))) =
+                    operands.last()
+                else {
+                    return Err(PdfReadError::Syntax);
+                };
+                self.state.horizontal_percent = percent.scene_decimal();
             }
             "Ts" => self.state.rise = one_number(operands)?,
             "Tj" | "'" | "\"" => {
@@ -1360,20 +1397,16 @@ impl<'a> SceneBuilder<'a> {
                 }
             }
             "TJ" => {
-                if let Some(ContentToken::Array(values)) = operands.last() {
-                    for value in values {
-                        match value {
-                            ContentToken::String(bytes) => self.show_text(bytes, &provenance)?,
-                            ContentToken::Integer(value) => {
-                                let adjustment = LayoutUnit::from_raw(
-                                    value.checked_mul(-1).ok_or(PdfReadError::NumericLimit)?,
-                                );
-                                let adjustment =
-                                    scale_font_width(adjustment, self.state.font_size)?;
-                                self.advance_text(adjustment)?;
-                            }
-                            _ => return Err(PdfReadError::Syntax),
-                        }
+                let [ContentToken::Array(values)] = operands else {
+                    return Err(PdfReadError::Syntax);
+                };
+                for value in values {
+                    if let ContentToken::String(bytes) = value {
+                        self.show_text(bytes, &provenance)?;
+                    } else {
+                        let adjustment =
+                            tj_advance(value, self.state.font_size, self.state.horizontal_percent)?;
+                        self.advance_text(adjustment)?;
                     }
                 }
             }
@@ -1886,17 +1919,15 @@ impl<'a> SceneBuilder<'a> {
                 .get(&code)
                 .copied()
                 .unwrap_or(font.default_width);
-            let advance = scale_font_width(width_units, self.state.font_size)?;
-            let advance = advance
-                .checked_add(self.state.char_spacing)
-                .and_then(|value| {
-                    if code == b' ' {
-                        value.checked_add(self.state.word_spacing)
-                    } else {
-                        Ok(value)
-                    }
-                })?;
-            let advance = mul(advance, self.state.horizontal_scale)?;
+            let mut spacing = i128::from(self.state.char_spacing.raw());
+            if code == b' ' {
+                spacing += i128::from(self.state.word_spacing.raw());
+            }
+            let advance = i128::from(width_units.raw())
+                .checked_mul(i128::from(self.state.font_size.raw()))
+                .and_then(|width| width.checked_add(spacing * 1_000))
+                .ok_or(PdfReadError::NumericLimit)?;
+            let advance = scale_text_advance(advance, self.state.horizontal_percent, 1)?;
             let transform = self.state.ctm.multiply(self.state.text_matrix)?;
             let zero = LayoutUnit::from_raw(0);
             let rect = if self.invocation_path.len() > 1 {
@@ -1965,7 +1996,12 @@ impl<'a> SceneBuilder<'a> {
     }
 
     fn advance_text(&mut self, advance: LayoutUnit) -> Result<(), PdfReadError> {
-        self.state.text_matrix.e = self.state.text_matrix.e.checked_add(advance)?;
+        let (x, y) = self
+            .state
+            .text_matrix
+            .point(advance, LayoutUnit::from_raw(0))?;
+        self.state.text_matrix.e = x;
+        self.state.text_matrix.f = y;
         Ok(())
     }
 
@@ -2860,7 +2896,8 @@ pub fn read_pdf_scene(
         page_refs.extend(pages.iter().map(|page| page.object_ref).zip(0..page_count));
         page_refs.sort_unstable();
     }
-    let mut scene_pages = Vec::with_capacity(end.saturating_sub(first));
+    let mut scene_pages = Vec::new();
+    budget.reserve_vec(&mut scene_pages, end - first)?;
     for (index, page) in pages.iter().enumerate().take(end).skip(first) {
         let page_index = u32::try_from(index).map_err(|_| PdfReadError::PageCountLimit)?;
         let had_field_root_counts = field_root_counts.is_some();

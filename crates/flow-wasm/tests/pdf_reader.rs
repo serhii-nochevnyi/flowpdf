@@ -75,6 +75,91 @@ fn reader_boundary_returns_verified_scene_window() {
 }
 
 #[test]
+fn reader_boundary_preserves_mapped_text_around_fractional_tj_spacing() {
+    for (percent, matrix, adjustment, advance, positions) in [
+        (
+            "50",
+            "1 0 0 1 10 50",
+            "-125.5",
+            384,
+            [(640, 1920), (1104, 1920), (1424, 1920)],
+        ),
+        (
+            "1",
+            "1 0 0 1 10 50",
+            "-125.5",
+            8,
+            [(640, 1920), (650, 1920), (657, 1920)],
+        ),
+        (
+            "0.07",
+            "1 0 0 1 10 50",
+            "-562.5",
+            1,
+            [(640, 1920), (642, 1920), (643, 1920)],
+        ),
+        (
+            "50",
+            "0 1 -1 0 10 50",
+            "-125.5",
+            384,
+            [(640, 1920), (640, 2384), (640, 2704)],
+        ),
+    ] {
+        let paint =
+            format!("BT /F1 20 Tf {percent} Tz {matrix} Tm [(A) {adjustment} (B) 100 (A)] TJ ET");
+        let cmap = "begincmap\n2 beginbfchar\n<41> <0410>\n<42> <0411>\nendbfchar\nendcmap";
+        let content = format!("<< /Length {} >>\nstream\n{paint}\nendstream", paint.len());
+        let to_unicode = format!("<< /Length {} >>\nstream\n{cmap}\nendstream", cmap.len());
+        let bytes = write_pdf(&[
+            "<< /Type /Catalog /Pages 2 0 R >>",
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>",
+            &content,
+            "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /FirstChar 65 /Widths [600 600] /ToUnicode 6 0 R >>",
+            &to_unicode,
+        ]);
+        let request = json!({
+            "protocolVersion": 1,
+            "requestId": "mapped-tj-spacing",
+            "bytesHex": hex(&bytes),
+            "firstPage": 0,
+            "pageCount": 1
+        });
+        let serialized = flow_wasm::read_pdf(request.to_string());
+        let value = response(&serialized);
+        assert_eq!(value["ok"], true, "{value}");
+        let scene: flow_core::PdfScene =
+            serde_json::from_value(value["result"]["scene"].clone()).unwrap();
+        let page = &scene.pages[0];
+        assert!(page.partial);
+        assert_eq!(page.elements.len(), 3);
+        let mut shared_provenance = None;
+        for (element, (text, (x, y))) in page
+            .elements
+            .iter()
+            .zip(["А", "Б", "А"].into_iter().zip(positions))
+        {
+            let flow_core::PdfSceneElement::Text { value } = element else {
+                panic!("expected mapped text");
+            };
+            assert_eq!(value.text, text);
+            assert_eq!(value.mapping, flow_core::PdfTextMapping::ToUnicode);
+            assert_eq!(value.glyphs[0].advance.raw(), advance);
+            assert_eq!(value.glyphs[0].provenance, value.provenance);
+            assert_eq!(
+                *shared_provenance.get_or_insert(&value.provenance),
+                &value.provenance
+            );
+            assert_eq!((value.rect.x.raw(), value.rect.y.raw()), (x, y));
+            assert_eq!(value.provenance.operator.as_deref(), Some("TJ"));
+            assert_eq!(value.provenance.object_ref.object_number, 4);
+        }
+        assert!(flow_wasm::verify_pdf_reader_response(serialized));
+    }
+}
+
+#[test]
 fn reader_boundary_budgets_nested_page_discovery_for_a_single_page_window() {
     let mut objects = [
         "<< /Type /Catalog /Pages 2 0 R >>",

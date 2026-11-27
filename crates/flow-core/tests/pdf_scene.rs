@@ -232,6 +232,77 @@ fn mapped_font_scene_reserves_decode_workspace_at_the_allowance_boundary() {
 }
 
 #[test]
+fn mapped_tj_applies_real_and_integer_spacing_at_the_active_horizontal_scale() {
+    for (percent, matrix, adjustment, advance, positions) in [
+        (
+            "50",
+            "1 0 0 1 10 50",
+            "-125.5",
+            384,
+            [(640, 1920), (1104, 1920), (1424, 1920)],
+        ),
+        (
+            "1",
+            "1 0 0 1 10 50",
+            "-125.5",
+            8,
+            [(640, 1920), (650, 1920), (657, 1920)],
+        ),
+        (
+            "0.07",
+            "1 0 0 1 10 50",
+            "-562.5",
+            1,
+            [(640, 1920), (642, 1920), (643, 1920)],
+        ),
+        (
+            "50",
+            "0 1 -1 0 10 50",
+            "-125.5",
+            384,
+            [(640, 1920), (640, 2384), (640, 2704)],
+        ),
+    ] {
+        let paint =
+            format!("BT /F1 20 Tf {percent} Tz {matrix} Tm [(A) {adjustment} (B) 100 (A)] TJ ET");
+        let bytes = pdf(vec![
+            (1, b"<< /Type /Catalog /Pages 2 0 R >>".to_vec()),
+            (2, b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec()),
+            (3, b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>".to_vec()),
+            stream(4, "", paint.as_bytes()),
+            (5, b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /FirstChar 65 /Widths [600 600] /ToUnicode 6 0 R >>".to_vec()),
+            stream(6, "", b"begincmap\n2 beginbfchar\n<41> <0410>\n<42> <0411>\nendbfchar\nendcmap\n"),
+        ]);
+        let reader = open_pdf(&bytes, Default::default()).unwrap();
+        let scene = read_pdf_scene(&reader, &PdfSceneRequest::default()).unwrap();
+        let page = &scene.pages[0];
+        assert!(page.partial);
+        assert_eq!(page.elements.len(), 3);
+        let mut shared_provenance = None;
+        for (element, (text, (x, y))) in page
+            .elements
+            .iter()
+            .zip(["А", "Б", "А"].into_iter().zip(positions))
+        {
+            let PdfSceneElement::Text { value } = element else {
+                panic!("expected mapped text");
+            };
+            assert_eq!(value.text, text);
+            assert_eq!(value.mapping, PdfTextMapping::ToUnicode);
+            assert_eq!((value.rect.x.raw(), value.rect.y.raw()), (x, y));
+            assert_eq!(value.glyphs[0].advance.raw(), advance);
+            assert_eq!(value.provenance.object_ref.object_number, 4);
+            assert_eq!(value.provenance.operator.as_deref(), Some("TJ"));
+            assert_eq!(value.glyphs[0].provenance, value.provenance);
+            assert_eq!(
+                *shared_provenance.get_or_insert(&value.provenance),
+                &value.provenance
+            );
+        }
+    }
+}
+
+#[test]
 fn mapped_text_runs_require_allowance_for_element_storage_growth() {
     let mut content = String::from("BT /F1 10 Tf 5 20 Td (A) Tj\n");
     content.push_str(&"0 12 Td (A) Tj\n".repeat(63));
@@ -729,7 +800,7 @@ fn aggregate_report_retains_operator_storage_across_two_pages() {
             .to_hex()
             .as_str()
     );
-    let exact = 24_534;
+    let exact = 24_534 + 2 * size_of::<flow_core::pdf::PdfScenePage>();
     assert_eq!(read(exact).unwrap(), expected);
     assert!(matches!(read(exact - 1), Err(PdfReadError::StreamLimit)));
 }
@@ -755,7 +826,7 @@ fn nested_form_marker_transfers_its_provenance_at_the_workspace_boundary() {
                 && inner.provenance.object_ref.object_number == 7
                 && inner.provenance.invocation_path == [0, outer.provenance.stream_offset]
     ));
-    let exact = 32_217;
+    let exact = 32_225 + size_of::<flow_core::pdf::PdfScenePage>();
     assert_eq!(read(exact).unwrap(), expected);
     assert!(matches!(read(exact - 1), Err(PdfReadError::StreamLimit)));
 }
@@ -1038,6 +1109,57 @@ fn one_page_scene_charges_nested_discovery_and_resolves_links_outside_the_window
     assert_eq!(path.provenance.object_ref.object_number, 108);
     assert_eq!(read(64 * 1024).unwrap(), expected);
     assert_eq!(read(12 * 1024), Err(PdfReadError::StreamLimit));
+}
+
+#[test]
+fn scene_page_slots_share_the_live_window_allowance() {
+    let mut objects = vec![(1, b"<< /Type /Catalog /Pages 2 0 R >>".to_vec())];
+    let kids = (3..35)
+        .map(|id| format!("{id} 0 R"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    objects.push((
+        2,
+        format!("<< /Type /Pages /Kids [{kids}] /Count 32 /MediaBox [0 0 200 200] >>").into_bytes(),
+    ));
+    objects.extend((3..35).map(|id| {
+        (
+            id,
+            b"<< /Type /Page /Parent 2 0 R /Contents 35 0 R >>".to_vec(),
+        )
+    }));
+    objects.push(stream(35, "", b"20 20 40 10 re f"));
+    let bytes = pdf(objects);
+    let read = |max_scene_bytes| {
+        let reader = open_pdf(
+            &bytes,
+            PdfReaderLimits {
+                max_scene_bytes,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        read_pdf_scene(
+            &reader,
+            &PdfSceneRequest {
+                first_page: 4,
+                page_count: 24,
+            },
+        )
+    };
+    let expected = read(PdfReaderLimits::default().max_scene_bytes).unwrap();
+    assert_eq!(expected.page_count, 32);
+    assert_eq!(expected.pages.len(), 24);
+    for (page, index) in expected.pages.iter().zip(4..28) {
+        assert_eq!(page.page_index, index);
+        assert_eq!(page.source_object.object_number, index + 3);
+        assert!(
+            matches!(page.elements.as_slice(), [PdfSceneElement::Path { value }] if value.fill)
+        );
+    }
+    assert_eq!(read(32 * 1024).unwrap(), expected);
+    // @invariant: This allowance fits the read only when output page slots are omitted.
+    assert_eq!(read(29 * 1024), Err(PdfReadError::StreamLimit));
 }
 
 #[test]
