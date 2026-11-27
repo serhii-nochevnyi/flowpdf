@@ -76,8 +76,9 @@ fn reader_boundary_returns_verified_scene_window() {
 
 #[test]
 fn reader_boundary_preserves_mapped_text_around_fractional_tj_spacing() {
-    for (percent, matrix, adjustment, advance, positions) in [
+    for (font_size, percent, matrix, adjustment, advance, positions) in [
         (
+            20,
             "50",
             "1 0 0 1 10 50",
             "-125.5",
@@ -85,6 +86,7 @@ fn reader_boundary_preserves_mapped_text_around_fractional_tj_spacing() {
             [(640, 1920), (1104, 1920), (1424, 1920)],
         ),
         (
+            20,
             "1",
             "1 0 0 1 10 50",
             "-125.5",
@@ -92,6 +94,7 @@ fn reader_boundary_preserves_mapped_text_around_fractional_tj_spacing() {
             [(640, 1920), (650, 1920), (657, 1920)],
         ),
         (
+            20,
             "0.07",
             "1 0 0 1 10 50",
             "-562.5",
@@ -99,15 +102,49 @@ fn reader_boundary_preserves_mapped_text_around_fractional_tj_spacing() {
             [(640, 1920), (642, 1920), (643, 1920)],
         ),
         (
+            20,
             "50",
             "0 1 -1 0 10 50",
             "-125.5",
             384,
             [(640, 1920), (640, 2384), (640, 2704)],
         ),
+        (
+            12,
+            "100",
+            "1 0 0 1 10 50",
+            "-0.65",
+            461,
+            [(640, 2432), (1101, 2432), (1485, 2432)],
+        ),
+        (
+            12,
+            "100",
+            "1 0 0 1 10 50",
+            "-0.65625",
+            461,
+            [(640, 2432), (1102, 2432), (1486, 2432)],
+        ),
+        (
+            12,
+            "33.33333333333333333",
+            "1 0 0 1 10 50",
+            "-2.65625000000000001",
+            154,
+            [(640, 2432), (795, 2432), (923, 2432)],
+        ),
+        (
+            12,
+            "333.3333333333333333",
+            "1 0 0 1 10 50",
+            "-2.65625000000000001",
+            1536,
+            [(640, 2432), (2183, 2432), (3463, 2432)],
+        ),
     ] {
-        let paint =
-            format!("BT /F1 20 Tf {percent} Tz {matrix} Tm [(A) {adjustment} (B) 100 (A)] TJ ET");
+        let paint = format!(
+            "BT /F1 {font_size} Tf {percent} Tz {matrix} Tm [(A) {adjustment} (B) 100 (A)] TJ ET"
+        );
         let cmap = "begincmap\n2 beginbfchar\n<41> <0410>\n<42> <0411>\nendbfchar\nendcmap";
         let content = format!("<< /Length {} >>\nstream\n{paint}\nendstream", paint.len());
         let to_unicode = format!("<< /Length {} >>\nstream\n{cmap}\nendstream", cmap.len());

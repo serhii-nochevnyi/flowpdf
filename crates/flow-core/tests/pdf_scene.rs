@@ -233,8 +233,9 @@ fn mapped_font_scene_reserves_decode_workspace_at_the_allowance_boundary() {
 
 #[test]
 fn mapped_tj_applies_real_and_integer_spacing_at_the_active_horizontal_scale() {
-    for (percent, matrix, adjustment, advance, positions) in [
+    for (font_size, percent, matrix, adjustment, advance, positions) in [
         (
+            20,
             "50",
             "1 0 0 1 10 50",
             "-125.5",
@@ -242,6 +243,7 @@ fn mapped_tj_applies_real_and_integer_spacing_at_the_active_horizontal_scale() {
             [(640, 1920), (1104, 1920), (1424, 1920)],
         ),
         (
+            20,
             "1",
             "1 0 0 1 10 50",
             "-125.5",
@@ -249,6 +251,7 @@ fn mapped_tj_applies_real_and_integer_spacing_at_the_active_horizontal_scale() {
             [(640, 1920), (650, 1920), (657, 1920)],
         ),
         (
+            20,
             "0.07",
             "1 0 0 1 10 50",
             "-562.5",
@@ -256,15 +259,49 @@ fn mapped_tj_applies_real_and_integer_spacing_at_the_active_horizontal_scale() {
             [(640, 1920), (642, 1920), (643, 1920)],
         ),
         (
+            20,
             "50",
             "0 1 -1 0 10 50",
             "-125.5",
             384,
             [(640, 1920), (640, 2384), (640, 2704)],
         ),
+        (
+            12,
+            "100",
+            "1 0 0 1 10 50",
+            "-0.65",
+            461,
+            [(640, 2432), (1101, 2432), (1485, 2432)],
+        ),
+        (
+            12,
+            "100",
+            "1 0 0 1 10 50",
+            "-0.65625",
+            461,
+            [(640, 2432), (1102, 2432), (1486, 2432)],
+        ),
+        (
+            12,
+            "33.33333333333333333",
+            "1 0 0 1 10 50",
+            "-2.65625000000000001",
+            154,
+            [(640, 2432), (795, 2432), (923, 2432)],
+        ),
+        (
+            12,
+            "333.3333333333333333",
+            "1 0 0 1 10 50",
+            "-2.65625000000000001",
+            1536,
+            [(640, 2432), (2183, 2432), (3463, 2432)],
+        ),
     ] {
-        let paint =
-            format!("BT /F1 20 Tf {percent} Tz {matrix} Tm [(A) {adjustment} (B) 100 (A)] TJ ET");
+        let paint = format!(
+            "BT /F1 {font_size} Tf {percent} Tz {matrix} Tm [(A) {adjustment} (B) 100 (A)] TJ ET"
+        );
         let bytes = pdf(vec![
             (1, b"<< /Type /Catalog /Pages 2 0 R >>".to_vec()),
             (2, b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec()),

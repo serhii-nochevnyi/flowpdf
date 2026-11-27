@@ -450,25 +450,41 @@ fn mul(left: LayoutUnit, right: LayoutUnit) -> Result<LayoutUnit, PdfReadError> 
 fn scale_text_advance(
     advance_thousandths: i128,
     horizontal_percent: SceneDecimal,
-    operand_units: i128,
+    spacing_factor: SceneDecimal,
 ) -> Result<LayoutUnit, PdfReadError> {
-    let base_divisor = 1_000 * 100 * operand_units;
-    let SceneDecimal::Exact { coefficient, scale } = horizontal_percent else {
-        let rounded =
-            (advance_thousandths as f64 / base_divisor as f64 * horizontal_percent.value()).round();
+    const DIVISOR: i128 = 1_000 * 100;
+    let (
+        SceneDecimal::Exact {
+            coefficient: percent,
+            scale: percent_scale,
+        },
+        SceneDecimal::Exact {
+            coefficient: spacing,
+            scale: spacing_scale,
+        },
+    ) = (horizontal_percent, spacing_factor)
+    else {
+        let rounded = (advance_thousandths as f64 / DIVISOR as f64
+            * horizontal_percent.value()
+            * spacing_factor.value())
+        .round();
         let limit = -(i64::MIN as f64);
         if !(-limit..limit).contains(&rounded) {
             return Err(PdfReadError::NumericLimit);
         }
         return Ok(LayoutUnit::from_raw(rounded as i64));
     };
-    let divisor = 10_i128
-        .checked_pow(scale)
-        .and_then(|decimal_units| decimal_units.checked_mul(base_divisor))
+    let decimal_places = percent_scale
+        .checked_add(spacing_scale)
+        .and_then(|scale| scale.checked_add(5))
         .ok_or(PdfReadError::NumericLimit)?;
+    let divisor = 10_i128.checked_pow(decimal_places);
     let scaled = advance_thousandths
-        .checked_mul(i128::from(coefficient))
-        .ok_or(PdfReadError::NumericLimit)?;
+        .checked_mul(i128::from(percent))
+        .and_then(|value| value.checked_mul(i128::from(spacing)));
+    let (Some(divisor), Some(scaled)) = (divisor, scaled) else {
+        return wide_decimal_advance(advance_thousandths, percent, spacing, decimal_places);
+    };
     let remainder = scaled % divisor;
     let rounded = scaled / divisor
         + if remainder.abs() >= divisor / 2 {
@@ -481,22 +497,63 @@ fn scale_text_advance(
         .map_err(|_| PdfReadError::NumericLimit)
 }
 
+fn wide_decimal_advance(
+    advance: i128,
+    percent: i64,
+    spacing: i64,
+    decimal_places: u32,
+) -> Result<LayoutUnit, PdfReadError> {
+    // @invariant: The product of one i128 and two i64 magnitudes needs at most 77 decimal digits.
+    let mut digits = [0_u8; 77];
+    let mut magnitude = advance.unsigned_abs();
+    for digit in &mut digits {
+        *digit = (magnitude % 10) as u8;
+        magnitude /= 10;
+    }
+    for factor in [percent.unsigned_abs(), spacing.unsigned_abs()] {
+        let factor = u128::from(factor);
+        let mut carry = 0;
+        for digit in &mut digits {
+            // @invariant: A single digit and carry stay below ten times the 64-bit factor.
+            let product = u128::from(*digit) * factor + carry;
+            *digit = (product % 10) as u8;
+            carry = product / 10;
+        }
+        debug_assert_eq!(carry, 0);
+    }
+
+    let split = usize::try_from(decimal_places).map_err(|_| PdfReadError::NumericLimit)?;
+    let (discarded, retained) = digits.split_at(split.min(digits.len()));
+    let rounded_up = split <= digits.len() && discarded.last().is_some_and(|&digit| digit >= 5);
+    let rounded = retained
+        .iter()
+        .rev()
+        .try_fold(0_u64, |value, &digit| {
+            value.checked_mul(10)?.checked_add(u64::from(digit))
+        })
+        .and_then(|value| value.checked_add(u64::from(rounded_up)))
+        .ok_or(PdfReadError::NumericLimit)?;
+    let rounded = i128::from(rounded);
+    let negative = (advance < 0) ^ (percent < 0) ^ (spacing < 0);
+    i64::try_from(if negative { -rounded } else { rounded })
+        .map(LayoutUnit::from_raw)
+        .map_err(|_| PdfReadError::NumericLimit)
+}
+
 fn tj_advance(
     operand: &ContentToken,
     font_size: LayoutUnit,
     horizontal_percent: SceneDecimal,
 ) -> Result<LayoutUnit, PdfReadError> {
-    let units = i128::from(LayoutUnit::UNITS_PER_POINT);
-    let spacing = match operand {
-        ContentToken::Integer(value) => i128::from(*value) * units,
-        ContentToken::Number((value, _)) => i128::from(value.raw()),
-        _ => return Err(PdfReadError::Syntax),
-    };
-    // @invariant: TJ spacing is in thousandths of text space and uses the glyph horizontal scale.
-    let advance = (-spacing)
-        .checked_mul(i128::from(font_size.raw()))
-        .ok_or(PdfReadError::NumericLimit)?;
-    scale_text_advance(advance, horizontal_percent, units)
+    if !matches!(operand, ContentToken::Integer(_) | ContentToken::Number(_)) {
+        return Err(PdfReadError::Syntax);
+    }
+    // @invariant: Both decimal operands remain unrounded until the final scene advance.
+    scale_text_advance(
+        -i128::from(font_size.raw()),
+        horizontal_percent,
+        operand.scene_decimal(),
+    )
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -826,6 +883,11 @@ pub(super) enum SceneDecimal {
 }
 
 impl SceneDecimal {
+    const ONE: Self = Self::Exact {
+        coefficient: 1,
+        scale: 0,
+    };
+
     fn value(self) -> f64 {
         match self {
             Self::Exact { coefficient, scale } => coefficient as f64 / 10_i128.pow(scale) as f64,
@@ -1927,7 +1989,8 @@ impl<'a> SceneBuilder<'a> {
                 .checked_mul(i128::from(self.state.font_size.raw()))
                 .and_then(|width| width.checked_add(spacing * 1_000))
                 .ok_or(PdfReadError::NumericLimit)?;
-            let advance = scale_text_advance(advance, self.state.horizontal_percent, 1)?;
+            let advance =
+                scale_text_advance(advance, self.state.horizontal_percent, SceneDecimal::ONE)?;
             let transform = self.state.ctm.multiply(self.state.text_matrix)?;
             let zero = LayoutUnit::from_raw(0);
             let rect = if self.invocation_path.len() > 1 {
@@ -4071,6 +4134,14 @@ fn parse_decimal(bytes: &[u8]) -> Result<(LayoutUnit, SceneDecimal), PdfReadErro
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn wide_decimal_advance_refuses_an_out_of_range_result() {
+        assert_eq!(
+            super::wide_decimal_advance(i128::MAX, i64::MAX, i64::MAX, 5),
+            Err(super::PdfReadError::NumericLimit)
+        );
+    }
+
     use super::{
         LayoutUnit, PaintBounds, PaintMatrix, RawPathCommand, SceneDecimal,
         lost_visible_fill_contour, separated_content_streams, transform_path,
