@@ -116,7 +116,7 @@ pub struct NativePageCapability {
 }
 
 impl NativePageState {
-    pub(super) fn has_shape_for_count(&self, count: usize) -> bool {
+    fn has_order_metadata(&self, count: usize) -> bool {
         count > 0
             && self.order.len() == count
             && self
@@ -125,6 +125,10 @@ impl NativePageState {
                 .is_none_or(|r| r.pages.len() == count)
             && self.max_position as usize == count - 1
             && self.can_delete == (count > 1)
+    }
+
+    pub(super) fn has_shape_for_count(&self, count: usize) -> bool {
+        self.has_order_metadata(count)
             && self.order.iter().all(|id| (1..(1 << 53)).contains(id))
             && self.selected.is_none_or(|id| self.order.contains(&id))
     }
@@ -134,22 +138,31 @@ impl NativePageState {
             && self.order.iter().copied().collect::<BTreeSet<_>>().len() == count
     }
 
+    pub(super) fn charge_order_validation(&self, work: &mut usize) -> Result<(), NativeEditError> {
+        spend(work, self.order.len())
+    }
+
     pub(super) fn valid_in_workspace(
         &self,
         count: usize,
         workspace: &Workspace,
+        work: &mut usize,
     ) -> Result<bool, NativeEditError> {
-        if !self.has_shape_for_count(count) {
+        if self.order.len() != count {
+            return Ok(false);
+        }
+        self.charge_order_validation(work)?;
+        if !self.has_order_metadata(count) {
             return Ok(false);
         }
         let mut bytes = workspace.scope();
         let mut seen = BTreeSet::new();
         for &id in &self.order {
-            if !bytes.insert(&mut seen, id).map_err(|_| Budget)? {
+            if !(1..(1 << 53)).contains(&id) || !bytes.insert(&mut seen, id).map_err(|_| Budget)? {
                 return Ok(false);
             }
         }
-        Ok(true)
+        Ok(self.selected.is_none_or(|id| seen.contains(&id)))
     }
 }
 

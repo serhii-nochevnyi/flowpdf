@@ -504,7 +504,7 @@ fn detached_verification_accepts_work_exhaustion_before_an_unsupported_curve() {
 fn assert_detached_object_projection_after_work_exhaustion(unsupported_curve: bool) {
     use flow_core::pdf::native::{
         NativeGraphic, NativeGraphicShape, NativeObjectCommand, NativeObjectPage,
-        NativeObjectRefusal,
+        NativeObjectRefusal, NativePageState,
     };
 
     let stream = |data: &str| format!("<< /Length {} >>\nstream\n{data}\nendstream", data.len());
@@ -615,20 +615,22 @@ fn assert_detached_object_projection_after_work_exhaustion(unsupported_curve: bo
         hasher.update(&serde_json::to_vec(claimed).unwrap());
         *hasher.finalize().as_bytes()
     };
-    let verify = |claimed: &[NativeObjectPage], live| {
+    let verify_state = |claimed: &[NativeObjectPage], state: &NativePageState, live| {
         NativePdfSession::verify_page_and_field_projection_with_objects(
             session.output_bytes(),
             limits,
             snapshot.binding,
             hash_with_rows(claimed),
             Some(claimed),
-            &snapshot.page_state,
+            state,
             &snapshot.fields,
             &notes,
             session.redaction_admitted(),
             live,
         )
     };
+    let verify =
+        |claimed: &[NativeObjectPage], live| verify_state(claimed, &snapshot.page_state, live);
     let verify_page = |claimed_scene, claimed_objects: &[NativeObjectPage]| {
         NativePdfSession::verify_page_projection_with_objects(
             session.output_bytes(),
@@ -662,6 +664,25 @@ fn assert_detached_object_projection_after_work_exhaustion(unsupported_curve: bo
     assert_eq!(verify(rows, Some(&session)), Ok(true));
     assert_eq!(verify_edit(rows), Ok(true));
     assert_eq!(verify_page(snapshot.scene.scene_hash, rows), Ok(true));
+    let mut selected = snapshot.page_state.clone();
+    selected.selected = selected.order.last().copied();
+    assert_eq!(verify_state(rows, &selected, None), Ok(true));
+    selected.selected = Some(0);
+    assert_eq!(verify_state(rows, &selected, None), Ok(false));
+    let mut duplicate_order = snapshot.page_state.clone();
+    duplicate_order.order[1] = duplicate_order.order[0];
+    assert_eq!(verify_state(rows, &duplicate_order, None), Ok(false));
+    assert_eq!(
+        NativePdfSession::verify_page_projection_with_objects(
+            session.output_bytes(),
+            limits,
+            snapshot.binding,
+            snapshot.scene.scene_hash,
+            Some(rows),
+            &duplicate_order,
+        ),
+        Ok(false)
+    );
     let mut wrong_scene_hash = snapshot.scene.scene_hash;
     wrong_scene_hash[0] ^= 1;
     assert_eq!(verify_page(wrong_scene_hash, rows), Ok(false));
@@ -945,7 +966,7 @@ fn detached_redaction_admission_uses_work_left_after_projection() {
         max_work,
         ..defaults
     };
-    let high = 401;
+    let high = 403;
     let low = high - 1;
     assert_eq!(verify(&session, limits_at(low), false), Ok(true));
     assert_eq!(
