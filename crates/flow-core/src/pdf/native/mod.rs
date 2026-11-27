@@ -75,7 +75,9 @@ mod text {
             graph: &NativePdfGraph,
             dict: &Dict,
             remaining: &mut usize,
+            work: &mut usize,
         ) -> RecognitionResult<Self> {
+            spend(work, FONT_RECOGNITION_WORK)?;
             let workspace = Workspace::new(*remaining);
             let mut memory = workspace.scope();
             let font = font_profile(graph, dict, &workspace, &mut memory)?;

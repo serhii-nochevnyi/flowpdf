@@ -494,6 +494,7 @@ fn admit_form_font(
     form: &mut Form,
     reference: Option<Ref>,
     remaining: &mut usize,
+    work: &mut usize,
 ) -> Result<(), NativeSessionError> {
     if form.font.is_some() {
         return Ok(());
@@ -505,7 +506,7 @@ fn admit_form_font(
         let font = dict(graph, reference).map_err(|_| Appearance)?;
         Ok(Font::Embedded(
             reference,
-            Box::new(FieldFont::admit(graph, font, remaining)?),
+            Box::new(FieldFont::admit(graph, font, remaining, work)?),
         ))
     })() {
         Ok(font) => Ok(font),
@@ -780,6 +781,7 @@ fn recognize_appearance(
     widget: Ref,
     (field, field_name): (Ref, String),
     remaining: &mut usize,
+    work: &mut usize,
 ) -> Result<Admitted, NativeSessionError> {
     let widget_data = dict(graph, widget).map_err(|_| Reference)?;
     let fields = dict(graph, field).map_err(|_| Reference)?;
@@ -848,7 +850,7 @@ fn recognize_appearance(
             let default_bytes = before_default - available;
             if form.font.is_none() {
                 let before = available;
-                admit_form_font(graph, form, reference, &mut available)?;
+                admit_form_font(graph, form, reference, &mut available, work)?;
                 spend(remaining, before - available)?;
             }
             if let Some(default) = default {
@@ -1023,7 +1025,7 @@ pub(super) fn project(
                 let identity = recognize_identity(graph, form, page, object, work, *remaining)?;
                 let mut available = *remaining;
                 let admitted =
-                    recognize_appearance(graph, form, page, object, identity, &mut available);
+                    recognize_appearance(graph, form, page, object, identity, &mut available, work);
                 let bytes = *remaining - available;
                 spend(remaining, bytes)?;
                 form_bytes += bytes;
@@ -1537,6 +1539,7 @@ fn stage_form(
             view.object,
             identity,
             &mut remaining,
+            &mut work,
         )?;
         let bytes = available - remaining;
         let value_bytes = admitted.value.retained_value_bytes();
@@ -1638,7 +1641,10 @@ fn stage_form(
             let mut remaining = graph.remaining_retained();
             let available = remaining;
             let reference = form_font_reference(graph, &form)?;
-            admit_form_font(graph, &mut form, reference, &mut remaining)?;
+            let budget = graph.remaining_work();
+            let mut work = budget;
+            admit_form_font(graph, &mut form, reference, &mut remaining, &mut work)?;
+            graph.charge_page_work(budget - work)?;
             let bytes = available - remaining;
             graph.charge_page_retained(bytes)?;
             *form_bytes += bytes;

@@ -1083,6 +1083,7 @@ fn checkbox_edit_skips_unused_embedded_default_font() {
         let bytes = build_pdf(&objects);
         let limits = NativeEditLimits {
             max_retained_bytes: 6 * 1024 * 1024,
+            max_work: 249_999,
             ..NativeEditLimits::default()
         };
         let mut pdf = NativePdfSession::open_scoped(&bytes, limits, [7; 16]).unwrap();
@@ -1296,6 +1297,47 @@ fn embedded_font_uses_the_live_projection_and_command_budgets() {
         Ok(NativeRequestLookup::Unseen)
     );
     assert_eq!(pdf.output_bytes(), bytes);
+}
+
+#[test]
+fn embedded_form_font_shares_projection_and_edit_work() {
+    let bytes = embedded_appearance("[1 [339]]");
+    let limits = NativeEditLimits {
+        max_work: 250_000,
+        ..NativeEditLimits::default()
+    };
+    assert!(matches!(
+        NativePdfSession::open_scoped(&bytes, limits, [7; 16]),
+        Err(NativeSessionError::Budget)
+    ));
+    let original = session(&bytes);
+    let verify = |pdf: &NativePdfSession, limits| {
+        let snapshot = pdf.snapshot();
+        NativePdfSession::verify_page_and_field_projection_with_objects(
+            pdf.output_bytes(),
+            limits,
+            snapshot.binding,
+            snapshot.scene.scene_hash,
+            Some(&snapshot.scene.object_pages),
+            &snapshot.page_state,
+            &snapshot.fields,
+            &[],
+            false,
+            None,
+        )
+    };
+    assert_eq!(verify(&original, limits), Err(NativeSessionError::Budget));
+    assert_eq!(verify(&original, NativeEditLimits::default()), Ok(true));
+
+    let edited = apply_at_work_boundary(&bytes, |pdf| NativeFieldCommand::SetFieldText {
+        field: pdf.snapshot().fields[0].id,
+        value: "Ї".into(),
+    });
+    assert!(edited.snapshot().limits.max_work > 500_000);
+    assert_eq!(verify(&edited, edited.snapshot().limits), Ok(true));
+    let reopened = session(edited.output_bytes());
+    assert!(reopened.snapshot().fields[0].can_edit_appearance);
+    assert_eq!(reopened.snapshot().fields[0].value.as_deref(), Some("Ї"));
 }
 
 #[test]
