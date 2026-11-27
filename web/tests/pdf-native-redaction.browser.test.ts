@@ -91,7 +91,8 @@ end end`, '')
 }
 
 type Action = NativePdfRedactionResult['action']
-type Fault = 'failed' | 'unavailable' | 'inconclusive' | 'hash' | 'version' | 'coverage' | 'missing' | 'lostPublish' | 'fatalPublish' | null
+type Fault = 'failed' | 'unavailable' | 'inconclusive' | 'hash' | 'version' | 'coverage' | 'missing'
+  | 'fatalVerify' | 'lostPublish' | 'fatalPublish' | null
 const refusedLane = { failed: 'structure', unavailable: 'text', inconclusive: 'raster' } as const
 
 function controlledWorker() {
@@ -174,6 +175,10 @@ function controlledWorker() {
       if (result.action === 'verify' && control.fault && control.fault !== 'lostPublish' && control.fault !== 'fatalPublish') {
         const fault = control.fault
         control.fault = null
+        if (fault === 'fatalVerify') {
+          control.die()
+          return
+        }
         if (fault === 'missing') return
         const candidate = result.candidate!
         const verification = result.verification!
@@ -716,48 +721,6 @@ for (const locale of ['en', 'uk'] as const) {
       expect(newOutput()).toBeNull()
       await expect.element(button('note.add')).toBeEnabled()
 
-      for (const held of ['stage', 'verify'] as const) {
-        lane = controlledWorker()
-        await putOriginal(source)
-        await fillMark(20, 20, 59, 80)
-        await addMark(1)
-        const refused = checkpoint()
-        const sourceWrites = put.mock.calls.length
-        const beforeLoss = acceptedScope()
-        lane.control.hold = held
-        await activate((await openConfirmation('apply', '1', 1)).element())
-        await expect.poll(() => lane.control.resume).toBeTypeOf('function')
-        await expect.element(status).toHaveTextContent(t(held === 'stage' ? 'redaction.staging' : 'redaction.pending'))
-        if (held === 'stage') {
-          expect(panel.element().querySelector('[data-redaction-check]')).toBeNull()
-        } else {
-          await assertCheck('internal', 'evidence.passed')
-          for (const key of ['structure', 'text', 'raster'] as const) await assertCheck(key, 'evidence.pending')
-        }
-        lane.control.die()
-        await expect.element(button('session.reopen')).toBeVisible()
-        await expect.element(alert).toHaveTextContent(t('redaction.noOutput', {
-          reason: t(held === 'stage' ? 'redaction.stageUnavailable' : 'redaction.inconclusive'),
-        }))
-        if (held === 'stage') {
-          expect(panel.element().querySelector('[data-redaction-check]')).toBeNull()
-        } else {
-          await assertCheck('internal', 'evidence.passed')
-          for (const key of ['structure', 'text', 'raster'] as const) await assertCheck(key, 'evidence.inconclusive')
-        }
-        await expect.element(redaction.getByText(t('redaction.marked'), { exact: true })).toBeVisible()
-        expect(visibleRaster()).not.toBeNull()
-        expect(redactionButton('redaction.apply').query()).toBeNull()
-        expect(newOutput()).toBeNull()
-        expect(marksOnPage()).toHaveLength(1)
-        expect(acceptedScope()).toBe(beforeLoss)
-        expect(downloads).toHaveLength(refused.downloads)
-        expect(urls).toHaveBeenCalledTimes(refused.urls)
-        expect(put).toHaveBeenCalledTimes(sourceWrites)
-        expect(lane.control.requests).not.toContain('publish')
-        assertUnpublishedReplies(rawRedactionReplies(lane.control))
-      }
-
       lane = controlledWorker()
       await putOriginal(source)
       await fillMark(20, 20, 59, 80)
@@ -787,18 +750,32 @@ for (const locale of ['en', 'uk'] as const) {
       const ordinaryOutput = acceptedScope()!
       const recoveryHash = nativeBytesHex(Uint8Array.from(ordinaryOutput.outputHash))
       const recoveryBytes = nativeHexBytes(ordinaryOutput.outputHex)
+      const recoverySourceHash = await hashPdfSourceBytes(recoveryBytes)
       const reopenAccepted = button('session.reopenAccepted')
-      for (const fault of ['lostPublish', 'fatalPublish'] as const) {
+      for (const fault of ['fatalStage', 'fatalVerify', 'lostPublish', 'fatalPublish'] as const) {
         await fillMark(20, 20, 59, 80)
         await addMark(1)
         const beforeRecovery = acceptedScope()
         const interruptedLane = lane
-        const beforePublication = checkpoint()
+        const beforeInterruption = checkpoint()
         const sourceWrites = put.mock.calls.length
-        interruptedLane.control.fault = fault
+        const held = fault === 'fatalStage' ? 'stage' : fault === 'fatalVerify' ? 'verify' : null
+        interruptedLane.control.hold = held
+        interruptedLane.control.fault = fault === 'fatalStage' ? null : fault
         interruptedLane.control.dropStatusReply = fault === 'lostPublish'
         await activate((await openConfirmation('apply', '1', 1)).element())
-        if (fault === 'lostPublish') {
+        if (held !== null) {
+          await expect.poll(() => interruptedLane.control.resume).toBeTypeOf('function')
+          await expect.element(status).toHaveTextContent(t(held === 'stage' ? 'redaction.staging' : 'redaction.pending'))
+          if (held === 'stage') {
+            expect(panel.element().querySelector('[data-redaction-check]')).toBeNull()
+            interruptedLane.control.die()
+          } else {
+            await assertCheck('internal', 'evidence.passed')
+            for (const key of ['structure', 'text', 'raster'] as const) await assertCheck(key, 'evidence.pending')
+            interruptedLane.control.resume!()
+          }
+        } else if (fault === 'lostPublish') {
           await expect.element(checkResult, { timeout: 6_000 }).toBeVisible()
           await activate(checkResult.element())
         }
@@ -806,22 +783,46 @@ for (const locale of ['en', 'uk'] as const) {
         await expect.element(alert).toHaveTextContent(t('session.redactionRecovery'))
 
         const replies = rawRedactionReplies(interruptedLane.control)
-        const published = replies.find(({ request }) => request.action.kind === 'publish')
-        if (published?.reply?.status !== 'published') throw Error('Missing worker publication')
-        expect(published.reply.snapshot.outputHex).not.toBe(ordinaryOutput.outputHex)
-        if (fault === 'lostPublish') {
-          const lostStatus = replies.at(-1)
-          expect(lostStatus?.reply).toMatchObject({ status: 'redaction', redaction: { action: 'status', published: true } })
-          expect(lostStatus?.request.requestId).toBe(published.request.requestId)
+        if (held !== null) {
+          await expect.element(alert).toHaveTextContent(t('redaction.noOutput', {
+            reason: t(held === 'stage' ? 'redaction.stageUnavailable' : 'redaction.inconclusive'),
+          }))
+          if (held === 'stage') {
+            expect(panel.element().querySelector('[data-redaction-check]')).toBeNull()
+          } else {
+            await assertCheck('internal', 'evidence.passed')
+            for (const key of ['structure', 'text', 'raster'] as const) await assertCheck(key, 'evidence.inconclusive')
+            expect(replies.at(-1)?.reply).toMatchObject({ status: 'redaction', redaction: {
+              action: 'verify', published: false, verification: { status: 'passed' },
+            } })
+          }
+          expect(interruptedLane.control.requests).not.toContain('publish')
+          assertUnpublishedReplies(replies)
         } else {
-          expect(interruptedLane.coordinator.snapshot().phase).toBe('invalidated')
-          expect(checkResult.query()).toBeNull()
-          expect(replies.at(-1)).toBe(published)
+          const published = replies.find(({ request }) => request.action.kind === 'publish')
+          if (published?.reply?.status !== 'published') throw Error('Missing worker publication')
+          expect(published.reply.snapshot.outputHex).not.toBe(ordinaryOutput.outputHex)
+          if (fault === 'lostPublish') {
+            const lostStatus = replies.at(-1)
+            expect(lostStatus?.reply).toMatchObject({ status: 'redaction', redaction: { action: 'status', published: true } })
+            expect(lostStatus?.request.requestId).toBe(published.request.requestId)
+          } else {
+            expect(replies.at(-1)).toBe(published)
+          }
         }
+        if (fault !== 'lostPublish') {
+          expect(interruptedLane.coordinator.snapshot()).toMatchObject({ phase: 'invalidated', redaction: null })
+          expect(checkResult.query()).toBeNull()
+          expect(redactionButton('redaction.apply').query()).toBeNull()
+        }
+        expect(interruptedLane.coordinator.snapshot()).toMatchObject({ reopenAccepted: true, reopenOriginal: true })
         expect(interruptedLane.coordinator.snapshot().accepted).toBe(beforeRecovery)
         expect(interruptedLane.coordinator.outputBytes()).toBeNull()
+        await expect.element(redaction.getByText(t('redaction.marked'), { exact: true })).toBeVisible()
+        expect(visibleRaster()?.dataset.nativePreviewHash).toBe(recoveryHash)
+        expect(marksOnPage()).toHaveLength(1)
         expect(newOutput()).toBeNull()
-        expect(checkpoint()).toEqual(beforePublication)
+        expect(checkpoint()).toEqual(beforeInterruption)
         expect(put).toHaveBeenCalledTimes(sourceWrites)
 
         lane = controlledWorker()
@@ -830,9 +831,19 @@ for (const locale of ['en', 'uk'] as const) {
         await expect.element(panel.getByText(ordinaryNote, { exact: true })).toBeVisible()
         await expect.poll(() => visibleRaster()?.dataset.nativePreviewHash).toBe(recoveryHash)
         await expect.element(button('download.edited')).toHaveAttribute('data-output-hash', recoveryHash)
-        expect((await getDownload('download.edited')).bytes).toEqual(recoveryBytes)
+        expect(lane.coordinator.outputBytes()).toEqual(recoveryBytes)
+        const recovered = await getDownload('download.edited')
+        expect(recovered.bytes).toEqual(recoveryBytes)
+        const reopenedRecovery = await reopenOutput(recovered.bytes)
+        expect(reopenedRecovery.outputHash).toEqual(ordinaryOutput.outputHash)
+        expect(await hashPdfSourceBytes(recovered.bytes)).toBe(recoverySourceHash)
+        expect(put).toHaveBeenCalledTimes(sourceWrites + 1)
+        expect(put).toHaveBeenLastCalledWith(recoverySourceHash.slice('sha256:v1:'.length), recoveryBytes)
+        await expect.element(button('download.original')).toHaveAttribute('data-origin-hash', ordinaryOutput.originStoreHash)
         expect((await getDownload('download.original')).bytes).toEqual(source)
         expect(marksOnPage()).toHaveLength(0)
+        await expect.element(redaction.getByText(t('redaction.empty'), { exact: true })).toBeVisible()
+        expect(panel.element().querySelector('[data-redaction-check]')).toBeNull()
         expect(checkResult.query()).toBeNull()
         expect(reopenAccepted.query()).toBeNull()
         expect(newOutput()).toBeNull()

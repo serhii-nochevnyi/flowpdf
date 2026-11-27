@@ -66,6 +66,9 @@ const reviewedReadbackBrowserSuites = [...reviewedAccessibleTextBrowserSuites.ma
 const reviewedImageReplacementBrowserSuites = reviewedReadbackBrowserSuites.map(([path, digest]) => [path,
   path === 'web/tests/pdf-native-objects.browser.test.ts' ? '9727686625f42171b0fa4476fe0b8a704da5351cd499a2db663240d389f6334f' : digest,
 ])
+const reviewedVerifiedRecoveryBrowserSuites = reviewedImageReplacementBrowserSuites.map(([path, digest]) => [path,
+  path === 'web/tests/pdf-native-redaction.browser.test.ts' ? '1fca26d7877cb168d7e3a4e04fb67188d32cf91fd60380ad1b871ce608c00768' : digest,
+])
 const reviewedBrowserProfiles = [
   [...reviewedBrowserSuites,
     ['web/tests/pdf-native-redaction.browser.test.ts', 'f03b3854ae1f8b6459c400fc67dc5f43dc7185737eeb9eb3f7439ef104e0fb10']],
@@ -98,6 +101,7 @@ const reviewedBrowserProfiles = [
   reviewedImageReplacementBrowserSuites.map(([path, digest]) => [path,
     path === 'web/tests/pdf-native-redaction.browser.test.ts' ? '0743c393f4897a5edaf98f62962d1b445f88a141c4fc4c0453cb93f3a0da71c5' : digest,
   ]),
+  reviewedVerifiedRecoveryBrowserSuites,
 ]
 const expandedSteps = [
   'Run bilingual Chromium text replacement tracer',

@@ -155,6 +155,7 @@ for (const [profile, revision, expanded] of [
   ['reviewed image replacement and redaction feedback', redactionFeedbackRevision, true],
   ['previous raw snapshot and preview readback', '46ed056b6366cf53d4a942ad9ee146cbb2a44575', true],
   ['previous reviewed six-suite redaction profile', '3850e46e18fa518133fb59ea71e41d19abe854c7', true],
+  ['previous publication recovery', '62d8a33197cc29a5ac3328ab2bf3348ae2105195', true],
 ]) {
   test(`accepts the exact ${profile} harness`, (t) => {
     const paths = ['.github/workflows/pdf-native-note-tracer.yml', 'package.json',
@@ -216,11 +217,13 @@ test('refuses the recovery note suite with a different reviewed redaction suite'
   assert.throws(() => requirePassedCi('HEAD', command), { message: 'NATIVE_NOTE_TRACER_HARNESS_NOT_APPROVED' })
 })
 
-test('binds the verified redaction recovery suite to the exact reviewed browser profile', (t) => {
+test('binds prepublication recovery to the exact six-suite browser profile', (t) => {
   const { command, state } = fixture()
   assert.deepEqual(requirePassedCi('HEAD', command), { repository: repo, sha, run: 7, attempt: 3, job: 73 })
-  state.changedPath = redactionSuite
-  assert.throws(() => requirePassedCi('HEAD', command), { message: 'NATIVE_NOTE_TRACER_HARNESS_NOT_APPROVED' })
+  for (const path of browserSuites) {
+    state.changedPath = path
+    assert.throws(() => requirePassedCi('HEAD', command), { message: 'NATIVE_NOTE_TRACER_HARNESS_NOT_APPROVED' })
+  }
   const olderObjects = harnessFilesFrom(t, readbackRevision, [objectsSuite])
   if (!olderObjects) return
   const mixed = fixture({ historicalFiles: olderObjects })
