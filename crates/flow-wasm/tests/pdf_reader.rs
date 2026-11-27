@@ -75,6 +75,55 @@ fn reader_boundary_returns_verified_scene_window() {
 }
 
 #[test]
+fn reader_boundary_charges_diagnostics_across_pages() {
+    let later = format!("%{}\nVendorStroke 10 10 5 5 re f", " ".repeat(20 * 1024));
+    let first = "VendorPaint VendorPaint 10 10 5 5 re f";
+    let contents =
+        |paint: &str| format!("<< /Length {} >>\nstream\n{paint}\nendstream", paint.len());
+    let bytes = write_pdf(&[
+        "<< /Type /Catalog /Pages 2 0 R >>",
+        "<< /Type /Pages /Kids [3 0 R 4 0 R 7 0 R] /Count 3 /MediaBox [0 0 100 100] >>",
+        "<< /Type /Page /Parent 2 0 R /Contents 5 0 R >>",
+        "<< /Type /Page /Parent 2 0 R /Contents 6 0 R >>",
+        &contents(first),
+        &contents(&later),
+        "<< /Type /Page /Parent 2 0 R /Contents 8 0 R /Resources << /XObject << /Chart 9 0 R >> >> >>",
+        &contents("/Chart Do"),
+        "<< /Type /XObject /Subtype /Form /BBox [0 0 20 20] /Filter /ASCII85Decode /Length 3 >>\nstream\nz~>\nendstream",
+    ]);
+    let mut request = json!({
+        "protocolVersion": 1,
+        "requestId": "multi-page-diagnostics",
+        "bytesHex": hex(&bytes),
+        "firstPage": 0,
+        "pageCount": 3,
+        "limits": flow_core::PdfReaderLimits {
+            max_scene_bytes: 32768,
+            ..Default::default()
+        }
+    });
+    let serialized = flow_wasm::read_pdf(request.to_string());
+    let value = response(&serialized);
+    assert_eq!(value["ok"], true, "{value}");
+    let scene = &value["result"]["scene"];
+    assert_eq!(scene["pageCount"], 3);
+    assert_eq!(scene["pages"].as_array().unwrap().len(), 2);
+    let diagnostics = scene["report"]["diagnostics"].as_array().unwrap();
+    assert_eq!(diagnostics.len(), 3);
+    assert_eq!(diagnostics[0]["operator"], "VendorPaint");
+    assert_eq!(diagnostics[1]["operator"], "VendorStroke");
+    assert_eq!(diagnostics[2]["code"], "unsupportedFilter");
+    assert_eq!(diagnostics[2]["pageIndex"], 2);
+    assert_eq!(scene["report"]["partial"], true);
+    assert!(flow_wasm::verify_pdf_reader_response(serialized));
+
+    request["limits"]["maxSceneBytes"] = json!(25_213);
+    let value = response(&flow_wasm::read_pdf(request.to_string()));
+    assert_eq!(value["ok"], false);
+    assert_eq!(value["error"]["code"], "FLOW_PDF_READER_STREAM_LIMIT");
+}
+
+#[test]
 fn reader_boundary_preserves_mapped_text_around_fractional_tj_spacing() {
     for (font_size, percent, matrix, adjustment, advance, positions) in [
         (
