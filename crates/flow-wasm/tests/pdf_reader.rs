@@ -8,12 +8,22 @@ fn fixture_pdf() -> Vec<u8> {
         "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Contents 4 0 R /Resources << >> >>",
         "<< /Length 0 >>\nstream\n\nendstream",
     ];
+    write_pdf(&objects)
+}
+
+fn write_pdf(objects: &[impl AsRef<str>]) -> Vec<u8> {
     let mut bytes = b"%PDF-1.7\n".to_vec();
     let mut offsets = Vec::with_capacity(objects.len() + 1);
     offsets.push(0usize);
     for (index, object) in objects.iter().enumerate() {
         offsets.push(bytes.len());
-        write!(&mut bytes, "{} 0 obj\n{}\nendobj\n", index + 1, object).unwrap();
+        write!(
+            &mut bytes,
+            "{} 0 obj\n{}\nendobj\n",
+            index + 1,
+            object.as_ref()
+        )
+        .unwrap();
     }
     let xref_offset = bytes.len();
     write!(&mut bytes, "xref\n0 {}\n", objects.len() + 1).unwrap();
@@ -62,6 +72,59 @@ fn reader_boundary_returns_verified_scene_window() {
         value["result"]["scene"]["sourceHash"]
     );
     assert!(flow_wasm::verify_pdf_reader_response(serialized));
+}
+
+#[test]
+fn reader_boundary_budgets_nested_page_discovery_for_a_single_page_window() {
+    let mut objects = [
+        "<< /Type /Catalog /Pages 2 0 R >>",
+        "<< /Type /Pages /Kids 4 0 R /Count 96 /MediaBox [0 0 200 200] >>",
+        "<< /Type /Pages /Parent 2 0 R /Kids 5 0 R /Count 96 >>",
+        "[3 0 R]",
+    ]
+    .map(str::to_owned)
+    .to_vec();
+    let children = (6..102)
+        .map(|id| format!("{id} 0 R"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    objects.push(format!("[{children}]"));
+    objects.extend((0..96).map(|_| "<< /Type /Page /Parent 3 0 R >>".to_owned()));
+    let mut request = json!({
+        "protocolVersion": 1,
+        "requestId": "nested-page-window",
+        "bytesHex": hex(&write_pdf(&objects)),
+        "firstPage": 95,
+        "pageCount": 1,
+        "limits": flow_core::PdfReaderLimits {
+            max_input_bytes: 1024 * 1024,
+            max_scene_bytes: 64 * 1024,
+            ..Default::default()
+        }
+    });
+    let serialized = flow_wasm::read_pdf(request.to_string());
+    let value = response(&serialized);
+    assert_eq!(value["ok"], true, "{value}");
+    let result = &value["result"];
+    let summary = &result["summary"];
+    let scene = &result["scene"];
+    assert_eq!(
+        summary["schemaVersion"],
+        flow_core::PDF_READER_SCHEMA_VERSION
+    );
+    assert_eq!(summary["pdfVersion"], "1.7");
+    assert_eq!(summary["sourceHash"], scene["sourceHash"]);
+    assert_eq!(summary["pageCount"], 96);
+    assert_eq!(scene["pageCount"], 96);
+    assert_eq!(scene["firstPage"], 95);
+    assert_eq!(scene["pages"].as_array().unwrap().len(), 1);
+    assert_eq!(scene["pages"][0]["pageIndex"], 95);
+    assert!(flow_wasm::verify_pdf_reader_response(serialized));
+
+    request["limits"]["maxSceneBytes"] = json!(12 * 1024);
+    let value = response(&flow_wasm::read_pdf(request.to_string()));
+    assert_eq!(value["ok"], false);
+    assert_eq!(value["error"]["code"], "FLOW_PDF_READER_STREAM_LIMIT");
 }
 
 #[test]

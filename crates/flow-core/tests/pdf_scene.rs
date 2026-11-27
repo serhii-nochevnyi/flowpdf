@@ -162,7 +162,7 @@ fn mapped_font_scene_reserves_decode_workspace_at_the_allowance_boundary() {
         (1, b"<< /Type /Catalog /Pages 2 0 R >>".to_vec()),
         (2, b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec()),
         (3, b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] /Resources << /Font 7 0 R >> /Contents 4 0 R >>".to_vec()),
-        stream(4, "", b"BT /F1 10 Tf 5 20 Td [(A) 15 (B)] TJ ET"),
+        stream(4, "", b"BT /F1 10 Tf 5 20 Td [(AAAAAAAAAAAA) 15 (B)] TJ ET"),
         (5, b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /FirstChar 65 /Widths [600 500] /ToUnicode 6 0 R >>".to_vec()),
         stream(6, "/Filter /FlateDecode", &compressed),
         (7, b"<< /F1 5 0 R >>".to_vec()),
@@ -185,7 +185,13 @@ fn mapped_font_scene_reserves_decode_workspace_at_the_allowance_boundary() {
     assert!(matches!(
         expected.pages[0].elements.as_slice(),
         [PdfSceneElement::Text { value: first }, PdfSceneElement::Text { value: second }]
-        if first.text == "А" && second.text == "fi"
+        if first.text == "А".repeat(12) && second.text == "fi"
+            && first.glyphs.len() == 12
+            && first.rect.x == first.glyphs[0].rect.x
+            && first.rect.width.raw() == {
+                let last = &first.glyphs[11].rect;
+                last.x.raw() + last.width.raw() - first.rect.x.raw()
+            }
             && [first, second].into_iter().all(|value| {
                 value.mapping == PdfTextMapping::ToUnicode
                     && value.font_name.as_deref() == Some("Helvetica")
@@ -1877,6 +1883,36 @@ fn stroke_readback_proves_containment_against_the_active_clip() {
             "1 w 20.125 40 m 25 40 l S",
             false,
             true,
+        ),
+        (
+            "20 20 100 100 re W n",
+            "[3 2] 0 d 40 60 m 80 60 l S",
+            true,
+            true,
+        ),
+        (
+            "20 20 100 100 re W n",
+            "q [3 2] 0 d Q 40 60 m 80 60 l S",
+            true,
+            false,
+        ),
+        (
+            "20 20 100 100 re W n",
+            "[3 2] 0 d q [] 0 d Q 40 60 m 80 60 l S",
+            true,
+            true,
+        ),
+        (
+            "20 20 100 100 re W n",
+            "[3 2] 0 d [] 0 d 40 60 m 80 60 l S",
+            true,
+            false,
+        ),
+        (
+            "20 20 100 100 re W n",
+            "[3 2] 0 d 140 160 m 180 160 l S",
+            false,
+            false,
         ),
         ("", "1 M 150 1.25 m 190 1.25 l S", true, false),
         (
